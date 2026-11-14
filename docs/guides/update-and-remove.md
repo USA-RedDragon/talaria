@@ -2,7 +2,7 @@
 
 ## Update
 
-The daemon updates itself. When the service runs `talaria run` and `update.auto` is on (the default), it looks for a new stable release shortly after it starts and then every `update.interval` (6 hours by default). It installs a release with the same checks as the `update` command, waits until no command, browser operation or chat is running on this computer, and restarts. It never installs a pre-release or an older release.
+The daemon updates itself. When the service runs `talaria run` and `update.auto` is on (the default), it looks for a new stable release shortly after it starts and then every `update.interval` (6 hours by default). It installs a release with the same checks as the `update` command, runs the new program with `run --check-config` before it installs it, waits until no command, browser operation, MCP call or chat is running on this computer, and restarts. It never installs a pre-release or an older release. It updates only the program that setup installed (`~/.talaria/bin/talaria`) and only when the service runs that program: a daemon you started from another path does not update itself. `update.interval` is at least `1h`.
 
 To update by hand:
 
@@ -21,7 +21,7 @@ update:
   auto: false
 ```
 
-Commands you run (`chat`, `acp`, `setup`, `login`) print one line on stderr once a day when a newer release exists. Set `TALARIA_NO_UPDATE_NOTICE=1` to hide it.
+Commands you run (`chat`, `acp`, `setup`, `login`) print one line on stderr when a newer release exists, at most once a day. Set `TALARIA_NO_UPDATE_NOTICE` to any value to hide it.
 
 Keep the program and your server close in version. The agent plugin and the program negotiate their protocol, so a release or two apart still works, but upgrade the server first, then your computers.
 

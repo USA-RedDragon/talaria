@@ -155,6 +155,7 @@ Useful options:
 - `--no-service` skips the background service. `--no-browser` leaves Firefox alone. `--no-shell-check` leaves your shell files alone.
 - `--name my-laptop` suggests the computer's name on the hub.
 - `--bin-dir DIR` installs the program somewhere else.
+- `--wait 0` does not wait for the Firefox extension (the default is 10 minutes).
 
 The full list is in the [command line reference](../reference/cli.md#setup).
 
@@ -265,4 +266,4 @@ The computer must reach the hub. Put the hub behind a VPN you already use (Tails
 
 ## If something goes wrong
 
-See [Fix computer problems](../guides/troubleshooting.md): setup errors, an expired code, a computer that shows offline, refused commands and the extension.
+See [Fix computer problems](../guides/troubleshooting.md): setup errors, pairing that fails, a computer that does not show up or shows offline, refused commands, Firefox that is not connected and a daemon that keeps disconnecting.

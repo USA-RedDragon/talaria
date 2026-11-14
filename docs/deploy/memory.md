@@ -56,4 +56,4 @@ On the Memory page, the Learned tab lists facts Honcho drew from your chats. You
 
 ## Project notes
 
-When the project-memory plugin is present, the Notes tab also has a picker for per-project notes, keyed by the project's git remote. This plugin is not part of the install files here, so the picker stays hidden.
+When the project-memory plugin is present, the Notes tab also has a picker for per-project notes, keyed by the project's git remote. The install kits here do not include this plugin, so the picker stays hidden until you add it: copy it from a `plugins/v<version>` release of the Talaria repository and enable it, as [plugins/README.md](https://github.com/USA-RedDragon/talaria/blob/main/plugins/README.md) says. Its prompt block holds up to 4,000 characters of notes unless Hermes's `plugins.max_section_chars` is raised.
