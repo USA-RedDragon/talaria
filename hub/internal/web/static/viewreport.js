@@ -447,9 +447,11 @@ window.HubViewReport = (o) => {
         // A scroll gesture moves a screen or so a frame, never four: the
         // rest is the page's.
         else if (g && gestureKind !== "k" && gestureKind !== "p" && gestureKind !== "f" && d !== null && Math.abs(d) > 4 * screen) auto("gesture", { d, from: place(prev), to: place(w), during: gestureKind });
-      } else if (!g && t - lastGesture > 3000 && d !== null && Math.abs(d) < 2 && !atEnds && Math.abs(w.top - prev.top) > screen) {
+      } else if (!g && t - lastGesture > 3000 && d !== null && Math.abs(d) < 2 && !atEnds && Math.abs(w.top - prev.top) > screen &&
+        !tg.some((n) => n === "older" || n === "older+")) {
         // The log kept the reader in place, but more than a screen went in
-        // or out above them.
+        // or out above them, and not older history the page renders ahead
+        // of the reader (showOlder), which goes in above by design.
         auto("above", { dt: Math.round(w.top - prev.top), from: place(prev), to: place(w) });
       }
       // A chat that opened away from its newest message, the reader not
