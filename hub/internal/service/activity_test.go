@@ -120,7 +120,7 @@ func TestSteerReachesAWaitingSubagent(t *testing.T) {
 	e := setup(t, service.Options{})
 	e.gw.AddSession(&gatewaytest.Session{ID: sLive, Live: true,
 		Subagents: []gateway.SubagentRow{{SubagentID: subMine, Goal: "Build", Status: ptr(statusWaiting),
-			WaitingOn: []string{"make -j8 all"}, AcceptingSteer: ptr(true), StartedAt: ptr(1700000000.5)}}})
+			WaitingOn: []string{"make test"}, AcceptingSteer: ptr(true), StartedAt: ptr(1700000000.5)}}})
 	if err := e.svc.SteerSubagent(context.Background(), userAlice, backendPC, sLive, subMine, " hello? "); err != nil {
 		t.Fatalf("steer = %v", err)
 	}
