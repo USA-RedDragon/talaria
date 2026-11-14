@@ -102,6 +102,19 @@ window.HubStick = (log, o) => {
     // the reader leaving the end, at any time after the open.
     else if (layoutMoved(r) || (pinned && t < fresh) || (pinned && !held() && top < 1 && log.scrollHeight !== r.h)) { keep("undo"); sync(); return; }
     const up = top < r.top;
+    // The reader moved the log by top - r.top from where the anchor was.
+    // What lies above the anchor may have changed size since the scroll
+    // came (older rows put in, a box of them laid out, an image above):
+    // keep the reader's move and undo that, or the reader lands that far
+    // off (seen with a finger on a slow phone: 3500 px into older rows).
+    if (anchor && !pinned && Math.abs(log.scrollTop - top) < 1) {
+      const at = o.place(anchor.n, log);
+      const d = at === null ? 0 : at - (anchor.off - (top - r.top));
+      if (d >= 1 || d <= -1) {
+        keep("kept");
+        log.scrollTop = top + d;
+      }
+    }
     note();
     // Only a real distance from the end leaves it: a tap's jitter, a
     // sub-pixel scrollTop after layout, or a log that grows taller (a
