@@ -1640,6 +1640,9 @@
 
     snapshot(s) {
       if (!$("banner").classList.contains("bad")) clearBanner("away");
+      // A scroll that waits for its frame decides whether the reader is at
+      // the end.
+      if (view === this) stick.sync();
       const kept = window.HubReconcile.anchor(this.log, stick.pinned(), rowPlace(this.log));
       vreport.note(kept ? "snap:kept" : "snap");
       const carried = window.HubReconcile.carry(this.pending, s);
@@ -1759,6 +1762,12 @@
     showOlder(more) {
       if (!this.older.length) return;
       vreport.note(more ? "older+" : "older");
+      // Judge a scroll that waits for its frame before the rows go in.
+      // Judged after, the reader's place is taken in the rows just put above
+      // them, and the log stays where those rows pushed it: a wheel or a
+      // swipe up from the newest message threw the reader thousands of
+      // pixels into older messages.
+      if (view === this) stick.sync();
       const frag = document.createDocumentFragment();
       const turn = this.turn;
       this.filling = true;

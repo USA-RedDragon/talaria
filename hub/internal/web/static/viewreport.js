@@ -370,7 +370,7 @@ window.HubViewReport = (o) => {
       const p = probe(log);
       const r = p ? rowEl(p.n) : null;
       const rowOff = r ? r.getBoundingClientRect().top - log.getBoundingClientRect().top : 0;
-      return { top, h, c, end: h - top - c < 24, el: p ? p.n : null, off: p ? p.off : 0, row: r ? r.dataset.row : "", rowOff };
+      return { top, h, c, end: h - top - c < 24, pin: o.stick.pinned(), el: p ? p.n : null, off: p ? p.off : 0, row: r ? r.dataset.row : "", rowOff };
     }
 
     // shift is how far the reader's place moved since base: positive when
@@ -436,7 +436,10 @@ window.HubViewReport = (o) => {
       // A move the reader did not make: more than a screen of what they
       // read went past, and not a log that stays at its end as it grows.
       const screen = Math.max(200, w.c);
-      const atEnds = prev.end && w.end;
+      // The newest message stays in view: at the end, or held there by
+      // the stick while the log changes size (a hidden tab, a keyboard),
+      // and it is at the end now.
+      const atEnds = (prev.end || prev.pin) && w.end;
       const jumped = d !== null ? Math.abs(d) > screen : Math.abs(w.top - prev.top) > screen && !atEnds;
       if (jumped && !atEnds) {
         const excusedNow = t < searchUntil || (w.end && (t < pillUntil || t - lastAny < 1500));

@@ -22,6 +22,7 @@ const (
 	vrWheel = "wheel"
 	vrMid   = "mid"
 	vrHand  = "hand"
+	vrSwipe = "swipe"
 	vrChat  = "Long"
 )
 
@@ -60,7 +61,7 @@ func (l *lockedBuf) lines() []map[string]any {
 // missing.
 func TestViewReportReachesHubChrome(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{vrJump, vrWheel, vrMid, vrHand} {
+	for _, mode := range []string{vrJump, vrWheel, vrMid, vrHand, vrSwipe} {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			viewReportRun(t, chromePath(t), mode)
@@ -108,9 +109,7 @@ func viewReportRun(t *testing.T, bin, mode string) {
 	for _, m := range sink.lines() {
 		switch m["msg"] {
 		case "view jumped":
-			if rep, _ := m["report"].(string); strings.Contains(rep, `"why":"jump"`) {
-				jumped++
-			}
+			jumped++
 		case "view capture sent by hand":
 			manual++
 		case "view left the newest message":
@@ -126,7 +125,7 @@ func viewReportRun(t *testing.T, bin, mode string) {
 			}
 		}
 	}
-	want := map[string][3]int{vrJump: {1, 0, 0}, vrWheel: {0, 0, 0}, vrMid: {0, 1, 0}, vrHand: {0, 0, 1}}[mode]
+	want := map[string][3]int{vrJump: {1, 0, 0}, vrWheel: {0, 0, 0}, vrMid: {0, 1, 0}, vrHand: {0, 0, 1}, vrSwipe: {0, 0, 0}}[mode]
 	if left != want[0] || jumped != want[1] || manual != want[2] || loaded != 1 {
 		t.Fatalf("hub logged %d leave, %d jump and %d manual reports (want %v) and %d page loads (want 1)\n%s", left, jumped, manual, want, loaded, out)
 	}

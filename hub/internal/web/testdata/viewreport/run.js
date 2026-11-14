@@ -8,7 +8,8 @@
 // MODE is jump (a script moves the log), wheel (the reader scrolls up),
 // mid (the reader scrolls up, presses something outside the log, and a
 // script then throws the log more than a screen further up: one jump
-// report) or hand (Alt+J sends the record by hand, with a toast).
+// report), swipe (Chrome only: a finger swipes up on a phone while older
+// rows render above; the reader stays put) or hand (Alt+J sends the record by hand, with a toast).
 // Prints ok when the page's own count is right; the Go test counts the
 // lines the hub logged.
 const assert = require("assert");
@@ -54,9 +55,27 @@ function driver() {
       const c = await connect();
       await c.send("Page.enable");
       await c.send("Page.addScriptToEvaluateOnNewDocument", { source: "(" + preload + ")()" });
-      await c.send("Emulation.setDeviceMetricsOverride", { width: W, height: H, deviceScaleFactor: 1.5, mobile: false });
+      if (mode === "swipe") {
+        // A phone: touch only, as Chrome on Android.
+        await c.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 915, deviceScaleFactor: 2.6, mobile: true });
+        await c.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+      } else await c.send("Emulation.setDeviceMetricsOverride", { width: W, height: H, deviceScaleFactor: 1.5, mobile: false });
       return {
         ev: c.ev,
+        // A finger that drags the log down by dy px (the view goes up).
+        // Several strokes from y, 20 px a frame, as a thumb reading up.
+        swipe: async (x, y, dy) => {
+          const touch = (type, ty) => c.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x: Math.round(x), y: Math.round(ty), id: 1, radiusX: 4, radiusY: 4, force: 1 }] });
+          for (let done = 0; done < dy; done += 400) {
+            await touch("touchStart", y);
+            for (let k = 1; k <= 20; k++) {
+              await sleep(16);
+              await touch("touchMove", y + 20 * k);
+            }
+            await touch("touchEnd", y + 400);
+            await sleep(120);
+          }
+        },
         nav: (u) => c.send("Page.navigate", { url: u }),
         wheel: (x, y, dy) => c.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: dy }),
         close: c.close,
@@ -104,6 +123,17 @@ const { proc, connect } = driver();
     assert.ok(/^[0-9a-f]{8}$/.test(b.chat), "chat = " + b.chat);
     assert.ok(!rs[0].body.includes("long1"), "the report names the chat");
     await until(`window.__answers.some((a) => a.kind === "left" && a.status === 204)`, "the hub's answer");
+  } else if (mode === "swipe") {
+    // A finger swipes up from the newest message while older rows render
+    // above: the reader stays on what the swipe brought into view.
+    const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + 60 }; })()`);
+    await c.swipe(box.x, box.y, 2800);
+    await sleep(2500);
+    const g = await gap();
+    const js = await ev(`window.__reports.filter((r) => r.kind === "jump").map((r) => r.body)`);
+    assert.strictEqual(js.length, 0, "a finger's swipe was reported as a jump: " + js.join("\n").slice(0, +(process.env.VR_DUMP || 600)));
+    assert.ok(g > 1800 && g < 4200, "after a 2800 px swipe the log is " + g + " px from its end");
+    assert.strictEqual((await left()).length, 0, "a reader's swipe was reported as a leave");
   } else if (mode === "mid" || mode === "hand") {
     const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     await c.wheel(box.x, box.y, -1500);
@@ -150,7 +180,13 @@ const { proc, connect } = driver();
     await sleep(2000);
     const rs = await left();
     assert.strictEqual(rs.length, 0, "a reader's scroll was reported");
-    const js = await ev(`window.__reports.filter((r) => r.kind === "jump" && r.why === "jump").map((r) => r.body)`);
+    // As far from the newest message as the wheel went, not thrown into
+    // the older rows that rendered above.
+    const g = await gap();
+    assert.ok(g > 1000 && g < 2600, "after a 1500 px wheel the log is " + g + " px from its end");
+    // Older rows render above the reader during the wheel: the reader stays
+    // on the rows the wheel brought into view.
+    const js = await ev(`window.__reports.filter((r) => r.kind === "jump").map((r) => r.body)`);
     assert.strictEqual(js.length, 0, "a reader's scroll was reported as a jump: " + js.join("\n").slice(0, +(process.env.VR_DUMP || 600)));
   }
   const loaded = await ev(`window.__reports.filter((r) => r.kind === "loaded").length`);
