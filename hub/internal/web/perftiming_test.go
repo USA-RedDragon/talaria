@@ -39,10 +39,11 @@ func TestTimingReportsAreLogged(t *testing.T) {
 	readEvents(t, bufio.NewReader(resp.Body), "snapshot")
 	// FNV-1a of "pc\ns1", as perfwatch.js hashes it.
 	const chat = "24f7821e"
-	if r, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", map[string]any{kKind: "timing", "what": "open", "chat": chat, "paint": 40}); r.StatusCode != http.StatusNoContent {
+	const kChat = "chat"
+	if r, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", map[string]any{kKind: "timing", "what": "open", kChat: chat, "paint": 40}); r.StatusCode != http.StatusNoContent {
 		t.Fatalf("timing = %d", r.StatusCode)
 	}
-	if r, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", map[string]any{kKind: "scroll", "chat": chat, "ms": 900}); r.StatusCode != http.StatusNoContent {
+	if r, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", map[string]any{kKind: "scroll", kChat: chat, "ms": 900}); r.StatusCode != http.StatusNoContent {
 		t.Fatalf("scroll = %d", r.StatusCode)
 	}
 	var open, scroll int

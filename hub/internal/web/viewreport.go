@@ -101,8 +101,8 @@ type openTime struct {
 
 func chatHash(backend, session string) string {
 	h := uint32(0x811c9dc5)
-	for _, c := range backend + "\n" + session {
-		// The page hashes UTF-16 code units; ids are ASCII.
+	// The page hashes UTF-16 code units; ids are ASCII, one byte each.
+	for _, c := range []byte(backend + "\n" + session) {
 		h ^= uint32(c)
 		h *= 0x01000193
 	}
