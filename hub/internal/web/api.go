@@ -602,6 +602,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// hub took to attach (attach) and to make the event (snap).
 	open := func(prep time.Duration) {
 		h.Set(serverTiming, "attach;dur="+msDur(attached)+", snap;dur="+msDur(prep)+", hub;dur="+msDur(time.Since(start)))
+		s.openTimes.add(userFrom(r), r.PathValue("backend"), r.PathValue("session"), h.Get(serverTiming)+", since;desc="+strconv.FormatBool(since != ""))
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(out, "retry: 2000\n\n")
 	}

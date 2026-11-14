@@ -133,6 +133,8 @@ type Server struct {
 	listFPs listFingerprints
 	// wrote is when each user last changed something (time.Time by user).
 	wrote sync.Map
+	// openTimes keeps the hub's time for recent event streams.
+	openTimes openTimes
 	// snaps keeps what the event stream made of recent snapshots.
 	snaps        snapCache
 	svc          hub.Service

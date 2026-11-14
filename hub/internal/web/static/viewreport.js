@@ -514,5 +514,8 @@ window.HubViewReport = (o) => {
   function note(what) { if (watch) watch.note(what); }
   function capture(done) { if (watch) watch.capture(done); else if (done) done(false); }
 
-  return { changed, excuse, reconnected, loaded, note, capture, ring: () => (watch ? watch.ring() : []) };
+  // send posts a report the caller made (HubPerfWatch's timings).
+  const sendReport = (body) => post(body);
+
+  return { changed, excuse, reconnected, loaded, note, capture, send: sendReport, ring: () => (watch ? watch.ring() : []) };
 };

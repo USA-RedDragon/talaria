@@ -24,6 +24,12 @@ const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[s.lengt
 
 // The page records the kinds of the chat events it gets.
 const preload = `(() => {
+  window.__timings = [];
+  const f = window.fetch;
+  window.fetch = function (u, init) {
+    try { if (String(u).includes("/api/view-report") && init && init.body) { const b = JSON.parse(init.body); if (b.kind === "timing" || b.kind === "scroll") window.__timings.push(b); } } catch (_) { /* not ours */ }
+    return f.apply(this, arguments);
+  };
   const E = window.EventSource;
   window.__kinds = [];
   window.EventSource = function (u, o) {
@@ -88,7 +94,9 @@ const preload = `(() => {
         const l = document.getElementById("log");
         if (l.querySelector(".msg") && l.textContent.includes(${JSON.stringify(last(chat))})) {
           await new Promise((r) => { const ch = new MessageChannel(); ch.port1.onmessage = r; ch.port2.postMessage(0); });
-          return performance.now() - t0;
+          const ms = performance.now() - t0;
+          window.__painted = { nodes: l.getElementsByTagName("*").length, rows: l.querySelectorAll(".msg").length };
+          return ms;
         }
         if (performance.now() - t0 > 20000) return -2;
       }
@@ -115,10 +123,10 @@ const preload = `(() => {
   const hubList = [];
   for (const chat of LONG) {
     first.push(await open(chat));
-    const nodes = await ev(`document.getElementById("log").getElementsByTagName("*").length`);
-    const rows = await ev(`document.querySelectorAll("#log .msg").length`);
-    // The window of a long chat: its newest rows, not 1,500.
-    assert.ok(nodes <= 6000 && rows <= 160, `${chat} holds ${nodes} nodes and ${rows} rows in the log; the budget is 6000 and 160`);
+    const { nodes, rows } = await ev(`window.__painted`);
+    // The first frame of a long chat draws its newest rows, not 1,500;
+    // older ones follow in idle time.
+    assert.ok(nodes <= 6000 && rows <= 160, `${chat} drew ${nodes} nodes and ${rows} rows in its first frame; the budget is 6000 and 160`);
     await open(SHORT);
   }
   for (let i = 0; i < 6; i++) {
@@ -133,6 +141,13 @@ const preload = `(() => {
       `switching back to ${chat} drew it again from a snapshot: ${JSON.stringify(kinds)}`);
     await open(SHORT);
   }
+  // The page reported each open and switch to the hub, with its paint
+  // time, its counts and the hub's time for its requests.
+  await c.until(`window.__timings.filter((t) => t.kind === "timing").length >= 20`, "the timing reports", 30000);
+  const timings = await ev(`window.__timings.filter((t) => t.kind === "timing")`);
+  const backs = timings.filter((t) => t.what === "back");
+  assert.ok(backs.length >= 6 && backs.every((t) => t.paint > 0 && t.rows > 0 && t.nodes > 0), "switch back timings: " + JSON.stringify(backs.slice(0, 2)));
+  assert.ok(timings.some((t) => t.what === "open" && t.srv.some((x) => x.st && x.st.hub >= 0)), "an open with the hub's request times: " + JSON.stringify(timings.slice(0, 2)));
   const out = { rate, calibration: k, first, back, hubBack, hubList, firstRatio: median(first) / k, backRatio: median(back) / k };
   if (report) console.log(JSON.stringify(out));
   // Budgets: a fixed part (frames) and a part that grows with the

@@ -800,6 +800,13 @@
   // reader who lands on older messages after a switch or a restart should
   // never see that.
   const vreport = window.HubViewReport({ view: () => view, stick, log: $("log"), csrf: () => csrf, probe: stickProbe });
+  // perf times opens, switches and scrolls in this browser for the hub's
+  // log (HubPerfWatch). lastPick is when the reader last picked a chat.
+  const perf = window.HubPerfWatch ? window.HubPerfWatch({ post: (b) => vreport.send(b), log: $("log") })
+    : { wrap: (n, f) => f, open() {}, painted() {} };
+  let lastPick = -1;
+  let opens = 0;
+  document.addEventListener("click", (e) => { if (e.target.closest && e.target.closest("#sessions a, #search, .item")) lastPick = e.timeStamp || performance.now(); }, { capture: true, passive: true });
   // Alt+J, or a long press on the chat's title, sends the hub the log's
   // last minute of moves at once, for a jump the page did not catch. Only
   // sizes, places and the page's own call sites; never the chat's text.
@@ -2052,6 +2059,7 @@
     if (p.slice(1).split("/").some((s) => s === "" || s === "." || s === "..")) return false;
     return mediaExts.has(extOf(p));
   }
+  for (const n of ["snapshot", "olderRows", "showOlder", "unpark", "park", "event", "row"]) Chat.prototype[n] = perf.wrap(n, Chat.prototype[n]);
 
   // maskMedia blanks fenced code, inline code and quote lines, so examples
   // there are not directives. Inline code that is a whole directive, or the
@@ -3475,6 +3483,13 @@
 
   function showChat(backend, session) {
     mark("open");
+    {
+      const t = performance.now();
+      const picked = lastPick >= 0 && t - lastPick < 1000;
+      const kind = !opens++ && !view && t < 10000 ? "load" : ready.has(readyKey(backend, session)) ? "back" : "open";
+      perf.open(kind, backend, session, kind === "load" ? 0 : picked ? lastPick : t);
+      lastPick = -1;
+    }
     parkView();
     pagesView.destroy();
     memory.hide();
@@ -3552,6 +3567,7 @@
         (chat.kinds = chat.kinds || []).push(Math.round(Date.now() - chat.openedAt) + ":" + e.kind + (e.provisional ? "*" : ""));
         if (chat.kinds.length > 40) chat.kinds.shift();
         chat.event(e.kind, e.data, e.at);
+        if (e.kind === "snapshot" && chat === view) perf.painted();
         if (first) {
           first = false;
           mark("handled");
@@ -3571,6 +3587,7 @@
     if (kept) {
       kept.unpark();
       mark("painted-kept");
+      perf.painted();
     }
     focusInput();
     if (page) {
@@ -4294,6 +4311,10 @@
     $("search").focus();
     $("search").select();
   }
+
+  drawList = perf.wrap("drawList", drawList);
+  if (window.hubMarkdown) window.hubMarkdown.render = perf.wrap("markdown", window.hubMarkdown.render);
+  if (window.hljs) window.hljs.highlight = perf.wrap("highlight", window.hljs.highlight);
 
   async function init() {
     try {
