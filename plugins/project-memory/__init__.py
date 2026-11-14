@@ -1,7 +1,8 @@
 """project-memory: one curated memory per project for chats bound to a device folder.
 
 Registers the ``project_memory`` tool (toolset ``project-memory``), the ``project-memory`` system prompt section
-(the project's notes next to the global memory block, frozen with the prompt like that block), a
+(the project's index and the names of its topics and path notes, next to the global memory block, frozen with the
+prompt like that block), a ``transform_tool_result`` hook that adds matching path notes to file tool results, a
 ``subagent_start`` hook that marks delegate children, which may not write project memory while they may not
 write memory, an ``agent_turn_start`` hook that resets the per-turn cap on failed writes, a wrapper on Hermes's memory
 approval replay that applies staged project writes to their project, and one paragraph in the built-in memory tool's description that sends project facts here.
@@ -38,6 +39,8 @@ def register(ctx) -> None:
         VALID_HOOKS = set()
     if "agent_turn_start" in VALID_HOOKS:
         ctx.register_hook("agent_turn_start", core.on_turn_start)
+    if "transform_tool_result" in VALID_HOOKS:
+        ctx.register_hook("transform_tool_result", core.on_tool_result)
     core.extend_memory_schema()
     core.install_pending_replay()
     core.register_skills_provider()

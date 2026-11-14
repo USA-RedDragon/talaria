@@ -75,6 +75,40 @@ async def project_skill_delete(project_id: str, name: str):
     return await _call(_core().delete_project_skill, project_id, name)
 
 
+_KINDS = {"topics": "topic", "paths": "path"}
+
+
+@router.get("/projects/{project_id}/{kind}")
+async def project_docs(project_id: str, kind: str):
+    if kind not in _KINDS:
+        return _error(404, "not_found", "no such route")
+    return await _call(_core().docs, project_id, _KINDS[kind])
+
+
+@router.get("/projects/{project_id}/{kind}/{name}")
+async def project_doc(project_id: str, kind: str, name: str):
+    if kind not in _KINDS:
+        return _error(404, "not_found", "no such route")
+    return await _call(_core().doc, project_id, _KINDS[kind], name)
+
+
+@router.put("/projects/{project_id}/{kind}/{name}")
+async def project_doc_put(project_id: str, kind: str, name: str, request: Request):
+    if kind not in _KINDS:
+        return _error(404, "not_found", "no such route")
+    body = await _body(request)
+    if body is None:
+        return _error(400, "bad_request", "the body must be a JSON object")
+    return await _call(_core().put_doc, project_id, _KINDS[kind], name, body)
+
+
+@router.delete("/projects/{project_id}/{kind}/{name}")
+async def project_doc_delete(project_id: str, kind: str, name: str):
+    if kind not in _KINDS:
+        return _error(404, "not_found", "no such route")
+    return await _call(_core().delete_doc, project_id, _KINDS[kind], name)
+
+
 @router.post("/projects/{project_id}/memory/{op}")
 async def project_change(project_id: str, op: str, request: Request):
     core = _core()

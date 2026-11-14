@@ -83,9 +83,9 @@ def test_notes_add_edit_remove(mem):
 def test_limits_and_errors(mem, monkeypatch):
     slug = project(mem)
     monkeypatch.setattr(mem, "char_limit", lambda cfg=None: 200)
-    with pytest.raises(mem.Refused) as exc:
-        mem.add(slug, "x" * 400)
-    assert exc.value.status == 409 and exc.value.code == "over_limit"
+    out = mem.add(slug, "x" * 400)  # over the whole index: kept in a topic, not refused
+    assert "message" in out and mem.entries(slug) == []
+    assert "x" * 400 in mem.L.read_doc(mem.project_dir(slug), "topic", "inbox")["body"]
     with pytest.raises(mem.Refused) as exc:
         mem.add("no-such-project", "x")
     assert exc.value.status == 404
@@ -122,7 +122,7 @@ def test_long_entry_under_global_limit(mem, monkeypatch):
     monkeypatch.setattr(mem, "_config", lambda: {"memory": {"memory_char_limit": 9000}})
     assert mem.session_store("s1", slug).memory_char_limit == 9000  # a live session picks up a new limit
     block = mem.render_block(slug)
-    assert "[66%, 6,000/9,000 chars]" in block and "1 more project notes are not shown" in block
+    assert "[index 66%, 6,000/9,000 chars]" in block and "1 more index lines are not shown" in block
 
 
 def _notes_8000(mem, monkeypatch):
@@ -146,7 +146,7 @@ def test_notes_are_cut_at_what_hermes_grants(mem, monkeypatch):
     slug = _notes_8000(mem, monkeypatch)
     monkeypatch.setattr(mem, "_granted", 4000)
     block = mem.render_block(slug)
-    assert len(block) <= 3990 and "more project notes are not shown" in block
+    assert len(block) <= 3990 and "more index lines are not shown" in block
     assert mem.section_budget(8000) == 3990
 
 
@@ -157,14 +157,14 @@ def test_request_section_chars_follows_the_hermes_ceiling(mem, monkeypatch, capl
     fake = types.ModuleType("hermes_cli.plugins")
     fake.system_prompt_section_ceiling = lambda: 12000
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake)
-    assert mem.request_section_chars() == 12000 and mem.section_budget() == 8990
+    assert mem.request_section_chars() == 12000 and mem.section_budget() == 9990
     assert "plugins.max_section_chars" not in caplog.text
     fake.system_prompt_section_ceiling = lambda: 100000
-    assert mem.request_section_chars() == 33000  # the largest note set plus the header
+    assert mem.request_section_chars() == 34000  # the largest index plus the header
     fake.system_prompt_section_ceiling = lambda: 4000
     with caplog.at_level("WARNING", logger="project_memory"):
         assert mem.request_section_chars() == 4000
-    assert "plugins.max_section_chars to 9000" in caplog.text
+    assert "plugins.max_section_chars to 10000" in caplog.text
     del fake.system_prompt_section_ceiling  # a Hermes without the setting keeps 4,000
     assert mem.request_section_chars() == 4000 and mem.section_budget() == 3990
 
