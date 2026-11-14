@@ -1,6 +1,6 @@
 # Hub settings (config.yaml)
 
-The hub reads `config.yaml` in its working directory, or the file named by `--config` (`-c`) or the `CONFIG` environment variable. Environment variables override the file, and flags override both. Every setting has all three forms: the key `http.public_url` is the environment variable `HUB_HTTP_PUBLIC_URL` and the flag `--http.public_url`.
+The hub reads `config.yaml` in its working directory, or the file named by `--config` (`-c`) or the `CONFIG` environment variable. The program is `talaria-hub` (`talaria-hub --help` lists every flag); its container image is `ghcr.io/usa-reddragon/talaria-hub`. Environment variables override the file, and flags override both. Every setting except the lists of tables (`users[]`, `backends[]`) has all three forms: the key `http.public_url` is the environment variable `HUB_HTTP_PUBLIC_URL` and the flag `--http.public_url`.
 
 A secret can come from a file instead of the config or the environment where the table shows a `_file` key, so a Docker or Kubernetes secret never goes into the environment.
 
@@ -14,7 +14,7 @@ For one person, one Hermes and the hub's own accounts, this is enough:
 http:
   public_url: https://hub.example.com
 store:
-  path: /data/hub.db
+  path: /data/talaria-hub.db
 hermes:
   url: http://hermes:9120
   username: hub

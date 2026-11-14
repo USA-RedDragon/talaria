@@ -43,7 +43,7 @@ plugins:
         sleep_guard: true        # refuse a foreground `terminal` command that waits by sleeping
 ```
 
-Route names `auto`, `none` and anything starting with `help-` are reserved.
+Route names `auto`, `none` and anything starting with `help-` are reserved. An option without a name, description or model, without a `provider` or `base_url`, with a repeated name or with a reserved name is skipped. The sleep guard refuses a `sleep` of more than 30 seconds, and `while` or `until` loops that sleep, in a foreground `terminal` command; a command run with `background=true` is never refused.
 
 ## Per-chat choice
 

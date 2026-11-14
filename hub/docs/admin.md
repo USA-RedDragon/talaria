@@ -73,6 +73,16 @@ Give each person their own backend when you want separate memory: a backend has 
 
 What a backend needs beyond stock Hermes, and what you lose without it, is in the [README](../README.md#set-up-a-hermes-backend). The hub detects missing parts when it starts to use them and hides the feature, so a stock Hermes works with fewer features.
 
+## Who may change a backend's agent
+
+Hub admins manage people. Three settings say who may also change a backend's agent from the hub, each as `user=backend` pairs such as `alice=main`:
+
+- `models.admins`: connect models (Settings, Models). Empty: the hub's admins.
+- `agent.admins`: change the agent's settings, skills and tools. Empty: the hub's admins.
+- `claude.admins`: sign the backend's Claude accounts in. Empty: nobody. See [Claude accounts](https://github.com/USA-RedDragon/talaria/blob/main/docs/guides/claude-accounts.md).
+
+The hub refuses to start when a pair names an unknown backend or user.
+
 ## Computers (devices)
 
 Set `device.enabled`, give the hub a signing key, and set `devices: true` on each backend that may have computers:
@@ -98,14 +108,14 @@ Both are optional and off by default. See [Telegram](../README.md#telegram) and 
 
 The hub keeps everything it owns (accounts, Telegram links, paired computers, drafts, saved prompts, notification settings) in one database:
 
-- **SQLite**, the default: one file, `store.path`. This is for one replica. Put it on a persistent volume.
+- **SQLite**, the default: one file, `store.path`. This is for one replica. Put it on a persistent volume. The built-in default is `/data/hermes-hub.db`, a name from before the rename to Talaria; the install files (Compose, Helm, all-in-one) set `HUB_STORE_PATH` to `talaria-hub.db`. A hub you start yourself keeps using whichever path it is given, so do not change the path of a hub that has data without moving the file.
 - **PostgreSQL**: `store.driver: postgres` and `store.dsn`, for two or more replicas. Connect to the database directly, not through PgBouncer in transaction mode.
 
-Chats and memory live in Hermes, not in the hub. Back up the hub's database and Hermes's data together. For SQLite, copy the file while the hub is stopped, or use `sqlite3 <file> ".backup <copy>"`. To move from SQLite to PostgreSQL, set `store.import_path` to the old file for one start.
+Chats and memory live in Hermes, not in the hub. Back up the hub's database and Hermes's data together. An admin can download one file with both under Settings, Backup; the steps, and a by-hand backup of the SQLite file, are in [Upgrade and back up Talaria](https://github.com/USA-RedDragon/talaria/blob/main/docs/deploy/upgrades.md). To move from SQLite to PostgreSQL, set `store.import_path` to the old file for one start.
 
 ## Reverse proxy notes
 
-The hub speaks plain HTTP on port 8080 by default. Put HTTPS in front of it: pages and push notifications need `https` (or `localhost`), and the login cookies are `Secure` when `http.public_url` is `https`. Set `http.public_url` to the address people open. The hub accepts requests only for that address.
+The hub speaks plain HTTP on port 8080 by default (`http.port`). In the Compose install, the `front` service (Caddy) owns port 8080 and the hub listens on 8081 behind it. Put HTTPS in front of it: pages and push notifications need `https` (or `localhost`), and the login cookies are `Secure` when `http.public_url` is `https`. Set `http.public_url` to the address people open. The hub accepts requests only for that address.
 
 Whatever proxy you use must:
 
@@ -140,7 +150,7 @@ with `map $http_upgrade $connection_upgrade { default upgrade; '' close; }` in t
 
 ## Upgrades
 
-Run the new release. The hub migrates its database on start. The `talaria` programs on people's computers update themselves. The hub pins the Hermes release it was tested with (the README names it), so upgrade Hermes through the hub's release notes, not ahead of them.
+Run the new release (the image `ghcr.io/usa-reddragon/talaria-hub`, binary `talaria-hub`). The hub migrates its database on start. The `talaria` programs on people's computers update themselves. The hub pins the Hermes release it was tested with (the README names it), so upgrade Hermes through the hub's release notes, not ahead of them: see [Upgrade Hermes](hermes-upgrade.md). With `updates.check` on (the default), admins see a banner when a newer release is out.
 
 ## Settings reference
 
