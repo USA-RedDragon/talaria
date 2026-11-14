@@ -232,5 +232,5 @@ window.HubStick = (log, o) => {
   const settled = () => log.clientHeight === rec.c && now() - resized >= settle && now() >= fresh;
 
   return { settled, sync, scrolled, scrollSoon, heard, drag, pin, pinSoon, release, look, reset, drawn, refresh: changed, pinned: () => pinned,
-    acted: () => acted, hearing: () => now() < until, trail: () => trail.slice() };
+    acted: () => acted, hearing: () => now() < until, held, trail: () => trail.slice() };
 };

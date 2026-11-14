@@ -1860,9 +1860,9 @@
         this.idling = false;
         if (view !== this || gen !== this.olderGen || !this.older.length || this.log.hidden) return;
         if (this.log.scrollTop > olderIdle * this.log.clientHeight) return;
-        // Not under a finger or a wheel: rows put above a log that the
+        // Not under a finger (also before its first move) or a wheel: rows put above a log that the
         // reader moves are not made up for until the gesture ends.
-        if (stick.hearing()) { setTimeout(() => this.upIdle(), 200); return; }
+        if (stick.hearing() || stick.held()) { setTimeout(() => this.upIdle(), 200); return; }
         // A frame is due: the next idle time.
         if (dl && !dl.didTimeout && dl.timeRemaining() < 6) { this.upIdle(); return; }
         this.showOlder(null, olderBatch, olderBatchChars);
