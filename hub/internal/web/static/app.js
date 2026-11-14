@@ -849,8 +849,13 @@
   const firstChars = 30000;
   const olderRows = 60;
   const olderChars = 60000;
-  // olderAhead is how many screens above the reader older rows render.
-  const olderAhead = 2;
+  // olderIdle is how many screens above the reader older rows render in
+  // idle time (all of them: a reader who scrolls up finds them ready, as
+  // before, but no frame waits for them), olderBatch and olderBatchChars
+  // the size of one batch.
+  const olderIdle = Infinity;
+  const olderBatch = 16;
+  const olderBatchChars = 16000;
 
   // olderCut is where the rows to render next start: back from end until
   // they have rows rows and chars characters, then back to the user
@@ -889,12 +894,14 @@
   const ready = new Map();
   const readyMax = 8;
   const readyNodes = 150000;
+  // parkNodes is the most nodes one kept chat keeps: about its newest
+  // screens, which put back in the page cost a frame, not tens.
+  const parkNodes = 5000;
   const readyKey = (b, s) => b + "\n" + s;
   function parkView() {
     const v = view;
     if (!v || pageMode || !v.loaded || v.dead || v.parked) return;
     const nodes = v.log.getElementsByTagName("*").length;
-    if (nodes > readyNodes / 2) return;
     v.park(nodes);
     const key = readyKey(v.backend, v.session);
     ready.delete(key);
@@ -938,6 +945,16 @@
       this.parkedView = { title: $("title").textContent, doc: document.title };
       const frag = document.createDocumentFragment();
       frag.append(...log.childNodes);
+      // A long chat keeps its newest rows: the oldest parts go back to the
+      // rows to render, as they were before they rendered. Out of the
+      // page, their removal lays nothing out.
+      const box = this.olderBox;
+      while (nodes > parkNodes && box && box.parentNode === frag && box.firstChild && box.firstChild.olderMsgs) {
+        const p = box.firstChild;
+        nodes -= p.getElementsByTagName("*").length + 1;
+        p.remove();
+        this.older.push(...p.olderMsgs);
+      }
       this.parked = frag;
       this.parkedNodes = nodes;
     }
@@ -958,7 +975,8 @@
       this.bottom();
       this.jumpTo();
       stick.drawn();
-      msgActs.decorate();
+      // Its rows have their buttons from before; the last row's may change.
+      afterPaint(() => { if (view === this) msgActs.decorate(); });
       this.topUp();
     }
 
@@ -1766,7 +1784,7 @@
     // Firefox lays out every message in it again on any change, and Chrome
     // all its children when one goes in at the top. A reader who is not at
     // the end keeps the same messages in view.
-    showOlder(more) {
+    showOlder(more, rows, chars) {
       if (!this.older.length) return;
       vreport.note(more ? "older+" : "older");
       // Judge a scroll that waits for its frame before the rows go in.
@@ -1780,10 +1798,11 @@
       this.filling = true;
       try {
         do {
-          const cut = olderCut(this.older, this.older.length, olderRows, olderChars);
+          const cut = olderCut(this.older, this.older.length, rows || olderRows, chars || olderChars);
           const part = this.older.slice(cut);
           this.older.length = cut;
           const chunk = el("div", "part");
+          chunk.olderMsgs = part;
           chunk.style.containIntrinsicSize = "auto " + partHeight(part) + "px";
           this.sink = chunk;
           this.turn = null;
@@ -1807,22 +1826,47 @@
       if (view === this) msgActs.decorate();
     }
 
-    // topUp renders the next older rows while the reader is within
-    // olderAhead screens of the top of what the log shows, or the log does
-    // not fill that much yet. History renders as the reader scrolls up, not
-    // all of it in the background: a long chat kept tens of thousands of
+    // topUp keeps older rows ready above the reader. Rows render in small
+    // batches in idle time while the reader is within olderIdle screens
+    // of the top of what the log shows; only a reader within a screen of
+    // it gets a batch at once, in the next frame. History renders ahead of
+    // the reader, not all of it: a long chat kept tens of thousands of
     // nodes in the page, and each change laid them out and styled them.
     topUp() {
-      if (this.toppingUp || !this.older.length) return;
+      if (!this.older.length) return;
+      const log = this.log;
+      if (log.scrollTop <= log.clientHeight) this.upNow();
+      else this.upIdle();
+    }
+
+    upNow() {
+      if (this.toppingUp) return;
       this.toppingUp = true;
       const gen = this.olderGen;
       requestAnimationFrame(() => {
         this.toppingUp = false;
         if (view !== this || gen !== this.olderGen || !this.older.length || this.log.hidden) return;
-        if (this.log.scrollTop > olderAhead * this.log.clientHeight) return;
-        this.showOlder();
+        if (this.log.scrollTop > this.log.clientHeight) { this.upIdle(); return; }
+        this.showOlder(null, olderBatch, olderBatchChars);
         this.topUp();
       });
+    }
+
+    upIdle() {
+      if (this.idling) return;
+      this.idling = true;
+      const gen = this.olderGen;
+      const run = (dl) => {
+        this.idling = false;
+        if (view !== this || gen !== this.olderGen || !this.older.length || this.log.hidden) return;
+        if (this.log.scrollTop > olderIdle * this.log.clientHeight) return;
+        // A frame is due: the next idle time.
+        if (dl && !dl.didTimeout && dl.timeRemaining() < 6) { this.upIdle(); return; }
+        this.showOlder(null, olderBatch, olderBatchChars);
+        this.topUp();
+      };
+      if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 300 });
+      else setTimeout(run, 30);
     }
 
     // fillOlder renders the rest of the history in the background, a few
@@ -2027,6 +2071,7 @@
       }
     }
   }
+  for (const n of ["snapshot", "olderRows", "showOlder", "unpark", "park", "event", "row"]) Chat.prototype[n] = perf.wrap(n, Chat.prototype[n]);
 
   // outcomeText says what became of an approval and where it got its answer,
   // as the hub's approval.outcome event tells it. An outcome the hub worked out
@@ -2059,7 +2104,6 @@
     if (p.slice(1).split("/").some((s) => s === "" || s === "." || s === "..")) return false;
     return mediaExts.has(extOf(p));
   }
-  for (const n of ["snapshot", "olderRows", "showOlder", "unpark", "park", "event", "row"]) Chat.prototype[n] = perf.wrap(n, Chat.prototype[n]);
 
   // maskMedia blanks fenced code, inline code and quote lines, so examples
   // there are not directives. Inline code that is a whole directive, or the

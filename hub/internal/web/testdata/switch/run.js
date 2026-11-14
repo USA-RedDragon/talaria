@@ -107,9 +107,9 @@ const { proc, connect } = require("../cdp.js").launch(bin, dir);
     assert.strictEqual(empty.length, 0, `switch to ${id}: an empty log at ${empty[0] && Math.round(empty[0].t)} ms`);
     assert.strictEqual(await ev(`(() => { const l = document.getElementById("log"); return Math.round(l.scrollHeight - l.scrollTop - l.clientHeight) < 2; })()`), true, `switch to ${id}: not at the end`);
   }
-  // The big chat draws a window of its history, and the rest as the
-  // reader scrolls up to it: all of it in the end, from the split snapshot.
-  await c.until(`document.querySelectorAll("#log .msg.user").length < 900`, "the big chat drawn as a window");
+  // The big chat draws its newest rows first, and the rest above them in
+  // idle time and as the reader scrolls up: all of it in the end, from
+  // the split snapshot.
   for (let i = 0; i < 400; i++) {
     if (await ev(`document.querySelectorAll("#log .msg.user").length >= 900`)) break;
     await ev(`(() => { const l = document.getElementById("log"); l.scrollTop = 0; return 1; })()`);
