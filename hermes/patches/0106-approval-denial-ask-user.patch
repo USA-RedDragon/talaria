@@ -1,0 +1,598 @@
+From 9d34e6ccf16a5ad797e768e4e20682bffc3ddc06 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 16:48:55 -0600
+Subject: [PATCH] fix(approval): a refused approval tells the agent not to work
+ around it and to ask the user
+
+A denied, timed-out or withdrawn approval, a smart approval block, a hard rule, a deny rule, a hardline block, an unattended refusal, a plugin approval, a protected write, an MCP trust denial and a failed review told the agent only "do not retry", in different words. Some said nothing about what to do instead.
+
+Every such result now ends with one instruction (tools/approval_guidance.py): do not work around the block (no other tool, script, rephrased command, or smaller steps to the same outcome), and if the action is still needed ask the user for explicit authorization with the clarify tool (in the reply when clarify is unavailable; a subagent's question goes to its parent chat through the existing subagent question path), stating the exact action, why it is needed and the checker's reason, then wait. A hard rule, a deny rule and a hardline block say an answer in the chat does not clear them and the user can run the action outside the agent or change the rule. The checker's rule name and reason are named in the message, once.
+
+The user's clarify answer is already the user's own words in the smart approval review, so the same action then runs without a second card; a test covers the loop.
+
+No new config key.
+---
+ agent/context_compressor.py                  |   3 +
+ agent/tool_executor.py                       |   4 +-
+ hermes_cli/plugins.py                        |   4 +-
+ tests/tools/test_approval_denial_guidance.py | 221 +++++++++++++++++++
+ tools/approval.py                            |  29 +--
+ tools/approval_floors.py                     |  12 +-
+ tools/approval_guidance.py                   |  50 +++++
+ tools/browser_vault_tool.py                  |   3 +-
+ tools/file_tools_write_guards.py             |   5 +-
+ tools/mcp_tool_events.py                     |   3 +-
+ tools/mcp_tool_handlers.py                   |   3 +-
+ 11 files changed, 312 insertions(+), 25 deletions(-)
+ create mode 100644 tests/tools/test_approval_denial_guidance.py
+ create mode 100644 tools/approval_guidance.py
+
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index 3a00ba62cb..53234923af 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -6,6 +6,7 @@ import contextvars
+ import copy
+ import hashlib
+ import json
++from tools.approval_guidance import NO_WORKAROUND
+ import logging
+ import sqlite3
+ import re
+@@ -2012,6 +2013,8 @@ def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) ->
+         outcome = "BLOCKED, not run"
+         if "NOT consented" in error:
+             outcome += "; the user did NOT consent, do not retry or reach the same outcome another way"
++        elif NO_WORKAROUND in error:
++            outcome += "; do not work around it, ask the user for explicit authorization"
+     else:
+         return None
+     target = _str_arg(args, "command") or _str_arg(args, "path")
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+index 575f62d103..752703f84e 100644
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -702,7 +702,9 @@ def _pre_tool_block(agent, ref: _ToolCallRef):
+                                               ref.task_id or "default")
+         except Exception:
+             logger.warning("Smart approval (provenance) review of %s failed; blocking it", ref.name, exc_info=True)
+-            block_msg = f"BLOCKED: the smart approval review of {ref.name} failed, so it did not run."
++            from tools.approval_guidance import guided
++            block_msg = guided(f"BLOCKED: the smart approval review of {ref.name} failed, so it did not run.",
++                               reason="the smart approval review could not decide")
+     return block_msg, final_args
+ 
+ 
+diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
+index e45ca36d3a..c9ce20f693 100644
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -1230,7 +1230,9 @@ def _resolve_block_from_details(
+         # plugin flagged for approval.
+         return f"BLOCKED: plugin approval gate failed for {tool_name}"
+     if not result.get("approved"):
+-        return str(result.get("message") or f"BLOCKED: plugin approval required for {tool_name}")
++        from tools.approval_guidance import guided
++        return guided(str(result.get("message") or f"BLOCKED: plugin approval required for {tool_name}"),
++                      reason=str(details.message or ""))
+     return None
+ 
+ 
+diff --git a/tests/tools/test_approval_denial_guidance.py b/tests/tools/test_approval_denial_guidance.py
+new file mode 100644
+index 0000000000..e8a85206dd
+--- /dev/null
++++ b/tests/tools/test_approval_denial_guidance.py
+@@ -0,0 +1,221 @@
++"""A refused or withdrawn approval tells the agent not to work around it and to ask the user instead.
++
++Invariants:
++  1. Every block message from the approval gates (user deny, timeout, withdrawn card, smart approval, hard rule,
++     deny rule, hardline, unattended refusal, plugin approval, protected writes) ends with the same instruction:
++     do not work around the block, ask the user for explicit authorization with clarify, then wait.
++  2. The checker's rule name and reason are in the message.
++  3. A hard rule says an answer in the chat does not clear it; the others point at clarify.
++  4. Loop: denied, the agent asks with clarify, the user authorizes, and the re-run is allowed without a card.
++"""
++
++from __future__ import annotations
++
++import json
++import threading
++
++import pytest
++
++from tools import approval as mod
++from tools import approval_automode as A
++from tools import approval_context
++from tools.approval_guidance import GUIDANCE, HARD_GUIDANCE, NO_WORKAROUND, guided
++
++SESSION = "deny-guidance"
++RULE = 'Smart approval rule "Git Destructive": drops a teammate\'s commit'
++COMMAND = "git push --force origin main"
++STAGE2 = ("<block>yes</block><category>Git Destructive</category>"
++          "<reason>[Git Destructive] drops a teammate's commit</reason>")
++
++
++def _assert_guided(message, *, hard=False):
++    assert NO_WORKAROUND in message
++    assert message.count(NO_WORKAROUND) == 1
++    assert message.endswith(HARD_GUIDANCE if hard else GUIDANCE)
++    assert ("clarify" in message) is True
++    assert "wait for the answer" in message.lower()
++
++
++def test_guided_is_idempotent_and_names_the_reason_once():
++    once = guided("BLOCKED: nope.", reason="rule X")
++    assert once.count("(Flagged by rule X.)") == 1
++    assert once.index("Flagged by") < once.index(NO_WORKAROUND)
++    assert guided(once, reason="rule X") == once
++    assert guided("BLOCKED: rule X nope.", reason="rule X").count("Flagged by") == 0
++
++
++@pytest.fixture()
++def gateway(monkeypatch):
++    mod._gateway_queues.clear()
++    mod._gateway_notify_cbs.clear()
++    mod._session_approved.clear()
++    for k in ("HERMES_CRON_SESSION", "HERMES_YOLO_MODE", "HERMES_INTERACTIVE"):
++        monkeypatch.delenv(k, raising=False)
++    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
++    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
++    monkeypatch.setenv("HERMES_SESSION_KEY", SESSION)
++    monkeypatch.setattr(mod, "_YOLO_MODE_FROZEN", False)
++    cfg = {"mode": "manual", "timeout": 60}
++    monkeypatch.setattr(approval_context, "_get_approval_config", lambda: cfg)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: cfg["mode"])
++    yield cfg
++    mod._gateway_queues.clear()
++    mod._gateway_notify_cbs.clear()
++
++
++def _answering(choice, reason=None, **kw):
++    def notify(_data):
++        threading.Timer(0.05, lambda: mod.resolve_gateway_approval(SESSION, choice, reason=reason)).start()
++    mod.register_gateway_notify(SESSION, notify)
++
++
++def test_user_deny_in_gateway(gateway):
++    _answering("deny", reason="not now")
++    result = mod.check_all_command_guards("rm -rf .git", "local")
++    assert result["approved"] is False and result["outcome"] == "denied"
++    assert 'Reason given by the user: "not now"' in result["message"]
++    assert "rm -rf" in result["message"] or "delete" in result["message"].lower() or "Flagged by" in result["message"]
++    _assert_guided(result["message"])
++
++
++def test_withdrawn_card_and_timeout(gateway, monkeypatch):
++    from tools.interrupt import set_interrupt
++    notified = threading.Event()
++    mod.register_gateway_notify(SESSION, lambda _d: notified.set())
++    holder = {}
++
++    def worker():
++        holder["tid"] = threading.get_ident()
++        holder["result"] = mod.check_all_command_guards("rm -rf .git", "local")
++
++    thread = threading.Thread(target=worker)
++    thread.start()
++    assert notified.wait(10)
++    set_interrupt(True, holder["tid"], reason="gateway shutdown")
++    try:
++        thread.join(10)
++    finally:
++        set_interrupt(False, holder["tid"])
++    result = holder["result"]
++    assert result["outcome"] == "cancelled" and "gateway shutdown" in result["message"]
++    _assert_guided(result["message"])
++
++
++def test_execute_code_denied_and_withdrawn(gateway):
++    _answering("deny")
++    result = mod.check_execute_code_guard("print(1)", "local")
++    assert result["approved"] is False
++    _assert_guided(result["message"])
++
++
++def test_hardline_and_deny_rule_say_the_chat_does_not_clear_them(gateway, monkeypatch):
++    result = mod.check_all_command_guards("rm -rf /", "local")
++    assert result.get("hardline") is True
++    _assert_guided(result["message"], hard=True)
++    cfg = {"mode": "manual", "deny": ["git push *"]}
++    monkeypatch.setattr(approval_context, "_get_approval_config", lambda: cfg)
++    result = mod.check_all_command_guards("git push origin main", "local")
++    assert result.get("user_deny") is True and "git push *" in result["message"]
++    _assert_guided(result["message"], hard=True)
++
++
++def test_unattended_refusal_names_the_pattern_and_asks(gateway, monkeypatch):
++    for k in ("HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK"):
++        monkeypatch.delenv(k, raising=False)
++    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
++    monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "deny")
++    result = mod.check_all_command_guards("chmod 777 /srv/x", "local")
++    assert result["approved"] is False
++    assert "world/other-writable" in result["message"]
++    _assert_guided(result["message"])
++
++
++def test_plugin_approval_denied(gateway):
++    from hermes_cli.plugins import _PreToolCallDirective, _resolve_block_from_details
++    _answering("deny")
++    details = _PreToolCallDirective(action="approve", message="Sign in on example.com", rule_key="browser:login:x")
++    block = _resolve_block_from_details(details, "browser_login")
++    assert block and "Sign in on example.com" in block
++    _assert_guided(block)
++
++
++def test_protected_write_denied(gateway, tmp_path, monkeypatch):
++    from tools import file_tools_write_guards as g
++    _answering("deny")
++    block = g._request_protected_instruction_approval(["AGENTS.md"])
++    assert block and "AGENTS.md" in block
++    assert block.endswith(GUIDANCE)
++
++
++# --- the loop: denied, the agent asks with clarify, the user authorizes, the re-run is allowed --------------
++
++QUESTION = f"May I run `{COMMAND}`? It drops a teammate's commit (Git Destructive)."
++CHOICE = "Yes, force push to main"
++
++
++def _answer(value):
++    return json.dumps({"responses": [{"question": QUESTION, "choices_offered": [CHOICE, "No"], "status": "answered",
++                                      "user_response": value}], "outcome": "submitted"})
++
++
++class _Agent:
++    def __init__(self, messages):
++        self.session_id = SESSION
++        self._session_db = None
++        self._approval_review_messages = messages
++
++
++@pytest.fixture()
++def reviewer(monkeypatch):
++    """Sonnet-like judge: blocks the force push unless a User line says yes to it."""
++    def complete(stage, system, user, max_tokens):
++        transcript = user.partition("<action>")[0]
++        said = any("force push to main" in line and "User:" in line for line in transcript.splitlines())
++        if said:
++            return "<block>no</block>"
++        return "<block>yes</block>" if stage == 1 else STAGE2
++    A.set_complete_override(complete)
++    yield
++    A.set_complete_override(None)
++
++
++def test_denied_then_clarify_authorization_lets_the_rerun_pass_without_a_card(gateway, reviewer, monkeypatch):
++    gateway.update(mode="smart", smart_provenance=True)
++    messages = [{"role": "user", "content": "Land the fix on main"}]
++    agent = _Agent(messages)
++    monkeypatch.setattr(A, "_current_agent", lambda: agent)
++    cards = []
++
++    def deny_card(data):
++        cards.append(data)
++        threading.Timer(0.05, lambda: mod.resolve_gateway_approval(SESSION, "deny")).start()
++
++    mod.register_gateway_notify(SESSION, deny_card)
++    first = mod.check_all_command_guards(COMMAND, "local")
++    assert first["approved"] is False and len(cards) == 1
++    assert "Git Destructive" in first["message"] and "drops a teammate's commit" in first["message"]
++    _assert_guided(first["message"])
++
++    messages += [
++        {"role": "assistant", "content": "", "tool_calls": [
++            {"id": "c1", "type": "function", "function": {"name": "clarify", "arguments": json.dumps(
++                {"questions": [{"question": QUESTION, "choices": [CHOICE, "No"]}]})}}]},
++        {"role": "tool", "tool_call_id": "c1", "content": _answer(CHOICE)},
++    ]
++    second = mod.check_all_command_guards(COMMAND, "local")
++    assert second["approved"] is True and len(cards) == 1, "no second card"
++
++
++def test_a_clarify_no_does_not_authorize(gateway, reviewer, monkeypatch):
++    gateway.update(mode="smart", smart_provenance=True)
++    messages = [
++        {"role": "user", "content": "Land the fix on main"},
++        {"role": "assistant", "content": "", "tool_calls": [
++            {"id": "c1", "type": "function", "function": {"name": "clarify", "arguments": json.dumps(
++                {"questions": [{"question": QUESTION, "choices": [CHOICE, "No"]}]})}}]},
++        {"role": "tool", "tool_call_id": "c1", "content": _answer("No")},
++    ]
++    monkeypatch.setattr(A, "_current_agent", lambda: _Agent(messages))
++    _answering("deny")
++    assert mod.check_all_command_guards(COMMAND, "local")["approved"] is False
++
+diff --git a/tools/approval.py b/tools/approval.py
+index 0d77104ffd..443adabbb0 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -38,6 +38,7 @@ from tools.approval_floors import (
+     _user_deny_block_result,
+ )
+ from tools.approval_gateway_wait import _await_gateway_decision
++from tools.approval_guidance import guided
+ from tools.approval_provenance import allowlisted_result, preapproved_result
+ from tools.approval_prompt import _present_with_selected_transport, _transport_choice, prompt_dangerous_approval
+ from tools import approval_automode as _automode
+@@ -652,14 +653,15 @@ def _denied(message: str, *, pattern_key: str, description: str, outcome: str, n
+             **extra) -> dict:
+     """Standard non-consent result: the agent must not retry or rephrase. ``user_summary`` is the
+     one-line human reading of the same outcome (see ``_user_summary``)."""
+-    return {"approved": False, "message": message, "pattern_key": pattern_key,
++    return {"approved": False, "message": guided(message, reason=description), "pattern_key": pattern_key,
+             "description": description, "outcome": outcome, "user_consent": False,
+             "user_summary": _user_summary(outcome, noun), **extra}
+ 
+ 
+ def _blocked(message: str, *, pattern_key: str, description: str) -> dict:
+     """Non-interactive block (cron / -q / unattended / no-human): no consent keys."""
+-    return {"approved": False, "message": message, "pattern_key": pattern_key, "description": description}
++    return {"approved": False, "message": guided(message, reason=description), "pattern_key": pattern_key,
++            "description": description}
+ 
+ 
+ def _user_approved(session_key: str, description: str) -> dict:
+@@ -815,9 +817,9 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
+         return None
+ 
+     def block(subject: str) -> dict:
+-        return {"approved": False, "message": ctx.block_message(
++        return {"approved": False, "message": guided(ctx.block_message(
+             subject, noun="dangerous commands",
+-            advice="Find an alternative approach that avoids this command.")}
++            advice="Find an alternative approach that avoids this command."))}
+ 
+     pending = _unapproved_findings(command, _is_permanently_approved)
+     if pending is not None:
+@@ -942,8 +944,8 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
+         # Unattended programmatic platforms (webhook/msgraph_webhook/ api_server): respect unattended_mode
+         # config. Resolves instantly — never a pending approval nobody can answer (#37284, #87509).
+         "approved": False,
+-        "message": (f"BLOCKED by smart approval: {description}. The command was assessed as genuinely "
+-                    f"dangerous. Do NOT retry.{_denial_breaker_addendum(session_key)}"),
++        "message": guided(f"BLOCKED by smart approval: {description}. The command was assessed as genuinely "
++                          f"dangerous. Do NOT retry.{_denial_breaker_addendum(session_key)}"),
+         "smart_denied": True,
+     }, True
+ 
+@@ -1096,8 +1098,7 @@ def _provenance_on() -> bool:
+         return False
+ 
+ 
+-_REVIEW_ADVICE = (" If other work does not depend on this action, continue with it. Do NOT retry this action, "
+-                  "rephrase it, or reach the same outcome another way; ask the user instead.")
++_REVIEW_ADVICE = " If other work does not depend on this action, continue with it."
+ 
+ 
+ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command: str, approval_callback,
+@@ -1118,11 +1119,13 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+         _record_denial(session_key)
+     if verdict.decision == "block" and verdict.tier == "hard":
+         return {"approved": False, "outcome": "denied", "description": verdict.card_text, **rule_fields,
+-                "message": (f"BLOCKED by {verdict.card_text}. This is a hard rule: nothing the user says in chat "
+-                            f"clears it.{_REVIEW_ADVICE}{_denial_breaker_addendum(session_key)}")}
++                "message": guided(f"BLOCKED by {verdict.card_text}. This is a hard rule: nothing the user says in "
++                                  f"chat clears it.{_REVIEW_ADVICE}{_denial_breaker_addendum(session_key)}",
++                                  hard=True)}
+     if not (is_cli or is_gateway or is_ask):
+         return {"approved": False, "outcome": "denied", "description": verdict.card_text, **rule_fields,
+-                "message": f"BLOCKED by {verdict.card_text}.{_REVIEW_ADVICE}{_denial_breaker_addendum(session_key)}"}
++                "message": guided(f"BLOCKED by {verdict.card_text}.{_REVIEW_ADVICE}"
++                                  f"{_denial_breaker_addendum(session_key)}")}
+     # The card can grant the clone's source for the chat ("Always allow code from this source in this chat").
+     source = verdict.detail.get("fetch_source") or ""
+     card_extra = {"grant_source": source} if source and _automode.grant_chat(agent)[0] else {}
+@@ -1151,9 +1154,7 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+                                                               "message in the chat"})
+     if not result.get("approved"):
+         result.update(rule_fields)
+-        message = result.get("message") or "BLOCKED."
+-        if verdict.card_text not in message:
+-            result["message"] = f"{message} (Flagged by {verdict.card_text}.)"
++        result["message"] = guided(result.get("message") or "BLOCKED.", reason=verdict.card_text)
+     return result
+ 
+ 
+diff --git a/tools/approval_floors.py b/tools/approval_floors.py
+index e33d7d9d2b..b0e971d6e2 100644
+--- a/tools/approval_floors.py
++++ b/tools/approval_floors.py
+@@ -13,6 +13,7 @@ import re
+ import time
+ import uuid
+ from tools import approval_context as _ctx
++from tools.approval_guidance import guided
+ from utils import unlink_files_older_than
+ from tools.approval_detection import (
+     _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION, _deny_command_variants)
+@@ -44,11 +45,12 @@ def _match_user_deny_rule(command: str) -> str | None:
+ 
+ def _user_deny_block_result(pattern: str) -> dict:
+     """Build the standard block result for an ``approvals.deny`` match."""
+-    return {"approved": False, "user_deny": True, "message": (
++    return {"approved": False, "user_deny": True, "message": guided(
+         f"BLOCKED: this command matches the user-defined deny rule "
+         f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
+         "executed via the agent — not even with --yolo, /yolo, or "
+-        "approvals.mode=off. Do NOT retry or rephrase this command; the user has explicitly forbidden it.")}
++        "approvals.mode=off. Do NOT retry or rephrase this command; the user has explicitly forbidden it.",
++        hard=True)}
+ 
+ 
+ def _save_blocked_payload(command: str) -> str | None:
+@@ -115,16 +117,18 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
+                 "then run it: terminal(command=\"bash /path/script.sh\") or "
+                 "\"python3 /path/script.py\". Do not retry inline."
+             )
++    if description not in (_PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION):
++        message = guided(message, hard=True)
+     return {"approved": False, "hardline": True, "message": message}
+ 
+ 
+ def _sudo_stdin_block_result(description: str) -> dict:
+     """Build the standard block result for sudo stdin guard."""
+-    return {"approved": False, "message": (
++    return {"approved": False, "message": guided(
+         f"BLOCKED: {description}. "
+         "Do not pipe passwords to 'sudo -S' — this is a brute-force "
+         "attack vector. Set SUDO_PASSWORD in your .env file if the "
+-        "agent needs passwordless sudo, or run the sudo command manually in your own terminal.")}
++        "agent needs passwordless sudo, or run the sudo command manually in your own terminal.", hard=True)}
+ 
+ 
+ # Shell control characters that make a command compound when they appear OUTSIDE quotes. Inside quotes they are
+diff --git a/tools/approval_guidance.py b/tools/approval_guidance.py
+new file mode 100644
+index 0000000000..0ccacbed20
+--- /dev/null
++++ b/tools/approval_guidance.py
+@@ -0,0 +1,50 @@
++"""What every refused or withdrawn approval tells the agent to do next.
++
++One instruction ends every block message: do not work around the block, and if the action is still needed ask the
++user for explicit authorization, with the exact action, why it is needed and the checker's reason. The user's answer
++to that question (a ``clarify`` answer) is read as the user's own words by the smart approval review, so the same
++action can then run again.
++"""
++
++from __future__ import annotations
++
++NO_WORKAROUND = "Do NOT work around this block"
++
++_WORKAROUND = (
++    f" {NO_WORKAROUND}: no other tool, script, rephrased command, or splitting it into smaller steps to reach "
++    "the same outcome."
++)
++_ASK = (
++    " If the action is still needed, ask the user for explicit authorization with the clarify tool (in your reply "
++    "if clarify is unavailable; a subagent's reply goes to its parent, which asks the user), stating the exact "
++    "action, why it is needed, and the checker's reason given above. Then wait for the answer."
++)
++_HARD = (
++    " An answer in the chat does not clear this rule; the user can run the action themselves outside the agent or "
++    "change the rule. If the action is still needed, tell the user with the clarify tool (in your reply if clarify "
++    "is unavailable) the exact action, why it is needed, and the checker's reason given above. Then wait for the "
++    "answer."
++)
++
++GUIDANCE = _WORKAROUND + _ASK
++HARD_GUIDANCE = _WORKAROUND + _HARD
++
++
++def with_reason(message: str, reason: str | None) -> str:
++    """*message* with ``(Flagged by <reason>.)`` before the guidance (or at the end), unless it names the reason."""
++    reason = (reason or "").strip().rstrip(".")
++    if not reason or reason in message:
++        return message
++    note = f" (Flagged by {reason}.)"
++    at = message.find(f" {NO_WORKAROUND}")
++    if at < 0:
++        return message.rstrip() + note
++    return message[:at].rstrip() + note + message[at:]
++
++
++def guided(message: str, *, reason: str | None = None, hard: bool = False) -> str:
++    """*message* followed by the no-workaround instruction, once, with the checker's *reason* named in it."""
++    message = with_reason(message or "BLOCKED.", reason)
++    if NO_WORKAROUND in message:
++        return message
++    return message.rstrip() + (HARD_GUIDANCE if hard else GUIDANCE)
+diff --git a/tools/browser_vault_tool.py b/tools/browser_vault_tool.py
+index 5739a9089d..3964741450 100644
+--- a/tools/browser_vault_tool.py
++++ b/tools/browser_vault_tool.py
+@@ -30,6 +30,7 @@ autofill (kernel-login-autofill.ts / fill_from_vault.ts).
+ from __future__ import annotations
+ 
+ import json
++from tools.approval_guidance import GUIDANCE
+ import secrets
+ import logging
+ from typing import Any, Dict, Optional
+@@ -507,7 +508,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None, *, with_ident
+         return json.dumps(page_origin)
+     if meta.kind == "payment" and not _confirm_payment_fill(meta.label, page_origin):
+         return json.dumps({"success": False, "error_type": "payment_declined",
+-                           "error": "The user did not confirm filling this payment card. Do not retry; ask them instead."})
++                           "error": "The user did not confirm filling this payment card." + GUIDANCE})
+ 
+     with backend.fill_context():
+         refusal = snapshot_refusal(backend, handle, meta, page_origin)
+diff --git a/tools/file_tools_write_guards.py b/tools/file_tools_write_guards.py
+index ea11d856cd..6ce8f40c9f 100644
+--- a/tools/file_tools_write_guards.py
++++ b/tools/file_tools_write_guards.py
+@@ -16,6 +16,7 @@ from pathlib import Path
+ 
+ from agent.file_safety import get_nt_namespace_error
+ from tools import file_state
++from tools.approval_guidance import GUIDANCE
+ from tools.binary_extensions import (
+     has_binary_extension,
+     has_opaque_document_extension,
+@@ -277,7 +278,7 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
+         f"BLOCKED: write to protected agent-instruction file(s) ({targets}) "
+         "{why} The user has NOT consented to this write. Do NOT retry it or "
+         "attempt the same edit via another path (terminal, execute_code, "
+-        "etc.).")
++        "etc.)." + GUIDANCE)
+     timed_out = blocked.format(why="approval prompt timed out without a user response. Silence is not consent.")
+     denied = blocked.format(why="was denied by the user.")
+ 
+@@ -382,7 +383,7 @@ def _check_approval_required_write(paths: list[str], task_id: str = "default") -
+     blocked = (
+         f"BLOCKED: write to SSH config file(s) ({display_targets}) "
+         "{why} Do NOT retry it via another path (terminal, execute_code) "
+-        "without the user's explicit consent.")
++        "without the user's explicit consent." + GUIDANCE)
+ 
+     try:
+         import tools.approval as _approval
+diff --git a/tools/mcp_tool_events.py b/tools/mcp_tool_events.py
+index 37cb47d517..b22af29af6 100644
+--- a/tools/mcp_tool_events.py
++++ b/tools/mcp_tool_events.py
+@@ -15,6 +15,7 @@ import base64
+ import contextlib
+ import hashlib
+ import json
++from tools.approval_guidance import GUIDANCE
+ import logging
+ import re
+ import secrets
+@@ -436,7 +437,7 @@ def _consent_error(server_name: str, args: dict) -> Optional[str]:
+         return tool_error("The event subscription was blocked: the approval system was unavailable.")
+     if answer == "accept":
+         return None
+-    return tool_error("The user did not approve this event subscription. Do not retry without explicit user direction.")
++    return tool_error("The user did not approve this event subscription." + GUIDANCE)
+ 
+ 
+ def _make_events_handler(op: str, label: str, rpc, *, needs_name: bool = True, needs_consent: bool = False):
+diff --git a/tools/mcp_tool_handlers.py b/tools/mcp_tool_handlers.py
+index f2e76f52e4..7ca0d510ad 100644
+--- a/tools/mcp_tool_handlers.py
++++ b/tools/mcp_tool_handlers.py
+@@ -6,6 +6,7 @@ import asyncio
+ import contextvars
+ import inspect
+ import json
++from tools.approval_guidance import GUIDANCE
+ import time
+ from contextlib import asynccontextmanager
+ from functools import partial
+@@ -206,7 +207,7 @@ def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[lis
+     if over and charge is not None:
+         return tool_error(charge.refusal(spent))
+     return tool_error(f"The user did not approve running write-capable MCP tool '{tool_name}' on untrusted server "
+-                      f"'{server_name}'. The command was NOT run. Do not retry without explicit user direction.")
++                      f"'{server_name}'. The command was NOT run." + GUIDANCE)
+ 
+ 
+ def _check_circuit_breaker(server_name: str) -> Optional[str]:
+-- 
+2.56.0
+
