@@ -1,6 +1,6 @@
 # Install settings (.env and Helm values)
 
-Everything on this page is generated from the files in the repository, so it matches the version you downloaded.
+The listings on this page (the `.env` file, the service list, the chart, the values and the images) are generated from the files in the repository, so they match the version you downloaded. The hub's own settings are on [Hub settings](../../hub/docs/configuration.md); the hub is the `talaria-hub` program in the image `ghcr.io/usa-reddragon/talaria-hub`, and every setting there except `users[]` and `backends[]` is also an environment variable that starts with `HUB_`.
 
 ## Compose settings (.env)
 

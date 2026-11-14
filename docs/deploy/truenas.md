@@ -59,7 +59,7 @@ YAML, with the all-in-one image ([design](all-in-one.md)). Tested on TrueNAS SCA
 
 ![A chat in Talaria where the demo model answers "This is the Talaria demo model"](images/truenas/chat-demo.png)
 
-`PUID` and `PGID` 568 are the TrueNAS `apps` user, which owns datasets with the Apps preset.
+`PUID` and `PGID` 568 are the TrueNAS `apps` user, which owns datasets with the Apps preset. `stop_grace_period: 2m` lets a stop wait for running replies to finish.
 
 <!-- docgen:code file=deploy/aio/truenas/compose.yaml -->
 ```yaml
@@ -123,6 +123,16 @@ On 4 CPU cores, that first answer took about ten minutes (the agent sends about 
 tools). Use a GPU or a provider for daily use.
 
 More in [Choosing models and providers](models.md#ollama).
+
+## If something goes wrong
+
+Open the app's logs under **Apps**, **Installed**, `talaria`, or run `sudo docker logs $(sudo docker ps -qf name=talaria)` in **System, Shell**. The container's health check passes once the agent and the hub both answer, and it allows 3 minutes after a start before a failure counts.
+
+- The page refuses to log you in: open Talaria at exactly the address in `TALARIA_PUBLIC_URL`.
+- The app does not start: read the log, and check that both dataset paths in the file exist (Datasets, preset Apps, as in step 1).
+- The chat says Talaria has no model yet: do the **Connect a model** step above.
+
+More in [Fix server problems](troubleshooting.md).
 
 ## A TrueNAS catalog entry (not done yet)
 

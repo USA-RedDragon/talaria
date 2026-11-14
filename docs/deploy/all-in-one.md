@@ -39,7 +39,7 @@ Then:
    and models you pull into Ollama later appear on their own. Details: [Choosing models and providers](models.md).
 
 The image is built from `deploy/aio/Dockerfile` for amd64 and arm64 and published on each release (see
-[Images](images.md)). To build it yourself from a checkout: `docker build -f aio/Dockerfile -t talaria-aio .`.
+[Images](images.md)). To build it yourself from a checkout: `docker build -f deploy/aio/Dockerfile -t talaria-aio deploy` (the build context is `deploy/`, not the repository root).
 
 ## Design
 
@@ -91,9 +91,10 @@ checked in the image: as the sandbox user, `ls /opt/data`, `cat /talaria/secrets
 Use the all-in-one image when the platform wants one container, or to try Talaria. Use compose or Helm when you
 want the stronger sandbox, separate upgrades, or optional parts in the same file.
 
-## Building and publishing (not done yet)
+## Building and publishing
 
-- One multi-arch image (amd64, arm64) per Talaria release, tagged `vX.Y.Z` and `latest`, built from pinned
-  digests of the parts, signed like the other images.
-- When the agent image bakes in the device plugin and Talaria's settings, the setup step shrinks to the
-  secrets and configs.
+A tag `aio/vX.Y.Z` runs `.github/workflows/aio.yaml`. It builds `deploy/aio/Dockerfile` for amd64 and arm64 from
+the pinned digests of its parts, pushes `ghcr.io/usa-reddragon/talaria-aio:vX.Y.Z` and `:latest`, signs the image
+keyless with cosign ([how to verify it](images.md)), and makes the GitHub release `aio/vX.Y.Z`. The image is
+released on its own schedule, apart from the hub and `talaria` releases; a pull request that changes `deploy/aio`
+only builds it.

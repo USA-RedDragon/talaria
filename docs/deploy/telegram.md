@@ -36,7 +36,7 @@ docker compose up -d
 
 ```sh
 kubectl -n talaria create secret generic talaria-telegram --from-literal=token=123456789:AA...
-helm upgrade talaria ./talaria -n talaria --reuse-values --set telegram.existingSecret=talaria-telegram
+helm upgrade talaria ./talaria -n talaria --reset-then-reuse-values --set telegram.existingSecret=talaria-telegram
 ```
 
 **All-in-one:** set `TALARIA_TELEGRAM_TOKEN` on the container.
@@ -61,14 +61,15 @@ Each person on your hub links their own Telegram account. People who are not lin
 
 | Command | What it does |
 | ------- | ------------ |
-| `/new` | Start a new chat |
+| `/new [backend]` | Start a new chat |
 | `/stop` | Stop the running turn |
 | `/model` | Show the chat's model, with buttons to switch |
 | `/status` | Show the model and how full the context is |
-| `/prompts` | Your saved prompts, one tap to send |
-| `/sessions`, `/backends` | List chats and backends |
-| `/devices`, `/where`, `/move` | List your computers, see where this chat runs, move it |
-| `/link`, `/unlink` | Link or unlink your account |
+| `/prompts` | Your saved prompts: tap one to get its text to copy |
+| `/bg TEXT` | Run a prompt in the background |
+| `/sessions`, `/attach N`, `/backends` | List chats, attach to chat N of that list, list backends |
+| `/devices`, `/new NAME [folder]`, `/where`, `/move NAME [folder]` | List your computers, start a chat on one, see where this chat runs, move it (`/move off` stops using the chat's computer). Shown when computers are set up |
+| `/link`, `/unlink` | Link or unlink your account (`/link` works in a direct message, or in a group with Topics) |
 | `/help` | The command list |
 
 When the agent wants to run something that needs your approval, the bot shows the command with buttons: Once, This chat, Always and Deny. You can also send photos, files, voice notes and PDFs to the bot, and they go to the chat as attachments.
@@ -82,7 +83,7 @@ You can have one topic per chat, so replies of different chats never mix. Either
 
 ## Things to know
 
-- Only one process can read a bot's messages at a time. Do not run the same token in two places.
+- Only one process can read a bot's messages at a time. Do not run the same token in two places. If the bot does not answer, see [Telegram does not answer](troubleshooting.md#telegram-does-not-answer).
 - Telegram limits how often a bot can send. Long turns update one status message in place instead of sending many.
 - The bot answers files larger than 20 MB with a note, because Telegram does not let bots download them.
 - For the bot's links to open the right address, set the public URL to the address you use in the browser.

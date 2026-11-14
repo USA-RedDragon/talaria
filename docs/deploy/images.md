@@ -49,6 +49,16 @@ cosign verify ghcr.io/usa-reddragon/talaria-aio:<tag> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+The `talaria` and `talaria-sandbox` images are not cosign-signed. They carry a GitHub build attestation, made by
+the release workflow and stored next to the image in GHCR. Verify one with:
+
+```bash
+gh attestation verify oci://ghcr.io/usa-reddragon/talaria:<tag> --repo USA-RedDragon/talaria
+```
+
+([Releases and verification](../releases.md) says what is attested.) The hub image, `talaria-hub`, has neither a
+signature nor an attestation, so pin it by digest, as the install files do.
+
 ## Another Hermes image
 
 Point `TALARIA_HERMES_IMAGE` (compose) or `images.hermes` (Helm) at another image, such as one you built, a

@@ -10,6 +10,7 @@ Talaria is built on Hermes Agent by Nous Research (MIT). Not affiliated with or 
 | -------- | --- | ----- |
 | A Linux host with Docker | Docker Compose, [`compose/`](compose) | [Docker Compose](../docs/deploy/compose.md) |
 | A Kubernetes cluster | Helm chart [`charts/talaria`](charts/talaria) | [Kubernetes](../docs/deploy/helm.md) |
+| Any Docker host, to look around | All-in-one container, [`aio/`](aio) | [All-in-one image](../docs/deploy/all-in-one.md) |
 | Unraid | All-in-one container, [`aio/unraid`](aio/unraid) | [Unraid](../docs/deploy/unraid.md) |
 | TrueNAS SCALE 24.10 or later | All-in-one container, [`aio/truenas`](aio/truenas) | [TrueNAS](../docs/deploy/truenas.md) |
 
@@ -48,6 +49,7 @@ All guides: https://usa-reddragon.github.io/talaria/
   moves the chart's `appVersion`). Renovate moves the same pins together.
 - `aio/`: the all-in-one image (`aio/Dockerfile`, build context `deploy/`), with the Unraid template and the
   TrueNAS app file. A tag `aio/vX.Y.Z` publishes `ghcr.io/usa-reddragon/talaria-aio:vX.Y.Z`.
+- `searxng/`: the SearXNG settings for the agent's web search (the source of the copies in `compose/files` and the chart).
 - `hack/smoke.py`: logs in, chats and runs a command in the sandbox against a running install with the demo
   model.
 

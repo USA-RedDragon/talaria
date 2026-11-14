@@ -24,6 +24,7 @@ first person who opens Talaria makes the admin account.
 | -------- | --- | ----- |
 | A Linux host with Docker | Docker Compose, [`deploy/compose`](deploy/compose) | [Docker Compose](docs/deploy/compose.md) |
 | A Kubernetes cluster | Helm chart [`deploy/charts/talaria`](deploy/charts/talaria) | [Kubernetes with Helm](docs/deploy/helm.md) |
+| Any Docker host, to look around | All-in-one container, [`deploy/aio`](deploy/aio) | [All-in-one image](docs/deploy/all-in-one.md) |
 | Unraid | All-in-one container, [`deploy/aio/unraid`](deploy/aio/unraid) | [Unraid](docs/deploy/unraid.md) |
 | TrueNAS SCALE 24.10 or later | All-in-one container, [`deploy/aio/truenas`](deploy/aio/truenas) | [TrueNAS](docs/deploy/truenas.md) |
 
@@ -48,7 +49,7 @@ docker compose exec -u hermes hermes hermes model
 
 To look around without a provider, set `COMPOSE_PROFILES=demo` in `.env`, run `docker compose up -d --wait` again
 and pick `talaria-demo` there. To let the agent work on your own computers, install the `talaria`
-program on each one and [pair it](docs/start/add-a-computer.md).
+program on each one and [pair it](docs/start/add-a-computer.md). To use Talaria from a phone, see [Use Talaria on a phone](docs/guides/pair-a-phone.md).
 
 ## What is in this repository
 
@@ -75,7 +76,7 @@ Pinned to Hermes Agent v0.23.1. Runs on Linux, macOS and Windows (commands in Gi
 
 - [Add a computer](docs/start/add-a-computer.md): install on Linux, macOS or Windows and pair it with your hub.
 - [Chat from a terminal](docs/guides/terminal-chat.md), [let the agent use Firefox](docs/guides/browser-extension.md) and [use Talaria in an editor](docs/guides/editor-bridge.md).
-- [Update, move or remove a computer](docs/guides/update-and-remove.md) a computer, and [troubleshooting](docs/guides/troubleshooting.md).
+- [Update, move or remove a computer](docs/guides/update-and-remove.md), and [troubleshooting](docs/guides/troubleshooting.md).
 - Reference: [command line](docs/reference/cli.md) and [configuration](docs/reference/configuration.md).
 
 ### Parts
@@ -194,7 +195,7 @@ Each editor window costs one `hermes acp` process in the pod.
 
 #### Firefox
 
-The agent can also use your own Firefox, with your logins, in its own "Hermes" tab group. It sees and acts only on tabs in that group. It asks you the first time it opens a site or submits a form on a site in a session, and every time it acts on a page with password, payment or one-time code fields.
+The agent can also use your own Firefox, with your logins, in its own "Talaria" tab group. It sees and acts only on tabs in that group. It asks you the first time it opens a site or submits a form on a site in a session, and every time it acts on a page with password, payment or one-time code fields.
 
 `talaria setup` turns it on when it finds Firefox (section [Setup](#setup), steps 3, 4 and 7). Add `browser.allow-hosts` to the config for LAN or loopback hosts the agent may open; all others are blocked in its tabs. To turn it on by hand instead:
 

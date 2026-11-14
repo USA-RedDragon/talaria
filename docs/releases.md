@@ -73,10 +73,12 @@ For tests only, the environment variable <!-- docgen:const pkg=internal/setup na
 With the GitHub CLI:
 
 ```sh
-gh attestation verify hermes-device_0.13.0_linux_amd64.tar.gz --repo USA-RedDragon/talaria \
-  --signer-workflow USA-RedDragon/talaria/.github/workflows/release.yaml --source-ref refs/tags/v0.13.0
-gh attestation verify oci://ghcr.io/usa-reddragon/hermes-device:v0.13.0 --repo USA-RedDragon/talaria
+gh attestation verify talaria_<version>_linux_amd64.tar.gz --repo USA-RedDragon/talaria \
+  --signer-workflow USA-RedDragon/talaria/.github/workflows/release.yaml --source-ref refs/tags/v<version>
+gh attestation verify oci://ghcr.io/usa-reddragon/talaria:v<version> --repo USA-RedDragon/talaria
 ```
+
+Use `hermes-device_<version>_...` and `oci://ghcr.io/usa-reddragon/hermes-device` for releases up to 0.25.4, which were published under the old names.
 
 `gh attestation verify <file> --repo USA-RedDragon/talaria` alone checks that a workflow of the repository signed it. The two extra flags make it check the same workflow and tag as `update`. It also works for the checksum file and the `.xpi`.
 

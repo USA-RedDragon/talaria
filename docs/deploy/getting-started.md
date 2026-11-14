@@ -46,9 +46,10 @@ The setup page that makes the first account, the first chat with the demo model,
 1. Start Talaria on the machine itself ([Docker Compose](compose.md), steps 1 to 3). It takes a few minutes, mostly the download.
 2. Open the address it prints right away and make your account on the setup page: the first visitor becomes the admin.
 3. Connect a model: click **Connect a model** in the chat area (or run `hermes model` in Talaria's container; the exact command is a numbered step in your install guide, and [Choosing models and providers](models.md) has the details), or use the demo model to look around. Then pick it in the chat's model menu.
-4. Send a message. Send `run: uname -a` to see the agent run a command in the sandbox.
+4. Send a message. With the demo model, send `run: uname -a` to see the agent run a command in the sandbox; with a real model, ask for something that needs a command, such as "what is the kernel version of this machine?".
 5. Pair your own computer so the agent can work on your files: [Add a computer](../start/add-a-computer.md).
-6. Optional: [Telegram](telegram.md), [Notifications](notifications.md), [Memory](memory.md).
+6. Open Talaria on your phone: [Use Talaria on a phone](../guides/pair-a-phone.md). It needs the address from `TALARIA_PUBLIC_URL`, and HTTPS for notifications.
+7. Optional: [Telegram](telegram.md), [Notifications](notifications.md), [Memory](memory.md).
 
 ## Where to look when something is wrong
 

@@ -45,7 +45,7 @@ On a new Unraid server, two things are off until you turn them on:
 
    ![The template's settings: Public URL http://10.0.2.15:8080, the two data folders under /mnt/user/appdata/talaria, and Demo model true](images/unraid/template-settings.png)
 
-5. **Apply**. The first start downloads about 1 GB (3.3 GB unpacked) and takes a minute or two.
+5. **Apply**. The first start downloads about 1.2 GB (3.3 GB unpacked) and takes a minute or two.
 6. On the **Docker** tab, turn the Talaria row's **Autostart** on, so Talaria starts again after the server
    restarts. Unraid leaves it off for a new container.
 
@@ -185,6 +185,17 @@ tools). Use a GPU or a provider for daily use.
 Both containers on the default bridge network reach each other this way. A container on a custom `br0` network
 cannot reach the server's own address unless **Settings, Docker, Host access to custom networks** is on. More in
 [Choosing models and providers](models.md#ollama).
+
+## If something goes wrong
+
+Click the Talaria icon on the **Docker** tab and pick **Logs**, or run `docker logs Talaria` in the Unraid terminal. The container's health check passes once the agent and the hub both answer, and it allows 3 minutes after a start before a failure counts. The usual problems:
+
+- The page refuses to log you in, or sends you to another address: you opened Talaria at an address other than **Public URL**. Open exactly that one, or **Edit** the container and fix **Public URL**.
+- Notifications and pages do not work on `http://<IP>:8080`: they need HTTPS. See [Notifications](notifications.md).
+- The chat says Talaria has no model yet: do the **Connect a model** step above.
+- A computer you pair cannot reach the hub: it must open **Public URL** from where it is.
+
+More in [Fix server problems](troubleshooting.md).
 
 ## Template
 

@@ -15,9 +15,9 @@ Talaria tells you on your phone or in your browser when the agent needs you or i
 Each person picks the events, the channels and quiet hours in Settings, Notifications.
 
 ![Settings, Notifications: the events to notify about, the channels (Telegram and browser notifications), and a Turn on for this device button](images/settings-notifications.png)
- During quiet hours nothing is sent. An approval or question that still waits after 5 minutes gets one reminder. "Send a test" sends one test notice to each channel.
+ During quiet hours nothing is sent. An approval or question that still waits after 5 minutes (`notify.remind_after`) gets one reminder, later if it falls in quiet hours. "Send a test" sends one test notice to each channel.
 
-You get no notice for a chat you have open on a visible page, and none on Telegram for a chat that is already attached to a Telegram chat, since that chat shows the prompt. At most 20 notices go to one person in 10 minutes.
+You get no notice for a chat you have open on a visible page (the hub counts a page as open for about 90 seconds after it last reported), and none on Telegram for a chat that is already attached to a Telegram chat, since that chat shows the prompt. At most 20 notices go to one person in 10 minutes.
 
 ## Web Push
 
@@ -46,5 +46,8 @@ With Telegram linked, notices arrive in your chat with the bot, with buttons for
 
 ## It does not work
 
-- No "Turn on for this device" button: the hub has no Web Push key, or the page is not on HTTPS or `localhost`. Check [Troubleshooting](troubleshooting.md#notifications).
+- No "Turn on for this device" button: the hub has no Web Push key, or the page is not on HTTPS or `localhost`.
 - A test arrives on Telegram but not in the browser: the browser blocked notifications for the site. Allow them in the site settings, then turn it on again.
+- Nothing arrives for a real event: the event may be off, quiet hours may be on, you may have the chat open, or the 20-in-10-minutes limit may apply.
+
+[Troubleshooting](troubleshooting.md#notifications-do-not-arrive) goes through each case, with the hub log lines to look for.

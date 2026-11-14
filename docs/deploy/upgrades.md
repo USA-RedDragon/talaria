@@ -12,7 +12,8 @@ to false in the hub's settings (`HUB_UPDATES_CHECK=false`).
 - Compose: get the new files (Step 1 of [the quick start](compose.md), into the same folder; your `.env` stays),
   then `docker compose up -d --wait`. Running replies finish first: the agent gets 2 minutes to
   stop.
-- Helm: `helm upgrade talaria ./talaria -n talaria --reuse-values` with the new chart. The agent updates without a
+- Helm: `helm upgrade talaria ./talaria -n talaria --reset-then-reuse-values` with the new chart (plain `--reuse-values`
+  would keep old chart defaults; see [Helm](helm.md)). The agent updates without a
   gap (see [Helm](helm.md#zero-downtime-updates)).
 - All-in-one: pull the new image and recreate the container (Unraid: **Check for Updates**, then **Apply
   Update**).
@@ -71,7 +72,7 @@ To restore it on a new Compose install:
    docker compose up -d --wait
    ```
 
-On Helm, put the keys into the `<release>-keys` Secret and the files into the PVCs the same way.
+On Helm, put the keys into the `<name>-keys` Secret (see the names under By hand) and the files into the PVCs the same way.
 
 ### By hand
 
@@ -80,7 +81,7 @@ What to keep:
 | Install | Where |
 | ------- | ----- |
 | Compose | Volumes `talaria_hermes-data`, `talaria_hub-data`, `talaria_secrets`, `talaria_sandbox-work`, and your `.env` |
-| Helm | PVCs `<release>-hermes`, `<release>-hub`, `<release>-sandbox`, and the Secret `<release>-keys` |
+| Helm | PVCs `<name>-hermes`, `<name>-hub`, `<name>-sandbox`, and the Secret `<name>-keys` (`<name>` is the release name when it contains `talaria`, such as `talaria`, else `<release>-talaria`) |
 | All-in-one | The `/opt/data` and `/talaria` folders |
 
 The agent's data holds the chats, memory and agent settings; the hub data holds paired computers, Telegram
@@ -98,7 +99,7 @@ docker compose start
 ```
 
 For Helm, snapshot the PVCs with your storage's snapshots, or copy the SQLite files out of the pods, and keep the
-`<release>-keys` Secret:
+`<name>-keys` Secret:
 
 ```bash
 kubectl -n talaria get secret talaria-keys -o yaml > talaria-keys.yaml   # keep this file private

@@ -56,7 +56,7 @@ It is built on the [bjw-s common library](https://bjw-s-labs.github.io/helm-char
 ```bash
 helm upgrade --install talaria ./talaria --namespace talaria --create-namespace \
   --set publicUrl=https://talaria.example.com \
-  --set ingress.enabled=true --set ingress.className=nginx --set ingress.tlsSecret=talaria-tls \
+  --set ingress.enabled=true --set ingress.className=nginx --set ingress.tlsSecret=talaria-tls
 ```
 
 Then make your account and connect a model, as in steps 2 and 3 of the quick start. For Gateway
