@@ -810,10 +810,12 @@
   // Alt+J, or a long press on the chat's title, sends the hub the log's
   // last minute of moves at once, for a jump the page did not catch. Only
   // sizes, places and the page's own call sites; never the chat's text.
-  const captureView = () => vreport.capture((ok) => {
-    if (ok) toast("Sent what just happened. Thanks.", { ok: true });
-    else toast("Could not send it.", { bad: true });
-  });
+  // The toast shows at once, not when the hub answers: a large report
+  // can take a while to go.
+  const captureView = () => {
+    toast("Sent what just happened. Thanks.", { ok: true });
+    vreport.capture((ok) => { if (!ok) toast("Could not send it.", { bad: true }); });
+  };
   document.addEventListener("keydown", (e) => {
     if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === "KeyJ" || (e.key || "").toLowerCase() === "j")) {
       e.preventDefault();
@@ -1675,67 +1677,79 @@
       this.reset();
       this.keep = null;
       this.loaded = true;
-      this.canBackground = !!s.tool_background;
-      setTitle(s.title);
-      this.setRunning(s.running);
-      activity.running(s.running);
-      this.showInfo(s.info || {});
-      // Stored tool rows carry no arguments; the assistant message that made the call has them.
-      this.calls = new Map();
-      this.filling = true;
-      mark("rows");
-      const msgs = s.messages || [];
-      const cut = olderCut(msgs, msgs.length, firstRows, firstChars);
-      this.older = msgs.slice(0, cut);
-      // A split snapshot sends its older rows next (snapshot.older).
-      this.olderWait = Number.isInteger(s.older) && s.older > 0;
-      this.afterOlder = undefined;
+      // The reader's place comes back however the drawing ends: a step
+      // that throws must not leave the log emptied at its top, where the
+      // next scroll event reads as the reader going there (Firefox, a
+      // parked chat's fresh snapshot: the reader thrown into older rows).
       try {
-        for (let i = cut; i < msgs.length; i++) this.row(msgs[i]);
-      } finally {
-        this.filling = false;
-        this.at = 0;
-      }
-      mark("rows-end");
-      this.turn = null;
-      const users = this.log.querySelectorAll(".msg.user");
-      this.groupTools(s.running && users.length ? users[users.length - 1] : null);
-      mark("grouped");
-      this.agentWaiting = new Map();
-      const mine = new Map();
-      for (const c of carried) if (c.act === "adopt") mine.set(c.at, c.p);
-      (s.pending || []).forEach((p, i) => {
-        if (p.status === "lost") this.lost(p.id, p.text);
-        else if (p.status === "steering") {
-          // Hermes also hands a background result or another agent's message to the running turn; the
-          // sender named in the input ID decides if it is the user's bubble or a card.
-          const v = window.HubOrigin.classify(p);
-          if (this.originCard(v, p.text, true)) return;
-          this.userText(v.text, true);
-          const x = this.pending[this.pending.length - 1];
-          x.id = window.HubReconcile.idOf(p);
-          x.adm = p.id;
-          this.adopt(x, mine.get(i));
-          this.steered(x);
-        } else if (!this.originCard(window.HubOrigin.classify(p), p.text, true)) {
-          const bubble = this.userText(window.HubOrigin.classify(p).text, true);
-          this.queued(bubble, p.id);
-          const x = this.pending.find((y) => y.bubble === bubble);
-          if (x) {
+        this.canBackground = !!s.tool_background;
+        setTitle(s.title);
+        this.setRunning(s.running);
+        activity.running(s.running);
+        this.showInfo(s.info || {});
+        // Stored tool rows carry no arguments; the assistant message that made the call has them.
+        this.calls = new Map();
+        this.filling = true;
+        mark("rows");
+        const msgs = s.messages || [];
+        const cut = olderCut(msgs, msgs.length, firstRows, firstChars);
+        this.older = msgs.slice(0, cut);
+        // A split snapshot sends its older rows next (snapshot.older).
+        this.olderWait = Number.isInteger(s.older) && s.older > 0;
+        this.afterOlder = undefined;
+        try {
+          for (let i = cut; i < msgs.length; i++) this.row(msgs[i]);
+        } finally {
+          this.filling = false;
+          this.at = 0;
+        }
+        mark("rows-end");
+        this.turn = null;
+        const users = this.log.querySelectorAll(".msg.user");
+        this.groupTools(s.running && users.length ? users[users.length - 1] : null);
+        mark("grouped");
+        this.agentWaiting = new Map();
+        const mine = new Map();
+        for (const c of carried) if (c.act === "adopt") mine.set(c.at, c.p);
+        (s.pending || []).forEach((p, i) => {
+          if (p.status === "lost") this.lost(p.id, p.text);
+          else if (p.status === "steering") {
+            // Hermes also hands a background result or another agent's message to the running turn; the
+            // sender named in the input ID decides if it is the user's bubble or a card.
+            const v = window.HubOrigin.classify(p);
+            if (this.originCard(v, p.text, true)) return;
+            const bubble = this.userText(v.text, true);
+            const x = this.pending.find((y) => y.bubble === bubble);
+            if (!x) return;
             x.id = window.HubReconcile.idOf(p);
             x.adm = p.id;
             this.adopt(x, mine.get(i));
+            this.steered(x);
+          } else if (!this.originCard(window.HubOrigin.classify(p), p.text, true)) {
+            const bubble = this.userText(window.HubOrigin.classify(p).text, true);
+            this.queued(bubble, p.id);
+            const x = this.pending.find((y) => y.bubble === bubble);
+            if (x) {
+              x.id = window.HubReconcile.idOf(p);
+              x.adm = p.id;
+              this.adopt(x, mine.get(i));
+            }
           }
+        });
+        for (const c of carried) {
+          if (c.act !== "again") continue;
+          const bubble = this.userText(c.p.text, true, c.p.atts);
+          const x = this.pending.find((y) => y.bubble === bubble);
+          if (!x) continue;
+          this.adopt(x, c.p);
+          x.id = c.p.id;
         }
-      });
-      for (const c of carried) {
-        if (c.act !== "again") continue;
-        const bubble = this.userText(c.p.text, true, c.p.atts);
-        const x = this.pending.find((y) => y.bubble === bubble);
-        this.adopt(x, c.p);
-        x.id = c.p.id;
+        for (const p of s.prompts || []) this.approval(p);
+      } catch (err) {
+        this.filling = false;
+        vreport.note("snap:err");
+        setTimeout(() => { throw err; }, 0);
       }
-      for (const p of s.prompts || []) this.approval(p);
       const j = jump;
       if (this.olderWait && (kept !== null || window.HubRestore.state() || (j && j.b === this.backend && j.s === this.session))) {
         // The place to show may be in the rows still coming: show the end

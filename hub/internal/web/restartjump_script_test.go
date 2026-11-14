@@ -85,7 +85,7 @@ func restartJump(t *testing.T, bin, mode string, running bool) {
 			if i%5 == 2 {
 				call := fmt.Sprintf("c%d", i)
 				ms = append(ms, map[string]any{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": call,
-					fnKey: map[string]any{fieldName: toolTerminal, ilArgs: `{"command":"ls -la /tmp"}`}}}},
+					fnKey: map[string]any{fieldName: toolTerminal, ilArgs: lsTmpArgs}}}},
 					map[string]any{kRole: stepTool, kCallID: call, fieldContent: strings.Repeat("line of output\n", 12)})
 			}
 			ms = append(ms, map[string]any{kRole: roleAssistant, kText: strings.Repeat(fmt.Sprintf("%s answer %d fills the log. ", c.id, i), 3+i%17)})

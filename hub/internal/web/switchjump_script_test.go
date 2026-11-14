@@ -19,8 +19,11 @@ import (
 )
 
 const (
-	sjToolID = "tool_id"
-	sjResult = "result"
+	// lsTmpArgs are the arguments of the stored terminal calls of the long
+	// chats.
+	lsTmpArgs = `{"command":"ls -la /tmp"}`
+	sjToolID  = "tool_id"
+	sjResult  = "result"
 )
 
 // Switching between long chats at desktop size opens each at its newest
@@ -83,7 +86,7 @@ func switchJump(t *testing.T, bin string) {
 			if i%5 == 2 {
 				call := fmt.Sprintf("c%d", i)
 				ms = append(ms, map[string]any{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": call,
-					fnKey: map[string]any{fieldName: toolTerminal, ilArgs: `{"command":"ls -la /tmp"}`}}}},
+					fnKey: map[string]any{fieldName: toolTerminal, ilArgs: lsTmpArgs}}}},
 					map[string]any{kRole: stepTool, kCallID: call, fieldContent: strings.Repeat("line of output\n", 12)})
 			}
 			text := strings.Repeat(fmt.Sprintf("%s answer %d fills the log. ", c.id, i), 3+i%17)
