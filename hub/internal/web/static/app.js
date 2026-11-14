@@ -2774,7 +2774,7 @@
       const d = el("details", "range");
       d.open = !!a.range;
       const s = el("summary", "", a.range ? "pages " + a.range : "pages");
-      s.title = "Choose which pages the agent sees";
+      s.title = "Choose which pages are sent to the agent";
       const input = el("input");
       input.type = "text";
       input.inputMode = "numeric";

@@ -1891,7 +1891,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.Duration(names[67], time.Duration(int64(50000000000)), "Long poll timeout for getUpdates")
 	fs.Duration(names[68], time.Duration(int64(1500000000)), "Minimum time between edits of one live message")
 	fs.Var(impl.NewInt(5), names[69], "Retries of a Bot API call that Telegram answers with 429")
-	fs.Duration(names[70], time.Duration(int64(2000000000)), "With store.driver postgres, only one hub replica runs the bot. This is how often each other replica tries to take it over")
+	fs.Duration(names[70], time.Duration(int64(2000000000)), "With store.driver postgres, only one hub replica runs the bot. This is how often each other replica checks whether the bot has no leader and takes over")
 	fs.Duration(names[71], time.Duration(int64(20000000000)), "How often the bot reads the chats of each linked group to add topics for new chats, rename topics and follow the chats that run")
 	fs.String(names[72], "collapsed", "How the status line of a turn shows its steps and thinking: collapsed (a quote that opens on a tap), expanded, or off")
 	fs.Bool(names[73], true, "In private chats, stream each turn into a draft (sendMessageDraft) that shows what runs and the reply as it is written, instead of editing the status line")

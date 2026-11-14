@@ -189,7 +189,7 @@ telegram:
   edit_interval: "1500ms"
   # Retries of a Bot API call that Telegram answers with 429
   max_retries: 5
-  # With store.driver postgres, only one hub replica runs the bot. This is how often each other replica tries to take it over
+  # With store.driver postgres, only one hub replica runs the bot. This is how often each other replica checks whether the bot has no leader and takes over
   leader_retry: "2s"
   # How often the bot reads the chats of each linked group to add topics for new chats, rename topics and follow the chats that run
   topic_sync: "20s"

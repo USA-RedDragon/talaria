@@ -625,7 +625,7 @@ class ToolTests(BrowserBase):
         out = self.run_tool("browser_login", tab_id=7)
         self.assertEqual(self.decision["action"], "approve")
         self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
-        self.assertIn("never sees the password", self.decision["message"])
+        self.assertIn("never shown to the agent", self.decision["message"])
         req = self.last("login")["args"]
         self.assertEqual(req["guard"], {"login_hosts": ["login.example.com"]})
         self.assertEqual(req["tab_id"], 7)

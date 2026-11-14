@@ -831,7 +831,7 @@ def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dic
     return {"login_hosts": [host]}, {
         "action": "approve", "rule_key": _rule("login", host),
         "message": (f"Sign in on {host} in {where} with the login Firefox has saved for it. Firefox fills the form "
-                    f"and the agent submits it; the agent never sees the password. Approving always lets scheduled "
+                    f"and the agent submits it; the password is never shown to the agent. Approving always lets scheduled "
                     f"jobs sign in on {host} without you. It allows nothing else on {host}.")}
 
 
@@ -927,7 +927,7 @@ def _decide_eval(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dict
                                                   f"with {', '.join(sensitive)} fields ({site})."}
     if sensitive:
         grant["confirm"] = sensitive
-        grant["confirm_text"] = (f"The agent wants to run a read-only script on {site} in {where}. The page has "
+        grant["confirm_text"] = (f"Allow running a read-only script on {site} in {where}. The page has "
                                  f"{', '.join(s.replace('_', '-') for s in sensitive)} fields. Script:\n{shown}")
         return grant, None
     if writes:
@@ -1022,26 +1022,26 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
     label = str(t.get("label") or "").strip()
     what_el = f" {json.dumps(label[:80], ensure_ascii=False)}" if label else ""
     if on_salesforce and clicks:
-        how = (f"press {str(args.get('key'))[:20]} on" if press else
-               "submit" if tool_name == "browser_type" else "click")
+        how = (f"pressing {str(args.get('key'))[:20]} on" if press else
+               "submitting" if tool_name == "browser_type" else "clicking")
         grant["protected_ok"] = True
         salesforce = protected(str(info.get("host") or "")) or protected(str(info.get("top_host") or ""))
         if salesforce and not sensitive:
             return grant, {"action": "approve", "rule_key": _rule("click", page),
-                           "message": f"The agent wants to {how} the element{what_el} on {page} (Salesforce) in "
+                           "message": f"Allow {how} the element{what_el} on {page} (Salesforce) in "
                                       f"{where}. Approving for this chat (or always) lets the agent click, submit and "
                                       f"press Enter or Space on {page} again without asking; \"always\" also lets "
                                       f"scheduled runs do it."}
         grant["confirm"] = sensitive or ["salesforce"]
         kind_of = "Salesforce" if salesforce else "a site in this device's browser.confirm-hosts"
-        grant["confirm_text"] = (f"The agent wants to {how} the element{what_el} on {page} ({kind_of}) in {where}. "
+        grant["confirm_text"] = (f"Allow {how} the element{what_el} on {page} ({kind_of}) in {where}. "
                                  + (f"The page has {', '.join(x.replace('_', '-') for x in sensitive)} fields. "
                                     if sensitive else "") + "Every click there needs your OK.")
         return grant, None
     if sensitive:
-        what = "submit a form on" if submits else ("follow a link from" if link_away else "act on")
+        what = "submitting a form on" if submits else ("following a link from" if link_away else "acting on")
         grant["confirm"] = sensitive
-        grant["confirm_text"] = (f"The agent wants to {what} {page} in {where}. The page has "
+        grant["confirm_text"] = (f"Allow {what} {page} in {where}. The page has "
                                  f"{', '.join(s.replace('_', '-') for s in sensitive)} fields.")
         return grant, None
     if submits:

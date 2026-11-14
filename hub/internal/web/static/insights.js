@@ -338,7 +338,7 @@ window.HubUsage = (ctx) => {
     }
     out.push(chats);
 
-    const models = section("Models", "Tokens and API calls of each model. Cost is the agent's estimate where it knows the price.");
+    const models = section("Models", "Tokens and API calls of each model. Cost is estimated where the price is known.");
     if ((r.models || []).length) {
       models.append(table([{ label: "Model" }, { label: "Provider" }, { label: "Input", num: true }, { label: "Output", num: true },
         { label: "Cached", num: true }, { label: "Calls", num: true }, { label: "Cost", num: true }],

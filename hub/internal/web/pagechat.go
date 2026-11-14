@@ -102,7 +102,7 @@ func browserReason(err error) string {
 	case errors.Is(err, hub.ErrComputerOffline):
 		return "This computer's Firefox is not connected to Talaria, so Talaria cannot read its tabs yet"
 	case errors.Is(err, hub.ErrUnknownDevice):
-		return "The hub does not know this computer"
+		return "This computer is not registered with the hub"
 	default:
 		return "The agent did not set this computer's browser for the chat: the server runs an older Talaria. Upgrade Talaria on the server: https://usa-reddragon.github.io/talaria/deploy/upgrades.html"
 	}

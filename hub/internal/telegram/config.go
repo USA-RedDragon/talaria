@@ -18,7 +18,7 @@ type Config struct {
 	PollTimeout     time.Duration `name:"poll_timeout" default:"50s" description:"Long poll timeout for getUpdates"`
 	EditInterval    time.Duration `name:"edit_interval" default:"1500ms" description:"Minimum time between edits of one live message"`
 	MaxRetries      int           `name:"max_retries" default:"5" description:"Retries of a Bot API call that Telegram answers with 429"`
-	LeaderRetry     time.Duration `name:"leader_retry" default:"2s" description:"With store.driver postgres, only one hub replica runs the bot. This is how often each other replica tries to take it over"`
+	LeaderRetry     time.Duration `name:"leader_retry" default:"2s" description:"With store.driver postgres, only one hub replica runs the bot. This is how often each other replica checks whether the bot has no leader and takes over"`
 	TopicSync       time.Duration `name:"topic_sync" default:"20s" description:"How often the bot reads the chats of each linked group to add topics for new chats, rename topics and follow the chats that run"`
 	Steps           string        `name:"steps" default:"collapsed" description:"How the status line of a turn shows its steps and thinking: collapsed (a quote that opens on a tap), expanded, or off"`
 	Drafts          bool          `name:"drafts" default:"true" description:"In private chats, stream each turn into a draft (sendMessageDraft) that shows what runs and the reply as it is written, instead of editing the status line"`

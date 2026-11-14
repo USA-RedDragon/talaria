@@ -1,7 +1,7 @@
 name: project-memory
 kind: standalone
 version: 0.6.0
-description: One memory per project (the git repository of a chat's bound device folder) as a short index in the system prompt, topics read on demand and path notes loaded on touch, with the project_memory tool and routes for hermes-hub's Memory page
+description: One memory per project (the git repository of a chat's bound device folder) as a short index in the system prompt, topics read on demand and path notes loaded on touch, with the project_memory tool and routes for the Talaria hub's Memory page
 author: Talaria contributors
 requires_hermes: ">=0.22.5"
 provides_tools: [project_memory]

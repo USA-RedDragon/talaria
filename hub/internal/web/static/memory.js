@@ -18,9 +18,9 @@ window.HubMemory = (ctx) => {
     notes: "Talaria reads these notes at the start of every chat. Keep them short. Changes apply to new chats.",
     skills: "Skills that belong to this project. Talaria loads them only in chats bound to this project and in their subagents. They win over a global skill of the same name here.",
     project: "Talaria's notes about one project. It reads them in chats that work in this project, on any device. Keep them short. Changes apply to new chats.",
-    you: "What Talaria knows about you as a person. It reads this in every chat, on every device and in Telegram. Changes apply to new chats.",
+    you: "What Talaria has stored about you as a person. It reads this in every chat, on every device and in Telegram. Changes apply to new chats.",
     learned: "Facts Talaria picked up from your chats over time. It looks these up when they seem relevant. Delete anything wrong or out of date.",
-    help: "Talaria keeps two short files that it reads at the start of every chat: its own notes and what it knows about you. It also learns facts from your chats over time and looks them up when they seem relevant. Here you can read, fix and delete all of it. Chats that are already open keep what they started with; changes apply to new chats.",
+    help: "Talaria keeps two short files that it reads at the start of every chat: its own notes and what it has stored about you. It also learns facts from your chats over time and looks them up when they seem relevant. Here you can read, fix and delete all of it. Chats that are already open keep what they started with; changes apply to new chats.",
     full: "Almost full. Shorten or remove a line before Talaria needs room for a new one.",
     off: "This file is turned off in the agent's memory settings, so Talaria does not read it and it cannot be changed here.",
   };
@@ -303,7 +303,7 @@ window.HubMemory = (ctx) => {
       store.entries.forEach((text) => list.append(entryRow(t, store, text)));
       if (ui.adding) list.append(editor(t, store, "", null));
       if (!store.entries.length && !ui.adding && !notes.pending.some((x) => x.target === t.target)) {
-        list.append(el("p", "mem-hint", t.id === "you" ? "Talaria knows nothing about you yet." : inProject ? "Talaria has no notes for this project yet." : "Talaria has no notes yet."));
+        list.append(el("p", "mem-hint", t.id === "you" ? "Nothing is stored about you yet." : inProject ? "Talaria has no notes for this project yet." : "Talaria has no notes yet."));
       }
     }
     body.append(list);
@@ -518,7 +518,7 @@ window.HubMemory = (ctx) => {
     const text = el("div", "mem-text");
     if (p.project) text.append(el("div", "who", "In the notes of project " + p.project));
     for (const c of p.changes) {
-      text.append(el("div", "who", "Talaria wants to " + changeWord(c)));
+      text.append(el("div", "who", "Pending change: " + changeWord(c)));
       if (c.action === "remove") {
         text.append(el("div", "", c.entry || c.old_text));
       } else if (c.action === "add") {

@@ -44,7 +44,7 @@ const (
 
 const (
 	msgNoFact      = "Honcho has no such fact. It may be deleted already"
-	msgNoWorkspace = "Honcho does not know this workspace or peer. Check backends[].honcho in the hub config"
+	msgNoWorkspace = "Honcho has no such workspace or peer. Check backends[].honcho in the hub config"
 )
 
 var conclusionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)

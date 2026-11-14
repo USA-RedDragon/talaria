@@ -145,7 +145,7 @@ type Backend struct {
 	Devices        bool            `name:"devices" description:"Let users pair talaria computers with this backend. Its Hermes needs the talaria device plugin, with plugin setting backend_id equal to this backend's id and the hub's public key. Default false"`
 	ACPURL         string          `name:"acp_url" description:"Base URL of this backend's acp-host, such as http://desktop:9130, for editors that connect with talaria acp. Only the hub may reach it. Empty: editors cannot connect"`
 	MediaRoots     []string        `name:"media_roots" description:"Absolute folders on this backend's server whose files the hub shows: files a reply names with MEDIA:<path>, browser_screenshot results and images users attached. The hub shows a file only when that chat names it. Empty: only images, in the folders of the talaria device plugin's browser_screenshot (<dir>/cache/screenshots/hermes-device/<session>/<file>) and of attached images (<dir>/cache/images/<file>), under any <dir>. Set it to anchor them to the backend's HERMES_HOME. Other paths, and those the server does not have, are read from the computer or sandbox that runs the chat"`
-	ServiceDevices []ServiceDevice `name:"service_devices" description:"Devices the hub knows from this list instead of pairing, such as each user's sandbox pod that runs talaria run. They may use only the exec leg"`
+	ServiceDevices []ServiceDevice `name:"service_devices" description:"Devices listed here are trusted without pairing, such as each user's sandbox pod that runs talaria run. They may use only the exec leg"`
 	Honcho         Honcho          `name:"honcho"`
 	AgentMessages  *bool           `name:"agent_messages" description:"Let the agents of this backend message each other through the hub with the talaria device plugin's device-agents tools (needs devices). Default: on when users names exactly one user and groups is empty; a backend shared by several people needs true, and then all its chats count as one person's"`
 }
@@ -317,7 +317,7 @@ type Device struct {
 
 // ServiceDevice is a device defined in the config, pinned to its backend.
 type ServiceDevice struct {
-	ID        string `name:"id" description:"Device id the backend sees: letters, digits, _ and -, at most 64, not starting with d_ (paired devices use that)"`
+	ID        string `name:"id" description:"Device id used on the backend: letters, digits, _ and -, at most 64, not starting with d_ (paired devices use that)"`
 	Name      string `name:"name" description:"Name shown for the device. Default: the id"`
 	Token     string `name:"token" secret:"true" description:"The device's token, as talaria stores it: hdt_ and at least 32 more characters. The hub keeps only its SHA-256. Required unless token_file is set"`
 	TokenFile string `name:"token_file" description:"File that holds the device's token. Wins over token"`
