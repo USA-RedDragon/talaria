@@ -338,6 +338,25 @@ window.HubViewReport = (o) => {
     if (window.visualViewport) window.visualViewport.addEventListener("resize", resize, { passive: true });
     try { new ResizeObserver(resize).observe(log); } catch (_) { /* no ResizeObserver */ }
     document.addEventListener("visibilitychange", () => { push([t0(), "n", "vis:" + document.visibilityState]); dirty(); });
+    // Errors of the page's own scripts, by kind and place: what the page
+    // left half done. Only the page's files, and a short message.
+    const errs = [];
+    const fail = (msg, file, line) => {
+      const f = String(file || "").split("?")[0].split("/").pop();
+      if (f && !/\.js$/.test(f)) return;
+      const e = [t0(), "E", String(msg || "").slice(0, 120), f + ":" + (line || 0)];
+      push(e);
+      if (errs.length < 10) errs.push(e);
+    };
+    window.addEventListener("error", (e) => {
+      const at = e.error && e.error.stack ? (/([\w.-]+\.js)(?:\?[^:\s)]*)?:(\d+)/.exec(e.error.stack) || []) : [];
+      fail(e.message, at[1] || e.filename, at[2] || e.lineno);
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      const r = e.reason;
+      const at = r && r.stack ? (/([\w.-]+\.js)(?:\?[^:\s)]*)?:(\d+)/.exec(r.stack) || []) : [];
+      fail("rejection: " + (r && r.name ? r.name : typeof r), at[1] || "", at[2] || 0);
+    });
 
     function dirty() {
       if (queued) return;
@@ -437,9 +456,9 @@ window.HubViewReport = (o) => {
       // read went past, and not a log that stays at its end as it grows.
       const screen = Math.max(200, w.c);
       // The newest message stays in view: at the end, or held there by
-      // the stick while the log changes size (a hidden tab, a keyboard),
-      // and it is at the end now.
-      const atEnds = (prev.end || prev.pin) && w.end;
+      // the stick while the log changes size (a hidden tab, a keyboard, a
+      // snapshot drawn again), and at it or held within a screen of it.
+      const atEnds = (prev.end || prev.pin) && (w.end || (w.pin && w.h - w.top - w.c < screen));
       const jumped = d !== null ? Math.abs(d) > screen : Math.abs(w.top - prev.top) > screen && !atEnds;
       if (jumped && !atEnds) {
         const excusedNow = t < searchUntil || (w.end && (t < pillUntil || t - lastAny < 1500));
@@ -474,6 +493,7 @@ window.HubViewReport = (o) => {
         pinned: o.stick.pinned(), hearing: o.stick.hearing(), gesture: now() < gestureUntil || touching,
         win: [window.innerWidth, window.innerHeight, Math.round((vv && vv.height) || 0), window.devicePixelRatio || 1],
         trail: o.stick.trail(), events: v ? (v.kinds || []).slice(-30) : [],
+        errs: errs.slice(),
         ring: ring.slice(),
       };
     }

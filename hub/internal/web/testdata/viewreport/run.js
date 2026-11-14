@@ -44,7 +44,9 @@ function driver() {
         await c.send("script.addPreloadScript", { functionDeclaration: preload });
         await c.send("browsingContext.setViewport", { context: c.context, viewport: { width: W, height: H }, devicePixelRatio: 1.5 });
         const wheel = (x, y, dy) => c.send("input.performActions", { context: c.context, actions: [{ type: "wheel", id: "w", actions: [{ type: "scroll", x: Math.round(x), y: Math.round(y), deltaX: 0, deltaY: dy }] }] });
-        return { ev: c.ev, nav: (u) => c.goto(u), wheel, close: c.close };
+        // altJ presses Alt+J on the keyboard, as a person does.
+        const altJ = () => c.send("input.performActions", { context: c.context, actions: [{ type: "key", id: "kb", actions: [{ type: "keyDown", value: "\uE00A" }, { type: "keyDown", value: "j" }, { type: "keyUp", value: "j" }, { type: "keyUp", value: "\uE00A" }] }] });
+        return { ev: c.ev, nav: (u) => c.goto(u), wheel, altJ, close: c.close };
       },
     };
   }
@@ -59,6 +61,9 @@ function driver() {
         // A phone: touch only, as Chrome on Android.
         await c.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 915, deviceScaleFactor: 2.6, mobile: true });
         await c.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+        // A phone's CPU: a frame's work can outlast the frame, so older
+        // rows go in while the finger's scroll waits to be judged.
+        await c.send("Emulation.setCPUThrottlingRate", { rate: 6 });
       } else await c.send("Emulation.setDeviceMetricsOverride", { width: W, height: H, deviceScaleFactor: 1.5, mobile: false });
       return {
         ev: c.ev,
@@ -78,6 +83,12 @@ function driver() {
         },
         nav: (u) => c.send("Page.navigate", { url: u }),
         wheel: (x, y, dy) => c.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: dy }),
+        altJ: async () => {
+          await c.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Alt", code: "AltLeft", windowsVirtualKeyCode: 18, modifiers: 1 });
+          await c.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "j", code: "KeyJ", windowsVirtualKeyCode: 74, modifiers: 1 });
+          await c.send("Input.dispatchKeyEvent", { type: "keyUp", key: "j", code: "KeyJ", windowsVirtualKeyCode: 74, modifiers: 1 });
+          await c.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Alt", code: "AltLeft", windowsVirtualKeyCode: 18, modifiers: 0 });
+        },
         close: c.close,
       };
     },
@@ -162,9 +173,10 @@ const { proc, connect } = driver();
       assert.ok(/\.js:\d+[^"]*=\d+/.test(JSON.stringify(b.ring)), "the ring has no scrollTop write with its call site");
       await until(`window.__answers.some((a) => a.kind === "jump" && a.status === 204)`, "the hub's answer");
     } else {
-      await ev(`(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", code: "KeyJ", altKey: true, bubbles: true })); return 1; })()`);
+      await c.altJ();
       await until(`window.__reports.some((r) => r.kind === "manual")`, "the manual report", 10000);
-      await until(`document.body.textContent.includes("Sent what just happened. Thanks.")`, "the toast", 10000);
+      // The toast is there and can be seen.
+      await until(`(() => { const t = [...document.querySelectorAll(".toast")].find((n) => n.textContent.includes("Sent what just happened. Thanks.")); if (!t) return false; const r = t.getBoundingClientRect(); const s = getComputedStyle(t); return r.width > 0 && r.height > 0 && r.top >= 0 && s.visibility !== "hidden" && +s.opacity > 0.5; })()`, "the toast in view", 10000);
       const rs = await ev(`window.__reports.filter((r) => r.kind === "manual")`);
       const b = JSON.parse(rs[0].body);
       assert.ok(Array.isArray(b.ring) && b.ring.length > 3, "the manual report has no ring");
