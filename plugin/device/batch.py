@@ -7,6 +7,13 @@ now and returns one approval that lists them in plain words. ``run`` (the handle
 every step again on the live page, because the page changes between steps; a step that needs an
 approval the batch did not cover stops the batch.
 
+On a page with password, payment or one-time code fields the single tools ask for every action.
+A batch asks once instead: ``plan`` puts one card text in the grant (``batch_confirm``: every
+step in plain words, which steps touch the secret fields, which submit), the handler asks the
+user once, and after the OK a step runs without a question as long as it matches what the card
+said (same tab, same registrable domain, same element, no new submit and no link to another
+site). A step that deviates asks again. Unattended runs keep the per-step refusals.
+
 Refs stay usable while the page re-renders. The plugin remembers the role and name of every ref
 that a snapshot gave out (``remember``). When a step finds its ref stale, the batch reads the page
 again, finds the element again by role, name and position among elements with the same role and
@@ -150,6 +157,44 @@ def short(text: Any, n: int = 40) -> str:
 
 def _quote(text: str) -> str:
     return json.dumps(short(text), ensure_ascii=False)
+
+
+_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "edu", "ac", "or", "ne", "go"}
+
+
+def registrable(host: str) -> str:
+    """The registrable domain of a host (``fit.clearance.fedex.com`` -> ``fedex.com``), by the last
+    two labels, or three under a country code with a second level such as ``co.uk``. IP addresses
+    and single-label hosts stay as they are."""
+    host = (host or "").strip().lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    parts = host.split(".")
+    if len(parts) < 2 or all(p.isdigit() for p in parts) or ":" in host:
+        return host
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SECOND_LEVEL:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+_NOUNS = (("payment details", re.compile(r"card|cvc|cvv|expir|payment|security code", re.I)),
+          ("a password", re.compile(r"pass(word|code)?\b", re.I)),
+          ("a one-time code", re.compile(r"code|otp|2fa|verif|token|\bpin\b|authenticat", re.I)))
+_KIND_OF = {"payment details": "payment", "a password": "password", "a one-time code": "one_time_code"}
+
+
+def secret_noun(label: Optional[tuple], step: dict, kinds: list) -> str:
+    """What a typed value is, in words, when the step types into a secret field of the page: ``a
+    one-time code``, ``a password`` or ``payment details``. Empty when the page has no such field
+    or the element's label says nothing about it."""
+    if not kinds:
+        return ""
+    text = " ".join(str(x) for x in ((label[1] if label else ""), step.get("name") or "", step.get("role") or "")
+                    if x)
+    for noun, rx in _NOUNS:
+        if _KIND_OF[noun] in kinds and rx.search(text):
+            return noun
+    return ""
 
 
 # --- outlines and ref labels -------------------------------------------------------------------
@@ -370,11 +415,36 @@ def changes_page(step: dict, grant: dict) -> bool:
     return False
 
 
+def _label_of(device_id: str, tab: Optional[int], ref: str) -> Optional[tuple]:
+    """``(role, name, nth, count)`` of a ref, from the snapshot that gave it out."""
+    ref = str(ref or "").strip().lstrip("@")
+    if not ref or tab is None:
+        return None
+    held = agent_labels(device_id, tab) or labels(device_id, tab)
+    return held["refs"].get(ref)
+
+
+KIND_WORDS = {"password": "password", "payment": "payment", "one_time_code": "one-time-code"}
+
+
+def _kinds_words(kinds: list) -> str:
+    words = [KIND_WORDS.get(k, k.replace("_", "-")) for k in kinds]
+    return ", ".join(words[:-1]) + " and " + words[-1] if len(words) > 1 else (words[0] if words else "")
+
+
+def _numbers(nums: list) -> str:
+    return (f"step {nums[0]}" if len(nums) == 1 else
+            "steps " + ", ".join(map(str, nums[:-1])) + " and " + str(nums[-1]))
+
+
 def plan(b: Any, args: dict, conn: Any) -> tuple[dict, Optional[dict]]:
     """``(grant, approval)`` for browser_batch, as ``decide`` returns them for a single tool.
 
     Steps are checked on the page as it is now, up to the first one that probably loads another
-    page; the rest are checked when they run. All approvals the steps need are asked as one."""
+    page; the rest are checked when they run. All approvals the steps need are asked as one.
+    The questions of a page with password, payment or one-time code fields are asked as one too,
+    by the handler (``batch_confirm`` in the grant), and the approvals of the other steps join it
+    so the user sees a single card."""
     try:
         steps = parse_steps(args.get("steps"))
     except ValueError:
@@ -384,16 +454,21 @@ def plan(b: Any, args: dict, conn: Any) -> tuple[dict, Optional[dict]]:
     started = time.monotonic()
     budget = max(5.0, b._hook_timeout() / 2 or 15.0)
     pending: list[tuple[int, str]] = []
-    confirms: list[int] = []
+    confirms: list[int] = []                 # steps whose page asks for the user's OK on every action
+    folded: list[int] = []                   # ... of which the one card of the batch can cover
     entries: Optional[list] = None
+    seen: dict[int, dict] = {}               # step number -> what the plan saw of the page and element
+    checked = 0
     for i, step in enumerate(steps, 1):
         if time.monotonic() - started > budget:
             break
         action = step["action"]
         sub = _SUB_TOOL.get(action)
         if sub is None:
+            checked = i
             continue
         ref = step.get("ref", "")
+        info = None
         try:
             if action != "navigate" and tab is None:
                 break
@@ -403,37 +478,114 @@ def plan(b: Any, args: dict, conn: Any) -> tuple[dict, Optional[dict]]:
                 ref = find_named(entries, step["name"], step.get("role", ""))
             if action == "press" and not (ref or step.get("name")):
                 ref = ""
-            grant, approval = b.decide(sub, sub_args(step, tab, ref), conn)
+            if action != "navigate" and (ref or action == "press"):
+                info = b.inspect_in_hook(conn, {"tab_id": tab, "ref": ref} if ref else {"tab_id": tab, "focus": True})
+                info = info if isinstance(info, dict) and not info.get("error") else None
+            grant, approval = b.decide(sub, sub_args(step, tab, ref), conn, inspected=info)
         except StepError:
             break
         except b._core().BrowserError:
             break
+        checked = i
         if approval and approval.get("action") == "block":
             return {}, {"action": "block", "message": f"browser_batch step {i} ({step_words(step)}): {approval['message']}"}
         if approval and approval.get("rule_key") and not b.approved(approval["rule_key"]):
             if approval["rule_key"] not in [k for _, k in pending]:
                 pending.append((i, approval["rule_key"]))
+        if info is not None:
+            t = info.get("target") if isinstance(info.get("target"), dict) else {}
+            seen[i] = {"host": str(info.get("host") or ""), "label": " ".join(str(t.get("label") or "").split()),
+                       "submits": bool(grant.get("submit_hosts")), "away": [str(h) for h in grant.get("visit_hosts") or []],
+                       "kinds": [k for k in (info.get("sensitive") or []) if isinstance(k, str)]}
         if grant.get("confirm"):
             confirms.append(i)
+            if not grant.get("protected_ok"):
+                folded.append(i)
         if changes_page(step, grant):
             break
+    ask_now = b.no_user() or not folded
+    # Salesforce clicks keep their own approval; every other approval joins the one card.
+    keep = pending if ask_now else [(i, k) for i, k in pending if k.split(":", 2)[1] == "click"]
+    join = [] if ask_now else [(i, k) for i, k in pending if (i, k) not in keep]
     grant = {"batch_rules": [k for _, k in pending]}
-    if not pending:
+    if not ask_now:
+        grant["batch_confirm"] = _one_card(conn.device_id, steps, where, tab, seen, checked, confirms, join)
+    if not keep:
         return grant, None
-    lines = [f"{n}. {step_words(s)}" for n, s in enumerate(steps, 1)]
-    needs = "; ".join(f"step {i} would {rule_words(k)}" for i, k in pending)
-    first = rule_words(pending[0][1])
+    lines = [f"{n}. {step_words(s, _label_of(conn.device_id, tab, s.get('ref', '')))}" for n, s in enumerate(steps, 1)]
+    needs = "; ".join(f"step {i} would {rule_words(k)}" for i, k in keep)
+    first = rule_words(keep[0][1])
     tail = (f"Approving for the session (or always) lets the agent {first} again without asking."
-            if len(pending) == 1 else
+            if len(keep) == 1 else
             f"Approving for the session (or always) lets the agent {first} again without asking; the other "
             f"approvals count for this batch only.")
     extra = (f" Steps {', '.join(map(str, confirms))} ask you again when they run (the page has password, payment "
-             f"or one-time code fields).") if confirms else ""
+             f"or one-time code fields).") if confirms and ask_now else ""
     later = (" Steps after one that loads a new page are checked when they run, and the batch stops at one that "
              "needs an approval not listed here.")
-    return grant, {"action": "approve", "rule_key": pending[0][1],
+    return grant, {"action": "approve", "rule_key": keep[0][1],
                    "message": f"Run {len(steps)} browser steps in {where}:\n" + "\n".join(lines) +
                               f"\nThis needs your OK: {needs}. {tail}{extra}{later}"}
+
+
+def _may_submit(step: dict) -> bool:
+    if step["action"] == "click":
+        return True
+    if step["action"] == "type":
+        return bool(step.get("submit"))
+    return step["action"] == "press" and step["key"].strip().lower() in ("enter", "return", "space", "spacebar", " ")
+
+
+def _one_card(device_id: str, steps: list[dict], where: str, tab: Optional[int], seen: dict, checked: int,
+              confirms: list[int], join: list[tuple[int, str]]) -> dict:
+    """The one question of a batch on a page with secret fields, and what it covers."""
+    kinds = sorted({k for i in confirms for k in seen.get(i, {}).get("kinds", [])})
+    sites = {registrable(seen[i]["host"]) for i in seen if seen[i]["host"]}
+    for s in steps:
+        if s["action"] == "navigate":
+            sites.add(registrable(urlsplit(str(s["url"])).hostname or ""))
+    sites.discard("")
+    lines, submits, noun_steps = [], [], []
+    for n, s in enumerate(steps, 1):
+        label = _label_of(device_id, tab, s.get("ref", ""))
+        seen_n = seen.get(n) or {}
+        step_kinds = seen_n.get("kinds") or []
+        text = step_words(s, label)
+        if s["action"] in ("type", "select") and step_kinds:
+            noun = secret_noun(label or (None if not seen_n.get("label") else ("", seen_n["label"], 0, None)), s, step_kinds)
+            t = target_words(s, label or (("", seen_n["label"], 0, None) if seen_n.get("label") else None))
+            if s["action"] == "type":
+                text = f"Type {noun or 'text'} into {t}" + (", then press Enter" if s.get("submit") else "")
+            else:
+                text = f"Select an option in {t}"
+            if noun:
+                noun_steps.append(n)
+        lines.append(f"{n}. {text}")
+        if seen_n.get("submits"):
+            submits.append((n, registrable(seen_n.get("host") or "")))
+    parts = [f"Run {len(steps)} browser steps in {where}:", *lines]
+    on = sorted({n for n in confirms})
+    if kinds:
+        touch = (f" Step{'s' if len(noun_steps) != 1 else ''} {', '.join(map(str, noun_steps))} "
+                 f"type{'s' if len(noun_steps) == 1 else ''} into those fields; the values are never shown here."
+                 ) if noun_steps else " The values you or the agent type there are never shown here."
+        parts.append(f"The page has {_kinds_words(kinds)} fields. {_numbers(on).capitalize()} act on that page.{touch}")
+    if submits:
+        parts.append(f"{_numbers([n for n, _ in submits]).capitalize()} submit a form to "
+                     f"{', '.join(sorted({h for _, h in submits}))}.")
+    if join:
+        parts.append("This also needs your OK: " + "; ".join(f"step {i} would {rule_words(k)}" for i, k in join) + ".")
+    if checked < len(steps):
+        later = [n for n in range(checked + 1, len(steps) + 1) if _may_submit(steps[n - 1])]
+        parts.append(f"Steps {checked + 1} to {len(steps)} come after a step that loads another page; they are "
+                     f"checked on the same terms when they run"
+                     + (f", and {_numbers(later)} may submit a form." if later else "."))
+    where_sites = ", ".join(sorted(sites)) if sites else "the same site"
+    parts.append(f"One OK runs all {len(steps)} steps with no more questions while each stays in this tab, on "
+                 f"{where_sites}, on the element listed, with the action listed, and submits only where listed. A "
+                 f"step that goes anywhere else, uses another element or submits another form asks again.")
+    return {"text": "\n".join(parts), "tab": tab, "sites": sorted(sites),
+            "steps": {i: {k: v for k, v in seen[i].items() if k != "kinds"} for i in seen}}
 
 
 def _outline_entries(b: Any, conn: Any, tab: int, sid: str = "") -> list:
@@ -452,6 +604,8 @@ class Runner:
         self.b, self.args, self.conn, self.sid, self.steps = b, args, conn, sid, steps
         self.tab = b._tab_id(args)
         self.covered = set(grant.get("batch_rules") or [])
+        self.card: Optional[dict] = None      # what the user approved on a page with secret fields, once accepted
+        self.n = 0                            # the number of the step that runs now
         stored = labels(conn.device_id, self.tab) if self.tab is not None else {"url": "", "refs": {}}
         self.pending_refresh = False
         held = agent_labels(conn.device_id, self.tab) if self.tab is not None else None
@@ -535,6 +689,35 @@ class Runner:
             raise StepError(str(info["error"]))
         return info
 
+    def deviation(self, grant: dict, info: Optional[dict]) -> str:
+        """Why a step is not what the approved card said, or an empty string when it is."""
+        card = self.card or {}
+        sites = set(card.get("sites") or [])
+        if card.get("tab") is not None and self.tab != card["tab"]:
+            return "it runs in another tab"
+        host = str((info or {}).get("host") or "")
+        if host and sites and registrable(host) not in sites:
+            return f"it acts on {registrable(host)}, which the approved steps do not use"
+        away = [registrable(h) for h in grant.get("visit_hosts") or [] if registrable(h) not in sites]
+        if away:
+            return f"it goes to {', '.join(sorted(set(away)))}, which the approved steps do not use"
+        spec = (card.get("steps") or {}).get(self.n) or {}
+        if spec:
+            t = (info or {}).get("target") if isinstance((info or {}).get("target"), dict) else {}
+            live = " ".join(str(t.get("label") or "").split())
+            if spec.get("label") and live != spec["label"]:
+                return f"it targets {_quote(live) if live else 'another element'}, not {_quote(spec['label'])}"
+            if grant.get("submit_hosts") and not spec.get("submits"):
+                return "it submits a form the approved steps did not"
+        return ""
+
+    def ask(self, text: str) -> None:
+        """Ask the user again, on a step that left the approved card."""
+        if self.b.no_user():
+            raise StepError("needs the user's OK on a page with secret fields, and no user is present", "approval")
+        if not self.b._confirm(text):
+            raise StepError("the user did not allow this action", "declined")
+
     def allow(self, tool: str, args: dict, info: Optional[dict]) -> dict:
         """Check a step on the live page with the single tool's rules; returns the grant."""
         b = self.b
@@ -546,13 +729,22 @@ class Runner:
             if key in self.covered:
                 self.covered_used = True
             if key not in self.covered and not b.approved(key):
-                raise StepError(f"needs the user's approval, which the batch did not ask for because the page was not "
-                                f"known when it started ({rule_words(key)}). Run this step with its own tool, then "
-                                f"start a new batch", "approval")
+                if self.card and not b.no_user():
+                    self.ask("This step is not in the steps you approved. " + str(approval.get("message") or ""))
+                else:
+                    raise StepError(f"needs the user's approval, which the batch did not ask for because the page was "
+                                    f"not known when it started ({rule_words(key)}). Run this step with its own tool, "
+                                    f"then start a new batch", "approval")
         if grant.get("confirm"):
             if b.no_user():
                 raise StepError("needs the user's OK on a page with secret fields, and no user is present", "approval")
-            if not b._confirm(grant.get("confirm_text") or "Allow this browser action?"):
+            text = grant.get("confirm_text") or "Allow this browser action?"
+            if self.card and not grant.get("protected_ok"):
+                why = self.deviation(grant, info)
+                if not why:
+                    return grant
+                text = f"This step is not what you approved: {why}. {text}"
+            if not b._confirm(text):
                 raise StepError("the user did not allow this action", "declined")
         return grant
 
@@ -702,6 +894,7 @@ class Runner:
         self.details = []
         for i, step in enumerate(self.steps, 1):
             label = self.orig.get(self._norm(step["ref"])) if step.get("ref") else None
+            self.n = i
             self.who, self.covered_used = None, False
             detail: dict = {"step": i, "action": step["action"], "state": "done"}
 
@@ -760,6 +953,12 @@ def run(b: Any, args: dict, conn: Any, sid: str) -> str:
                          "(it opens a tab), or open one with browser_navigate")
     grant = b._take_grant(b._grant_key(b._session(sid), "browser_batch", args))
     runner = Runner(b, args, conn, sid, steps, grant)
+    card = grant.get("batch_confirm")
+    if card and not b.no_user():
+        if not b._confirm(card["text"]):
+            return json.dumps({"error": "the user did not allow this batch; nothing was run", "code": "declined"},
+                              ensure_ascii=False)
+        runner.card = card
     lines, failed = runner.go(stop)
     out: dict = {"tab_id": runner.tab, "ok": failed is None, "steps": lines,
                  "completed": sum(1 for ln in lines if not ln.split(". ", 1)[1].startswith(("Failed", "Not run")))

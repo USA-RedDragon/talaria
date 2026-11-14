@@ -2322,7 +2322,7 @@ SCHEMAS = {
     "browser_batch": _schema(
         "browser_batch", "PREFER THIS when you know the steps: run click, type, press, select, hover, scroll, "
         "wait_for and navigate steps in one call, then read the page once. Refs survive re-renders; name (and role) "
-        "works without a ref. Stops at the first failure unless stop_on_error is false. One approval for the batch. "
+        "works without a ref. Stops at the first failure unless stop_on_error is false. One approval for the whole batch, even on secret-field pages. "
         "Use single tools to explore. Example: {\"steps\": [{\"action\": \"type\", \"ref\": \"e1\", "
         "\"text\": \"alice\"}, {\"action\": \"press\", \"key\": \"Enter\"}]}",
         {"tab_id": _TAB,
@@ -2375,15 +2375,15 @@ SCHEMAS = {
         []),
     "browser_click": _schema(
         "browser_click", "Click an element by ref. Submits, links to other sites and clicks on Salesforce need the "
-        "user's approval. Example: {\"tab_id\": 12, \"ref\": \"e5\"}", {"tab_id": _TAB, "ref": _REF}, ["ref"]),
+        "user's approval. On secret-field pages every call asks; use browser_batch. Example: {\"tab_id\": 12, \"ref\": \"e5\"}", {"tab_id": _TAB, "ref": _REF}, ["ref"]),
     "browser_type": _schema(
-        "browser_type", "Replace a field's text. submit presses Enter (needs approval once per site). Example: "
+        "browser_type", "Replace a field's text. submit presses Enter (needs approval once per site). On secret-field pages every call asks; use browser_batch. Example: "
         "{\"tab_id\": 12, \"ref\": \"e3\", \"text\": \"alice\"}",
         {"tab_id": _TAB, "ref": _REF, "text": {"type": "string"},
          "submit": {"type": "boolean", "description": "Press Enter after typing"}}, ["ref", "text"]),
     "browser_press": _schema(
         "browser_press", "Press one key, on ref or on the focused element: Enter, Tab, Escape, Space, Backspace, "
-        "Delete, arrows, Home, End, PageUp, PageDown or one character, with modifiers such as Shift+Tab. Example: "
+        "Delete, arrows, Home, End, PageUp, PageDown or one character, with modifiers such as Shift+Tab. On secret-field pages every call asks; use browser_batch. Example: "
         "{\"tab_id\": 12, \"key\": \"Enter\"}",
         {"tab_id": _TAB, "key": {"type": "string"}, "ref": dict(_REF, description="Element; omit for the focused one")},
         ["key"]),

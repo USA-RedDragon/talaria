@@ -914,7 +914,7 @@ class ToolTests(BrowserBase):
             self.assertLessEqual(set(example), set(schema["parameters"]["properties"]), name)
             self.assertLessEqual(set(schema["parameters"]["required"]), set(example) | {"device"}, name)
             total += len(json.dumps({"type": "function", "function": schema}, ensure_ascii=False))
-        self.assertLess(total, 12000, "the eager toolset's schemas cost about chars/4 tokens on every turn")
+        self.assertLess(total, 12300, "the eager toolset's schemas cost about chars/4 tokens on every turn")
 
     def test_vision_multimodal(self):
         with mock.patch.object(browser, "_native_vision", lambda: True), \
@@ -2210,6 +2210,70 @@ class BatchTool(BrowserBase):
         self.assertIn("2. Press Enter", self.decision["message"])
         self.assertNotIn('"x"', self.decision["message"].replace('"Email"', ""))
         self.assertEqual(self.last("press")["args"]["guard"]["submit_hosts"], ["example.com"])
+
+    def sensitive_batch(self, steps=None):
+        self.fake.outline = FORM_OUTLINE.replace('"Name"', '"Verification code"')
+        self.fake.inspect = dict(self.fake.inspect, host="fit.clearance.fedex.com", sensitive=["one_time_code"],
+                                 target={"kind": "field", "host": "fit.clearance.fedex.com", "form": True,
+                                         "label": "Verification code"})
+        self.snapshot()
+        self.fake.requests.clear()
+        self.confirmed.reset_mock()
+        return steps or [{"action": "type", "ref": "e2", "text": "123456"}] + [
+            {"action": "click", "ref": "e2"}] * 3 + [{"action": "press", "key": "Tab", "ref": "e2"}] * 4
+
+    def test_batch_on_a_one_time_code_page_asks_once(self):
+        steps = self.sensitive_batch()
+        self.assertEqual(len(steps), 8)
+        out = self.run_tool("browser_batch", tab_id=7, snapshot="none", steps=steps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["completed"], 8)
+        self.assertEqual(self.confirmed.call_count, 1)
+        card = self.confirmed.call_args.args[0]
+        self.assertIn("one-time-code fields", card)
+        self.assertIn("1. Type a one-time code into", card)
+        self.assertIn("fedex.com", card)
+        self.assertNotIn("123456", card)
+
+    def test_batch_card_never_shows_secret_values(self):
+        steps = self.sensitive_batch([{"action": "type", "ref": "e2", "text": "s3cr3t-value"}])
+        self.run_tool("browser_batch", tab_id=7, snapshot="none", steps=steps)
+        self.assertNotIn("s3cr3t-value", self.confirmed.call_args.args[0])
+
+    def test_declined_sensitive_batch_runs_nothing(self):
+        steps = self.sensitive_batch()
+        self.confirmed.return_value = False
+        out = self.run_tool("browser_batch", tab_id=7, snapshot="none", steps=steps)
+        self.assertEqual(out["code"], "declined")
+        self.assertNotIn("click", self.ops())
+
+    def test_step_to_another_site_asks_again(self):
+        steps = self.sensitive_batch([{"action": "click", "ref": "e2"}, {"action": "click", "ref": "e2"}])
+        args = dict(tab_id=7, snapshot="none", steps=steps)
+        self.assertIsNone(browser.pre_tool_call(tool_name="browser_batch", args=args, task_id="t", session_id=self.session))
+        self.fake.inspect = dict(self.fake.inspect, target={"kind": "link", "host": "evil.example.org",
+                                                            "label": "Verification code"})
+        self.registry.dispatch("browser_batch", args, task_id="t", session_id=self.session)
+        self.assertGreaterEqual(self.confirmed.call_count, 2)
+        self.assertIn("not what you approved", self.confirmed.call_args.args[0])
+
+    def test_step_on_an_unlisted_element_asks_again(self):
+        steps = self.sensitive_batch([{"action": "click", "ref": "e2"}, {"action": "click", "ref": "e2"}])
+        args = dict(tab_id=7, snapshot="none", steps=steps)
+        self.assertIsNone(browser.pre_tool_call(tool_name="browser_batch", args=args, task_id="t", session_id=self.session))
+        self.fake.inspect = dict(self.fake.inspect, target={"kind": "field", "host": "fit.clearance.fedex.com",
+                                                            "form": True, "label": "Card number"})
+        self.registry.dispatch("browser_batch", args, task_id="t", session_id=self.session)
+        self.assertGreaterEqual(self.confirmed.call_count, 2)
+        self.assertIn("not what you approved", self.confirmed.call_args.args[0])
+
+    def test_unattended_sensitive_batch_still_refuses(self):
+        steps = self.sensitive_batch([{"action": "click", "ref": "e2"}])
+        with mock.patch.object(browser, "no_user", return_value=True):
+            out = self.run_tool("browser_batch", tab_id=7, snapshot="none", steps=steps)
+        self.assertEqual(out["failed"]["code"], "approval")
+        self.assertNotIn("click", self.ops())
+        self.assertEqual(self.confirmed.call_count, 0)
 
     def test_declined_batch_runs_nothing(self):
         self.snapshot()
