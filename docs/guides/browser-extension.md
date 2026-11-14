@@ -18,13 +18,20 @@ This needs Firefox 139 or newer, from your distribution or from Mozilla. The Fla
 3. Restart the daemon: `systemctl --user restart talaria` on Linux.
 4. Install the extension. Download `talaria-firefox-<version>.xpi` from the [latest release](https://github.com/USA-RedDragon/talaria/releases/latest). In Firefox, open `about:addons`, choose the gear menu, then "Install Add-on From File..." and pick the file. Mozilla signs the file, so it stays installed, and Firefox updates it from later releases.
 
-When it works, the Talaria button in Firefox's toolbar shows a green "on" badge, and its tooltip reads "Talaria: connected".
+## Connect Firefox
+
+Firefox starts the extension's connection to the daemon, so the daemon and Firefox both have to be running. Check it in either place:
+
+- The Talaria button in Firefox's toolbar shows a green "on" badge, and its tooltip reads "Talaria: connected".
+- Ask the agent to run `browser_status`. It says whether the chat has a computer with Firefox connected, and which.
+
+If the badge is missing, check that the extension is enabled in `about:addons`, that you ran `talaria browser install` and that the daemon runs. [Troubleshooting](troubleshooting.md) lists the usual causes. Only one Firefox connects at a time: when you open the Talaria button in a second Firefox, that one takes over and the first disconnects. With more than one computer that has browser control, the agent uses the browser of the computer the chat is bound to, or the one it picks with `browser_use_device`.
 
 If the release you installed has no `.xpi` file, no signed extension was published for it. Install the next release, or load the extension for development: `talaria browser extension --out ~/talaria-extension`, then in Firefox open `about:debugging#/runtime/this-firefox` and choose "Load Temporary Add-on...". A temporary add-on goes away when Firefox restarts.
 
 ## What the agent can do
 
-It can list, open and close tabs in its group, go to a page, go back, read a page's text or an outline of it, take a screenshot, click, type, press keys, hover, scroll and wait. It cannot download or upload files, answer browser permission prompts or dialogs, or touch tabs outside its group. A tab you drag into the group becomes the agent's, and a tab you drag out is no longer.
+It can list, open and close tabs in its group, go to a page, go back, read a page's text or an outline of it, take a screenshot, click, type, choose an option in a select box, press keys, hover, scroll and wait. With the saved logins of Firefox it can also sign in on the hosts in `browser.autologin-hosts` (the agent never sees the password). It cannot download or upload files, answer browser permission prompts or dialogs, or touch tabs outside its group. A tab you drag into the group becomes the agent's, and a tab you drag out is no longer.
 
 It never opens pages on your private network. Requests from its tabs to loopback, private, link-local and `100.64/10` addresses and to `.local`, `.internal` and `.home.arpa` names are blocked. To allow one host, add it to the config:
 
@@ -33,6 +40,12 @@ browser:
   allow-hosts:
     - nas.home.arpa
 ```
+
+## Steps in one call
+
+When the agent knows what to do on a page, such as filling in a form, it sends the whole sequence as one `browser_batch` call (up to 25 steps: click, type, press, select, hover, scroll, wait and navigate) and reads the page once at the end. It stops at the first step that fails unless it asked to go on. If the page redraws between steps, the agent finds the same element again by its role and label. The ask-before rules below apply to each step, and a batch asks once for all of them, in plain words, before it starts. A step that needs an approval the batch did not list stops the batch.
+
+In the web app, a batch is one card, with one line for each step and how it ended (done, failed or not run), and the page it read at the end. Cards for single browser steps and for each batch step name the element by the label the page gives it, such as "Typed into Search" or "Clicked Sign in", never by an internal reference like `e12`. What the agent typed is not shown on the card or put in the label.
 
 ## When it asks you
 
@@ -44,7 +57,7 @@ The agent asks before it does anything you cannot easily undo. The question appe
 | Click or type without submitting anything | Never |
 | Open a site it has not used in this session | Once per site per session |
 | Submit a form | Once per site per session |
-| Click or type on a page with a password, payment or one-time code field | Every time |
+| Click or type on a page with a password, payment or one-time code field | Every time, also for each step of a batch |
 | Run a script on a page | Once per site per session, every time on a page with secret fields |
 
 A site is the host name without a leading `www.`, so `accounts.example.com` and `example.com` are asked about separately. You can answer once, for the session, always, or deny.

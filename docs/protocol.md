@@ -1,6 +1,6 @@
 # Wire protocol
 
-Status: phase 3, exec leg protocol version 3 (version 2 peers still served). Pinned to Hermes Agent v0.22.7.
+Status: phase 3, exec leg protocol version 3 (version 2 peers still served). Pinned to Hermes Agent v0.23.1.
 
 This document defines every message and endpoint between the device client (`talaria`), the Talaria hub and the Hermes side (the device plugin in the gateway process, and `acp-host` in the Hermes pod). The hub implements its side from this document. Where this document and code disagree, fix the code or this document in the same change.
 
@@ -186,7 +186,7 @@ Protocol version: <!-- docgen:const pkg=protocol name=Version code=false -->3<!-
 
 ```json
 {"type": "welcome", "version": 3, "device_id": "d_8f2c", "name": "desktop", "ping_interval": 25,
- "plugin_version": "0.3.0", "hermes_version": "v0.22.7", "grace_seconds": 120}
+ "plugin_version": "0.3.0", "hermes_version": "v0.23.1", "grace_seconds": 120}
 ```
 
 `device_id` and `name` come from the assertion. `version` is the chosen version. `grace_seconds` (version 3 only) is the plugin's resume grace (section 4.7). `capabilities`, when present, lists the device's capabilities the plugin accepts (step 5), for example `["browser"]`. `client_version` in `hello` and `plugin_version` and `hermes_version` in `welcome` carry the release versions both ways, for display and for the `4426` reasons.
@@ -305,7 +305,7 @@ On a leg where `welcome.capabilities` names `browser`, more message types run on
 
 | Type | Direction | Meaning |
 |---|---|---|
-| `browser` | plugin to device | Run one browser operation: `{"type", "id", "op", "args", "timeout"}`. `id` is unique per connection; `kill` with the same `id` cancels it. `op` is one of `tabs_list`, `tab_open`, `tab_close`, `navigate`, `back`, `read_text`, `snapshot`, `inspect`, `click`, `type`, `press`, `hover`, `scroll`, `wait`, `eval`, `screenshot`, `login`, `check` |
+| `browser` | plugin to device | Run one browser operation: `{"type", "id", "op", "args", "timeout"}`. `id` is unique per connection; `kill` with the same `id` cancels it. `op` is one of `tabs_list`, `tab_open`, `tab_close`, `navigate`, `back`, `read_text`, `snapshot`, `inspect`, `click`, `type`, `press`, `select`, `hover`, `scroll`, `wait`, `eval`, `screenshot`, `login`, `check`; the device refuses any other. A device or extension from before `select` refuses it, and the plugin then sets the value with `type` |
 | `browser_start` | plugin to device | Start Firefox when the extension is not connected, and wait until it is connected: `{"type", "id", "timeout"}`. Answered by one `browser_result` with the same `id` (`result`: `{"started"}`); `kill` cancels it. The hub forwards it like any other message (docs/browser.md section 5.1) |
 | `browser_result` | device to plugin | Exactly one answer per `browser`: `{"type", "id", "ok", "result"}` or `{"type", "id", "ok": false, "code", "error"}`, `code` one of `not_connected`, `refused`, `timeout`, `cancelled`, `failed` |
 | `browser_status` | device to plugin | Whether the browser extension is connected: `{"type", "connected", "browser", "extension_version", "can_start"}` (`can_start`: the device answers `browser_start`). Sent after the `welcome` (and the `resume`) and on every change |
@@ -465,7 +465,7 @@ Remove `params.payload.mcp_servers` if present, then forward. On a result with `
 
 ### 5.4 Allowed and denied calls
 
-The hub lets through only an allowlist (`gatewayRules` in hub/internal/device/rpc.go): the methods the Hermes v0.22.7 Ink TUI and classic CLI send for chatting. It refuses every other method, and the requests below, with error code `-32601`, reason `hermes_device_denied` and message `<method> is not available through talaria: <why>`, and forwards nothing. A refused notification is dropped. The session checks of 5.3 apply to every method that passes.
+The hub lets through only an allowlist (`gatewayRules` in hub/internal/device/rpc.go): the methods the Hermes v0.23.1 Ink TUI and classic CLI send for chatting. It refuses every other method, and the requests below, with error code `-32601`, reason `hermes_device_denied` and message `<method> is not available through talaria: <why>`, and forwards nothing. A refused notification is dropped. The session checks of 5.3 apply to every method that passes.
 
 | Methods | Rule |
 |---|---|
@@ -478,6 +478,8 @@ The hub lets through only an allowlist (`gatewayRules` in hub/internal/device/rp
 | `config.get` | Refused with a `cwd` member or with `key` `project`: both run git in a pod directory |
 | `slash.exec`, `command.dispatch` | Only the slash-command allowlist below. A `/model` gets `--session` put first |
 | `file.attach` | Refused with a non-null `path` (a pod path) or a `staged_upload` member (copies a browser upload out of the pod) |
+| `client.capabilities` | Only the member `server_requests`, as `true` or `false`. It tells the gateway that the client answers server requests such as approvals and questions. Any other capability (such as `desktop_local`, which describes the client's own machine) is refused |
+| `image.render` | Only the params `path`, `cols`, `rows`, `graphics` and `terminal`, and only when the server's Hermes reports the `image-render-confined-v1` capability in `runtime.describe` (it then reads only images it stored; Talaria Hermes patch 0003). Otherwise refused, since it would read any file of the server |
 | `model.options` | `refresh` is removed: it refetches every provider's model list for the whole profile |
 | `learning.frames`, `pet.cells` | Size params are clamped (`learning.frames`: `cols` 20 to 400, `rows` 10 to 200, `frames` 1 to 120; `pet.cells`: `cols` 4 to 200), because Hermes renders whatever size it is asked for. A size that is neither null nor a number is refused with `-32602` |
 
@@ -707,7 +709,7 @@ The user revokes a device on the hub page. The hub then refuses the token (secti
 
 ```json
 {"device_id": "d_8f2c", "device_name": "desktop", "user": "alice", "backend": "alice",
- "hermes_version": "v0.22.7", "plugin_version": "0.2.0", "placeholder": "/opt/data/hermes/device-placeholder"}
+ "hermes_version": "v0.23.1", "plugin_version": "0.26.11", "placeholder": "/opt/data/hermes/device-placeholder"}
 ```
 
 Service devices (section 8.10) may call whoami too. Their `user` is `service`.
@@ -765,6 +767,7 @@ The plugin is a Hermes user plugin named `device`, installed into `$HERMES_HOME/
 | `mcp` | `true` | `false` hides the `device-mcp` toolset and turns its tools off (section 8.11) |
 | `mcp_approval` | `write` | When `mcp_device_call` asks the user first: `write` for tools whose server does not mark them `readOnlyHint: true`, `always` for every tool, `never` |
 | `agent_messages` | `true` | `false` hides the `device-agents` toolset (section 12) |
+| `cron_agents` | `true` | `false` keeps the `device-agents` toolset out of scheduled job runs (section 12) |
 | `mcp_call_timeout` | `600` | Seconds `mcp_device_call` waits when the agent gives no `timeout`, at most 3600 |
 | `dev_static_tokens` | `false` | Dev mode (section 8.9) |
 | `devices` | `{}` | Dev mode only: `<name>: {token_env: <env var>}` or `{token: <at least 16 chars>}` |

@@ -23,9 +23,9 @@ talaria chat -- --resume <session-id>
 
 ## Which agent build runs
 
-On Linux, `chat` runs the exact agent build that your server runs. The daemon reads the server's image from its welcome message, downloads that build by its digest in the background, checks every layer against its SHA-256, and keeps it in `~/.cache/talaria/hermes` (about 1.4 GB). It keeps the current build and the one before it. The managed build has a home of its own and does not read or write `~/.hermes`.
+On Linux, `chat` runs the exact agent build that your server runs. The daemon reads the server's image from its welcome message, downloads that build by its digest in the background, checks every layer against its SHA-256, and keeps it in `talaria/hermes` in your user cache directory (`~/.cache/talaria/hermes` on Linux; about 1.4 GB per build, and it waits until 4 GB are free). It keeps the current build and the one before it. The managed build has a home of its own and does not read or write `~/.hermes`.
 
-On macOS, or when you set `chat.managed: false`, `chat` runs the `hermes` on your `PATH`. It must be the same release as the server's, and `chat` refuses to start on a mismatch. `--allow-version-mismatch` starts it anyway.
+On macOS and Windows, or when you set `chat.managed: false`, `chat` runs the `hermes` on your `PATH`. It must be the same release as the server's, and `chat` refuses to start on a mismatch. `--allow-version-mismatch` starts it anyway.
 
 Two helper flags:
 
