@@ -1,0 +1,668 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 14:54:42 -0600
+Subject: [PATCH] fix(delegate): a message to a waiting subagent wakes it at
+ once
+
+A subagent that ended its turn waiting on a background job (patch 0092)
+has no next tool result, so a steer, an agent_send message or the hub's
+Send sat queued until the job exited, hours later. delegate_task's steer
+said "queued" and the subagent looked dead.
+
+A steer to a waiting subagent now wakes it at once with the text as its
+next input, plus a note that its job is still running (command and elapsed
+time). The watch stays armed and the subagent ends its turn waiting again.
+Messages sent together are read in order in one wake; a message that
+arrives with the job's exit joins that wake. delegate_task and
+subagent.steer answer "delivered" instead of "queued". Stop on a waiting
+subagent wakes its wait loop immediately.
+---
+ apps/shared/src/gateway-contract.generated.ts |   4 +-
+ apps/shared/src/gateway-contract.openrpc.json |   3 +-
+ gateway/session_ancillary.py                  |  15 +-
+ hermes_cli/gateway_tools.py                   |   7 +-
+ .../fixtures/subagent_controls_peer.py        |  19 ++
+ .../gateway/test_session_subagent_controls.py |  18 ++
+ tests/tools/test_delegate_wait_wake.py        | 167 ++++++++++++++++++
+ tools/delegate_tool_registry.py               |  74 +++++---
+ tools/delegate_tool_wait.py                   |  96 ++++++++--
+ .../contracts/billing_delegation_pets.py      |   4 +-
+ tui_gateway/methods_session.py                |  10 +-
+ 11 files changed, 370 insertions(+), 47 deletions(-)
+ create mode 100644 tests/tools/test_delegate_wait_wake.py
+
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index 3a4c6127..e4f63efc 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -339,13 +339,13 @@ export interface SubagentSteerParams {
+   subagent_id: string
+   text: string
+ }
+-/** ``queued`` is not ``delivered``: a child past its final tool batch surfaces ``missed_steer``. */
++/** ``queued`` is not ``delivered``: a child past its final tool batch surfaces ``missed_steer``. ``delivered`` means the child was waiting on its background job (patch 0092) and the text woke it at once. */
+ export interface SubagentSteerResult {
+   status: SteerStatus
+   subagent_id: string
+   text: string
+ }
+-export type SteerStatus = 'queued' | 'rejected'
++export type SteerStatus = 'queued' | 'delivered' | 'rejected'
+ export interface HandoffRequestParams {
+   session_id: string
+   profile?: string | null
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index 41d07647..776aaa0d 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -43653,6 +43653,7 @@
+       "SteerStatus": {
+         "enum": [
+           "queued",
++          "delivered",
+           "rejected"
+         ],
+         "title": "SteerStatus",
+@@ -44699,7 +44700,7 @@
+       },
+       "SubagentSteerResult": {
+         "additionalProperties": false,
+-        "description": "``queued`` is not ``delivered``: a child past its final tool batch surfaces ``missed_steer``.",
++        "description": "``queued`` is not ``delivered``: a child past its final tool batch surfaces ``missed_steer``. ``delivered``\nmeans the child was waiting on its background job (patch 0092) and the text woke it at once.",
+         "properties": {
+           "status": {
+             "$ref": "#/components/schemas/SteerStatus"
+diff --git a/gateway/session_ancillary.py b/gateway/session_ancillary.py
+index a44b9ddd..c48e2147 100644
+--- a/gateway/session_ancillary.py
++++ b/gateway/session_ancillary.py
+@@ -53,14 +53,19 @@ async def subagent_control(connection, ref, params, *, steer):
+         child = next((r['agent'] for r in records if r.get('subagent_id') == sub), None)
+     if not steer:
+         from agent.interrupt_compat import request_hard_interrupt
+-        return {'found': child is not None and bool(request_hard_interrupt(child, f'Interrupted via Desktop ({sub})')),
+-                'subagent_id': sub}
++        found = child is not None and bool(request_hard_interrupt(child, f'Interrupted via Desktop ({sub})'))
++        if found:  # a child waiting on its background job polls: make it look at the stop flag now
++            from tools.delegate_tool_wait import nudge
++            nudge(child)
++        return {'found': found, 'subagent_id': sub}
+     from tools import delegate_tool_registry as registry
+     with registry._active_subagents_lock:  # linearized with the child's final steer drain
+         record = registry._active_subagents.get(sub)
+-        queued = bool(child is not None and record and record.get('agent') is child and record.get('accepting_steer')
+-                      and child.steer(params['text']))
+-    return {'status': 'queued' if queued else 'rejected', 'subagent_id': sub, 'text': params['text']}
++        outcome = (child is not None and record and record.get('agent') is child and record.get('accepting_steer')
++                   and registry.steer_record_locked(record, params['text']))
++    # "delivered": the child was waiting on its background job and the text woke it at once (patch 0105).
++    status = 'delivered' if outcome == 'woke' else 'queued' if outcome else 'rejected'
++    return {'status': status, 'subagent_id': sub, 'text': params['text']}
+ 
+ 
+ async def show_tools(connection, ref, params):
+diff --git a/hermes_cli/gateway_tools.py b/hermes_cli/gateway_tools.py
+index 71e77571..50f3fef3 100644
+--- a/hermes_cli/gateway_tools.py
++++ b/hermes_cli/gateway_tools.py
+@@ -185,14 +185,17 @@ class GatewayProcessView:
+     def subagent_control(self, action, subagent_id, message=None):
+         """Steer (``subagent.steer``) or stop (``subagent.interrupt``) one child of this session, in
+         the shape ``delegate_tool_registry._handle_control_action`` answers: ``note`` or ``error``."""
+-        from tools.delegate_tool_registry import _CONTROL_OUTCOMES
++        from tools.delegate_tool_registry import _CONTROL_OUTCOMES, _WOKE_NOTE
+ 
+         status, note, failure = _CONTROL_OUTCOMES[action]
+         try:
+             if action == "steer":
+                 result = self.connection.call("subagent.steer", session_id=self.session_id,
+                                               subagent_id=subagent_id, text=message, timeout=5) or {}
+-                ok = result.get("status") == "queued"
++                ok = result.get("status") in ("queued", "delivered")
++                if result.get("status") == "delivered":
++                    self._subagents_polled = 0.0
++                    return {"action": action, "subagent_id": subagent_id, "status": "delivered", "note": _WOKE_NOTE}
+             else:
+                 result = self.connection.call("subagent.interrupt", session_id=self.session_id,
+                                               subagent_id=subagent_id, timeout=5) or {}
+diff --git a/tests/gateway/fixtures/subagent_controls_peer.py b/tests/gateway/fixtures/subagent_controls_peer.py
+index cdb34e2e..2c632750 100644
+--- a/tests/gateway/fixtures/subagent_controls_peer.py
++++ b/tests/gateway/fixtures/subagent_controls_peer.py
+@@ -77,6 +77,25 @@ async def probe():
+             _close_subagent_steering('owned', children['owned'])
+             late = await rpc(ws, 'subagent.steer', session_id=sid, subagent_id='owned', text='too late')
+             receipt['late'] = late.get('result', late.get('error'))
++            # A child waiting on its background job (patch 0092) is woken by the text, and Stop rings its wait.
++            from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
++            from tools.delegate_tool_wait import WAKE_ATTR, WAKE_EVENT_ATTR, _wake_event
++            sleeper = children['waiting'] = Agent()
++            sleeper._subagent_id = 'waiting'
++            sleeper._delegate_parent_ref = weakref.ref(parent)
++            sleeper._parent_session_id = sid
++            sleeper._session_db = authority.db
++            _register_child(sleeper, parent, 'waiting-goal', owner_session_id=None,
++                            owner_transport=None, owner_session_record=None)
++            with _active_subagents_lock:
++                _active_subagents['waiting']['status'] = 'waiting'
++            steer = await rpc(ws, 'subagent.steer', session_id=sid, subagent_id='waiting', text='hello?')
++            receipt['wake'] = {'steer': steer.get('result', steer.get('error')), 'messages': vars(sleeper).get(WAKE_ATTR),
++                               'rung': _wake_event(sleeper).is_set(), 'steered': sleeper.steered}
++            _wake_event(sleeper).clear()
++            stop = await rpc(ws, 'subagent.interrupt', session_id=sid, subagent_id='waiting')
++            receipt['wake']['stop'] = stop.get('result', stop.get('error'))
++            receipt['wake']['stop_rung'] = _wake_event(sleeper).is_set()
+         finally:
+             for name, child in children.items():
+                 _unregister_subagent(name, agent=child)
+diff --git a/tests/gateway/test_session_subagent_controls.py b/tests/gateway/test_session_subagent_controls.py
+index a91cdce3..ae7a2f0a 100644
+--- a/tests/gateway/test_session_subagent_controls.py
++++ b/tests/gateway/test_session_subagent_controls.py
+@@ -30,6 +30,24 @@ def test_desktop_subagent_steer_and_stop_reach_only_this_sessions_children(tmp_p
+     assert receipt['late']['status'] == 'rejected', receipt
+ 
+ 
++def test_desktop_steer_wakes_a_subagent_waiting_on_its_job_and_stop_rings_its_wait(tmp_path):
++    """A waiting child has no next tool result: the text must wake it (answer ``delivered``), not sit queued."""
++    root = Path(__file__).resolve().parents[2]
++    home, user = tmp_path / 'state', tmp_path / 'user'
++    home.mkdir()
++    user.mkdir()
++    env = child_env()
++    env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
++               PYTHONPATH=str(root), PYTHONUNBUFFERED='1')
++    result = subprocess.run([sys.executable, str(root / 'tests/gateway/fixtures/subagent_controls_peer.py')],
++                            cwd=root, env=env, capture_output=True, text=True, timeout=90, check=False)
++    assert result.returncode == 0, result.stdout + result.stderr
++    wake = json.loads((home / 'receipt.json').read_text())['wake']
++    assert wake == {'steer': {'status': 'delivered', 'subagent_id': 'waiting', 'text': 'hello?'},
++                    'messages': ['hello?'], 'rung': True, 'steered': [], 'stop': {'found': True, 'subagent_id': 'waiting'},
++                    'stop_rung': True}, wake
++
++
+ def test_desktop_subagent_controls_reach_every_child_the_dock_lists(tmp_path):
+     """A background child whose parent agent was rebuilt or evicted stays in ``subagent.list`` (it
+     follows the conversation's durable owner id). Before: Stop on that row answered ``found: false``
+diff --git a/tests/tools/test_delegate_wait_wake.py b/tests/tools/test_delegate_wait_wake.py
+new file mode 100644
+index 00000000..398aa34c
+--- /dev/null
++++ b/tests/tools/test_delegate_wait_wake.py
+@@ -0,0 +1,167 @@
++"""A message or steer sent to a subagent that waits on its background job wakes it at once (patch 0105).
++
++Same seams as test_delegate_child_wait: real registries, fake child agents.
++"""
++
++import json
++import time
++
++from tests.tools.test_delegate_resume_action import (  # noqa: F401  (fixtures)
++    PARENT, SID, _Parent, _call, _clean_state, _completions, _db, _fake_child, _finished_child, seams,
++)
++from tests.waiting import wait_until
++from tools import delegate_tool_wait as wait
++from tools.delegate_tool_registry import (
++    _active_subagents, _active_subagents_lock, _handle_control_action, interrupt_subagent, steer_outcome,
++    steer_subagent,
++)
++from tools.process_registry import _handle_process, process_registry
++
++
++def _waiting_child(command):
++    """First round hands ``command`` off and ends its turn; every later round only records its input and ends again."""
++    child = _fake_child()
++    child._interrupt_requested = False
++    child.interrupt.side_effect = lambda *a, **k: setattr(child, "_interrupt_requested", True)
++    seen = {}
++
++    def converse(**kwargs):
++        child.conversations.append(kwargs)
++        if len(child.conversations) == 1:
++            session = process_registry.spawn_local(command, task_id=SID, owner_task_id=SID)
++            seen["session"] = session
++            json.loads(_handle_process({"action": "handoff", "session_id": session.id, "data": "job",
++                                        "resume_on_exit": True}, task_id=SID))
++        return {"final_response": "waiting", "completed": True, "interrupted": False, "api_calls": 1, "messages": []}
++
++    child.run_conversation.side_effect = converse
++    child.seen = seen
++    return child
++
++
++def _start(seams, command):
++    db = _db()
++    _finished_child(db)
++    child = _waiting_child(command)
++    seams(child)
++    handle = _call(_Parent(db), subagent_id=SID, message="go")
++    wait_until(lambda: any(r.get("status") == "waiting" for r in _active_subagents.values()), what="waiting")
++    return child, handle["run_id"]
++
++
++def _finish(child):
++    session = child.seen["session"]
++    if not session.exited:
++        process_registry.kill_process(session.id)
++
++
++def test_steer_to_a_waiting_child_wakes_it_once_and_keeps_the_watch(seams):
++    child, run_id = _start(seams, "sleep 60")
++    try:
++        assert steer_outcome(SID, "report where you are") == "woke"
++        wait_until(lambda: len(child.conversations) == 2, timeout=10, what="the wake-up round")
++        message = child.conversations[1]["user_message"]
++        assert "report where you are" in message
++        assert "sleep 60" in message and "still running" in message and "End your turn again" in message
++        # It goes back to waiting on the same job, which was never touched.
++        wait_until(lambda: any(r.get("status") == "waiting" for r in _active_subagents.values()), what="waiting again")
++        assert len(wait.waits_of(child)) == 1 and not child.seen["session"].exited
++        time.sleep(1.2)
++        assert len(child.conversations) == 2  # woken once
++        assert _completions(run_id) == []
++    finally:
++        _finish(child)
++        wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++
++
++def test_two_steers_in_a_row_are_both_delivered_in_order(seams):
++    child, run_id = _start(seams, "sleep 60")
++    try:
++        assert steer_outcome(SID, "first") == "woke"
++        wait_until(lambda: len(child.conversations) == 2, timeout=10, what="round 2")
++        wait_until(lambda: any(r.get("status") == "waiting" for r in _active_subagents.values()), what="waiting again")
++        assert steer_outcome(SID, "second") == "woke"
++        wait_until(lambda: len(child.conversations) == 3, timeout=10, what="round 3")
++        assert "first" in child.conversations[1]["user_message"]
++        assert "second" in child.conversations[2]["user_message"]
++        assert "first" not in child.conversations[2]["user_message"]
++    finally:
++        _finish(child)
++        wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++
++
++def test_steers_sent_together_are_read_in_order_in_one_wake(seams):
++    child, run_id = _start(seams, "sleep 60")
++    try:
++        with _active_subagents_lock:  # the child cannot leave the wait between the two
++            wait.wake(child, "alpha")
++            wait.wake(child, "beta")
++        wait_until(lambda: len(child.conversations) == 2, timeout=10, what="round 2")
++        message = child.conversations[1]["user_message"]
++        assert message.index("alpha") < message.index("beta")
++    finally:
++        _finish(child)
++        wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++
++
++def test_a_message_after_the_job_ended_does_not_double_wake(seams):
++    child, run_id = _start(seams, "sleep 1; echo done")
++    wait_until(lambda: len(child.conversations) == 2, timeout=30, what="the exit wake-up")
++    wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++    assert "exited with code 0" in child.conversations[1]["user_message"]
++    assert steer_outcome(SID, "too late") == ""  # nobody is waiting any more
++    time.sleep(1.0)
++    assert len(child.conversations) == 2
++
++
++def test_a_message_with_the_exit_is_one_wake(seams):
++    child, run_id = _start(seams, "sleep 60")
++    session = child.seen["session"]
++    process_registry.kill_process(session.id)
++    wait_until(lambda: session.exited, what="the job to be gone")
++    with _active_subagents_lock:  # the exit and the message reach the wait together
++        wait.wake(child, "note")
++    wait_until(lambda: len(child.conversations) == 2, timeout=10, what="round 2")
++    wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++    message = child.conversations[1]["user_message"]
++    assert "note" in message and "exited" in message
++    time.sleep(1.0)
++    assert len(child.conversations) == 2
++
++
++def test_delegate_task_steer_says_it_woke_the_waiting_child(seams):
++    child, run_id = _start(seams, "sleep 60")
++    try:
++        out = json.loads(_handle_control_action("steer", SID, "hello?", _Parent(_db())))
++        assert out["status"] == "delivered" and "woke" in out["note"] and "queued" not in out["status"]
++        wait_until(lambda: len(child.conversations) == 2, timeout=10, what="round 2")
++        assert "hello?" in child.conversations[1]["user_message"]
++        assert steer_subagent(SID, "again") is True
++    finally:
++        _finish(child)
++        wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++
++
++def test_an_agent_message_through_the_lifecycle_service_wakes_it_too(seams):
++    from agent.subagent_lifecycle import SubagentLifecycleService
++    child, run_id = _start(seams, "sleep 60")
++    try:
++        assert SubagentLifecycleService.steer_active(SID, "from a peer") is True
++        wait_until(lambda: len(child.conversations) == 2, timeout=10, what="round 2")
++        assert "from a peer" in child.conversations[1]["user_message"]
++    finally:
++        _finish(child)
++        wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++
++
++def test_stop_on_a_waiting_child_stops_it_at_once(seams):
++    child, run_id = _start(seams, "sleep 60")
++    try:
++        started = time.time()
++        assert interrupt_subagent(SID) is True
++        wait_until(lambda: _completions(run_id), timeout=5, what="the stopped child's result")
++        assert time.time() - started < 3.0
++        assert not any(r.get("status") == "waiting" for r in _active_subagents.values())
++        assert len(child.conversations) == 1
++    finally:
++        _finish(child)
+diff --git a/tools/delegate_tool_registry.py b/tools/delegate_tool_registry.py
+index ce75a735..b61bfa74 100644
+--- a/tools/delegate_tool_registry.py
++++ b/tools/delegate_tool_registry.py
+@@ -135,7 +135,11 @@ def interrupt_subagent(subagent_id: str) -> bool:
+     if agent is None:
+         return False
+     try:
+-        return bool(request_hard_interrupt(agent, f"Interrupted via TUI ({subagent_id})"))
++        stopped = bool(request_hard_interrupt(agent, f"Interrupted via TUI ({subagent_id})"))
++        if record.get("status") == "waiting":  # a waiting child polls; make it look at the flag now
++            from tools.delegate_tool_wait import nudge
++            nudge(agent)
++        return stopped
+     except Exception as exc:
+         logger.debug("interrupt_subagent(%s) failed: %s", subagent_id, exc)
+         return False
+@@ -157,24 +161,30 @@ def _subagent_transport_matches(record, transport) -> bool:
+     return bound is transport or (isinstance(bound, FanoutTransport) and bound.contains(transport))
+ 
+ 
+-def steer_subagent(
++def steer_subagent(subagent_id: str, text: str, **authority: Any) -> bool:
++    """``steer_outcome`` as a bool: True iff the text was queued or woke the waiting subagent."""
++    return bool(steer_outcome(subagent_id, text, **authority))
++
++
++def steer_outcome(
+     subagent_id: str, text: str, *, owner_session_id: Optional[str] = None, owner_transport: Any = None,
+     owner_session_record: Any = None,
+-) -> bool:
+-    """Queue steering text into a running subagent without stopping it.
++) -> str:
++    """Queue steering text into a running subagent without stopping it, or wake a subagent that waits on its
++    background job (patch 0092) with the text as its next input: ``"queued"``, ``"woke"``, or ``""`` when refused.
+ 
+     AIAgent.steer() appends the text to the child's last tool result at its next iteration boundary — the current tool
+-    call is never cut. True iff the text was QUEUED while the child still accepted work; False for unknown/closed id,
++    call is never cut. Non-empty iff the text was QUEUED (or woke the child) while it still accepted work; empty for unknown/closed id,
+     ownership mismatch, no live agent, or empty text. ``owner_session_id=None`` keeps the in-process helper contract;
+     gateway callers must pass exact authority. Acceptance and completion are linearized by the registry lock: if
+     acceptance wins but no delivery boundary remains, the text lands in the entry as ``missed_steer``.
+     """
+     if not text or not text.strip():
+-        return False
++        return ""
+     with _active_subagents_lock:
+         record = _active_subagents.get(subagent_id)
+         if not record or not record.get("accepting_steer", False):
+-            return False
++            return ""
+         if owner_session_id is not None and (
+             record.get("owner_session_id") != owner_session_id
+             or owner_transport is None
+@@ -182,19 +192,28 @@ def steer_subagent(
+             or owner_session_record is None
+             or record.get("owner_session_record") is not owner_session_record
+         ):
+-            return False
+-        agent = record.get("agent")
+-        if agent is None:
+-            return False
+-        if record.get("status") == "queued":  # not started: the text joins its goal when it starts
+-            queued_steers = getattr(agent, "_queued_steers", None)
+-            agent._queued_steers = [*(queued_steers if isinstance(queued_steers, list) else []), text]
+-            return True
+-        try:
+-            return bool(agent.steer(text))
+-        except Exception as exc:
+-            logger.debug("steer_subagent(%s) failed: %s", subagent_id, exc)
+-            return False
++            return ""
++        return steer_record_locked(record, text)
++
++
++def steer_record_locked(record: dict[str, Any], text: str) -> str:
++    """Deliver ``text`` to the live agent of ``record`` (the caller holds ``_active_subagents_lock`` and has checked
++    ownership and ``accepting_steer``): ``"queued"``, ``"woke"`` for a child waiting on its job, or ``""``."""
++    agent = record.get("agent")
++    if agent is None:
++        return ""
++    if record.get("status") == "queued":  # not started: the text joins its goal when it starts
++        queued_steers = getattr(agent, "_queued_steers", None)
++        agent._queued_steers = [*(queued_steers if isinstance(queued_steers, list) else []), text]
++        return "queued"
++    if record.get("status") == "waiting":  # no tool result is coming: wake it with the text now
++        from tools.delegate_tool_wait import wake
++        return "woke" if wake(agent, text) else ""
++    try:
++        return "queued" if agent.steer(text) else ""
++    except Exception as exc:
++        logger.debug("steer of %s failed: %s", record.get("subagent_id"), exc)
++        return ""
+ 
+ def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[Any, Any]:
+     """Exact request transport + live session generation, if any — an in-process
+@@ -333,11 +352,24 @@ def _handle_control_action(action: str, subagent_id: Optional[str], message: Opt
+         from tools.delegate_tool_progress import PARENT_REPLY_NOTE, has_parent_messaging
+         if _get_parent_reply_guidance() and has_parent_messaging(record.get("agent")):
+             text = f"{text}\n\n({PARENT_REPLY_NOTE})"
+-    ok = interrupt_subagent(sid) if action == "stop" else steer_subagent(sid, text)
++    woke = False
++    if action == "stop":
++        ok = interrupt_subagent(sid)
++    else:
++        outcome_kind = steer_outcome(sid, text)
++        ok, woke = bool(outcome_kind), outcome_kind == "woke"
++    if ok and woke:
++        return json.dumps({"action": action, "subagent_id": sid, "status": "delivered", "note": _WOKE_NOTE},
++                          ensure_ascii=False)
+     if ok:
+         return json.dumps({"action": action, "subagent_id": sid, "status": status, "note": note}, ensure_ascii=False)
+     return tool_error(failure.format(sid=sid))
+ 
++_WOKE_NOTE = (
++    "Delivered: the subagent was waiting on its background job, and this woke it at once with your text as its next "
++    "input. The job keeps running and stays watched; the subagent ends its turn waiting again when it is done with "
++    "your message.")
++
+ # action -> (success status, success note, failure error template)
+ _CONTROL_OUTCOMES = {
+     "stop": (
+diff --git a/tools/delegate_tool_wait.py b/tools/delegate_tool_wait.py
+index 94a6fa2c..4c4dc664 100644
+--- a/tools/delegate_tool_wait.py
++++ b/tools/delegate_tool_wait.py
+@@ -17,6 +17,9 @@ import time
+ from typing import Any, Callable, Optional
+ 
+ WAITS_ATTR = "_child_waits"
++WAKE_ATTR = "_wake_messages"
++WAKE_EVENT_ATTR = "_wake_event"
++_WAKE_LOCK = threading.Lock()
+ MAX_WAITS = 8
+ _POLL_SECONDS = 0.5
+ _TOUCH_SECONDS = 30.0
+@@ -61,6 +64,45 @@ def restore(child: Any, waits: Any) -> None:
+         vars(child)[WAITS_ATTR] = [dict(w) for w in waits if isinstance(w, dict) and w.get("session_id")]
+ 
+ 
++def _wake_event(child: Any) -> threading.Event:
++    with _WAKE_LOCK:
++        return vars(child).setdefault(WAKE_EVENT_ATTR, threading.Event())
++
++
++def wake(child: Any, text: str) -> bool:
++    """Hand ``text`` to a child that is waiting: it resumes at once with the text as its next input, and its watches
++    stay armed. The caller holds the registry lock and has seen the child's status ``waiting``; ``await_exit`` takes
++    the same lock to leave the wait, so a message is either read by this wait or left for the next tool result."""
++    if not isinstance(text, str) or not text.strip():
++        return False
++    event = _wake_event(child)
++    with _WAKE_LOCK:
++        vars(child).setdefault(WAKE_ATTR, []).append(text.strip())
++    event.set()
++    return True
++
++
++def nudge(child: Any) -> None:
++    """Make a waiting child look at its stop flag now (Stop and Pause do not wait for the next poll)."""
++    event = vars(child).get(WAKE_EVENT_ATTR)
++    if event is not None:
++        event.set()
++
++
++def _elapsed(seconds: float) -> str:
++    minutes = int(max(seconds, 0) // 60)
++    return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
++
++
++def _still_running(waits: list[dict[str, Any]], now: float) -> str:
++    lines = [f"`{str(w.get('command', ''))[:200]}` ({w['session_id']}), running for "
++             f"{_elapsed(now - float(w.get('since') or now))}" for w in waits]
++    if not lines:
++        return ""
++    return ("Your background job is still running and still watched: " + "; ".join(lines)
++            + ". End your turn again to keep waiting.")
++
++
+ def _set_status(subagent_id: Optional[str], status: str, commands: list[str]) -> None:
+     if not subagent_id:
+         return
+@@ -97,13 +139,24 @@ def _describe(entry: dict[str, Any], session: Any, timed_out: bool) -> str:
+ 
+ 
+ def await_exit(child: Any, subagent_id: Optional[str], stopped: Callable[[], bool]) -> Optional[str]:
+-    """Block until a watched process exits or its wait limit passes; the message that resumes the subagent, or None
+-    when the subagent was stopped first. The subagent shows as ``waiting`` meanwhile and its activity clock keeps
+-    ticking so the stale monitor does not take it for wedged."""
++    """Block until a watched process exits, its wait limit passes, or a message is sent to the subagent; the message
++    that resumes the subagent, or None when the subagent was stopped first. A steer or agent message wakes it at once
++    with that text (and a note that its jobs still run); the watches stay armed. The subagent shows as ``waiting``
++    meanwhile and its activity clock keeps ticking so the stale monitor does not take it for wedged."""
++    from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
+     waits = waits_of(child)
++    event = _wake_event(child)
+     _set_status(subagent_id, "waiting", [w["command"][:120] for w in waits])
+     last_touch = 0.0
+-    pause = threading.Event()
++    # A steer that arrived after the last tool result and before the wait began sits in the child's buffer.
++    drain = getattr(child, "_drain_pending_steer", None)
++    if callable(drain):
++        try:
++            early = drain()
++        except Exception:
++            early = None
++        if isinstance(early, str) and early.strip():
++            wake(child, early)
+     try:
+         while True:
+             if stopped():
+@@ -116,14 +169,35 @@ def await_exit(child: Any, subagent_id: Optional[str], stopped: Callable[[], boo
+                     ready.append((entry, session, False))
+                 elif now >= entry.get("deadline", now + 1):
+                     ready.append((entry, session, True))
+-            if ready:
++            # Leave the wait and take the messages in one step under the registry lock, which a steer holds when it
++            # decides the child is still waiting: no message is left behind between the two.
++            with _active_subagents_lock:
++                with _WAKE_LOCK:
++                    messages = list(vars(child).get(WAKE_ATTR) or [])
++                    vars(child)[WAKE_ATTR] = []
++                    event.clear()
++                if ready or messages:
++                    record = _active_subagents.get(subagent_id) if subagent_id else None
++                    if record is not None:
++                        record["status"] = "running"
++                        record["waiting_on"] = None
++            if ready or messages:
+                 for entry, _s, _t in ready:
+                     waits.remove(entry)
+-                lines = [_describe(*item) for item in ready]
+-                return ("A process you were waiting on finished. Continue your task with its result.\n\n"
+-                        + "\n\n".join(lines)
+-                        + (f"\n\nStill watching {len(waits)} other process(es); end your turn again to keep waiting."
+-                           if waits else ""))
++                parts = []
++                if ready:
++                    parts.append("A process you were waiting on finished. Continue your task with its result.\n\n"
++                                 + "\n\n".join(_describe(*item) for item in ready))
++                if messages:
++                    body = "\n\n".join(messages)
++                    parts.append(("Messages sent to you while you were waiting:\n\n" if ready
++                                  else "A message was sent to you while you were waiting on a background job. "
++                                       "Read it and act on it.\n\n") + body)
++                if waits:
++                    parts.append(_still_running(waits, now) if messages and not ready
++                                 else f"Still watching {len(waits)} other process(es); end your turn again to keep "
++                                      "waiting.")
++                return "\n\n".join(parts)
+             if now - last_touch >= _TOUCH_SECONDS:
+                 last_touch = now
+                 touch = getattr(child, "_touch_activity", None)
+@@ -132,6 +206,6 @@ def await_exit(child: Any, subagent_id: Optional[str], stopped: Callable[[], boo
+                         touch("waiting on a background process")
+                     except Exception:
+                         pass
+-            pause.wait(_POLL_SECONDS)
++            event.wait(_POLL_SECONDS)
+     finally:
+         _set_status(subagent_id, "running", [])
+diff --git a/tui_gateway/contracts/billing_delegation_pets.py b/tui_gateway/contracts/billing_delegation_pets.py
+index 48e2358d..0725cd3e 100644
+--- a/tui_gateway/contracts/billing_delegation_pets.py
++++ b/tui_gateway/contracts/billing_delegation_pets.py
+@@ -418,11 +418,13 @@ class SubagentSteerParams(SessionParams):
+ 
+ class SteerStatus(WireEnum):
+     queued = "queued"
++    delivered = "delivered"
+     rejected = "rejected"
+ 
+ 
+ class SubagentSteerResult(Result):
+-    """``queued`` is not ``delivered``: a child past its final tool batch surfaces ``missed_steer``."""
++    """``queued`` is not ``delivered``: a child past its final tool batch surfaces ``missed_steer``. ``delivered``
++    means the child was waiting on its background job (patch 0092) and the text woke it at once."""
+ 
+     status: SteerStatus
+     subagent_id: str
+diff --git a/tui_gateway/methods_session.py b/tui_gateway/methods_session.py
+index 5b1ca479..4f7898f4 100644
+--- a/tui_gateway/methods_session.py
++++ b/tui_gateway/methods_session.py
+@@ -2210,8 +2210,9 @@ def _(rid, params: dict) -> dict:
+ @method("subagent.steer")
+ def _(rid, params: dict) -> dict:
+     """Queue steering text into a live delegated child (the in-flight tool call is never cut). "queued"
+-    is not "delivered": a child past its final tool batch surfaces ``missed_steer`` on the parent entry."""
+-    from tools.delegate_tool import steer_subagent
++    is not "delivered": a child past its final tool batch surfaces ``missed_steer`` on the parent entry. A child
++    waiting on its background job is woken with the text at once: "delivered"."""
++    from tools.delegate_tool_registry import steer_outcome
+     if not (subagent_id := _str_param(params, "subagent_id")):
+         return _err(rid, 4000, "subagent_id required")
+     if not (text := (params.get("text") or "").strip()):
+@@ -2220,9 +2221,10 @@ def _(rid, params: dict) -> dict:
+         return err
+     owner_id = _str_param(params, "session_id")
+     transport, owner = _current_session_steer_authority(owner_id)
+-    queued = transport is not None and owner is not None and steer_subagent(
++    outcome = transport is not None and owner is not None and steer_outcome(
+         subagent_id, text, owner_session_id=owner_id, owner_transport=transport, owner_session_record=owner)
+-    return _ok(rid, {"status": "queued" if queued else "rejected", "subagent_id": subagent_id, "text": text})
++    status = "delivered" if outcome == "woke" else "queued" if outcome else "rejected"
++    return _ok(rid, {"status": status, "subagent_id": subagent_id, "text": text})
+ 
+ 
+ @method("spawn_tree.save")

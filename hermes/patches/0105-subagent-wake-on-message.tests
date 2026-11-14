@@ -1,0 +1,12 @@
+# New: a message to a waiting subagent wakes it (tests/tools/test_delegate_wait_wake.py, tests/gateway/test_session_subagent_controls.py)
+# The wait, the control actions, the steer path and the gateway contract it changes
+tests/tools/test_delegate_child_wait.py
+tests/tools/test_subagent_steer.py
+tests/tools/test_delegate_control_actions.py
+tests/tools/test_delegate_capacity_queue.py
+tests/tools/test_delegation_restart_handoff.py
+tests/tui_gateway/contracts/test_generated.py
+tests/hermes_cli/test_plugin_host.py
+tests/gateway/test_session_subagent_controls.py
+tests/hermes_cli/test_subagent_monitor_gateway.py
+tests/agent/test_subagent_lifecycle_active.py
