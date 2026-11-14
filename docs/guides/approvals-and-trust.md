@@ -10,10 +10,10 @@ An approval is a card in the chat with the command or action and a button for ea
 
 - **The page.** The card sits in the chat. The chat list marks a chat that waits with an amber "Approval" badge (or "Question" for a question), and Alt+Shift+Down jumps to the next chat that needs you. A card that you answered shows "Sent. Waiting for the agent to confirm." until Hermes settles it, and offers its buttons again if Hermes does not confirm in time.
 - **Telegram.** A chat attached to Telegram, or a chat's topic, shows the prompt with buttons: Once, This chat, Always, This source in this chat (when Hermes offers it) and Deny. Afterwards the message says what became of it and where, such as "Allowed always (in the hub)". See [Telegram](../../hub/README.md#telegram).
-- **Your phone.** An approval or question that nobody answers gets a notice (Telegram and Web Push), and one reminder after `notify.remind_after`. See [Notifications](../../hub/README.md#notifications).
+- **Your phone.** An approval or question gets a notice (Telegram and Web Push), and one reminder if it still waits after `notify.remind_after` (default 5 minutes). See [Notifications](../../hub/README.md#notifications).
 - **A paired computer or an editor.** They can answer too. The hub records answers that pass through it. For an answer given in an app that talks to Hermes directly it shows only "Allowed (in another app)" or "Denied (in another app)", without a scope.
 
-An approval waits for as long as Hermes's `approvals.timeout` says, and a question for `agent.clarify_timeout`; a question that runs out returns Hermes's usual timed-out reply to the agent, and Telegram then shows "Expired". A prompt that Hermes cancels or that is answered elsewhere closes the card with a line that says so.
+An approval waits for as long as Hermes's `approvals.timeout` says, and a question for `agent.clarify_timeout`; when a subagent's question runs out, the subagent gets the usual timed-out reply. Telegram then shows "Expired". A prompt that Hermes cancels or that is answered elsewhere closes the card with a line that says so.
 
 ### Subagents ask in the parent chat
 
@@ -24,10 +24,10 @@ A background subagent that needs an approval, or has a question, asks in the cha
 | Choice | What it does |
 |---|---|
 | Allow (Once) | Runs this one action. |
-| Allow in this chat (This chat) | Runs this kind of action in this chat from now on. |
+| Allow in this chat (This chat) | Allows this kind of action in this chat from now on. |
 | Always allow (Always) | Adds the command to the agent's allowlist, for every chat that uses this Hermes profile. It writes only `command_allowlist` in `config.yaml`; the deployment's locked settings stay as they are. |
-| Always allow code from this source in this chat (This source) | Records a [grant](#chat-grants) for the repository this code comes from, kept with this chat. Only smart approval offers it. |
-| Deny | Does not run the action. The agent reads that the user denied it. |
+| Always allow code from this source in this chat (This source) | Records a [grant](#chat-grants) for the repository this code comes from, kept with this chat. Offered when the held command runs a clone from this session. |
+| Deny | Does not run the action. |
 
 Hermes decides which choices a prompt offers; the page and Telegram show exactly those.
 
@@ -37,7 +37,7 @@ Under Settings, Agent, "Before risky commands" has three settings, for everyone 
 
 - **Ask every time** (`approvals.mode: manual`): every command that Hermes treats as risky asks.
 - **Ask only when a command looks risky** (`smart`): smart approval decides, see below.
-- **Never ask** (`off`): nothing asks, for every chat of the profile. Agent messages run without approvals too.
+- **Never ask** (`off`): nothing asks, for every chat of the profile.
 
 Anyone can turn asking off for their own chat only ("Never ask in this chat", what `/yolo` does). The hub does not deliver an agent message to a chat in that mode, because what the message leads to would run with no approval you see. The keys that the install owns (`agent.locked_keys`, which the Helm chart fills from `hermes.config`) show read-only as "Set in the deployment config", `approvals.mode` can be one of them.
 
@@ -63,7 +63,7 @@ Upstream's smart mode looks only at commands that match a pattern list. Talaria'
 
 **The override card.** A soft block, or a review that cannot decide, becomes a one-time card that reads `Smart approval rule "<name>": <reason>` with the usual choices. You approve it or deny it yourself. When nobody can answer, the action is blocked. A held card is reviewed again when you write in the chat, and it settles as allowed once if your new words clear it.
 
-**When the review model fails.** A failure never allows. If the call fails for a provider limit or a transient error (429, a plan limit, a timeout, an overload, a 5xx), the review tries once more on the same route (a `claude-pool` provider moves to its next account) and then runs stage 2 on the stage-1 route. If every route fails the card says "Smart approval could not review this: the review model was unavailable ... Approve or deny it yourself." with the reset time of the pool when it has one. A reply with no verdict is retried once with a stricter format line.
+**When the review model fails.** A failure never allows. If the call fails for a provider limit or a transient error (429, a plan limit, a timeout, an overload, a 5xx), the review tries once more on the same route (a `claude-pool` provider moves to its next account; this is skipped after a timeout and when every account is at its limit) and then, for stage 2, runs it on the stage-1 route (skipped when that route already failed, is the same model, or is self-hosted while stage 2 is hosted). If every route fails the card says "Smart approval could not review this: the review model was unavailable ... Approve or deny it yourself." with the reset time of the pool when it has one. A reply with no verdict is retried once with a stricter format line.
 
 **Subagents.** A subagent is judged against the root chat's user messages, read from the session store at each review, so a message you write after the subagent started counts. A nested subagent reads the same root chat. If the root chat cannot be read, the review is unsure and asks you; a subagent's own transcript is never read as yours.
 
@@ -124,4 +124,4 @@ There is no default. A `..` path, a look-alike host, and a clone made with `-c`,
 
 ## Unattended runs
 
-Hermes does not ask anyone in a scheduled job or a one-shot query. A tool that needs your approval is refused at once in such a run, and the hub sends a failure notice that names the tool and says to approve it once with Always. See [Scheduled jobs and background work](scheduled-jobs.md).
+Nobody can answer an approval in a scheduled job or a one-shot query. The browser tools of the talaria device plugin refuse a step that needs an approval in such a run at once. When that refusal shows in a chat the hub follows, the hub sends a failure notice that names the tool and says the run needs your approval, given once with Always. See [Scheduled jobs and background work](scheduled-jobs.md).

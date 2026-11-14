@@ -8,7 +8,7 @@ This page is for the person who runs the server. It covers adding accounts, sign
 
 Two programs share the work:
 
-- **The agent** (Hermes, with the Claude accounts plugin) owns the accounts. The plugin keeps one Claude login per account, runs the chats on them, reads their usage, and chooses the account for each chat. Its routes are under `/api/plugins/claude-accounts` on the agent's dashboard. The plugin is not part of the hub.
+- **The agent** (Hermes, with the Claude accounts plugin) owns the accounts. The plugin keeps the Claude accounts, runs the chats on them, reads their usage and names the account for each chat. Its routes are under `/api/plugins/claude-accounts` on the agent's dashboard. The plugin is not part of the hub.
 - **The hub** shows the accounts and their usage, signs an account in on request, and tells people when an account lost its login. It stores no Claude login and no Claude token. It reaches the plugin with its own dashboard login to the agent.
 
 The hub does not choose accounts and has no setting that changes the pick. What it shows about the pick is the plugin's answer. A server whose agent has no Claude accounts plugin shows none of this: the Claude cards and the sign-in controls do not appear.
@@ -32,13 +32,13 @@ An account is a **slot** in the agent's settings. Add the slot there, then sign 
    ```
 
    - `id` is lowercase letters, digits and dashes, starting with a letter or digit, at most 32 characters. A bad or repeated id is skipped.
-   - `label` is the name people see. Without one, the id is the name. A label in the form `Claude (name)` shows as just `name` in the pool card.
-   - With the Helm chart, put this under `hermes.config`, which is merged over Talaria's settings on every start. Elsewhere, edit the agent's `config.yaml` in its data folder. Talaria never changes a setting you set.
-2. Each slot keeps its login in its own folder, `<accounts root>/<id>`. The accounts root is `$CLAUDE_ACCOUNTS_ROOT` on the agent, else the `claude` folder inside `$HERMES_HOME`. Keep it on the agent's persistent volume, or a restart signs the accounts out.
-3. Restart the agent so it reads the new slot. The account shows up as **Not signed in**.
+   - `label` is the name people see. Without one, the id is the name. A label in the form `Claude (name)` shows as just `name` in the pool card's "Next room back" line.
+   - With the Helm chart, put this under `hermes.config`, which is merged over Talaria's settings on every start. Elsewhere, edit the agent's `config.yaml` in its data folder.
+2. Each slot keeps its login in its own folder, `<accounts root>/<id>`. The Claude Code usage counter (see the last section) looks for these folders in `$CLAUDE_ACCOUNTS_ROOT`, else in the `claude` folder inside `$HERMES_HOME`. Keep the folders on the agent's persistent volume.
+3. A slot that has no login shows as **Not signed in**.
 4. Sign it in (below).
 
-To bill an account's **API credits** instead of its subscription, give the agent that account's API key. The agent then offers a provider named `claude-api-<slot>`. Its models show in the model list under "Claude API credits", such as "Opus 5.5 (main credits)". These providers are separate from the subscription pool and are never part of its totals.
+An account's **API credits** are billed through a provider named `claude-api-<slot>`. Its models show in the model list under "Claude API credits", such as "Opus 5.5 (main credits)". These providers are separate from the subscription pool and are never part of its totals.
 
 ## Choose who signs accounts in
 
@@ -65,15 +65,15 @@ Only a Claude admin of the backend sees the buttons. On **Usage**, under **Subsc
 
 Things to know:
 
-- A sign-in that is not finished stops after 10 minutes. Start again.
+- A sign-in that is not finished expires. The dialog then says "The sign-in took too long and was stopped." Start again.
 - Sending the code can take up to 90 seconds.
 - The code goes straight to the agent. The hub does not log, store or send it back, and the box is cleared when you send it. The sign-in link goes only to the admin who asked.
-- A code with a space in it, or one over 4096 characters, is refused before it reaches the agent.
+- The hub trims spaces around the code. A code with a space inside it, a control character, or more than 4096 bytes is refused before it reaches the agent.
 - If a sign-in is already running for the slot, the dialog continues it instead of starting a second one.
 
 ### Sign in from Telegram
 
-When a chat's account loses its login, each Claude admin of that backend gets a "Claude sign-ins" notice. On Telegram the bot starts the sign-in for that admin and sends the link, in the General topic of their linked group or else in their private chat. Reply to that message with the code. Only that admin's reply counts. The bot deletes the message with the code when it may, and edits the sign-in message to show the result. Web Push notices never carry the link; they say to open the hub.
+When a chat's account loses its login, each Claude admin of that backend gets the notice "A Claude account needs a sign-in" (the **Claude sign-ins** kind in the notification settings, which only Claude admins see). On Telegram the bot starts the sign-in for that admin and sends the link, in their private chat or in the General topic of their linked group. Reply to that message with the code. Only that admin's reply counts. The bot deletes the message with the code when it may, and edits the sign-in message to show the result. Web Push notices never carry the link; they say to open the hub.
 
 ## How the pool picks an account
 
@@ -89,7 +89,7 @@ To read the pick from a script, call `GET /api/claude/<backend>/pool?session=<ch
 
 ### Rotation
 
-How accounts take turns is the plugin's rule, so the detail depends on the plugin's release. From what the hub shows: a chat keeps its account; new chats go to the account whose weekly window resets soonest among those with room; when a full account's week resets, it has room again. The hub never moves a running chat to another account.
+How accounts take turns is the plugin's rule, and the plugin is not part of this repository. The hub shows the line "the soonest reset with room" for a chat that is not pinned yet. The hub never moves a running chat to another account.
 
 ## Read the usage
 
@@ -97,7 +97,7 @@ How accounts take turns is the plugin's rule, so the detail depends on the plugi
 
 - **A Claude card on top**: the pool as one number. "Week: 42% used" is the average of the weekly share used over the signed-in accounts whose usage could be read, each capped at 100%. "About 1.4 accounts of room left" adds up the room left on each. "Next room back" names the full account whose week resets first, and when. If some accounts could not be read, it says so, such as "2 of 3 accounts read".
 - **Accounts behind "Show accounts"**: each with its name, email, plan, whether it is signed in, and every window it reports, with the share used and the reset time. Some plans have no 5-hour window; it is left out, not shown empty.
-- **API credits**, for an account that has an API key: an estimate such as "about $73 of $100 left, resets Dec 1". It is the plan's monthly credit less what the agent spent through the key at list prices. Use of the key outside Talaria is not counted, and calls with no known price are left out.
+- **API credits**, for an account that has an API key: an estimate such as "about $73 of $100 left, resets Dec 1". It is the plan's monthly credit less what the agent spent through the key since the month started. Use of the key outside Talaria is not counted, and calls with no known price are left out.
 - **ChatGPT**, when the agent also runs a ChatGPT plan, listed after Claude with no sign-in button. Sign in to ChatGPT in the agent.
 
 Under a chat's title, a chat on the pooled Claude provider shows "Claude" and the pool's week meter. A chat on one account shows that account's name with its 5-hour and weekly meters, such as "5h 12% (resets 3:40 PM CST)". A meter turns to a warning at 80%.
@@ -123,9 +123,9 @@ Under a chat's title, a chat on the pooled Claude provider shows "Claude" and th
 
 | You see | Why | What to do |
 |---|---|---|
-| No Claude cards on Usage and no sign-in buttons | The agent has no Claude accounts plugin, or no slots. The hub remembers a missing plugin for 5 minutes | Add the plugin and at least one slot, restart the agent, and reload after a few minutes |
-| "This agent server has no Claude accounts plugin" | The agent answered 404 or 405 to the plugin's route | Check that the plugin is installed and enabled on that backend, and that the hub points at the right backend |
-| "Could not reach the Claude accounts plugin on the agent server" | The agent is restarting, or the hub's dashboard login to it failed | Wait for the agent, then look for "Claude request failed" in the hub's log |
+| No Claude cards on Usage and no sign-in buttons | The agent has no Claude accounts plugin. The hub remembers a missing plugin for 5 minutes. With the plugin but no slots, the section says "No accounts." | Add the plugin and at least one slot, and reload after 5 minutes |
+| "this agent server has no Claude accounts plugin" | The agent answered 404 or 405 to the plugin's route | Check that the plugin is installed and enabled on that backend, and that the hub points at the right backend |
+| "Could not reach the Claude accounts plugin on the agent server" | The hub could not reach the plugin, or its answer was not JSON | Wait for the agent, then look for "Claude request failed" in the hub's log |
 | An account says **Not signed in** | First use, or the login expired or was revoked | A Claude admin clicks **Sign in** |
 | A chat shows a note naming an account, with **Sign in** | A turn failed with a logged-out error and the plugin confirmed the account is signed out | A Claude admin signs it in. The hub handles one failure per chat and account a minute, and notifies admins at most once per account in 30 minutes |
 | "No Claude account can run this chat now." | The plugin has no account to give the chat | Sign accounts in, wait for "Next room back", or pick another model |
@@ -140,7 +140,7 @@ Under a chat's title, a chat on the pooled Claude provider shows "Claude" and th
 
 ## Claude Code token counts
 
-This is a different feature with a similar name. Computers that run `talaria run`, and the agent's editor bridge (`acp-host`), can count the tokens Claude Code used and send the count to the hub, for the Claude Code panel on the Usage page. On the agent they read the per-account folders under the same accounts root (setting `usage.hermes-accounts-dir`). They read transcripts, never a login. See [Computer settings](../reference/configuration.md) and the [wire protocol](../protocol.md).
+This is a different feature with a similar name. Computers that run `talaria run`, and the agent's editor bridge (`acp-host`), can count the tokens Claude Code used and send the count to the hub, for the Claude Code panel on the Usage page. On the agent they read the per-account folders under the same accounts root (setting `usage.hermes-accounts-dir`). They read transcripts and the signed-in account's email, never a login token or what was said. See [Computer settings](../reference/configuration.md) and the [wire protocol](../protocol.md).
 
 ## See also
 
