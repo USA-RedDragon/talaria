@@ -1,4 +1,4 @@
-assertion/assertion.go	106	88
+assertion/assertion.go	106	89
 cmd/acp.go	29	1
 cmd/acphost.go	57	23
 cmd/autoupdate.go	75	58
@@ -61,7 +61,7 @@ internal/claudeusage/timeline.go	96	86
 internal/config/config.go	86	76
 internal/config/load.go	18	17
 internal/daemonstate/daemonstate.go	17	13
-internal/device/device.go	710	627
+internal/device/device.go	710	628
 internal/device/mcp.go	69	60
 internal/device/signal_unix.go	1	1
 internal/diskfree/diskfree_linux.go	7	5
