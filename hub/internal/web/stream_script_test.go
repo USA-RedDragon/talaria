@@ -42,7 +42,7 @@ func TestSendScript(t *testing.T) {
 // under, and keeps the reader's place.
 func TestReconcileScript(t *testing.T) {
 	t.Parallel()
-	runStreamScript(t, "reconcile.js", "reconcile.js")
+	runStreamScript(t, "reconcile.js", "origin.js", "reconcile.js")
 }
 
 // Every pending approval gets a card with its own buttons; an answer reads

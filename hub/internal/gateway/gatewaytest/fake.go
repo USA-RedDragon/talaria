@@ -101,6 +101,9 @@ type Session struct {
 	// inputs prompt.steer_queued handed to it.
 	turn, turnInput string
 	transfers       []string
+	// SteerRow, when set, is the row a finished turn stores for the
+	// steers it read (nil stores none); unset, it is Hermes's steer row.
+	SteerRow func(texts []string) map[string]any
 	// Revision is the runtime revision session.mutate is fenced on. Turns
 	// and settings changes move it, as in Hermes.
 	Revision int64

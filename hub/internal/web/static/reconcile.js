@@ -14,6 +14,22 @@ window.HubReconcile = (() => {
   // replica's, may not know it.
   const keepFor = 10 * 60 * 1000;
 
+  // steerText is the user's words of a row Hermes stored for a steer, or
+  // null for another row. A steer has no submission ID: its row is the
+  // steer marker around the text (HubOrigin.unwrapSteer), and the steers
+  // one tool batch read share one row, joined by newlines.
+  function steerText(m) {
+    const o = window.HubOrigin;
+    if (!o) return null;
+    const r = o.row(m);
+    const inner = o.unwrapSteer(r.text);
+    if (inner !== r.text) return String(inner);
+    return r.display_kind === "steer" ? r.text.trim() : null;
+  }
+
+  // inSteer tells whether text is one or more whole lines of a steer row.
+  const inSteer = (row, text) => row === text || row.startsWith(text + "\n") || row.endsWith("\n" + text) || row.includes("\n" + text + "\n");
+
   // carry tells what to do with each message this page has sent and the
   // snapshot does not account for: "done" when the snapshot's transcript
   // has it (it started), "adopt" with the index of its entry in the
@@ -25,9 +41,20 @@ window.HubReconcile = (() => {
   function carry(local, snap, now) {
     const started = new Set();
     const typed = new Set();
+    const steers = [];
     const msgs = snap.messages || [];
     for (const m of msgs) if (m && m.submission_id) started.add(m.submission_id);
-    for (const m of msgs.slice(-60)) if (m && m.role === "user" && typeof m.text === "string") typed.add(m.text.trim());
+    for (const m of msgs.slice(-60)) {
+      if (!m || m.role !== "user") continue;
+      if (typeof m.text === "string") typed.add(m.text.trim());
+      const s = steerText(m);
+      if (s !== null) steers.push(s);
+    }
+    // stored tells whether the transcript has a message the hub accepted.
+    const stored = (text) => {
+      const t = String(text || "").trim();
+      return typed.has(t) || (t !== "" && steers.some((s) => inSteer(s, t)));
+    };
     const pending = snap.pending || [];
     const at = now === undefined ? Date.now() : now;
     const out = [];
@@ -35,7 +62,7 @@ window.HubReconcile = (() => {
       const lately = !!p.id && !!p.at && at - p.at < keepFor;
       if (!p.inflight && !lately) continue;
       const i = pending.findIndex((x) => idOf(x) === p.id || x.id === p.id);
-      if (started.has(p.id) || (!p.inflight && typed.has(String(p.text || "").trim()))) out.push({ p, act: "done" });
+      if (started.has(p.id) || (!p.inflight && stored(p.text))) out.push({ p, act: "done" });
       else if (i >= 0) out.push({ p, act: "adopt", at: i });
       else out.push({ p, act: "again" });
     }

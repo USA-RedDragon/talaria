@@ -3,6 +3,7 @@ package gatewaytest
 import (
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway"
 )
@@ -29,6 +30,13 @@ func receipt(sessionID, admission string, sequence int64, status string, generat
 	return map[string]any{kAdmissionID: admission, "ref": map[string]any{kSessionID: sessionID}, "sequence": sequence,
 		kStatus: status, kOutcome: nil, "authority_epoch": 1, kExecGen: generation}
 }
+
+// SteerOpen and SteerClose are the marker Hermes wraps a steer's row in
+// (agent/prompt_builder.py STEER_MARKER_OPEN and STEER_MARKER_CLOSE).
+const (
+	SteerOpen  = "[OUT-OF-BAND USER MESSAGE \u2014 a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]"
+	SteerClose = "[/OUT-OF-BAND USER MESSAGE]"
+)
 
 // SteerEnded, as a SteerScript step, ends the running turn before the
 // steer reaches it: the admission runs as its own turn and the steer is
@@ -167,6 +175,24 @@ func (g *Gateway) hSteerQueued(_ *conn, p map[string]any) (any, string, func()) 
 func (g *Gateway) settleTransfersLocked(s *Session, outcome string) {
 	if len(s.transfers) == 0 {
 		return
+	}
+	if outcome == "steered" {
+		// The turn read its steers as one user row: their texts joined by
+		// newlines in the steer marker (agent/prompt_builder.py
+		// steer_user_row), with no submission ID of its own.
+		var texts []string
+		for _, id := range s.transfers {
+			if i := slices.IndexFunc(s.Pending, func(a gateway.PendingAdmission) bool { return a.AdmissionID == id }); i >= 0 {
+				texts = append(texts, strings.TrimSpace(s.Pending[i].Text))
+			}
+		}
+		row := map[string]any{kRole: roleUser, "display_kind": "steer", kText: SteerOpen + "\n" + strings.Join(texts, "\n") + "\n" + SteerClose}
+		if s.SteerRow != nil {
+			row = s.SteerRow(texts)
+		}
+		if len(texts) > 0 && row != nil {
+			s.Messages = append(s.Messages, row)
+		}
 	}
 	for _, id := range s.transfers {
 		s.Pending = slices.DeleteFunc(s.Pending, func(a gateway.PendingAdmission) bool { return a.AdmissionID == id })

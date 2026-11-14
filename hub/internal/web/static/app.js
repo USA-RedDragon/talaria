@@ -1591,13 +1591,16 @@
     }
 
     // adopt gives x, the pending message that the snapshot shows, what the
-    // page still holds of the one it is sending: its key, files and state.
+    // page still holds of the one it is sending: its key, files and state,
+    // and when it was sent, so that drawing it again does not restart the
+    // time a snapshot that does not show it keeps it (HubReconcile.carry).
     adopt(x, c) {
       if (!c || !x) return;
       x.cid = c.cid;
       x.files = c.files;
       x.atts = c.atts;
       x.inflight = c.inflight;
+      if (c.at) x.at = c.at;
     }
 
     snapshot(s) {
@@ -3478,7 +3481,9 @@
     let first = true;
     // fp names the transcript this page shows, while nothing has changed it
     // since the snapshot: a reconnect to a replica that cannot resume from
-    // the event id then gets "snapshot.same" instead of the whole chat.
+    // the event id then gets "snapshot.same" instead of the whole chat. A
+    // chat that still shows messages of its own as sending asks for the
+    // whole chat: the hub's word decides which of them still are.
     let fp = (kept && kept.fp) || "";
     const follow = window.HubStream(view.base + "/events", {
       message: (m) => {
@@ -3511,7 +3516,7 @@
         try { await api("GET", "/api/me"); } catch (_) { return; }
         banner("Could not open this chat. Reconnecting.", true, "stream");
       },
-    }, { query: () => (fp ? "fp=" + encodeURIComponent(fp) : "") });
+    }, { query: () => (fp && !chat.pending.length ? "fp=" + encodeURIComponent(fp) : "") });
     stream = follow;
     // A chat kept from before shows at once, as the reader left it.
     if (kept) {

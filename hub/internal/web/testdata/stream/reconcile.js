@@ -2,7 +2,7 @@
 const assert = require("assert");
 const { load } = require("./harness.js");
 
-const w = load([process.argv[2]]);
+const w = load(process.argv.slice(2));
 const R = w.win.HubReconcile;
 
 const id = (n) => "hub:0000000" + n + "-aaaa-4bbb-8ccc-dddddddddddd";
@@ -47,6 +47,30 @@ const snap2 = {
 };
 const got2 = JSON.parse(JSON.stringify(R.carry(accepted, snap2, now).map((c) => [c.p.text, c.act])));
 assert.deepStrictEqual(got2, [["steered in", "again"], ["stored by now", "done"], ["listed", "adopt"]]);
+
+// A steer is stored as a row of its own: no submission ID, the text in the
+// steer marker, and the steers one tool batch read joined by newlines. It
+// is in the transcript, so its bubble is done, not carried as sending.
+const open = "[OUT-OF-BAND USER MESSAGE \u2014 a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]";
+const close = "[/OUT-OF-BAND USER MESSAGE]";
+const steered = [
+  { id: id(1), inflight: false, text: "first steer", at: now - 5000 },
+  { id: id(2), inflight: false, text: "> quoted line\nsecond steer\n", at: now - 5000 },
+  { id: id(3), inflight: false, text: "alone", at: now - 5000 },
+  { id: id(4), inflight: false, text: "steer", at: now - 5000 },
+  { id: id(5), inflight: true, text: "alone", at: now - 5000 },
+];
+const snap3 = {
+  messages: [
+    { role: "user", text: "go" },
+    { role: "user", display_kind: "steer", text: open + "\nfirst steer\n> quoted line\nsecond steer\n" + close },
+    { role: "assistant", text: "ok" },
+    { role: "user", display_kind: "steer", text: "\n\n" + open + "\nalone\n" + close },
+  ],
+};
+const got3 = JSON.parse(JSON.stringify(R.carry(steered, snap3, now).map((c) => [c.p.text, c.act])));
+// "steer" is only a part of a line, and a message still in flight is not taken for one stored.
+assert.deepStrictEqual(got3, [["first steer", "done"], ["> quoted line\nsecond steer\n", "done"], ["alone", "done"], ["steer", "again"], ["alone", "again"]]);
 
 // A pending input is known by the ID the page sent it under, else by the hub's.
 assert.strictEqual(R.idOf({ id: "adm-2", submission_id: id(2) }), id(2));
