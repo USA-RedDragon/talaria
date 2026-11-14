@@ -16,6 +16,7 @@ This page lists the pages of the docs site in reading order, by section; the sit
   - [Approvals and trust](guides/approvals-and-trust.md)
   - [Subagents, agent messages and goals](guides/subagents-and-lanes.md)
   - [Scheduled jobs and background work](guides/scheduled-jobs.md)
+  - [Use Talaria on a phone](guides/pair-a-phone.md)
   - [Add a computer](start/add-a-computer.md)
   - [Chat from a terminal](guides/terminal-chat.md)
   - [Let the agent use Firefox](guides/browser-extension.md)
@@ -23,6 +24,7 @@ This page lists the pages of the docs site in reading order, by section; the sit
   - [Telegram](deploy/telegram.md)
   - [Notifications](deploy/notifications.md)
   - [Memory](deploy/memory.md)
+  - [Claude accounts](guides/claude-accounts.md)
   - [Update, move or remove a computer](guides/update-and-remove.md)
 - Admin
   - [Set up logins](deploy/auth.md)
