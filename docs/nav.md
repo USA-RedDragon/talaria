@@ -13,6 +13,9 @@ This page lists the pages of the docs site in reading order, by section; the sit
   - [Choose a model and provider](deploy/models.md)
 - Use
   - [Chat, approvals and pages](../hub/README.md)
+  - [Approvals and trust](guides/approvals-and-trust.md)
+  - [Subagents, agent messages and goals](guides/subagents-and-lanes.md)
+  - [Scheduled jobs and background work](guides/scheduled-jobs.md)
   - [Add a computer](start/add-a-computer.md)
   - [Chat from a terminal](guides/terminal-chat.md)
   - [Let the agent use Firefox](guides/browser-extension.md)
