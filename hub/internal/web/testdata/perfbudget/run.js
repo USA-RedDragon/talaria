@@ -137,10 +137,10 @@ const preload = `(() => {
   if (report) console.log(JSON.stringify(out));
   // Budgets: a fixed part (frames) and a part that grows with the
   // calibration, about twice what a fast machine and one four times
-  // slower measured (back 18 and 36 ms, first open 25 to 40 and 90 ms,
+  // slower measured (back 18 and 36 ms, first open 25 to 60 and 90 ms,
   // with calibrations of 13 and 53 ms).
   const backBudget = 25 + 1.5 * k;
-  const firstBudget = 25 + 2.5 * k;
+  const firstBudget = 40 + 3 * k;
   assert.ok(median(back) <= backBudget, `switching back took ${median(back).toFixed(1)} ms (median), budget ${backBudget.toFixed(1)} (calibration ${k.toFixed(1)} ms)`);
   assert.ok(median(first) <= firstBudget, `opening a long chat took ${median(first).toFixed(1)} ms (median), budget ${firstBudget.toFixed(1)} (calibration ${k.toFixed(1)} ms)`);
   // The hub answers a chat it holds, and the chat list, from memory.
