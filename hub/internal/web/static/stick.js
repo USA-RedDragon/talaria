@@ -96,11 +96,11 @@ window.HubStick = (log, o) => {
     if (Math.abs(top - r.top) < 1) return;
     const t = now();
     if (t < until) until = Math.max(until, t + 300);
-    // A log at its end whose content changed size since the scroll came,
+    // A log at its end thrown to its very top while its content changed,
     // with no wheel, touch, key or press: the page redrew it (a snapshot
     // empties the log and fills it again, which drops scrollTop to 0), not
-    // the reader leaving the end.
-    else if (layoutMoved(r) || (pinned && t < fresh) || (pinned && !held() && log.scrollHeight !== r.h)) { keep("undo"); sync(); return; }
+    // the reader leaving the end, at any time after the open.
+    else if (layoutMoved(r) || (pinned && t < fresh) || (pinned && !held() && top < 1 && log.scrollHeight !== r.h)) { keep("undo"); sync(); return; }
     const up = top < r.top;
     note();
     // Only a real distance from the end leaves it: a tap's jitter, a
