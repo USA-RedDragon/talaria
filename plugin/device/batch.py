@@ -75,6 +75,9 @@ def parse_steps(raw: Any) -> list[dict]:
         action = ALIASES.get(action, action)
         if action not in ACTIONS:
             raise ValueError(f"step {i}: action must be one of {', '.join(ACTIONS)}, not {str(item.get('action'))[:30]!r}")
+        if "label" in item and "name" not in item and "label" not in STEP_KEYS[action] and "name" in STEP_KEYS[action]:
+            item = {**item, "name": item["label"]}  # the element's label is its name
+            del item["label"]
         extra = sorted(k for k in item if k != "action" and k not in STEP_KEYS[action])
         if extra:
             raise ValueError(f"step {i} ({action}): {', '.join(extra)} does not apply to {action}; it takes "
@@ -103,7 +106,8 @@ def _check_step(i: int, step: dict) -> None:
     if "role" in step:
         step["role"] = str(step["role"]).strip().lower()
     if action in ("click", "hover", "type", "select") and not (step.get("ref") or step.get("name")):
-        raise ValueError(f"{where}: give ref (from the last snapshot) or name (the element's label on the page)")
+        alone = f"; a {step['role']} alone does not say which one, so add its name" if step.get("role") else ""
+        raise ValueError(f"{where}: give ref (from the last snapshot) or name (the element's label on the page){alone}")
     if action == "type":
         if "text" not in step:
             step["text"] = ""

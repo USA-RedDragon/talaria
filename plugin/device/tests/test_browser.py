@@ -2014,6 +2014,16 @@ class BatchSteps(unittest.TestCase):
         self.assertEqual(steps[3]["value"], "Red")
         self.assertEqual(steps[2]["seconds"], 10.0)
 
+    def test_label_is_the_name(self):
+        step = batch.parse_steps([{"action": "click", "label": "Save", "role": "button"}])[0]
+        self.assertEqual((step["name"], step["role"], "label" in step), ("Save", "button", False))
+
+    def test_role_alone_says_to_add_the_name(self):
+        with self.assertRaises(ValueError) as cm:
+            batch.parse_steps([{"action": "click", "ref": "e1"}, {"action": "click", "role": "button"}])
+        self.assertIn("step 2 (click): give ref", str(cm.exception))
+        self.assertIn("a button alone does not say which one, so add its name", str(cm.exception))
+
     def test_parse_json_string(self):
         self.assertEqual(batch.parse_steps('[{"action": "click", "ref": "e2"}]')[0]["ref"], "e2")
 
