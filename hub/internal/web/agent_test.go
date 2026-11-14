@@ -124,11 +124,11 @@ func TestAgentAdminRoutes(t *testing.T) {
 	if code != http.StatusOK || st[keyApprovals] != "smart" || st["soul"] != "You are helpful." || st["live"] != true {
 		t.Fatalf("settings = %d %s", code, text)
 	}
-	code, _, text = call(t, c, http.MethodPut, base+pSettings, m.CSRF, map[string]any{keyApprovals: "manual", keyTZ: "Europe/Berlin"})
+	code, _, text = call(t, c, http.MethodPut, base+pSettings, m.CSRF, map[string]any{keyApprovals: kManual, keyTZ: "Europe/Berlin"})
 	if code != http.StatusOK {
 		t.Fatalf("save = %d %s", code, text)
 	}
-	if a, _ := e.pc.Config["approvals"].(map[string]any); a["mode"] != "manual" || e.pc.Config[keyTZ] != "Europe/Berlin" {
+	if a, _ := e.pc.Config["approvals"].(map[string]any); a["mode"] != kManual || e.pc.Config[keyTZ] != "Europe/Berlin" {
 		t.Fatalf("agent config = %v", e.pc.Config)
 	}
 	// Only the keys sent: nothing else reached the agent's config.

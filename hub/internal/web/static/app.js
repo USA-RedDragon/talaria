@@ -780,7 +780,7 @@
     log.addEventListener("toggle", soon, true);
     window.addEventListener("resize", soon);
     if (window.visualViewport) window.visualViewport.addEventListener("resize", soon);
-    jump.addEventListener("click", () => { s.pin(); });
+    jump.addEventListener("click", () => { vreport.note("pill"); s.pin(); });
     // For tests that drive the page: true once the log has taken in its size.
     window.HubLogSettled = s.settled;
     return s;
@@ -799,7 +799,41 @@
   // the reader did nothing in it, at any time, at most once every 30 s. A
   // reader who lands on older messages after a switch or a restart should
   // never see that.
-  const vreport = window.HubViewReport({ view: () => view, stick, log: $("log"), csrf: () => csrf });
+  const vreport = window.HubViewReport({ view: () => view, stick, log: $("log"), csrf: () => csrf, probe: stickProbe });
+  // Alt+J, or a long press on the chat's title, sends the hub the log's
+  // last minute of moves at once, for a jump the page did not catch. Only
+  // sizes, places and the page's own call sites; never the chat's text.
+  const captureView = () => vreport.capture((ok) => {
+    if (ok) toast("Sent what just happened. Thanks.", { ok: true });
+    else toast("Could not send it.", { bad: true });
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === "KeyJ" || (e.key || "").toLowerCase() === "j")) {
+      e.preventDefault();
+      captureView();
+    }
+  }, true);
+  {
+    const title = document.querySelector(".bar .title");
+    let press = 0;
+    let at = null;
+    let fired = false;
+    const stop = () => { clearTimeout(press); press = 0; };
+    title.addEventListener("touchstart", (e) => {
+      stop();
+      fired = false;
+      const p = e.touches && e.touches[0];
+      at = p ? [p.clientX, p.clientY] : null;
+      press = setTimeout(() => { press = 0; fired = true; if (navigator.vibrate) navigator.vibrate(30); captureView(); }, 800);
+    }, { passive: true });
+    title.addEventListener("touchmove", (e) => {
+      const p = e.touches && e.touches[0];
+      if (!p || !at || Math.abs(p.clientX - at[0]) > 10 || Math.abs(p.clientY - at[1]) > 10) stop();
+    }, { passive: true });
+    title.addEventListener("touchend", stop, { passive: true });
+    title.addEventListener("touchcancel", stop, { passive: true });
+    title.addEventListener("contextmenu", (e) => { if (fired || press) e.preventDefault(); });
+  }
 
   // A snapshot renders its newest rows first: at least firstRows rows and
   // firstChars characters, in whole turns. The older rows follow in the
@@ -903,6 +937,7 @@
 
     // unpark shows a parked chat again, at its newest message.
     unpark() {
+      vreport.note("unpark");
       const p = this.parkedView;
       this.log.replaceChildren(this.parked);
       this.parked = null;
@@ -1606,6 +1641,7 @@
     snapshot(s) {
       if (!$("banner").classList.contains("bad")) clearBanner("away");
       const kept = window.HubReconcile.anchor(this.log, stick.pinned(), rowPlace(this.log));
+      vreport.note(kept ? "snap:kept" : "snap");
       const carried = window.HubReconcile.carry(this.pending, s);
       this.keep = new Set(carried.filter((c) => c.act === "again").flatMap((c) => (c.p.atts || []).map((a) => a.url)));
       this.reset();
@@ -1687,8 +1723,11 @@
     // message a search opened, or where a reload left them; else at the end.
     place(kept) {
       if (kept !== null || window.HubRestore.state()) this.showOlder(() => true);
-      if (window.HubReconcile.restore(this.log, kept, (p) => rowTop(this.log, p.row))) stick.look();
-      else this.bottom();
+      if (window.HubReconcile.restore(this.log, kept, (p) => rowTop(this.log, p.row))) {
+        // Back to where the reader was before the snapshot.
+        vreport.excuse(1500, "restore");
+        stick.look();
+      } else this.bottom();
       this.jumpTo();
       this.topUp();
       if (view === this) restoreView(this);
@@ -1719,6 +1758,7 @@
     // the end keeps the same messages in view.
     showOlder(more) {
       if (!this.older.length) return;
+      vreport.note(more ? "older+" : "older");
       const frag = document.createDocumentFragment();
       const turn = this.turn;
       this.filling = true;
@@ -1797,7 +1837,7 @@
       }
       n.scrollIntoView({ block: "center" });
       // The search put the reader there: not a view that went astray.
-      vreport.excuse(3000);
+      vreport.excuse(3000, "search");
       stick.look();
       n.classList.add("flash");
       setTimeout(() => n.classList.remove("flash"), 2500);
@@ -4168,7 +4208,7 @@
         if (!n) chat.log.scrollTop = st.log.top;
         else chat.log.scrollTop += n.getBoundingClientRect().top - chat.log.getBoundingClientRect().top - a.off;
         // The reader's place from before the reload, not a view astray.
-        vreport.excuse(3000);
+        vreport.excuse(3000, "restore");
         stick.release();
       };
       place();

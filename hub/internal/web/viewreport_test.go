@@ -25,7 +25,7 @@ func TestViewReport(t *testing.T) {
 	if resp, _ := post(t, c, e.url+"/api/view-report", "", "", report); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("report without CSRF = %d", resp.StatusCode)
 	}
-	big := map[string]any{"trail": strings.Repeat("x", 20<<10)}
+	big := map[string]any{"trail": strings.Repeat("x", 200<<10)}
 	if resp, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", big); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("oversized report = %d", resp.StatusCode)
 	}
@@ -53,7 +53,18 @@ func TestViewReportBeaconAndLoaded(t *testing.T) {
 	if resp, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", map[string]any{kKind: "loaded", "version": "v9"}); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("loaded = %d", resp.StatusCode)
 	}
-	var left, loaded int
+	// A jump report carries a minute of the log's moves: tens of KiB.
+	ring := make([][]any, 0, 300)
+	for i := range 300 {
+		ring = append(ring, []any{i * 200, "s", 1000 + i, 90000, 900, 0, 0, map[string]any{"w": []string{"set@stick.js:65<sync@stick.js:85=1234"}}})
+	}
+	if resp, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", map[string]any{kKind: "jump", "why": "jump", "ring": ring}); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("jump = %d", resp.StatusCode)
+	}
+	if resp, _ := post(t, c, e.url+"/api/view-report", m.CSRF, "", map[string]any{kKind: kManual, "ring": ring}); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("manual = %d", resp.StatusCode)
+	}
+	var left, loaded, jumped, manual int
 	for _, l := range sink.lines() {
 		rep, _ := l["report"].(string)
 		if strings.Contains(rep, m.CSRF) || strings.Contains(rep, "csrf") {
@@ -64,11 +75,19 @@ func TestViewReportBeaconAndLoaded(t *testing.T) {
 			left++
 		case "page loaded":
 			loaded++
+		case "view jumped":
+			jumped++
+		case "view capture sent by hand":
+			manual++
 		}
 	}
-	if left != 1 || loaded != 1 {
-		t.Fatalf("logged %d left and %d loaded lines, want 1 and 1", left, loaded)
+	if left != 1 || loaded != 1 || jumped != 1 || manual != 1 {
+		t.Fatalf("logged %d left, %d loaded, %d jumped and %d manual lines, want 1 each", left, loaded, jumped, manual)
 	}
 }
 
-const kKind = "kind"
+const (
+	kKind = "kind"
+	// kManual is both an approvals mode and a view report kind.
+	kManual = "manual"
+)

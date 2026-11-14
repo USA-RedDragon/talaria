@@ -5,7 +5,10 @@
 // one report that goes through fetch to the hub; a real wheel scroll
 // produces none.
 // usage: node run.js BROWSER_BIN HUB_URL PROFILE_DIR MODE
-// MODE is jump (a script moves the log) or wheel (the reader scrolls up).
+// MODE is jump (a script moves the log), wheel (the reader scrolls up),
+// mid (the reader scrolls up, presses something outside the log, and a
+// script then throws the log more than a screen further up: one jump
+// report) or hand (Alt+J sends the record by hand, with a toast).
 // Prints ok when the page's own count is right; the Go test counts the
 // lines the hub logged.
 const assert = require("assert");
@@ -23,7 +26,7 @@ const preload = `() => {
     const p = f0.apply(this, arguments);
     if (String(u).includes("/api/view-report")) {
       const b = JSON.parse(o.body);
-      window.__reports.push({ kind: b.kind, keepalive: !!o.keepalive, body: o.body });
+      window.__reports.push({ kind: b.kind, why: b.why, keepalive: !!o.keepalive, body: o.body });
       p.then((r) => window.__answers.push({ kind: b.kind, status: r.status }), () => window.__answers.push({ kind: b.kind, status: 0 }));
     }
     return p;
@@ -101,6 +104,45 @@ const { proc, connect } = driver();
     assert.ok(/^[0-9a-f]{8}$/.test(b.chat), "chat = " + b.chat);
     assert.ok(!rs[0].body.includes("long1"), "the report names the chat");
     await until(`window.__answers.some((a) => a.kind === "left" && a.status === 204)`, "the hub's answer");
+  } else if (mode === "mid" || mode === "hand") {
+    const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    await c.wheel(box.x, box.y, -1500);
+    await until(`(() => { const l = document.getElementById("log"); return l.scrollHeight - l.scrollTop - l.clientHeight > 100; })()`, "the wheel to move the log");
+    await sleep(2500);
+    if (await ev(`document.getElementById("log").scrollTop < 1.7 * document.getElementById("log").clientHeight`)) {
+      await c.wheel(box.x, box.y, 1200);
+      await sleep(2500);
+    }
+    const text = (b) => b.includes("answer that fills") || b.includes("question x") || b.includes("long1");
+    if (mode === "mid") {
+      // A press outside the log, then the page itself moves the reader.
+      await ev(`(() => { document.getElementById("title").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })); return 1; })()`);
+      const by = await ev(`(() => { const l = document.getElementById("log"); const by = Math.round(Math.min(l.scrollTop - 10, 1.6 * l.clientHeight)); l.scrollTop -= by; return by / l.clientHeight; })()`);
+      assert.ok(by > 1.05, "the log has too little above the reader for the test: " + by);
+      await until(`window.__reports.some((r) => r.kind === "jump")`, "the jump report", 10000);
+      await sleep(1000);
+      const rs = await ev(`window.__reports.filter((r) => r.kind === "jump" && r.why === "jump")`);
+      assert.strictEqual(rs.length, 1, "jump reports: " + rs.length);
+      const b = JSON.parse(rs[0].body);
+      assert.strictEqual(b.why, "jump");
+      assert.ok(b.d > 0 && b.from && b.to && b.from.top > b.to.top, "the report has no move: " + rs[0].body.slice(0, 400));
+      assert.ok(Array.isArray(b.ring) && b.ring.some((e) => e[1] === "i" && e[2] === "x"), "the press outside the log is not in the ring");
+      assert.ok(b.ring.some((e) => e[1] === "gw"), "the wheel is not in the ring");
+      assert.ok(!text(rs[0].body), "the report holds chat text");
+      assert.ok(/\.js:\d+[^"]*=\d+/.test(JSON.stringify(b.ring)), "the ring has no scrollTop write with its call site");
+      await until(`window.__answers.some((a) => a.kind === "jump" && a.status === 204)`, "the hub's answer");
+    } else {
+      await ev(`(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", code: "KeyJ", altKey: true, bubbles: true })); return 1; })()`);
+      await until(`window.__reports.some((r) => r.kind === "manual")`, "the manual report", 10000);
+      await until(`document.body.textContent.includes("Sent what just happened. Thanks.")`, "the toast", 10000);
+      const rs = await ev(`window.__reports.filter((r) => r.kind === "manual")`);
+      const b = JSON.parse(rs[0].body);
+      assert.ok(Array.isArray(b.ring) && b.ring.length > 3, "the manual report has no ring");
+      assert.ok(!text(rs[0].body), "the report holds chat text");
+      await until(`window.__answers.some((a) => a.kind === "manual" && a.status === 204)`, "the hub's answer");
+    }
+    const left = await ev(`window.__reports.filter((r) => r.kind === "left").length`);
+    assert.strictEqual(left, 0, "a reader's own scroll up was reported as a leave");
   } else {
     const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     await c.wheel(box.x, box.y, -1500);
@@ -108,6 +150,8 @@ const { proc, connect } = driver();
     await sleep(2000);
     const rs = await left();
     assert.strictEqual(rs.length, 0, "a reader's scroll was reported");
+    const js = await ev(`window.__reports.filter((r) => r.kind === "jump" && r.why === "jump").map((r) => r.body)`);
+    assert.strictEqual(js.length, 0, "a reader's scroll was reported as a jump: " + js.join("\n").slice(0, +(process.env.VR_DUMP || 600)));
   }
   const loaded = await ev(`window.__reports.filter((r) => r.kind === "loaded").length`);
   assert.strictEqual(loaded, 1, "page loaded reports: " + loaded);

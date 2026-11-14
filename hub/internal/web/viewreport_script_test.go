@@ -20,6 +20,8 @@ import (
 const (
 	vrJump  = "jump"
 	vrWheel = "wheel"
+	vrMid   = "mid"
+	vrHand  = "hand"
 	vrChat  = "Long"
 )
 
@@ -50,13 +52,15 @@ func (l *lockedBuf) lines() []map[string]any {
 
 // A chat the page shows leaves its newest message with nobody touching it,
 // long after it opened: the page sends one report, by fetch, and the hub
-// logs it. A reader's wheel scroll sends none. Both also log the page load
-// with the release. testdata/viewreport/run.js drives the real page in
+// logs it. A reader's wheel scroll sends none. A reader above the newest
+// message whom the page throws more than a screen further up, right after a
+// press outside the log, gets one jump report; Alt+J sends the record by
+// hand. All also log the page load with the release. testdata/viewreport/run.js drives the real page in
 // headless Chrome and Firefox; each skips where node or its browser is
 // missing.
 func TestViewReportReachesHubChrome(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{vrJump, vrWheel} {
+	for _, mode := range []string{vrJump, vrWheel, vrMid, vrHand} {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			viewReportRun(t, chromePath(t), mode)
@@ -66,7 +70,7 @@ func TestViewReportReachesHubChrome(t *testing.T) {
 
 func TestViewReportReachesHubFirefox(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{vrJump, vrWheel} {
+	for _, mode := range []string{vrJump, vrWheel, vrMid, vrHand} {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			viewReportRun(t, firefoxPath(t), mode)
@@ -100,9 +104,15 @@ func viewReportRun(t *testing.T, bin, mode string) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	var left, loaded int
+	var left, loaded, jumped, manual int
 	for _, m := range sink.lines() {
 		switch m["msg"] {
+		case "view jumped":
+			if rep, _ := m["report"].(string); strings.Contains(rep, `"why":"jump"`) {
+				jumped++
+			}
+		case "view capture sent by hand":
+			manual++
 		case "view left the newest message":
 			left++
 			rep, _ := m["report"].(string)
@@ -116,11 +126,8 @@ func viewReportRun(t *testing.T, bin, mode string) {
 			}
 		}
 	}
-	wantLeft := 0
-	if mode == vrJump {
-		wantLeft = 1
-	}
-	if left != wantLeft || loaded != 1 {
-		t.Fatalf("hub logged %d view reports (want %d) and %d page loads (want 1)\n%s", left, wantLeft, loaded, out)
+	want := map[string][3]int{vrJump: {1, 0, 0}, vrWheel: {0, 0, 0}, vrMid: {0, 1, 0}, vrHand: {0, 0, 1}}[mode]
+	if left != want[0] || jumped != want[1] || manual != want[2] || loaded != 1 {
+		t.Fatalf("hub logged %d leave, %d jump and %d manual reports (want %v) and %d page loads (want 1)\n%s", left, jumped, manual, want, loaded, out)
 	}
 }

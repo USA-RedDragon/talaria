@@ -7,8 +7,9 @@ import (
 	"net/http"
 )
 
-// maxViewReport bounds a view report's body.
-const maxViewReport = 16 << 10
+// maxViewReport bounds a view report's body: a jump report carries the
+// log's last minute of moves.
+const maxViewReport = 160 << 10
 
 // viewReportRoute lets a beacon in: it cannot set the CSRF header, so its
 // token may be the body's "csrf" field. The page's checks are the same.
@@ -32,9 +33,11 @@ func (s *Server) viewReportRoute() http.Handler {
 }
 
 // handleViewReport logs what a page reports: that it loaded and with which
-// release, or that the chat it shows left the newest message without the
+// release, that the chat it shows left the newest message without the
 // reader doing anything (the log's last moves, the chat's events, the
-// page's age). Nothing is stored; it is for finding what moves the view in
+// page's age), that the reading place moved by more than a screen on its
+// own ("jump"), or what the reader sent by hand right after one
+// ("manual"). Nothing is stored; it is for finding what moves the view in
 // a browser the tests do not catch. The token a beacon carries is dropped.
 func (s *Server) handleViewReport(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Content-Type") != "application/json" {
@@ -54,8 +57,13 @@ func (s *Server) handleViewReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	msg := "view left the newest message"
-	if m["kind"] == "loaded" {
+	switch m["kind"] {
+	case "loaded":
 		msg = "page loaded"
+	case "jump":
+		msg = "view jumped"
+	case "manual":
+		msg = "view capture sent by hand"
 	}
 	s.log.Info(msg, "user", userFrom(r), "ua", r.UserAgent(), "report", string(body))
 	w.WriteHeader(http.StatusNoContent)
