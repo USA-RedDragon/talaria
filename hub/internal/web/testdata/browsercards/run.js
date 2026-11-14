@@ -29,6 +29,16 @@ async function seen(c, n, tag) {
   }, tag + ": card " + n + " in view");
 }
 
+// whole scrolls card n so that all of it is on screen (the last cards of the
+// chat cannot reach the top) and waits until it stays there.
+async function whole(c, n, tag) {
+  await c.poll(async () => {
+    await c.ev(`${cards}[${n}].scrollIntoView({ block: "end" })`);
+    await c.frames(3);
+    return c.ev(`(() => { const b = ${cards}[${n}].getBoundingClientRect(); return b.top >= 0 && b.bottom <= window.innerHeight; })()`);
+  }, tag + ": card " + n + " fully in view");
+}
+
 async function run(c, w, h, touch, dark) {
   const { ev } = c;
   const tag = (w < 600 ? "412" : "1280") + "-" + (dark ? "dark" : "light");
@@ -36,13 +46,14 @@ async function run(c, w, h, touch, dark) {
   await c.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });
   await c.load(url + "/auth/login?next=/", `[...document.querySelectorAll("#sessions *")].some((x) => x.children.length < 4 && x.textContent.trim().startsWith("Browser"))`, "the Browser session is listed");
   await ev(`[...document.querySelectorAll("#sessions *")].filter((x) => x.children.length < 4 && x.textContent.trim().startsWith("Browser")).pop().click()`);
-  await until(ev, `${cards}.length === 6`, tag + ": six browser cards");
+  await until(ev, `${cards}.length === 8`, tag + ": eight browser cards");
   await ev(`document.querySelectorAll("details.toolgroup").forEach((d) => { d.open = true; })`);
   const titles = await ev(`${cards}.map((x) => x.querySelector(".notice-title").textContent)`);
   assert.deepStrictEqual(titles, [
     "Filled the form on support.example.com: 4 steps",
     "Filled the form on support.example.com: 2 of 4 steps",
-    "Typed into Search", "Pressed Enter", "Clicked Save", "Hovered over Account menu"], tag + ": titles " + JSON.stringify(titles));
+    "Typed into Search", "Pressed Enter", "Clicked Save", "Hovered over Account menu",
+    "Browser steps not run: 3", "Ran 1 of 3 steps"], tag + ": titles " + JSON.stringify(titles));
   assert.ok(!/\be\d+\b/.test(titles.join(" ")), tag + ": no ref in a title");
   const metas = await ev(`${cards}.map((x) => x.querySelector(".notice-meta").textContent)`);
   assert.ok(/^Done/.test(metas[0]) && /^Stopped at step 3/.test(metas[1]), tag + ": meta " + JSON.stringify(metas));
@@ -72,6 +83,29 @@ async function run(c, w, h, touch, dark) {
   assert.ok(await ev(`getComputedStyle(${cards}[1].querySelector("ol.steps li:nth-child(3) .notice-bad")).color !== getComputedStyle(${cards}[1].querySelector("ol.steps li .notice-ok")).color`), tag + ": a failed step is colored apart");
   await seen(c, 1, tag);
   await shot(c, tag + "-batch-stopped");
+
+  // A batch the plugin refused before any step: never an empty body. The
+  // whole error, then the steps asked for, the invalid one marked.
+  await ev(`${cards}[6].scrollIntoView()`);
+  await ev(`${cards}[6].querySelector(".notice-head").click()`);
+  await until(ev, `${cards}[6].querySelectorAll("ol.steps li").length === 3`, tag + ": steps of the refused batch");
+  const refused = await ev(`[...${cards}[6].querySelectorAll("ol.steps li")].map((l) => l.innerText.replace(/\\s+/g, " ").trim())`);
+  assert.deepStrictEqual(refused, ["Open support.example.com Not run", "Click the button Not valid", 'Type into "Subject" Not run'], tag + ": " + JSON.stringify(refused));
+  assert.ok(await ev(`${cards}[6].querySelector(".tool-q").textContent.includes("the element's label on the page)")`), tag + ": the whole error is shown");
+  assert.ok(!(await ev(`${cards}[6].innerText.includes("hello")`)), tag + ": typed text is not shown");
+  assert.strictEqual(await ev(`${cards}[6].dataset.state`), "bad");
+  await whole(c, 6, tag);
+  await shot(c, tag + "-batch-refused");
+
+  // A batch that ran out of time: the step it never reached is listed as not run.
+  await ev(`${cards}[7].scrollIntoView()`);
+  await ev(`${cards}[7].querySelector(".notice-head").click()`);
+  await until(ev, `${cards}[7].querySelectorAll("ol.steps li").length === 3`, tag + ": steps of the partial batch");
+  const part = await ev(`[...${cards}[7].querySelectorAll("ol.steps li")].map((l) => l.innerText.replace(/\\s+/g, " ").trim())`);
+  assert.ok(/Failed: the batch ran out of time/.test(part[1]) && part[2] === "Wait for Ticket created Not run", tag + ": " + JSON.stringify(part));
+  await whole(c, 7, tag);
+  await shot(c, tag + "-batch-partial");
+  await ev(`${cards}[6].querySelector(".notice-head").click(); ${cards}[7].querySelector(".notice-head").click()`);
 
   // Single cards, closed together.
   await ev(`${cards}[0].querySelector(".notice-head").click(); ${cards}[1].querySelector(".notice-head").click()`);

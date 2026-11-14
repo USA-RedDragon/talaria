@@ -20,6 +20,18 @@ for (const c of JSON.parse(fs.readFileSync(cases, "utf8"))) {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(seen)), c.want, c.name);
 }
 
+// A batch refused before any step: the body has the whole error and the steps
+// the agent asked for, from the call's arguments, never empty.
+{
+  const err = "step 2 (click): give ref (from the last snapshot) or name (the element's label on the page), and then some more words to be sure it is longer than the status line";
+  const d = derive({ name: "browser_batch", done: true, failed: true, out: "", mem: memory(), args: { steps: [{ action: "navigate", url: "https://a.example/x" }, { action: "click", role: "button" }, { action: "type", name: "Email", text: "secret" }, { action: "press", key: "Enter" }] }, res: { error: err } });
+  const got = JSON.parse(JSON.stringify(d.blocks));
+  assert.strictEqual(got[0].text, err);
+  assert.deepStrictEqual(got[1].items.map((x) => x.text + "|" + x.state), ["Open a.example|not_run", "Click the button|failed", "Type into \"Email\"|not_run", "Press Enter|not_run"]);
+  assert.ok(!JSON.stringify(got).includes("secret"), "typed text is never shown");
+  assert.strictEqual(d.title, "Browser steps not run: 4");
+}
+
 const { wrapped, take } = sandbox.window.HubToolCard;
 const batch = wrapped("tool_call", { calls: [{ name: "process_manage", arguments: { action: "kill" } }, { name: "process_manage", arguments: { action: "list" } }, { name: "terminal", arguments: { command: "ls" } }, 5] });
 assert.strictEqual(batch.length, 3);

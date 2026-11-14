@@ -48,6 +48,20 @@
      "name": "browser_hover",
      "arguments": "{\"tab_id\":7,\"ref\":\"e9\"}"
     }
+   },
+   {
+    "id": "c7",
+    "function": {
+     "name": "browser_batch",
+     "arguments": "{\"tab_id\":7,\"steps\":[{\"action\":\"navigate\",\"url\":\"https://support.example.com/new\"},{\"action\":\"click\",\"role\":\"button\"},{\"action\":\"type\",\"name\":\"Subject\",\"text\":\"hello\"}]}"
+    }
+   },
+   {
+    "id": "c8",
+    "function": {
+     "name": "browser_batch",
+     "arguments": "{\"tab_id\":7,\"steps\":[{\"action\":\"click\",\"name\":\"Save\"},{\"action\":\"click\",\"name\":\"Confirm\"},{\"action\":\"wait_for\",\"text\":\"Ticket created\"}]}"
+    }
    }
   ]
  },
@@ -120,6 +134,30 @@
   "display_metadata": {
    "tool_outcome": {
     "duration_ms": 900
+   }
+  }
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "c7",
+  "name": "browser_batch",
+  "text": "{\"error\": \"step 2 (click): give ref (from the last snapshot) or name (the element's label on the page)\", \"code\": \"invalid\"}",
+  "timestamp": 1763000000.0,
+  "display_metadata": {
+   "tool_outcome": {
+    "duration_ms": 19
+   }
+  }
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "c8",
+  "name": "browser_batch",
+  "text": "{\"ok\": false, \"total\": 3, \"completed\": 1, \"details\": [{\"step\": 1, \"action\": \"click\", \"text\": \"Clicked \\\"Save\\\"\", \"state\": \"done\"}, {\"step\": 2, \"action\": \"click\", \"text\": \"Clicked \\\"Confirm\\\"\", \"state\": \"failed\", \"error\": \"the batch ran out of time\"}], \"failed\": {\"step\": 2, \"error\": \"the batch ran out of time\", \"code\": \"timeout\"}}",
+  "timestamp": 1763000000.0,
+  "display_metadata": {
+   "tool_outcome": {
+    "duration_ms": 19
    }
   }
  },

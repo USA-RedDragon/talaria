@@ -427,12 +427,57 @@ window.HubToolCard = (() => {
     return [];
   }
 
+  // askedStep is one step the agent asked for, in plain words, from the
+  // call's arguments: the element's label, else its role, else its ref. What
+  // would be typed is never shown.
+  function askedStep(x) {
+    if (!isObj(x)) return "A step that is not an object";
+    const act = str(x.action).toLowerCase();
+    const el = str(x.name) ? '"' + short(x.name) + '"' : str(x.role) ? "the " + short(x.role) : str(x.ref) ? "element " + short(x.ref) : "";
+    switch (act) {
+      case "click": return "Click " + (el || "an element");
+      case "hover": return "Hover over " + (el || "an element");
+      case "type": case "fill": return "Type into " + (el || "an element");
+      case "select": return (str(x.value) ? "Select " + short(x.value) + " in " : "Choose an option in ") + (el || "a list");
+      case "press": case "key": return "Press " + (short(x.key) || "a key") + (el ? " on " + el : "");
+      case "scroll": return "Scroll " + (str(x.to_text) ? "to " + short(x.to_text) : el ? "to " + el : str(x.direction) ? short(x.direction) : "the page");
+      case "wait_for": case "wait": return "Wait for " + (short(x.text) || short(x.selector) || "something on the page");
+      case "navigate": case "goto": case "open": return "Open " + (hostOfUrl(x.url) || short(x.url) || "a page");
+      default: return act ? "Step: " + short(act) : "A step with no action";
+    }
+  }
+
+  // batchRefused is the card of a batch that came back with an error and no
+  // step results: it never ran (the plugin refused it before the first step,
+  // or the browser was not there). The body is the whole error and the steps
+  // the agent asked for, each marked not run, the one the error names marked
+  // failed.
+  function batchRefused(c, a, res) {
+    let e = str(res.error) || str(res.message) || str(c.error) || first(c.out);
+    e = e.trim();
+    const given = Array.isArray(a.steps) ? a.steps : [];
+    const m = /\bstep (\d+)\b/i.exec(e);
+    const at = m && +m[1] >= 1 && +m[1] <= given.length ? +m[1] : 0;
+    const out = { icon: "list", bad: true, blocks: [] };
+    out.title = given.length ? "Browser steps not run: " + given.length : "Browser steps not run";
+    out.status = at ? "Not run: step " + at + " is not valid" : "Not run";
+    out.blocks.push({ label: "Error", plain: true, text: e || "The call did not work." });
+    const items = given.map((x, i) => ({ text: askedStep(x), state: i + 1 === at ? "failed" : "not_run", outcome: i + 1 === at ? "Not valid" : "Not run", form: false }));
+    if (items.length) out.blocks.push({ label: "Steps asked for", kind: "steps", items, text: items.map((x, i) => (i + 1) + ". " + x.text + " (" + x.outcome + ")").join("\n") });
+    return out;
+  }
+
   function batch_(c) {
     const a = isObj(c.args) ? c.args : {};
     const res = isObj(c.res) ? c.res : {};
+    if (c.done && (c.failed || str(res.error)) && !batchSteps(res).length) return batchRefused(c, a, res);
     const out = { icon: "list", blocks: [] };
     const given = Array.isArray(a.steps) ? a.steps : [];
     const steps = c.done ? batchSteps(res) : [];
+    // Steps the result does not list (the batch ran out of time) were not run.
+    if (c.done && steps.length && steps.length < given.length) {
+      for (let i = steps.length; i < given.length; i++) steps.push({ text: askedStep(given[i]), state: "not_run", outcome: "Not run", form: false });
+    }
     const total = steps.length || (typeof res.total === "number" ? res.total : given.length);
     const page = isObj(res.page) ? res.page : null;
     const site = hostOfUrl(page && page.url) || hostOfUrl((given.find((x) => isObj(x) && x.url) || {}).url);
