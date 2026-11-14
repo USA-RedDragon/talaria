@@ -31,7 +31,7 @@ If the release you installed has no `.xpi` file, no signed extension was publish
 
 ## What the agent can do
 
-It can list, open and close tabs in its group, go to a page, go back, read a page's text or an outline of it, take a screenshot, click, type, choose an option in a select box, press keys, hover, scroll and wait. With the saved logins of Firefox it can also sign in on the hosts in `browser.autologin-hosts` (the agent never sees the password). It cannot download or upload files, answer browser permission prompts or dialogs, or touch tabs outside its group. A tab you drag into the group becomes the agent's, and a tab you drag out is no longer.
+It can list, open and close tabs in its group, go to a page, go back, read a page's text or an outline of it, take a screenshot, click, type, choose an option in a select box, press keys, hover, scroll and wait. With the saved logins of Firefox it can also sign in on the hosts in `browser.autologin-hosts` (the agent never gets the password). It cannot download or upload files, answer browser permission prompts or dialogs, or touch tabs outside its group. A tab you drag into the group becomes the agent's, and a tab you drag out is no longer.
 
 It never opens pages on your private network. Requests from its tabs to loopback, private, link-local and `100.64/10` addresses and to `.local`, `.internal` and `.home.arpa` names are blocked. To allow one host, add it to the config:
 
@@ -43,7 +43,7 @@ browser:
 
 ## Steps in one call
 
-When the agent knows what to do on a page, such as filling in a form, it sends the whole sequence as one `browser_batch` call (up to 25 steps: click, type, press, select, hover, scroll, wait and navigate) and reads the page once at the end. It stops at the first step that fails unless it asked to go on. If the page redraws between steps, the agent finds the same element again by its role and label. The ask-before rules below apply to each step, and a batch asks once for all of them, in plain words, before it starts. A step that needs an approval the batch did not list stops the batch.
+When the agent has the steps for a page, such as filling in a form, it sends the whole sequence as one `browser_batch` call (up to 25 steps: click, type, press, select, hover, scroll, wait and navigate) and reads the page once at the end. It stops at the first step that fails unless it asked to go on. If the page redraws between steps, the agent finds the same element again by its role and label. The ask-before rules below apply to each step, and a batch asks once for all of them, in plain words, before it starts. A step that needs an approval the batch did not list stops the batch.
 
 In the web app, a batch is one card, with one line for each step and how it ended (done, failed or not run), and the page it read at the end. Cards for single browser steps and for each batch step name the element by the label the page gives it, such as "Typed into Search" or "Clicked Sign in", never by an internal reference like `e12`. What the agent typed is not shown on the card or put in the label.
 
@@ -51,7 +51,7 @@ In the web app, a batch is one card, with one line for each step and how it ende
 
 The agent asks before it does anything you cannot easily undo. The question appears wherever you talk to the agent: the web app, Telegram or your editor.
 
-| The agent wants to | It asks |
+| The agent needs to | It asks |
 |---|---|
 | Read, screenshot, scroll, hover, wait, go back | Never |
 | Click or type without submitting anything | Never |

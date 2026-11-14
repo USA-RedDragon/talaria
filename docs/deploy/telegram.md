@@ -72,7 +72,7 @@ Each person on your hub links their own Telegram account. People who are not lin
 | `/link`, `/unlink` | Link or unlink your account (`/link` works in a direct message, or in a group with Topics) |
 | `/help` | The command list |
 
-When the agent wants to run something that needs your approval, the bot shows the command with buttons: Once, This chat, Always and Deny. You can also send photos, files, voice notes and PDFs to the bot, and they go to the chat as attachments.
+When the agent requests to run something that needs your approval, the bot shows the command with buttons: Once, This chat, Always and Deny. You can also send photos, files, voice notes and PDFs to the bot, and they go to the chat as attachments.
 
 ## A topic for each chat
 

@@ -1,6 +1,6 @@
 # Approvals and trust
 
-Talaria asks you before the agent does something risky, and it never lets a message from a file, a web page or another agent answer for you. This page covers how a question reaches you, what you can answer, how smart approval decides when to ask, and the settings that tell the agent whom to trust.
+Talaria asks you before the agent does something risky, and it never lets a message from a file, a web page or another agent answer for you. This page covers how a question reaches you, what you can answer, how smart approval picks when to ask, and the settings that tell the agent whom to trust.
 
 The chat, the notices and Telegram are described in the [hub guide](../../hub/README.md). The patches behind smart approval are in [Talaria Hermes patches](../../hermes/README.md).
 
@@ -29,14 +29,14 @@ A background subagent that needs an approval, or has a question, asks in the cha
 | Always allow code from this source in this chat (This source) | Records a [grant](#chat-grants) for the repository this code comes from, kept with this chat. Offered when the held command runs a clone from this session. |
 | Deny | Does not run the action. |
 
-Hermes decides which choices a prompt offers; the page and Telegram show exactly those.
+Hermes sets which choices a prompt offers; the page and Telegram show exactly those.
 
 ## When Talaria asks
 
 Under Settings, Agent, "Before risky commands" has three settings, for everyone on the backend (admins change it):
 
 - **Ask every time** (`approvals.mode: manual`): every command that Hermes treats as risky asks.
-- **Ask only when a command looks risky** (`smart`): smart approval decides, see below.
+- **Ask only when a command looks risky** (`smart`): smart approval chooses, see below.
 - **Never ask** (`off`): nothing asks, for every chat of the profile.
 
 Anyone can turn asking off for their own chat only ("Never ask in this chat", what `/yolo` does). The hub does not deliver an agent message to a chat in that mode, because what the message leads to would run with no approval you see. The keys that the install owns (`agent.locked_keys`, which the Helm chart fills from `hermes.config`) show read-only as "Set in the deployment config", `approvals.mode` can be one of them.
@@ -45,15 +45,15 @@ Anyone can turn asking off for their own chat only ("Never ask in this chat", wh
 
 Upstream's smart mode looks only at commands that match a pattern list. Talaria's patched Hermes adds a review that asks one question of every tool call that is not plainly read-only: did the user ask for this, or something that includes it? It is patch `0077-smart-approval-provenance` and is on in a Talaria install (`approvals.smart_provenance: true`, set by the install's init step unless you set your own value). It takes effect when `approvals.mode` is `smart`.
 
-**What the review sees.**
+**What the review reads.**
 
 - The user's own words: your typed messages, steers, messages that still wait, your answers to the agent's questions (see [below](#your-answers-to-questions-count)), and answers sent from a page, each with its time.
 - The session's earlier calls that were not read-only, each with an ok, error or blocked line.
 - Repo instruction files, labeled as not the user.
 
-**What it never sees.** Tool results. A file, a page, a script's output or another agent's message therefore cannot approve a risky action, however it is worded. Peer-agent messages, subagent results, a parent agent's goal or steers, recalled memory and gateway notices are never read as the user's words.
+**What it never reads.** Tool results. A file, a page, a script's output or another agent's message therefore cannot approve a risky action, however it is worded. Peer-agent messages, subagent results, a parent agent's goal or steers, recalled memory and gateway notices are never read as the user's words.
 
-**How it decides.** Stage 1 is a one-token check that leans toward blocking (`approvals.smart_fast_model`). Only its blocks go to stage 2, which reasons about the user's intent, applies the allow exceptions and names the rule it blocks on (`approvals.smart_model`). Both fall back to the approval task's model (`auxiliary.approval`) when empty. The rules come in three kinds:
+**How it judges.** Stage 1 is a one-token check that leans toward blocking (`approvals.smart_fast_model`). Only its blocks go to stage 2, which reasons about the user's intent, applies the allow exceptions and names the rule it blocks on (`approvals.smart_model`). Both fall back to the approval task's model (`auxiliary.approval`) when empty. The rules come in three kinds:
 
 - **Hard rule.** Secrets or private data leaving the machine. Nothing said in chat clears it, and a hard block is final.
 - **Soft rules.** Risky actions such as a force push, a deletion or a publish. They clear when the user's words name the action and its target, or when the target is clear from what you or the agent's own work set up.

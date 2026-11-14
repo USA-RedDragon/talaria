@@ -112,7 +112,7 @@ The agent tried to work in a folder that is not under `device.roots`. Add the fo
 
 ## A command was killed: out of memory
 
-The agent sees `[killed: out of memory ...]`. Only that command was killed. Either the computer ran out of memory, or you set `device.command-memory-max` (there is no cap by default) and the command used more. Raise the cap (for example `16G`) or turn it off with `off`. macOS has no per-command cap.
+The agent gets `[killed: out of memory ...]`. Only that command was killed. Either the computer ran out of memory, or you set `device.command-memory-max` (there is no cap by default) and the command used more. Raise the cap (for example `16G`) or turn it off with `off`. macOS has no per-command cap.
 
 ## The Talaria extension does not connect
 
@@ -140,7 +140,7 @@ The agent's browser tools stop with one of these messages. The computer is the o
 
 ## `chat` cannot start the agent
 
-- On Linux, `chat` downloads the server's agent build on first use. Check disk space (about 1.4 GB) and that the computer can reach the registry that holds the image. `talaria chat --status` shows what it knows.
+- On Linux, `chat` downloads the server's agent build on first use. Check disk space (about 1.4 GB) and that the computer can reach the registry that holds the image. `talaria chat --status` shows the server's agent release and the builds on this computer.
 - With a local agent install (macOS, or `chat.managed: false`), it must be the same release as the server's. `talaria chat` says which two releases differ.
 
 ## Still stuck

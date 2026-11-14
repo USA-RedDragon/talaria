@@ -114,7 +114,7 @@ Chart 0.3.0 drops the Caddy container that sat in front of the hub in its pod: t
 Nothing else moves, so a plain `helm upgrade` keeps every volume, Secret and Service. The hub's pod is replaced
 once, and the agent hands over as in a rolling update.
 
-The hub now sees your ingress controller or gateway as the client, not a proxy on `127.0.0.1`. `auth.trustedProxies`
+The hub now records your ingress controller or gateway as the client, not a proxy on `127.0.0.1`. `auth.trustedProxies`
 therefore defaults to the private address ranges of pods (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
 `fc00::/7`). Upgrade with your own values file, not `--reuse-values`, which would keep the old `127.0.0.1/32`.
 With `auth.mode=proxy` and plain headers, set it to the addresses of your proxy if you can, as the hub reads the

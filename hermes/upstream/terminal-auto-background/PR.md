@@ -29,7 +29,7 @@ It reuses the yield-to-background path that already moves a local foreground com
 
 ## Scope and fallback
 
-Only the local backend can hand a running foreground process to the registry today (`yield_to_background_handler` returns no handler for other backends). For docker, ssh, modal, daytona, plugin backends and anything else, no handler and no `yield_after` are passed, so `env.execute` receives the same arguments as before and the command runs in the foreground until it exits or times out, as today. A backend or plugin that wants this later can pass its own `yield_handler` and `yield_after` to `BaseEnvironment.execute`; `_run_foreground` already formats the result from `yield_reason`.
+Only the local backend can hand a running foreground process to the registry today (`yield_to_background_handler` returns no handler for other backends). For docker, ssh, modal, daytona, plugin backends and anything else, no handler and no `yield_after` are passed, so `env.execute` receives the same arguments as before and the command runs in the foreground until it exits or times out, as today. A backend or plugin that adopts this later can pass its own `yield_handler` and `yield_after` to `BaseEnvironment.execute`; `_run_foreground` already formats the result from `yield_reason`.
 
 ## Config
 

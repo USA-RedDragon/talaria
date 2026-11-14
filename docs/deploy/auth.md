@@ -76,7 +76,7 @@ Optional. Set it to the hub user name of the person this agent works for, once t
 ## Behind a reverse proxy
 
 Use this when a proxy already logs your people in. The proxy sends the person's name in a header, and the hub
-believes that header from the address of the proxy right in front of it. In compose and the all-in-one image that
+accepts that header from the address of the proxy right in front of it. In compose and the all-in-one image that
 is the Caddy of Talaria itself (`front`), which passes on what your proxy sends; with Helm it is your ingress
 controller or gateway (`auth.trustedProxies`). So **only your proxy may reach Talaria's port**:
 anyone else could send the header themselves. Bind the port to the proxy's network or to `127.0.0.1`, and make your

@@ -42,7 +42,7 @@ An account's **API credits** are billed through a provider named `claude-api-<sl
 
 ## Choose who signs accounts in
 
-Signing in decides which Claude login the agent uses, so the hub keeps it to named people. Set `claude.admins` in the hub's settings (environment variable `HUB_CLAUDE_ADMINS`) as `user=backend` pairs:
+Signing in sets which Claude login the agent uses, so the hub keeps it to named people. Set `claude.admins` in the hub's settings (environment variable `HUB_CLAUDE_ADMINS`) as `user=backend` pairs:
 
 ```yaml
 claude:
@@ -123,7 +123,7 @@ Under a chat's title, a chat on the pooled Claude provider shows "Claude" and th
 
 | You see | Why | What to do |
 |---|---|---|
-| No Claude cards on Usage and no sign-in buttons | The agent has no Claude accounts plugin. The hub remembers a missing plugin for 5 minutes. With the plugin but no slots, the section says "No accounts." | Add the plugin and at least one slot, and reload after 5 minutes |
+| No Claude cards on Usage and no sign-in buttons | The agent has no Claude accounts plugin. The hub keeps a missing plugin for 5 minutes. With the plugin but no slots, the section says "No accounts." | Add the plugin and at least one slot, and reload after 5 minutes |
 | "this agent server has no Claude accounts plugin" | The agent answered 404 or 405 to the plugin's route | Check that the plugin is installed and enabled on that backend, and that the hub points at the right backend |
 | "Could not reach the Claude accounts plugin on the agent server" | The hub could not reach the plugin, or its answer was not JSON | Wait for the agent, then look for "Claude request failed" in the hub's log |
 | An account says **Not signed in** | First use, or the login expired or was revoked | A Claude admin clicks **Sign in** |

@@ -41,7 +41,7 @@ Booleans and invalid values fall back to the default. Documented in `cli-config.
 New `tests/gateway/test_unviewed_completion_turns.py` (real `GatewayRunner`, `SessionAuthority` and `SessionDB`; the turn handler is a stand-in, no model call):
 
 - default (unset, `0`, a boolean) keeps the note and starts no turn
-- option set, no viewer: the exit runs as one turn, no note is written, the admission completes, and a viewer that attaches afterward sees the turn's output in its history snapshot
+- option set, no viewer: the exit runs as one turn, no note is written, the admission completes, and a viewer that attaches afterward gets the turn's output in its history snapshot
 - a viewer attached: unchanged
 - busy session: a human input runs first, then two exits coalesced into one turn
 - the in-a-row limit, a user message resetting it, a viewer attaching resetting it, and the count surviving the session leaving memory

@@ -64,7 +64,7 @@ Anthropic account sign-in, Qwen sign-in, AWS Bedrock and Google Vertex AI cannot
 
 ## Set a model on the server
 
-`hermes model` does the same from a terminal, and covers every provider the agent knows. Run it in the agent's container, as the `hermes` user:
+`hermes model` does the same from a terminal, and covers every provider the agent supports. Run it in the agent's container, as the `hermes` user:
 
 | Install | Command |
 | ------- | ------- |
@@ -98,7 +98,7 @@ With `hermes model`, Ollama is the agent's **Custom endpoint**:
 2. API base URL: `http://<Ollama's address>:11434/v1`. From a container, `localhost` is the container itself:
    use the address of the machine that runs Ollama (such as `http://192.168.1.10:11434/v1`; Ollama there must
    listen on that address, `OLLAMA_HOST=0.0.0.0:11434`), or `http://ollama:11434/v1` for the compose `ollama`
-   profile. The agent checks the address at once and says how many models it sees.
+   profile. The agent checks the address at once and says how many models it lists.
 3. Leave the API key empty and press Enter for the API compatibility mode (auto-detect). It lists Ollama's
    models by number: type the number of yours. Press Enter for the context length (the agent asks Ollama for the
    window it serves: the one `ollama ps` shows, else the model's `num_ctx`, else the one `OLLAMA_CONTEXT_LENGTH`

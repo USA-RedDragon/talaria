@@ -93,7 +93,7 @@ Choose Allow. Until you do, the service cannot reach the hub and its log says `c
 
 **Choose your shell.** On Windows the agent's commands run in one shell that you pick at setup. The agent is told which one at the start of each chat, so it writes commands for it:
 
-| Shell | What the agent writes | Paths the agent sees | Needs |
+| Shell | What the agent writes | Paths the agent uses | Needs |
 |---|---|---|---|
 | `git-bash` (the default when Git is installed) | bash commands; Windows programs (`git`, `where.exe`, `cmd //c`) run by name | `/c/Users/alice/src` for `C:\Users\alice\src` | [Git for Windows](https://git-scm.com/download/win) (`winget install Git.Git`) |
 | `powershell` | PowerShell commands (`Get-ChildItem`, `$env:NAME`). PowerShell 7 (`pwsh`) when installed, else Windows PowerShell | the same `/c/...` paths in its file tools; commands see `C:\Users\alice\src` | Git for Windows too: the agent's file tools and the scripts around each command still use Git Bash |
@@ -121,7 +121,7 @@ Then it works through the steps below, with these Windows places:
 
 Setup needs no administrator rights. Stopping a command from the chat ends it and every program it started (a Windows Job Object holds them all).
 
-The paired PC then works like any other computer. In a chat on it, the agent sees your Windows folders in the form its shell uses, here Git Bash:
+The paired PC then works like any other computer. In a chat on it, the agent gets your Windows folders in the form its shell uses, here Git Bash:
 
 ![A chat on windows-pc, in /c/Users/tester/projects/website: the agent ran pwd, cygpath -w and ls in Git Bash, and the output shows both /c/Users/tester/projects/website and C:\\Users\\tester\\projects\\website](../images/windows-chat.png)
 
@@ -137,7 +137,7 @@ The paired PC then works like any other computer. In a chat on it, the agent see
 
 #### Run the Linux build inside WSL2 instead
 
-You can also install the Linux release inside a WSL 2 distribution, exactly as on Linux (`talaria_<version>_linux_amd64.tar.gz`, then `./talaria setup https://hub.example.com` in the WSL terminal). The hub then sees a Linux computer: the agent works in the distribution's own files, and your Windows files are under `/mnt/c`. The service needs systemd in the distribution (`[boot]` `systemd=true` in `/etc/wsl.conf`, then `wsl --shutdown`); without it, use `--no-service` and start `talaria run` yourself. WSL stops a distribution some time after its last terminal closes, and the computer then shows offline. The Windows program with `--shell wsl` does not have this problem: its scheduled task starts at logon and starts WSL for each command.
+You can also install the Linux release inside a WSL 2 distribution, exactly as on Linux (`talaria_<version>_linux_amd64.tar.gz`, then `./talaria setup https://hub.example.com` in the WSL terminal). The hub then registers a Linux computer: the agent works in the distribution's own files, and your Windows files are under `/mnt/c`. The service needs systemd in the distribution (`[boot]` `systemd=true` in `/etc/wsl.conf`, then `wsl --shutdown`); without it, use `--no-service` and start `talaria run` yourself. WSL stops a distribution some time after its last terminal closes, and the computer then shows offline. The Windows program with `--shell wsl` does not have this problem: its scheduled task starts at logon and starts WSL for each command.
 
 Setup works through these steps, in this order:
 

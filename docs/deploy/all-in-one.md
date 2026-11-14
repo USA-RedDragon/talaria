@@ -79,7 +79,7 @@ checked in the image: as the sandbox user, `ls /opt/data`, `cat /talaria/secrets
 | | Compose (or Helm) | All-in-one |
 | - | ----------------- | ---------- |
 | Setup | A folder with `compose.yaml` and `.env` | One container, a form in the NAS UI |
-| Sandbox isolation | Its own container: own filesystem, process and network namespaces, read-only root | Its own user in the same container: same filesystem view (minus permissions), same network, sees other processes' names |
+| Sandbox isolation | Its own container: own filesystem, process and network namespaces, read-only root | Its own user in the same container: same filesystem view (minus permissions), same network, lists other processes' names |
 | Sandbox tools | Alpine image with build tools, git, node, python | The agent image's Debian, which has python, node, git and gcc |
 | Upgrades | Each part separately | All parts at once: one image tag per Talaria release |
 | A crash | Docker restarts that container | s6 restarts that service; a gateway crash restarts the container |
@@ -88,7 +88,7 @@ checked in the image: as the sandbox user, `ls /opt/data`, `cat /talaria/secrets
 | Optional parts (Ollama, Honcho) | Profiles in the same file | Separate apps, pointed at by URL |
 | Several agent servers | Possible (edit the hub config) | One |
 
-Use the all-in-one image when the platform wants one container, or to try Talaria. Use compose or Helm when you
+Use the all-in-one image when the platform needs one container, or to try Talaria. Use compose or Helm when you
 want the stronger sandbox, separate upgrades, or optional parts in the same file.
 
 ## Building and publishing

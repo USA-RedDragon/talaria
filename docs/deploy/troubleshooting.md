@@ -127,7 +127,7 @@ Start with Settings, Notifications: choose "Send a test". It sends one test noti
 - The test works but the real event does not notify. Check, in order:
   - The event is off in Settings, Notifications. "Long tasks done" (a reply of 2 minutes or more) and "Scheduled jobs" are off by default.
   - Quiet hours are on. Nothing is sent during them; an approval or question that is still open afterwards gets its one reminder later.
-  - You have that chat open on a visible page (the hub sees this for about 90 seconds), so there is nothing to tell you. Telegram also stays quiet for a chat attached to a Telegram chat, since the prompt is already there.
+  - You have that chat open on a visible page (the hub detects this for about 90 seconds), so there is nothing to tell you. Telegram also stays quiet for a chat attached to a Telegram chat, since the prompt is already there.
   - More than 20 notices went to you in 10 minutes. The hub logs `Too many notices, holding back` and sends the next ones later.
   - A chat that nobody has open is looked at every 15 seconds (`notify.watch_interval`), and scheduled jobs are read every minute (`notify.job_interval`), so allow a short delay.
 
