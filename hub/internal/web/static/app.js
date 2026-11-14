@@ -789,7 +789,10 @@
   // Older rows render as the reader nears them (Chat.topUp), and all of
   // them for a search of the page: the browser finds only what the page
   // holds, and its find bar opens after this key.
-  $("log").addEventListener("scroll", () => { if (view && view.older.length) view.topUp(); }, { passive: true });
+  // Only the reader's own scroll toward the top renders older rows: a top
+  // the page caused (a log emptied and drawn again) is not the reader
+  // reading up, and rows rendered above it strand the reader there.
+  $("log").addEventListener("scroll", () => { if (view && view.older.length && stick.hearing()) view.topUp(); }, { passive: true });
   document.addEventListener("keydown", (e) => {
     const k = (e.key || "").toLowerCase();
     if (view && view.older.length && (((e.ctrlKey || e.metaKey) && !e.altKey && (k === "f" || k === "g")) || e.key === "F3")) view.fillOlder();
