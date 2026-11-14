@@ -73,7 +73,8 @@ type SubagentTail struct {
 	Truncated  bool   `json:"truncated"`
 }
 
-// SteerResult is subagent.steer's result: "queued" or "rejected".
+// SteerResult is subagent.steer's result: "queued", "delivered" (the subagent
+// was waiting on a background job and the text woke it) or "rejected".
 type SteerResult struct {
 	Status string `json:"status"`
 }

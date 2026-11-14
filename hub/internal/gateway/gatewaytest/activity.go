@@ -94,7 +94,11 @@ func (g *Gateway) hSubagentSteer(_ *conn, p map[string]any) (any, string, func()
 		return map[string]any{kStatus: "rejected", kSubagentID: id, kText: text}, "", nil
 	}
 	g.steers = append(g.steers, Steer{SessionID: s.ID, SubagentID: id, Text: text})
-	return map[string]any{kStatus: "queued", kSubagentID: id, kText: text}, "", nil
+	status := "queued"
+	if st := s.Subagents[i].Status; st != nil && *st == "waiting" {
+		status = "delivered" // Hermes wakes a waiting subagent with the text at once
+	}
+	return map[string]any{kStatus: status, kSubagentID: id, kText: text}, "", nil
 }
 
 func (g *Gateway) hSubagentInterrupt(_ *conn, p map[string]any) (any, string, func()) {

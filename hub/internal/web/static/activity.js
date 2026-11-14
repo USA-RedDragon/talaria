@@ -802,13 +802,14 @@ window.HubActivity = (ctx) => {
         const text = inp.value.trim();
         if (!text) return;
         send.disabled = true;
+        const woke = r.state === "hold"; // a waiting subagent is woken by the message at once
         act(async () => {
           await api("POST", chat.base + "/subagents/" + encodeURIComponent(r.id) + "/steer", { text });
           push(r, "k", "You: " + text);
           inp.value = "";
           await readSteps(r);
           draw();
-        }, "Sent to {name}. It reads it at its next step.", "Could not send", r.goal || "the subagent").finally(() => { send.disabled = false; });
+        }, woke ? "Sent to {name}. It was waiting on its job and woke up to read it." : "Sent to {name}. It reads it at its next step.", "Could not send", r.goal || "the subagent").finally(() => { send.disabled = false; });
       };
       b.append(form);
     }

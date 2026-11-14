@@ -168,7 +168,8 @@ func (s *Service) SteerSubagent(ctx context.Context, user, backendID, sessionID,
 			gateway.SteerParams{SessionID: ls.id, SubagentID: subagentID, Text: text}, &res); err != nil {
 			return refusal(err)
 		}
-		if res.Status != "queued" {
+		// "delivered": the subagent was waiting on its background job and the message woke it at once.
+		if res.Status != "queued" && res.Status != "delivered" {
 			return hub.ErrSteerRejected
 		}
 		s.recordSteer(ctx, user, backendID, sessionID, subagentID, text)

@@ -114,6 +114,21 @@ func TestActivityPassesOnAWaitingSubagent(t *testing.T) {
 	}
 }
 
+// A message to a subagent waiting on its job wakes it (Hermes answers "delivered", not "queued"); the hub takes both.
+func TestSteerReachesAWaitingSubagent(t *testing.T) {
+	t.Parallel()
+	e := setup(t, service.Options{})
+	e.gw.AddSession(&gatewaytest.Session{ID: sLive, Live: true,
+		Subagents: []gateway.SubagentRow{{SubagentID: subMine, Goal: "Build", Status: ptr(statusWaiting),
+			WaitingOn: []string{"make -j8 all"}, AcceptingSteer: ptr(true), StartedAt: ptr(1700000000.5)}}})
+	if err := e.svc.SteerSubagent(context.Background(), userAlice, backendPC, sLive, subMine, " hello? "); err != nil {
+		t.Fatalf("steer = %v", err)
+	}
+	if got := e.gw.Steers(); len(got) != 1 || got[0].Text != "hello?" {
+		t.Fatalf("steers = %+v", got)
+	}
+}
+
 func TestActivityRefusesOtherUsers(t *testing.T) {
 	t.Parallel()
 	e := activitySetup(t)
