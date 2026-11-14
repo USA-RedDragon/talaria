@@ -8,7 +8,8 @@
 // MODE is jump (a script moves the log), wheel (the reader scrolls up),
 // mid (the reader scrolls up, presses something outside the log, and a
 // script then throws the log more than a screen further up: one jump
-// report), swipe (Chrome only: a finger swipes up on a phone while older
+// report), grow (a wheel up while 4000 px go in above the reader before
+// the page judged its scroll; the reader stays put), swipe (Chrome only: a finger swipes up on a phone while older
 // rows render above; the reader stays put) or hand (Alt+J sends the record by hand, with a toast).
 // Prints ok when the page's own count is right; the Go test counts the
 // lines the hub logged.
@@ -134,6 +135,17 @@ const { proc, connect } = driver();
     assert.ok(/^[0-9a-f]{8}$/.test(b.chat), "chat = " + b.chat);
     assert.ok(!rs[0].body.includes("long1"), "the report names the chat");
     await until(`window.__answers.some((a) => a.kind === "left" && a.status === 204)`, "the hub's answer");
+  } else if (mode === "grow") {
+    // The reader wheels up from the newest message, and right as the first
+    // scroll event comes, before the page has judged it, 4000 px go in
+    // above the reader (older rows, a box of them laid out, an image): the
+    // reader stays on what the wheel brought into view.
+    await ev(`(() => { const l = document.getElementById("log"); let armed = true; l.addEventListener("scroll", () => { if (!armed) return; armed = false; const d = document.createElement("div"); d.style.height = "4000px"; l.prepend(d); }, { passive: true }); return 1; })()`);
+    const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    await c.wheel(box.x, box.y, -600);
+    await sleep(2500);
+    const g = await gap();
+    assert.ok(g > 300 && g < 1400, "after a 600 px wheel with 4000 px put in above, the log is " + g + " px from its end");
   } else if (mode === "swipe") {
     // A finger swipes up from the newest message while older rows render
     // above: the reader stays on what the swipe brought into view.
