@@ -95,8 +95,16 @@ type Project struct {
 	Count      int          `json:"count"`
 	// Skills is how many project skills the project has.
 	Skills int `json:"skills"`
-	Used   int `json:"used"`
-	Limit  int `json:"limit"`
+	// Used and Limit are the index's characters and budget. Topics and
+	// PathNotes count the project's topics and path notes, Inbox the
+	// unsorted notes in its inbox topic, and Total the characters of the
+	// index, topics and path notes together.
+	Used      int `json:"used"`
+	Limit     int `json:"limit"`
+	Topics    int `json:"topics"`
+	PathNotes int `json:"path_notes"`
+	Inbox     int `json:"inbox"`
+	Total     int `json:"total"`
 }
 
 // SeenFolder is a folder on a device where Hermes saw a project. Device is
@@ -108,11 +116,62 @@ type SeenFolder struct {
 	SeenAt   float64 `json:"seen_at"`
 }
 
-// ProjectNotes is a project's MEMORY.md, as TargetMemory of Notes, with
-// the project. It has no USER.md, approval or pending writes.
+// ProjectNotes is a project's index (MEMORY.md), as TargetMemory of
+// Notes, with the project, its topics and path notes. It has no USER.md,
+// approval or pending writes. Message says where a change went when the
+// index was full and the text moved into a topic.
 type ProjectNotes struct {
 	Notes
-	Project Project `json:"project"`
+	Project   Project      `json:"project"`
+	Topics    []ProjectDoc `json:"topics"`
+	PathNotes []ProjectDoc `json:"path_notes"`
+	Inbox     int          `json:"inbox"`
+	Message   string       `json:"message,omitempty"`
+}
+
+// The kinds of a project's files besides the index.
+const (
+	DocTopics = "topics"
+	DocPaths  = "paths"
+)
+
+// ProjectDoc is one topic or path note of a project, without its text.
+// Paths are a path note's glob patterns; InIndex says an index line points
+// to a topic.
+type ProjectDoc struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Modified    string   `json:"modified"`
+	Size        int      `json:"size"`
+	Paths       []string `json:"paths,omitempty"`
+	InIndex     bool     `json:"in_index,omitempty"`
+}
+
+// ProjectDocText is a topic or path note with its text. List is the kind's
+// list after a change.
+type ProjectDocText struct {
+	ProjectDoc
+	Content   string       `json:"content"`
+	Truncated bool         `json:"truncated"`
+	List      []ProjectDoc `json:"list,omitempty"`
+}
+
+// ProjectDocs lists a project's topics or path notes.
+type ProjectDocs struct {
+	Items []ProjectDoc `json:"items"`
+	Inbox int          `json:"inbox"`
+}
+
+// ProjectDocInput creates or changes a topic or path note. Name renames it;
+// Create refuses when it exists; Base, the text the editor started from,
+// refuses a change made meanwhile.
+type ProjectDocInput struct {
+	Content     string   `json:"content"`
+	Description string   `json:"description"`
+	Paths       []string `json:"paths,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Create      bool     `json:"create,omitempty"`
+	Base        *string  `json:"base,omitempty"`
 }
 
 // ProjectSkill is one skill that lives in a project, not in the global
@@ -250,6 +309,13 @@ type Memory interface {
 	ProjectSkills(ctx context.Context, user, backendID, projectID string) (ProjectSkills, error)
 	ProjectSkill(ctx context.Context, user, backendID, projectID, name string) (ProjectSkillDoc, error)
 	DeleteProjectSkill(ctx context.Context, user, backendID, projectID, name string) (ProjectSkills, error)
+	// ProjectDocs lists a project's topics (kind DocTopics) or path notes
+	// (DocPaths); ProjectDoc reads one, PutProjectDoc creates or changes
+	// one, and DeleteProjectDoc removes one and answers with the rest.
+	ProjectDocs(ctx context.Context, user, backendID, projectID, kind string) (ProjectDocs, error)
+	ProjectDoc(ctx context.Context, user, backendID, projectID, kind, name string) (ProjectDocText, error)
+	PutProjectDoc(ctx context.Context, user, backendID, projectID, kind, name string, in ProjectDocInput) (ProjectDocText, error)
+	DeleteProjectDoc(ctx context.Context, user, backendID, projectID, kind, name string) (ProjectDocs, error)
 	Learned(ctx context.Context, user, backendID string, q LearnedQuery) (LearnedPage, error)
 	LearnedInfo(ctx context.Context, user, backendID string) (LearnedInfo, error)
 	AddLearned(ctx context.Context, user, backendID, content string) (Conclusion, error)

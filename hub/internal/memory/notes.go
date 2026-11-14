@@ -236,7 +236,20 @@ func (n *notes) project(ctx context.Context, method, path string, body any) (hub
 		return hub.ProjectNotes{}, err
 	}
 	fillProject(&out.Project)
+	out.Topics = fillDocs(out.Topics)
+	out.PathNotes = fillDocs(out.PathNotes)
 	return out, nil
+}
+
+func fillDocs(l []hub.ProjectDoc) []hub.ProjectDoc {
+	if l == nil {
+		return []hub.ProjectDoc{}
+	}
+	return l
+}
+
+func docsBase(id, kind string) string {
+	return projectBase + "/projects/" + url.PathEscape(id) + "/" + kind
 }
 
 func (n *notes) projectNotes(ctx context.Context, id string) (hub.ProjectNotes, error) {

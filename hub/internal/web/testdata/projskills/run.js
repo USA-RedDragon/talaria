@@ -41,7 +41,7 @@ async function memoryProject(c, tag) {
   await ev(`(() => { const s = ${q('#memory select[data-k="project"]')}; s.value = ${JSON.stringify(demo)}; s.dispatchEvent(new Event("change")); })()`);
   await until(ev, `${q('#memory [data-k="sub-skills"]')}`, tag + ": Notes and Skills tabs");
   const labels = await ev(`[...document.querySelectorAll("#memory .mem-subtab")].map((b) => b.textContent.replace(/\\s+/g, " ").trim())`);
-  assert.deepStrictEqual(labels, ["Notes (3)", "Skills (3)"], tag + ": tab labels from the real counts");
+  assert.deepStrictEqual(labels, ["Index (3)", "Topics (0)", "Path notes (0)", "Skills (3)"], tag + ": tab labels from the real counts");
   await ev(`${q('#memory [data-k="sub-skills"]')}.click()`);
   await until(ev, `document.querySelectorAll("#memory .mem-skill").length === 3`, tag + ": three skills");
   assert.ok((await ev(`location.hash`)).endsWith("/" + demo + "/skills"), tag + ": the address keeps the Skills tab");

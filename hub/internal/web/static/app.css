@@ -662,11 +662,24 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
   background: var(--bg); color: var(--fg); max-width: 100%; justify-self: start; }
 .mem-proj dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .25rem .9rem; margin: 0; font-size: .82rem; color: var(--muted); }
 .mem-proj dd { margin: 0; color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; overflow-wrap: anywhere; }
-.mem-subtabs { display: flex; gap: .3rem; border-bottom: 1px solid var(--line); margin-top: .1rem; }
-.mem-subtab { border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; background: none; padding: .35rem .75rem; color: var(--muted); font-size: .9rem; }
+.mem-subtabs { display: flex; gap: .3rem; border-bottom: 1px solid var(--line); margin-top: .1rem; overflow-x: auto; }
+.mem-subtab { border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; background: none; padding: .35rem .75rem; color: var(--muted); font-size: .9rem; white-space: nowrap; }
 .mem-subtab[aria-selected="true"] { background: var(--card); color: var(--fg); font-weight: 650; border-color: var(--line); margin-bottom: -1px; }
 .mem-pill { font-size: .72rem; padding: .05rem .5rem; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .mem-pill.proj { color: var(--accent); border-color: var(--accent); }
+.mem-pill.warn { color: var(--warn); border-color: var(--warn); }
+.mem-pill.glob { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg); background: var(--code); border-color: transparent; white-space: normal; overflow-wrap: anywhere; }
+.mem-link { color: var(--accent); text-decoration: none; font-size: .85rem; white-space: nowrap; }
+.mem-link:hover { text-decoration: underline; }
+.mem-total { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mem-skill.open { padding-bottom: .8rem; }
+.mem-skill-meta { margin-top: .2rem; color: var(--muted); font-size: .78rem; display: flex; flex-wrap: wrap; gap: .3rem .7rem; align-items: center; font-variant-numeric: tabular-nums; }
+.mem-form { display: grid; gap: .5rem; margin-top: .5rem; }
+.mem-form label { display: grid; gap: .2rem; font-size: .8rem; color: var(--muted); }
+.mem-form input, .mem-form textarea, .mem-acts input { font: inherit; font-size: .9rem; padding: .35rem .55rem; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%; }
+.mem-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; min-height: 11rem; resize: vertical; }
+.mem-form textarea.short { min-height: 6rem; }
+.mem-acts input { flex: 1; min-width: 10rem; max-width: 18rem; width: auto; }
 .mem-skills { display: grid; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 0 .8rem; }
 .mem-skills > .mem-hint { padding: .6rem 0; }
 .mem-skill { padding: .55rem 0; border-top: 1px solid var(--line); min-width: 0; }
@@ -676,7 +689,7 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
 .mem-skill-name { font-weight: 650; overflow-wrap: anywhere; min-width: 2rem; flex: 0 1 auto; }
 .mem-skill-top .mem-pill { flex: none; }
 .mem-skill-top.asking { flex-wrap: wrap; }
-.mem-skill-top.asking .mem-skill-acts { flex: 1 1 100%; justify-content: flex-end; margin-left: 0; }
+.mem-skill-top.asking .mem-skill-acts { flex: 1 1 100%; justify-content: flex-end; margin-left: 0; flex-wrap: wrap; white-space: normal; }
 .mem-skill-acts { display: inline-flex; flex: none; gap: .4rem; align-items: center; margin-left: auto; white-space: nowrap; }
 .mem-skill-acts button { font-size: .85rem; padding: .25rem .7rem; }
 .mem-skill-desc { margin-top: .2rem; color: var(--muted); font-size: .88rem; overflow-wrap: anywhere; }
@@ -696,6 +709,8 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
   .mem-proj select { justify-self: stretch; }
   .mem-proj dl { grid-template-columns: minmax(0, 1fr); gap: .1rem; }
   .mem-proj dd + dt { margin-top: .3rem; }
+  .mem-skill-top.doc { flex-wrap: wrap; }
+  .mem-skill-top.doc .mem-skill-acts { margin-left: 0; flex: 1 1 100%; }
 }
 
 /* In-page image viewer */

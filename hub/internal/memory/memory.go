@@ -311,6 +311,92 @@ func (s *Service) DeleteProjectSkill(ctx context.Context, user, backendID, proje
 	return out, nil
 }
 
+// docName bounds a topic's or path note's name as the plugin does: 1 to 64
+// lowercase letters, digits and dashes.
+var docName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+func (s *Service) doc(ctx context.Context, user, backendID, projectID, kind, name string, named bool) (*notes, error) {
+	n, err := s.project(ctx, user, backendID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if kind != hub.DocTopics && kind != hub.DocPaths {
+		return nil, &hub.MemoryError{Status: http.StatusNotFound, Message: "Not found"}
+	}
+	if named && !docName.MatchString(name) {
+		return nil, &hub.MemoryError{Status: http.StatusNotFound, Message: "The project has no such " + docWord(kind)}
+	}
+	return n, nil
+}
+
+func docWord(kind string) string {
+	if kind == hub.DocPaths {
+		return "path note"
+	}
+	return "topic"
+}
+
+// ProjectDocs lists a project's topics or path notes.
+func (s *Service) ProjectDocs(ctx context.Context, user, backendID, projectID, kind string) (hub.ProjectDocs, error) {
+	n, err := s.doc(ctx, user, backendID, projectID, kind, "", false)
+	if err != nil {
+		return hub.ProjectDocs{}, err
+	}
+	var out hub.ProjectDocs
+	if err := n.send(ctx, http.MethodGet, docsBase(projectID, kind), nil, &out); err != nil {
+		return hub.ProjectDocs{}, err
+	}
+	out.Items = fillDocs(out.Items)
+	return out, nil
+}
+
+// ProjectDoc reads one topic or path note.
+func (s *Service) ProjectDoc(ctx context.Context, user, backendID, projectID, kind, name string) (hub.ProjectDocText, error) {
+	n, err := s.doc(ctx, user, backendID, projectID, kind, name, true)
+	if err != nil {
+		return hub.ProjectDocText{}, err
+	}
+	var out hub.ProjectDocText
+	if err := n.send(ctx, http.MethodGet, docsBase(projectID, kind)+"/"+name, nil, &out); err != nil {
+		return hub.ProjectDocText{}, err
+	}
+	return out, nil
+}
+
+// PutProjectDoc creates or changes one topic or path note.
+func (s *Service) PutProjectDoc(ctx context.Context, user, backendID, projectID, kind, name string, in hub.ProjectDocInput) (hub.ProjectDocText, error) {
+	n, err := s.doc(ctx, user, backendID, projectID, kind, name, true)
+	if err != nil {
+		return hub.ProjectDocText{}, err
+	}
+	if in.Name != "" && !docName.MatchString(in.Name) {
+		return hub.ProjectDocText{}, &hub.MemoryError{Status: http.StatusBadRequest, Message: "A name is 1 to 64 lowercase letters, digits and dashes"}
+	}
+	if strings.TrimSpace(in.Content) == "" {
+		return hub.ProjectDocText{}, &hub.MemoryError{Status: http.StatusBadRequest, Message: "The text is empty"}
+	}
+	var out hub.ProjectDocText
+	if err := n.send(ctx, http.MethodPut, docsBase(projectID, kind)+"/"+name, in, &out); err != nil {
+		return hub.ProjectDocText{}, err
+	}
+	out.List = fillDocs(out.List)
+	return out, nil
+}
+
+// DeleteProjectDoc removes one topic or path note and answers with the rest.
+func (s *Service) DeleteProjectDoc(ctx context.Context, user, backendID, projectID, kind, name string) (hub.ProjectDocs, error) {
+	n, err := s.doc(ctx, user, backendID, projectID, kind, name, true)
+	if err != nil {
+		return hub.ProjectDocs{}, err
+	}
+	var out hub.ProjectDocs
+	if err := n.send(ctx, http.MethodDelete, docsBase(projectID, kind)+"/"+name, nil, &out); err != nil {
+		return hub.ProjectDocs{}, err
+	}
+	out.Items = fillDocs(out.Items)
+	return out, nil
+}
+
 func view(v string) (string, error) {
 	switch v {
 	case "", hub.ViewAll:

@@ -84,6 +84,114 @@ type Plugin struct {
 	notes    hub.Notes
 	projects []hub.ProjectNotes
 	skills   map[string][]hub.ProjectSkillDoc
+	docs     map[string][]hub.ProjectDocText
+}
+
+// AddProjectDoc gives a project a topic (kind hub.DocTopics) or a path note
+// (hub.DocPaths), as the project-memory plugin would keep it.
+func (p *Plugin) AddProjectDoc(projectID, kind string, d hub.ProjectDocText) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.docs == nil {
+		p.docs = map[string][]hub.ProjectDocText{}
+	}
+	d.Size = len(d.Content)
+	p.docs[projectID+"/"+kind] = append(p.docs[projectID+"/"+kind], d)
+	p.syncDocs(projectID)
+}
+
+func (p *Plugin) docList(projectID, kind string) []hub.ProjectDoc {
+	out := make([]hub.ProjectDoc, 0, len(p.docs[projectID+"/"+kind]))
+	for _, d := range p.docs[projectID+"/"+kind] {
+		out = append(out, d.ProjectDoc)
+	}
+	return out
+}
+
+// syncDocs keeps a project's counts and lists in step with its docs.
+func (p *Plugin) syncDocs(projectID string) {
+	i := slices.IndexFunc(p.projects, func(x hub.ProjectNotes) bool { return x.Project.ID == projectID })
+	if i < 0 {
+		return
+	}
+	pn := &p.projects[i]
+	pn.Topics, pn.PathNotes = p.docList(projectID, hub.DocTopics), p.docList(projectID, hub.DocPaths)
+	pn.Project.Topics, pn.Project.PathNotes = len(pn.Topics), len(pn.PathNotes)
+	pn.Project.Total = pn.Project.Used
+	for _, d := range append(slices.Clone(pn.Topics), pn.PathNotes...) {
+		pn.Project.Total += d.Size
+	}
+}
+
+func (p *Plugin) serveDocs(w http.ResponseWriter, method string, pn *hub.ProjectNotes, parts []string, body map[string]any) {
+	id, kind := pn.Project.ID, parts[1]
+	key := id + "/" + kind
+	if len(parts) == 2 && method == http.MethodGet {
+		writeJSON(w, http.StatusOK, hub.ProjectDocs{Items: p.docList(id, kind), Inbox: pn.Inbox})
+		return
+	}
+	if len(parts) != 3 {
+		writeJSON(w, http.StatusNotFound, map[string]string{keyDetail: notFound})
+		return
+	}
+	list := p.docs[key]
+	i := slices.IndexFunc(list, func(d hub.ProjectDocText) bool { return d.Name == parts[2] })
+	switch method {
+	case http.MethodGet, http.MethodDelete:
+		if i < 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{keyError: "unknown_doc", keyMsg: "This project has no such topic."})
+			return
+		}
+		if method == http.MethodGet {
+			writeJSON(w, http.StatusOK, list[i])
+			return
+		}
+		p.docs[key] = slices.Delete(list, i, i+1)
+		p.syncDocs(id)
+		writeJSON(w, http.StatusOK, hub.ProjectDocs{Items: p.docList(id, kind), Inbox: pn.Inbox})
+		return
+	case http.MethodPut:
+		str := func(k string) string { s, _ := body[k].(string); return s }
+		if create, _ := body["create"].(bool); create && i >= 0 {
+			writeJSON(w, http.StatusConflict, map[string]string{keyError: "exists", keyMsg: "There is already a topic named " + parts[2] + "."})
+			return
+		}
+		if base, ok := body["base"].(string); ok && i >= 0 && base != list[i].Content {
+			writeJSON(w, http.StatusConflict, map[string]string{keyError: "changed", keyMsg: "This changed since you opened it. Reload and try again."})
+			return
+		}
+		d := hub.ProjectDocText{ProjectDoc: hub.ProjectDoc{Name: parts[2], Description: str("description"), Modified: "2026-11-14"}, Content: str("content")}
+		if name := str("name"); name != "" {
+			d.Name = name
+		}
+		if ps, ok := body["paths"].([]any); ok {
+			for _, x := range ps {
+				if s, ok := x.(string); ok {
+					d.Paths = append(d.Paths, s)
+				}
+			}
+		} else if i >= 0 {
+			d.Paths = list[i].Paths
+		}
+		if kind == hub.DocPaths && len(d.Paths) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{keyError: "bad_request", keyMsg: "a path note needs paths"})
+			return
+		}
+		d.Size = len(d.Content)
+		if i >= 0 {
+			d.InIndex = list[i].InIndex
+			list[i] = d
+		} else {
+			list = append(list, d)
+		}
+		slices.SortFunc(list, func(a, b hub.ProjectDocText) int { return strings.Compare(a.Name, b.Name) })
+		p.docs[key] = list
+		p.syncDocs(id)
+		d.List = p.docList(id, kind)
+		writeJSON(w, http.StatusOK, d)
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{keyDetail: notFound})
 }
 
 // AddProjectSkill gives a project a skill, as the project-memory plugin
@@ -138,10 +246,28 @@ func (p *Plugin) AddProject(pr hub.Project, entries ...string) {
 	if entries == nil {
 		entries = []string{}
 	}
-	p.projects = append(p.projects, hub.ProjectNotes{Project: pr, Notes: hub.Notes{Targets: map[string]hub.NoteStore{
+	p.projects = append(p.projects, hub.ProjectNotes{Project: pr, Topics: []hub.ProjectDoc{}, PathNotes: []hub.ProjectDoc{}, Notes: hub.Notes{Targets: map[string]hub.NoteStore{
 		hub.TargetMemory: {File: "/data/projects/" + pr.ID + "/MEMORY.md", Limit: 3500, Enabled: true, Entries: entries},
 		hub.TargetUser:   {Entries: []string{}},
 	}, Pending: []hub.PendingNote{}}})
+}
+
+// SetProjectIndex sets a project's index budget, counts what its entries
+// use, and how many notes its inbox topic holds.
+func (p *Plugin) SetProjectIndex(projectID string, limit, inbox int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	i := slices.IndexFunc(p.projects, func(x hub.ProjectNotes) bool { return x.Project.ID == projectID })
+	if i < 0 {
+		return
+	}
+	pn := &p.projects[i]
+	st := pn.Targets[hub.TargetMemory]
+	st.Limit, st.Used = limit, len(strings.Join(st.Entries, "\n§\n"))
+	pn.Targets[hub.TargetMemory] = st
+	pn.Project.Limit, pn.Project.Used, pn.Project.Count = limit, st.Used, len(st.Entries)
+	pn.Inbox, pn.Project.Inbox = inbox, inbox
+	p.syncDocs(projectID)
 }
 
 // NewPlugin starts a fake with notes.
@@ -296,6 +422,9 @@ func (p *Plugin) serveProject(w http.ResponseWriter, method, rest string, body m
 	switch {
 	case len(parts) >= 2 && parts[1] == "skills":
 		p.serveSkills(w, method, pn, parts)
+		return
+	case len(parts) >= 2 && (parts[1] == hub.DocTopics || parts[1] == hub.DocPaths):
+		p.serveDocs(w, method, pn, parts, body)
 		return
 	case method == http.MethodGet && len(parts) == 1:
 	case method == http.MethodPost && len(parts) == 3 && parts[1] == "memory":

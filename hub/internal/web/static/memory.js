@@ -17,7 +17,9 @@ window.HubMemory = (ctx) => {
   const copy = {
     notes: "Talaria reads these notes at the start of every chat. Keep them short. Changes apply to new chats.",
     skills: "Skills that belong to this project. Talaria loads them only in chats bound to this project and in their subagents. They win over a global skill of the same name here.",
-    project: "Talaria's notes about one project. It reads them in chats that work in this project, on any device. Keep them short. Changes apply to new chats.",
+    project: "The index is what Talaria reads at the start of every chat in this project: one short line per note. Detail lives in topics; the agent reads a topic when a task calls for it. Changes apply to new chats.",
+    topics: "Topics hold the detail behind the index: any number, any length. Every chat gets the list of topic names; the agent reads a topic when a task calls for it. A topic no index line points to is still listed.",
+    paths: "Path notes are rules for part of the project. Talaria reads one the first time a chat opens or edits a file that matches its patterns, so they cost nothing in chats that never go there.",
     you: "What Talaria has stored about you as a person. It reads this in every chat, on every device and in Telegram. Changes apply to new chats.",
     learned: "Facts Talaria picked up from your chats over time. It looks these up when they seem relevant. Delete anything wrong or out of date.",
     help: "Talaria keeps two short files that it reads at the start of every chat: its own notes and what it has stored about you. It also learns facts from your chats over time and looks them up when they seem relevant. Here you can read, fix and delete all of it. Chats that are already open keep what they started with; changes apply to new chats.",
@@ -34,8 +36,10 @@ window.HubMemory = (ctx) => {
   let projects = null;
   let projectsErr = "";
   let project = "";
-  // psub is the part of a project in view: its notes or its skills.
+  // psub is the part of a project in view: its index ("notes"), topics,
+  // path notes ("paths") or skills.
   let psub = "notes";
+  const psubs = ["notes", "topics", "paths", "skills"];
   let skills = null;
   let skillsErr = "";
   let skillsFor = "";
@@ -66,7 +70,7 @@ window.HubMemory = (ctx) => {
 
   function setHash() {
     let h = "#/memory/" + encodeURIComponent(backend) + "/" + tab;
-    if (tab === "notes" && project) h += "/" + encodeURIComponent(project) + (psub === "skills" ? "/skills" : "");
+    if (tab === "notes" && project) h += "/" + encodeURIComponent(project) + (psub !== "notes" ? "/" + psub : "");
     if (location.hash !== h) history.replaceState(null, "", h);
   }
 
@@ -83,7 +87,7 @@ window.HubMemory = (ctx) => {
     projects = null;
     tab = tabs.some((x) => x.id === t) ? t : tab;
     if (t === "notes" && (pr || "") !== project) { project = pr || ""; notes = null; skills = null; }
-    psub = t === "notes" && project && sub === "skills" ? "skills" : "notes";
+    psub = t === "notes" && project && psubs.includes(sub) ? sub : "notes";
     if (!tabOK(tab)) tab = tabs.find((x) => tabOK(x.id)).id;
     resetUI();
     if (backend) setHash();
@@ -110,6 +114,8 @@ window.HubMemory = (ctx) => {
   function scope() { return project ? "/projects/" + encodeURIComponent(project) : ""; }
   function projectView() { return tab === "notes" && !!project; }
   function skillsView() { return projectView() && psub === "skills"; }
+  function docsView() { return projectView() && (psub === "topics" || psub === "paths"); }
+  function docsPath(kind, name) { return path(scope() + "/docs/" + kind + (name ? "/" + encodeURIComponent(name) : "")); }
 
   async function load() {
     if (!backend) return;
@@ -120,6 +126,7 @@ window.HubMemory = (ctx) => {
     if (tab === "notes" && !projects) loadProjects();
     if (skillsView()) { loadSkills(); return; }
     await loadNotes();
+    if (docsView() && psub === "paths") loadPathTexts();
   }
 
   async function loadNotes() {
@@ -182,6 +189,7 @@ window.HubMemory = (ctx) => {
       if (n.project && projects) projects = projects.map((x) => (x.id === n.project.id ? n.project : x));
       countPending();
       if (after) after();
+      if (n.message) { ui.note = n.message; ui.bad = false; }
     } catch (e) {
       ui.note = e.message;
       ui.bad = true;
@@ -261,11 +269,12 @@ window.HubMemory = (ctx) => {
     }
   }
 
-  function meter(store) {
+  function meter(store, label, warnAt) {
+    label = label || "Space used";
     const pct = store.limit > 0 ? Math.min(100, Math.round((store.used / store.limit) * 100)) : 0;
-    const m = el("div", pct >= 85 ? "mem-meter warn" : "mem-meter");
+    const m = el("div", pct >= (warnAt || 85) ? "mem-meter warn" : "mem-meter");
     const row = el("div", "row");
-    row.append(el("span", "", "Space used"), el("span", "", fmt(store.used) + " / " + fmt(store.limit) + " characters"));
+    row.append(el("span", "", label), el("span", "", fmt(store.used) + " / " + fmt(store.limit) + " characters"));
     const track = el("div", "track");
     const fill = el("div", "fill");
     fill.style.width = pct + "%";
@@ -274,7 +283,7 @@ window.HubMemory = (ctx) => {
     track.setAttribute("aria-valuemin", "0");
     track.setAttribute("aria-valuemax", String(store.limit));
     track.setAttribute("aria-valuenow", String(store.used));
-    track.setAttribute("aria-label", "Space used");
+    track.setAttribute("aria-label", label);
     m.append(row, track);
     return { m, pct };
   }
@@ -282,6 +291,7 @@ window.HubMemory = (ctx) => {
   function drawNotes(body, t) {
     if (t.id === "notes") projectPicker(body);
     if (skillsView()) { drawSkills(body); return; }
+    if (docsView()) { drawDocs(body); return; }
     const inProject = projectView();
     body.append(el("p", "mem-hint", copy[inProject ? "project" : t.id]));
     if (!notes) {
@@ -290,8 +300,9 @@ window.HubMemory = (ctx) => {
     }
     const store = notes.targets[t.target];
     if (!store.enabled) body.append(el("p", "mem-note", copy.off));
-    const { m, pct } = meter(store);
+    const { m, pct } = inProject ? meter(store, "Index space", 80) : meter(store);
     body.append(m);
+    if (inProject) indexNotes(body, store, pct);
     status(body);
     const list = el("div", "mem-entries");
     for (const p of notes.pending.filter((x) => x.target === t.target)) list.append(pendingRow(p));
@@ -309,10 +320,10 @@ window.HubMemory = (ctx) => {
     body.append(list);
     if (store.enabled && !ui.raw && !ui.adding) {
       const acts = el("div", "mem-acts");
-      acts.append(btn("", t.id === "you" ? "Add a line" : "Add a note", () => { ui.adding = true; ui.edit = null; ui.note = ""; draw(); focusEditor(); }));
+      acts.append(btn("", t.id === "you" || inProject ? "Add a line" : "Add a note", () => { ui.adding = true; ui.edit = null; ui.note = ""; draw(); focusEditor(); }));
       body.append(acts);
     }
-    if (store.enabled && pct >= 90) body.append(el("p", "mem-hint", copy.full));
+    if (store.enabled && pct >= 90 && !inProject) body.append(el("p", "mem-hint", copy.full));
     if (store.enabled) body.append(advancedNotes(t, store));
   }
 
@@ -365,8 +376,11 @@ window.HubMemory = (ctx) => {
     bar.setAttribute("role", "tablist");
     bar.setAttribute("aria-label", "Part of the project");
     const nSkills = skills && skillsFor === backend + "/" + project ? skills.length : cur.skills || 0;
-    const nNotes = notes && notes.project && notes.project.id === project ? notes.targets.memory.entries.length : cur.count || 0;
-    for (const [id, label, n] of [["notes", "Notes", nNotes], ["skills", "Skills", nSkills]]) {
+    const mine = notes && notes.project && notes.project.id === project;
+    const nNotes = mine ? notes.targets.memory.entries.length : cur.count || 0;
+    const nTopics = mine ? (notes.topics || []).length : cur.topics || 0;
+    const nPaths = mine ? (notes.path_notes || []).length : cur.path_notes || 0;
+    for (const [id, label, n] of [["notes", "Index", nNotes], ["topics", "Topics", nTopics], ["paths", "Path notes", nPaths], ["skills", "Skills", nSkills]]) {
       const b = el("button", "mem-subtab", label);
       b.type = "button";
       b.dataset.k = "sub-" + id;
@@ -379,11 +393,279 @@ window.HubMemory = (ctx) => {
         resetUI();
         setHash();
         draw();
-        if (id === "skills") loadSkills(); else if (!notes) loadNotes();
+        if (id === "skills") loadSkills();
+        else if (!notes) load();
+        else if (id === "paths") loadPathTexts();
       };
       bar.append(b);
     }
     return bar;
+  }
+
+  // pointerOf splits an index line that points to a topic, as the plugin
+  // writes it ("<summary> -> topic: <name>"), into its text and the topic.
+  function pointerOf(text) {
+    const m = /^([\s\S]*?)\s*->\s*topic:\s*([a-z0-9][a-z0-9-]{0,63})\s*$/.exec(text);
+    return m ? { line: m[1], topic: m[2] } : null;
+  }
+
+  function openTopic(name) {
+    psub = "topics";
+    resetUI();
+    ui.open = name;
+    setHash();
+    draw();
+    viewDoc("topics", name, true);
+  }
+
+  // indexNotes shows, under the index's meter, the size of the whole
+  // project, the 80% warning and how many notes wait in the inbox topic.
+  function indexNotes(body, store, pct) {
+    const p = notes.project || {};
+    const nt = (notes.topics || []).length, np = (notes.path_notes || []).length;
+    const total = p.total || store.used;
+    body.append(el("div", "mem-total", "Whole project: " + fmt(total) + " characters across the index, " + fmt(nt) + (nt === 1 ? " topic" : " topics") +
+      " and " + fmt(np) + (np === 1 ? " path note" : " path notes") + ". Only the index has a limit."));
+    if (pct >= 80) body.append(el("p", "mem-note", "The index is " + pct + "% full. When it fills, Talaria keeps saving: it moves the detail into a topic and leaves a one-line pointer here."));
+    if (notes.inbox) body.append(el("p", "mem-note", "The inbox topic holds " + fmt(notes.inbox) + (notes.inbox === 1 ? " note" : " notes") + " saved while the index was full. Sort them into topics."));
+  }
+
+  // Topics and path notes. ui.open is the topic shown in place, ui.docEdit
+  // the one in the editor ("" for a new one), ui.docs their texts by kind/name.
+  function docList(kind) { return (kind === "topics" ? notes.topics : notes.path_notes) || []; }
+
+  function setDocList(kind, list) {
+    if (kind === "topics") notes.topics = list; else notes.path_notes = list;
+    if (projects) projects = projects.map((x) => (x.id === project ? { ...x, [kind === "topics" ? "topics" : "path_notes"]: list.length } : x));
+  }
+
+  async function viewDoc(kind, name, keep) {
+    ui.docs = ui.docs || {};
+    const key = kind + "/" + name;
+    if (keep && ui.docs[key] && !ui.docs[key].err) return ui.docs[key];
+    const at = backend + "/" + project;
+    const docs = ui.docs;
+    try {
+      docs[key] = await api("GET", docsPath(kind, name));
+    } catch (e) {
+      docs[key] = { err: e.message };
+    }
+    if (at === backend + "/" + project && shown) draw();
+    return docs[key];
+  }
+
+  // loadPathTexts reads the text of every path note, which the list shows.
+  async function loadPathTexts() {
+    if (!notes || !notes.project) return;
+    ui.docs = ui.docs || {};
+    const missing = (notes.path_notes || []).filter((d) => !ui.docs["paths/" + d.name]).slice(0, 50);
+    await Promise.all(missing.map((d) => viewDoc("paths", d.name, true)));
+  }
+
+  function drawDocs(body) {
+    const kind = psub;
+    body.append(el("p", "mem-hint", copy[kind]));
+    if (!notes) {
+      body.append(el("p", notesErr ? "mem-note bad" : "mem-hint", notesErr ? "Could not load memory: " + notesErr : "Loading."));
+      return;
+    }
+    status(body);
+    const acts = el("div", "mem-acts");
+    if (kind === "topics") {
+      const s = el("input");
+      s.type = "search";
+      s.placeholder = "Search topics";
+      s.setAttribute("aria-label", "Search topics");
+      s.dataset.k = "topic-search";
+      s.value = ui.q || "";
+      s.oninput = () => { ui.q = s.value; draw(); };
+      acts.append(s);
+    }
+    acts.append(btn("", kind === "topics" ? "New topic" : "New path note", () => { ui.docEdit = ""; ui.confirm = null; ui.note = ""; draw(); focusDoc(); }));
+    body.append(acts);
+    const list = el("div", "mem-skills");
+    if (ui.docEdit === "") list.append(docForm(kind, null));
+    const q = (ui.q || "").trim().toLowerCase();
+    const items = docList(kind).filter((d) => kind !== "topics" || !q || (d.name + " " + d.description).toLowerCase().includes(q));
+    for (const d of items) list.append(ui.docEdit === d.name ? docForm(kind, d) : docRow(kind, d));
+    if (!items.length && ui.docEdit !== "") {
+      list.append(el("p", "mem-hint", q ? "No topic matches." : kind === "topics" ? "This project has no topics yet." : "This project has no path notes yet."));
+    }
+    body.append(list);
+  }
+
+  function docRow(kind, d) {
+    const key = kind + "/" + d.name;
+    const open = kind === "paths" || ui.open === d.name;
+    const row = el("div", "mem-skill" + (open ? " open" : ""));
+    row.dataset.doc = d.name;
+    const top = el("div", "mem-skill-top doc");
+    top.append(el("span", "mem-skill-name", d.name));
+    if (kind === "topics") {
+      if (d.name === "inbox") top.append(el("span", "mem-pill warn", "unsorted"));
+      else if (!d.in_index) top.append(el("span", "mem-pill", "not in the index"));
+    }
+    top.append(el("span", "grow"));
+    const acts = el("span", "mem-skill-acts");
+    if (ui.confirm === key) {
+      top.classList.add("asking");
+      acts.append(el("span", "mem-ask", kind === "topics" ? "Delete this topic? Index lines that point to it stay." : "Delete this path note?"),
+        btn("ghost", "Cancel", () => { ui.confirm = null; draw(); }), btn("danger", "Delete", () => deleteDoc(kind, d.name)));
+    } else {
+      if (kind === "topics") {
+        const v = btn("", open ? "Hide" : "Open", () => { ui.open = open ? null : d.name; draw(); if (!open) viewDoc(kind, d.name, true); });
+        v.setAttribute("aria-expanded", open ? "true" : "false");
+        acts.append(v);
+      }
+      acts.append(btn("", "Edit", () => editDoc(kind, d.name)), btn("ghost danger-text", "Delete", () => { ui.confirm = key; draw(); }));
+    }
+    top.append(acts);
+    row.append(top);
+    if (kind === "topics" && d.description) row.append(el("div", "mem-skill-desc", d.description));
+    const meta = el("div", "mem-skill-meta");
+    for (const g of d.paths || []) meta.append(el("span", "mem-pill glob", g));
+    meta.append(el("span", "", fmt(d.size) + " characters"));
+    if (d.modified) meta.append(el("span", "", "changed " + day(d.modified + "T12:00:00")));
+    row.append(meta);
+    const doc = ui.docs && ui.docs[key];
+    if (kind === "paths") {
+      if (doc && !doc.err) row.append(el("div", "mem-skill-desc", doc.content));
+      else if (doc && doc.err) row.append(el("p", "mem-note bad", "Could not read it: " + doc.err));
+    } else if (open) {
+      if (!doc) row.append(el("p", "mem-hint", "Loading."));
+      else if (doc.err) row.append(el("p", "mem-note bad", "Could not read the topic: " + doc.err));
+      else {
+        const pre = el("pre", "mem-skill-text", doc.content);
+        pre.tabIndex = 0;
+        pre.setAttribute("aria-label", "Topic " + d.name);
+        row.append(pre);
+        if (doc.truncated) row.append(el("p", "mem-hint", "The text is cut here. The topic is longer."));
+      }
+    }
+    return row;
+  }
+
+  async function editDoc(kind, name) {
+    ui.docEdit = name;
+    ui.confirm = null;
+    ui.note = "";
+    ui.draftDoc = null;
+    draw();
+    const d = await viewDoc(kind, name, false);
+    if (d && d.err) { ui.docEdit = null; ui.note = d.err; ui.bad = true; }
+    draw();
+    focusDoc();
+  }
+
+  function focusDoc() {
+    const f = root.querySelector('.mem-form [data-k="doc-text"]');
+    if (f && !f.disabled) f.focus({ preventScroll: true });
+  }
+
+  // docForm edits a topic (name, description, text) or a path note (name,
+  // patterns, text). d is null for a new one.
+  function docForm(kind, d) {
+    const row = el("div", "mem-skill open");
+    row.append(el("div", "mem-skill-name", d ? "Edit " + d.name : kind === "topics" ? "New topic" : "New path note"));
+    const doc = d ? ui.docs && ui.docs[kind + "/" + d.name] : { content: "", description: "", paths: [] };
+    const f = el("div", "mem-form");
+    if (!doc) { f.append(el("p", "mem-hint", "Loading.")); row.append(f); return row; }
+    const draft = ui.draftDoc && ui.draftDoc.for === kind + "/" + (d ? d.name : "") ? ui.draftDoc : null;
+    const field = (label, input) => { const l = el("label", "", label); l.append(input); f.append(l); return input; };
+    const n = el("input");
+    n.value = draft ? draft.name : d ? d.name : "";
+    n.placeholder = "a-short-name";
+    n.dataset.k = "doc-name";
+    field("Name", n);
+    let desc = null, pats = null;
+    if (kind === "topics") {
+      desc = el("input");
+      desc.value = draft ? draft.desc : doc.description || "";
+      desc.placeholder = "One line: what is in it";
+      desc.dataset.k = "doc-desc";
+      field("Description", desc);
+    } else {
+      pats = el("input");
+      pats.value = draft ? draft.pats : (doc.paths || []).join(", ");
+      pats.placeholder = "src/ppu/**, *.sql";
+      pats.dataset.k = "doc-paths";
+      field("Files it applies to (patterns relative to the repository, comma separated)", pats);
+    }
+    const ta = el("textarea", kind === "paths" ? "short" : "");
+    ta.value = draft ? draft.text : doc.content || "";
+    ta.placeholder = "Markdown. No length limit.";
+    ta.dataset.k = "doc-text";
+    field("Text", ta);
+    const keep = () => { ui.draftDoc = { for: kind + "/" + (d ? d.name : ""), name: n.value, desc: desc ? desc.value : "", pats: pats ? pats.value : "", text: ta.value }; };
+    for (const x of [n, desc, pats, ta]) if (x) x.oninput = keep;
+    const done = () => { ui.docEdit = null; ui.draftDoc = null; };
+    const save = () => saveDoc(kind, d, doc, n.value.trim(), desc ? desc.value : null, pats ? pats.value : null, ta.value, done);
+    ta.onkeydown = (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+      if (e.key === "Escape") { e.stopPropagation(); done(); draw(); }
+    };
+    const er = el("div", "mem-editrow");
+    er.append(el("span", "", d ? fmt(d.size) + " characters" : "Ctrl+Enter saves"), btn("ghost", "Cancel", () => { done(); draw(); }), btn("primary", "Save", save));
+    f.append(er);
+    row.append(f);
+    return row;
+  }
+
+  async function saveDoc(kind, d, doc, name, desc, pats, text, done) {
+    if (ui.busy) return;
+    if (!name || !text.trim()) { ui.note = !name ? "Give it a name." : "The text is empty."; ui.bad = true; draw(); return; }
+    const body = { content: text };
+    if (desc !== null) body.description = desc;
+    if (pats !== null) body.paths = pats.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+    let target = name;
+    if (d) { target = d.name; body.base = doc.content; if (name !== d.name) body.name = name; } else body.create = true;
+    ui.busy = true;
+    ui.note = "";
+    draw();
+    const at = backend + "/" + project;
+    try {
+      const out = await api("PUT", docsPath(kind, target), body);
+      if (at !== backend + "/" + project) return;
+      setDocList(kind, out.list || docList(kind));
+      ui.docs = ui.docs || {};
+      if (d) delete ui.docs[kind + "/" + d.name];
+      ui.docs[kind + "/" + out.name] = out;
+      if (kind === "topics") ui.open = out.name;
+      done();
+      ui.note = (kind === "topics" ? "Topic " : "Path note ") + out.name + " is saved. Changes apply to new chats.";
+      ui.bad = false;
+    } catch (e) {
+      ui.note = e.message;
+      ui.bad = true;
+    } finally {
+      ui.busy = false;
+    }
+    draw();
+  }
+
+  async function deleteDoc(kind, name) {
+    if (ui.busy) return;
+    ui.busy = true;
+    ui.note = "";
+    draw();
+    const at = backend + "/" + project;
+    try {
+      const out = await api("DELETE", docsPath(kind, name));
+      if (at !== backend + "/" + project) return;
+      setDocList(kind, out.items);
+      if (kind === "topics") notes.inbox = out.inbox;
+      ui.confirm = null;
+      if (ui.open === name) ui.open = null;
+      if (ui.docs) delete ui.docs[kind + "/" + name];
+      ui.note = name + " is deleted.";
+      ui.bad = false;
+    } catch (e) {
+      ui.note = e.message;
+      ui.bad = true;
+    } finally {
+      ui.busy = false;
+    }
+    draw();
   }
 
   // loadSkills reads the skills of the project in view.
@@ -540,10 +822,18 @@ window.HubMemory = (ctx) => {
     if (ui.edit === text) return editor(t, store, text, text);
     const row = el("div", "mem-entry");
     if (ui.more === text) row.classList.add("open");
-    row.append(el("div", "mem-text", text));
+    const ptr = notes.project ? pointerOf(text) : null;
+    const txt = el("div", "mem-text", ptr ? ptr.line + " " : text);
+    if (ptr) {
+      const a = el("a", "mem-link", "Topic: " + ptr.topic);
+      a.href = "#/memory/" + encodeURIComponent(backend) + "/notes/" + encodeURIComponent(project) + "/topics";
+      a.onclick = (e) => { e.preventDefault(); openTopic(ptr.topic); };
+      txt.append(a);
+    }
+    row.append(txt);
     const acts = el("div", "mem-entry-acts");
     if (ui.confirm === text) {
-      acts.append(el("span", "mem-ask", "Delete this note?"), btn("ghost", "Cancel", () => { ui.confirm = null; draw(); }),
+      acts.append(el("span", "mem-ask", notes.project ? "Delete this line?" : "Delete this note?"), btn("ghost", "Cancel", () => { ui.confirm = null; draw(); }),
         btn("danger", "Delete", () => change("POST", "/notes/" + t.target + "/remove", { entry: text }, () => { ui.confirm = null; })));
     } else {
       acts.append(btn("ghost mem-more", "⋯", () => { ui.more = ui.more === text ? null : text; draw(); }, "More"),
@@ -568,6 +858,11 @@ window.HubMemory = (ctx) => {
     const n = el("span", "", "");
     const room = () => store.limit - store.used + (entry !== null ? entry.length : store.entries.length ? -3 : 0);
     const tell = () => {
+      if (notes.project) {
+        // A project's index never refuses a line: when it is full, the detail moves into a topic.
+        n.textContent = fmt(ta.value.trim().length) + " characters. Keep index lines short; put detail in a topic.";
+        return;
+      }
       const left = room() - ta.value.trim().length;
       n.textContent = fmt(ta.value.trim().length) + " characters" + (left < 0 ? ", " + fmt(-left) + " over the limit" : "");
       n.classList.toggle("bad", left < 0);

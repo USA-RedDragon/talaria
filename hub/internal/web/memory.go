@@ -27,6 +27,10 @@ func (s *Server) memoryRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/memory/{backend}/projects/{project}/skills", s.api(s.handleProjectSkills))
 	mux.Handle("GET /api/memory/{backend}/projects/{project}/skills/{skill}", s.api(s.handleProjectSkill))
 	mux.Handle("DELETE /api/memory/{backend}/projects/{project}/skills/{skill}", s.api(s.handleDeleteProjectSkill))
+	mux.Handle("GET /api/memory/{backend}/projects/{project}/docs/{kind}", s.api(s.handleProjectDocs))
+	mux.Handle("GET /api/memory/{backend}/projects/{project}/docs/{kind}/{name}", s.api(s.handleProjectDoc))
+	mux.Handle("PUT /api/memory/{backend}/projects/{project}/docs/{kind}/{name}", s.api(s.handlePutProjectDoc))
+	mux.Handle("DELETE /api/memory/{backend}/projects/{project}/docs/{kind}/{name}", s.api(s.handleDeleteProjectDoc))
 	mux.Handle("GET /api/memory/{backend}/learned", s.api(s.handleLearned))
 	mux.Handle("POST /api/memory/{backend}/learned", s.api(s.handleAddLearned))
 	mux.Handle("GET /api/memory/{backend}/learned/info", s.api(s.handleLearnedInfo))
@@ -183,6 +187,55 @@ func (s *Server) handleDeleteProjectSkill(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
+}
+
+// memoryJSON answers v, or the error as memoryFail does.
+func (s *Server) memoryJSON(w http.ResponseWriter, v any, err error) {
+	if err != nil {
+		s.memoryFail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) handleProjectDocs(w http.ResponseWriter, r *http.Request) {
+	if s.memory == nil {
+		s.memoryFail(w, hub.ErrNoMemory)
+		return
+	}
+	v, err := s.memory.ProjectDocs(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("project"), r.PathValue("kind"))
+	s.memoryJSON(w, v, err)
+}
+
+func (s *Server) handleProjectDoc(w http.ResponseWriter, r *http.Request) {
+	if s.memory == nil {
+		s.memoryFail(w, hub.ErrNoMemory)
+		return
+	}
+	v, err := s.memory.ProjectDoc(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("project"), r.PathValue("kind"), r.PathValue("name"))
+	s.memoryJSON(w, v, err)
+}
+
+func (s *Server) handlePutProjectDoc(w http.ResponseWriter, r *http.Request) {
+	var in hub.ProjectDocInput
+	if !decode(w, r, &in) {
+		return
+	}
+	if s.memory == nil {
+		s.memoryFail(w, hub.ErrNoMemory)
+		return
+	}
+	v, err := s.memory.PutProjectDoc(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("project"), r.PathValue("kind"), r.PathValue("name"), in)
+	s.memoryJSON(w, v, err)
+}
+
+func (s *Server) handleDeleteProjectDoc(w http.ResponseWriter, r *http.Request) {
+	if s.memory == nil {
+		s.memoryFail(w, hub.ErrNoMemory)
+		return
+	}
+	v, err := s.memory.DeleteProjectDoc(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("project"), r.PathValue("kind"), r.PathValue("name"))
+	s.memoryJSON(w, v, err)
 }
 
 func (s *Server) handlePendingNote(w http.ResponseWriter, r *http.Request) {
