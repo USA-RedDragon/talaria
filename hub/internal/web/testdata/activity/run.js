@@ -254,7 +254,7 @@ assert.match(rowOf("sa-8").querySelector("button.now2").textContent, /^Running l
 // failed and not finished: it shows what it waits on, counts as running, and shows its elapsed time.
 const liveCount = () => Number(ids.actcount.textContent || 0);
 const runningBefore = liveCount();
-const longCmd = "bash /home/reddragon/Projects/dmrgo/wait.sh " + "--flag ".repeat(40) + "done";
+const longCmd = "bash /home/alice/Projects/demo/wait.sh " + "--flag ".repeat(40) + "done";
 list = [{ id: "sa-w", goal: "Build the thing", status: "waiting", waiting_on: [longCmd, "sleep 99"], started_at: now / 1000 - 3 * 3600 - 13 * 60 }];
 await round();
 const wrow = rowOf("sa-w");
@@ -263,7 +263,7 @@ assert.ok(!/Failed/.test(wrow.textContent), "a waiting subagent is not failed: "
 assert.ok(!/Done/.test(wrow.textContent), "a waiting subagent is not done: " + wrow.textContent);
 assert.ok(wrow.querySelector(".state.hold"), "its own state color");
 assert.ok(!wrow.querySelector(".state.bad") && !wrow.querySelector(".state.ok"));
-assert.match(wrow.textContent, /Waiting on bash \/home\/reddragon\/Projects\/dmrgo\/wait\.sh/);
+assert.match(wrow.textContent, /Waiting on bash \/home\/alice\/Projects\/demo\/wait\.sh/);
 assert.ok(wrow.textContent.includes("Waiting on ") && !wrow.textContent.includes("done"), "the command is clamped: " + wrow.textContent);
 assert.ok(wrow.textContent.includes("+1 more") || wrow.textContent.includes("1 more"), "a second command is counted: " + wrow.textContent);
 assert.match(wrow.querySelector(".time").textContent, /3\s*h|3:13|193/, "elapsed since start: " + wrow.querySelector(".time").textContent);

@@ -44,7 +44,7 @@ func TestProjectNotesPages(t *testing.T) {
 		"Build with `make dev`; tests need Redis on port 6390.",
 		"Release flow: tag on main after green CI, never on a bot commit. -> topic: release",
 		"PPU timing rules and the mid-scanline quirks. -> topic: gb-timing",
-		"Owners: emulator core Jacob; web UI Katelyn.")
+		"Owners: emulator core Alice; web UI Bob.")
 	pcM.AddProjectSkill(demo, hub.ProjectSkillDoc{ProjectSkill: hub.ProjectSkill{Name: "demo-app-release", Path: "demo-app-release", Description: "Use when cutting a demo-app release.", Enabled: true}, Content: "# release"})
 	topic := func(name, desc, text string, linked bool) {
 		pcM.AddProjectDoc(demo, hub.DocTopics, hub.ProjectDocText{ProjectDoc: hub.ProjectDoc{Name: name, Description: desc, Modified: "2026-11-13", InIndex: linked}, Content: text})

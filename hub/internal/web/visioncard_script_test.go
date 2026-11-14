@@ -58,7 +58,7 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 	const (
 		seen  = "/opt/data/hermes/cache/images/s1.png"
 		gone  = "/opt/data/hermes/cache/images/gone.png"
-		other = "/home/reddragon/.cache/relift/win-tests/s1.png"
+		other = "/home/alice/.cache/relift/win-tests/s1.png"
 	)
 	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
 	e.gw.SetFile(seen, shotPicture(t))

@@ -33,7 +33,7 @@ class MirrorBase(Base):
         self.repo = self.root / "skills-repo"
         self.repo.mkdir()
         git(self.repo, "init", "-q", "-b", "main")
-        for k, v in (("user.name", "Jacob"), ("user.email", "j@example.com"), ("commit.gpgsign", "false")):
+        for k, v in (("user.name", "Alice"), ("user.email", "a@example.com"), ("commit.gpgsign", "false")):
             git(self.repo, "config", k, v)
         (self.repo / "README.md").write_text(README)
         git(self.repo, "add", "-A")

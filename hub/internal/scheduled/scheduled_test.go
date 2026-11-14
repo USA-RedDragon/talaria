@@ -92,7 +92,7 @@ func setup(t *testing.T, users ...string) *env {
 	svc := scheduled.New(scheduled.Options{Access: access{users}, Backends: []config.Backend{b},
 		Requesters: map[string]scheduled.Requester{backend: d},
 		Devices: devices{
-			devAlice: {ID: devAlice, User: alice, Name: "upstairs-pc"},
+			devAlice: {ID: devAlice, User: alice, Name: "desktop-pc"},
 			devBob:   {ID: devBob, User: bob, Name: "bobs-laptop"},
 		},
 		Location: loc, Now: func() time.Time { return now }})
@@ -172,7 +172,7 @@ func TestJobsShowStateTimesAndRuns(t *testing.T) {
 	}
 	a1 := find(t, jobs, "Weekly review")
 	if a1.State != hub.JobRunning || a1.Next != "Tue Nov 17, 1:00 AM" || a1.NextRel != "in 6 days" ||
-		a1.Expr != "0 1 * * 2" || a1.RunsIn != "Sandbox, Firefox on upstairs-pc" ||
+		a1.Expr != "0 1 * * 2" || a1.RunsIn != "Sandbox, Firefox on desktop-pc" ||
 		a1.ModelLabel != "Follows the chat model (qwen-big)" || a1.ResultsText != "Telegram, General topic" {
 		t.Fatalf("a1 = %+v", a1)
 	}

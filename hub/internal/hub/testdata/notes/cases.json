@@ -1,12 +1,12 @@
 [
  {
   "name": "memory context after text",
-  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Jacob prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>",
+  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Alice prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>",
   "want": "can we auto-linkify?"
  },
  {
   "name": "memory context alone",
-  "text": "<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Jacob prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>",
+  "text": "<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Alice prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>",
   "want": ""
  },
  {
@@ -136,7 +136,7 @@
  },
  {
   "name": "several notes",
-  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Jacob prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>\n\n[Subagents in this chat (this replaces any earlier subagent note): auto. Pick each subagent's `option`: local routes or haiku for volume work, sonnet for normal work, opus or fable only for hard judgment or after a cheaper route failed.]\n\n[Waiting: to wait for something slow, start it with terminal(background=true), then call process_manage(action='wait', session_id=..., timeout=...). Repeat the wait if it times out. Never use sleep to poll. To wait for a condition, run one background command that loops until the condition holds, then wait on it.]",
+  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Alice prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>\n\n[Subagents in this chat (this replaces any earlier subagent note): auto. Pick each subagent's `option`: local routes or haiku for volume work, sonnet for normal work, opus or fable only for hard judgment or after a cheaper route failed.]\n\n[Waiting: to wait for something slow, start it with terminal(background=true), then call process_manage(action='wait', session_id=..., timeout=...). Repeat the wait if it times out. Never use sleep to poll. To wait for a condition, run one background command that loops until the condition holds, then wait on it.]",
   "want": "can we auto-linkify?"
  },
  {
@@ -151,7 +151,7 @@
  },
  {
   "name": "notes in any order",
-  "text": "can we auto-linkify?\n\n[Subagents in this chat (this replaces any earlier subagent note): auto. Pick each subagent's `option`: local routes or haiku for volume work, sonnet for normal work, opus or fable only for hard judgment or after a cheaper route failed.]\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Jacob prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>",
+  "text": "can we auto-linkify?\n\n[Subagents in this chat (this replaces any earlier subagent note): auto. Pick each subagent's `option`: local routes or haiku for volume work, sonnet for normal work, opus or fable only for hard judgment or after a cheaper route failed.]\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Alice prefers short answers.\n\nSecond paragraph of recall.\n</memory-context>",
   "want": "can we auto-linkify?"
  },
  {
@@ -166,7 +166,7 @@
  },
  {
   "name": "memory context with a closing tag word inside",
-  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Jacob prefers short answers.\n\nMentions </memory> and <memory-context> text, then second paragraph of recall.\n</memory-context>",
+  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Alice prefers short answers.\n\nMentions </memory> and <memory-context> text, then second paragraph of recall.\n</memory-context>",
   "want": "can we auto-linkify?"
  },
  {
@@ -196,8 +196,8 @@
  },
  {
   "name": "unclosed memory context stays",
-  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Jacob prefers short answers.\n\nSecond paragraph of recall.",
-  "want": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Jacob prefers short answers.\n\nSecond paragraph of recall."
+  "text": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Alice prefers short answers.\n\nSecond paragraph of recall.",
+  "want": "can we auto-linkify?\n\n<memory-context>\n[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]\n\n- Alice prefers short answers.\n\nSecond paragraph of recall."
  },
  {
   "name": "memory context tag without the system note stays",

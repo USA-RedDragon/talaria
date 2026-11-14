@@ -17,9 +17,9 @@ const (
 	kCalls    = "tool_calls"
 	longToken = "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEEEEEEEEEFFFFFFFFFFGGGGGGGGGGHHHHHHHHHHIIIIIIIIIIJJJJJJJJJJKKKKKKKKKKLLLLLLLLLL"
 	longURL   = "https://example.com/a/very/long/path/with/no/spaces/at/all/" + longToken + "?query=" + longToken + "&other=" + longToken
-	// The script of the approval Jacob saw overflow on his phone.
+	// The script of the approval Alice saw overflow on her phone.
 	evalScript = "const t=document.body.innerText;const out=[];for(const k of ['ムーブメント','キャリバー','Cal','材質','生産国','電池','価格','税']){let i=-1;while((i=t.indexOf(k,i+1))>=0&&out.length<30)out.push(t.slice(Math.max(0,i-60),i+160).replace(/\\n+/g,' | '))}return out;"
-	evalNote   = "Run a read-only script on iei.jp in the Firefox on device framework-13 with the user's logins (it can read what the page shows and send GET requests to iei.jp, nothing else). Approving for the session (or always) lets the agent run read-only scripts on iei.jp again without asking. Script:\n"
+	evalNote   = "Run a read-only script on example.com in the Firefox on device laptop with the user's logins (it can read what the page shows and send GET requests to example.com, nothing else). Approving for the session (or always) lets the agent run read-only scripts on example.com again without asking. Script:\n"
 )
 
 // No card, notice, table or code block may widen the chat stream or the

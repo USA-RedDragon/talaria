@@ -75,7 +75,7 @@ eq(W.candidates(sessions, "pc", "s1", ["s2"], "DOCS").map((s) => s.id), ["s3"]);
   let cur = { b: "pc", s: "s1" };
   const me = { partners: true };
   const ww = W.create({ api, el, toast() {}, banner() {}, me: () => me, backends: () => [{ id: "pc" }, { id: "home" }], sessions: () => sessions,
-    where: (s) => (s.id === "s2" ? "upstairs-pc, ~/Projects/research" : ""), current: () => cur, redraw: () => { redraws++; }, phone: () => false });
+    where: (s) => (s.id === "s2" ? "desktop-pc, ~/Projects/research" : ""), current: () => cur, redraw: () => { redraws++; }, phone: () => false });
 
   eq(ww.menuItems(sessions[0], () => {}), [], "no row before the pairs are known");
   await ww.load();
@@ -121,7 +121,7 @@ eq(W.candidates(sessions, "pc", "s1", ["s2"], "DOCS").map((s) => s.id), ["s3"]);
   const panel = doc.body.querySelector(".ww-panel");
   assert.ok(panel, "the link opens the panel");
   assert.ok(panel.text().includes("up to 30 back-and-forths, not 6."));
-  assert.ok(panel.text().includes("Research") && panel.text().includes("upstairs-pc, ~/Projects/research"), panel.text());
+  assert.ok(panel.text().includes("Research") && panel.text().includes("desktop-pc, ~/Projects/research"), panel.text());
 
   // Add and remove.
   const opt = panel.querySelectorAll("ww-opt").find((o) => o.text().includes("Docs pass"));

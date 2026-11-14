@@ -1512,7 +1512,7 @@ class BrowserDeviceTests(BrowserBase):
 
     def test_scheduling_on_a_computer_asks_once(self):
         """Giving a job a computer asks; updates, runs and resumes of a job that has one do not
-        (Jacob answered "always" three times and was asked a fourth time after an update)."""
+        (Alice answered "always" three times and was asked a fourth time after an update)."""
         gate = browser.pre_tool_call
         self.second()
         create = {"action": "create", "prompt": "p", "schedule": "in 2m"}
