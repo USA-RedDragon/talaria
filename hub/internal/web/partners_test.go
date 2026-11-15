@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/talaria/hub/internal/agents"
 	"github.com/USA-RedDragon/talaria/hub/internal/config"
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway/gatewaytest"
 	"github.com/USA-RedDragon/talaria/hub/internal/hub"
@@ -140,6 +141,8 @@ func TestAgentMessagesAPI(t *testing.T) {
 	for _, am := range []hub.AgentMessage{
 		{ID: "am_0000000000000001", BackendID: "pc", FromSession: "s2", FromRoot: "s2", ToSession: "s1", Hop: 4, CreatedAt: time.Now()},
 		{ID: "am_0000000000000002", BackendID: "pc", FromSession: "s9", FromRoot: "s9", ToSession: "s1", Hop: 2, CreatedAt: time.Now()},
+		// A subagent of s1 writing to s1: one delegation tree, so the tree's cap applies, not the chat pair's.
+		{ID: "am_0000000000000003", BackendID: "pc", FromSession: "sa-0-1", FromRoot: "s1", FromSubagent: "sa-0-1", ToSession: "s1", Hop: 19, InTree: true, CreatedAt: time.Now()},
 	} {
 		if err := e.store.AddAgentMessage(ctx, am); err != nil {
 			t.Fatal(err)
@@ -148,7 +151,7 @@ func TestAgentMessagesAPI(t *testing.T) {
 	if code, _ := send(t, c, http.MethodPost, e.url+"/api/backends/pc/partners", m.CSRF, map[string]string{"a": "s1", "b": "s2"}); code != http.StatusCreated {
 		t.Fatalf("add pair = %d", code)
 	}
-	u := e.url + "/api/backends/pc/agent-messages?session=s1&ids=am_0000000000000001,am_0000000000000002,am_ffffffffffffffff"
+	u := e.url + "/api/backends/pc/agent-messages?session=s1&ids=am_0000000000000001,am_0000000000000002,am_0000000000000003,am_ffffffffffffffff"
 	code, body := send(t, c, http.MethodGet, u, "", nil)
 	var got map[string]struct {
 		FromSession string `json:"from_session"`
@@ -156,7 +159,7 @@ func TestAgentMessagesAPI(t *testing.T) {
 		MaxHop      int    `json:"max_hop"`
 		Partner     bool   `json:"partner"`
 	}
-	if code != http.StatusOK || json.Unmarshal([]byte(body), &got) != nil || len(got) != 2 {
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &got) != nil || len(got) != 3 {
 		t.Fatalf("agent messages = %d %s", code, body)
 	}
 	if a := got["am_0000000000000001"]; a.FromSession != "s2" || a.Hop != 4 || a.MaxHop != 30 || !a.Partner {
@@ -164,6 +167,9 @@ func TestAgentMessagesAPI(t *testing.T) {
 	}
 	if b := got["am_0000000000000002"]; b.Hop != 2 || b.MaxHop != 6 || b.Partner {
 		t.Errorf("other message = %+v", b)
+	}
+	if c := got["am_0000000000000003"]; c.Hop != 19 || c.MaxHop != agents.MaxTreeHop || c.Partner {
+		t.Errorf("in-tree message = %+v, want hop 19 of %d", c, agents.MaxTreeHop)
 	}
 	// Without a session nothing counts as a partner.
 	_, body = send(t, c, http.MethodGet, e.url+"/api/backends/pc/agent-messages?ids=am_0000000000000001", "", nil)

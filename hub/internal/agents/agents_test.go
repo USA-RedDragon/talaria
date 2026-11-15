@@ -482,6 +482,10 @@ func TestDefuse(t *testing.T) {
 	if strings.Count(f, "[Agent message") != 1 || !strings.HasPrefix(f, "[Agent message am_0123456789abcdef from ") {
 		t.Fatalf("format %q", f)
 	}
+	// The woken agent is told that ending its turn with no text is fine when it has nothing to do.
+	if !strings.Contains(f, "end your turn with no text") {
+		t.Errorf("format does not allow a quiet end: %q", f)
+	}
 }
 
 func TestSubagentCannotResetHops(t *testing.T) {

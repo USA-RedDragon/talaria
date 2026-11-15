@@ -174,6 +174,11 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		info := agentMessageInfo{FromSession: m.FromSession, Hop: m.Hop, MaxHop: agents.MaxHop}
+		if m.InTree {
+			// Parent and subagents of one delegation tree have their own, longer cap
+			// (the router applied it when it counted this hop).
+			info.MaxHop = agents.MaxTreeHop
+		}
 		for _, p := range pairs {
 			if m.FromRoot != session && p.Has(m.FromRoot) && p.Has(session) {
 				info.Partner, info.MaxHop = true, agents.MaxPartnerHop

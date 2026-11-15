@@ -25,7 +25,7 @@ func Format(id, from, replyTo string, steer bool, text string) string {
 			"Act on it, or tell the user.\n\n")
 	} else {
 		b.WriteString("The sender does not see your replies in this chat: to answer it, call agent_send with to \"" + replyTo +
-			"\" and reply_to \"" + id + "\". Do not answer just to acknowledge.\n\n")
+			"\" and reply_to \"" + id + "\". Do not answer just to acknowledge: if there is nothing to do, end your turn with no text.\n\n")
 	}
 	b.WriteString(Defuse(text))
 	return b.String()
