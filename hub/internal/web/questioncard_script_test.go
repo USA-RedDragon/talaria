@@ -1,11 +1,11 @@
 package web_test
 
 import (
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway"
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway/gatewaytest"
@@ -58,17 +58,17 @@ func questionCards(t *testing.T, bin string) {
 			prompt("cl-5", "Ship it?", []string{"yes", "no", "later"}, false, nil)}})
 	e.gw.AddSession(&gatewaytest.Session{ID: "away", Title: titleOther, Live: true, StartedAt: 700,
 		Messages: []map[string]any{{kRole: roleUser, kText: textHello}, {kRole: roleAssistant, kText: "hi"}}})
-	// Nobody answers the last question: it runs out once the fourth is answered.
-	go func() {
-		for range 600 {
-			if len(e.gw.ClarifyAnswers()) >= 4 {
-				time.Sleep(300 * time.Millisecond)
-				e.gw.SettleClarify(askID, "cl-5", "timed_out", 1800)
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
+	// Nobody answers the last question: the page asks for it to run out
+	// (GET /__timeout) once it shows the question open, so the timeout
+	// cannot land before the card is drawn.
+	live := *e.front.h.Load()
+	e.front.to(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__timeout" {
+			e.gw.SettleClarify(askID, "cl-5", "timed_out", 1800)
+			return
 		}
-	}()
+		live.ServeHTTP(w, r)
+	}))
 	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "questioncard", "run.js"), bin, e.url, t.TempDir())
 	// QCARD_SHOTS names a folder for the screenshots of the cards (Chrome).
 	if d := os.Getenv("QCARD_SHOTS"); d != "" {

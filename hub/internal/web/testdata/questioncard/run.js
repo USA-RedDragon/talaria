@@ -150,6 +150,7 @@ const { proc, connect } = driver();
   // 5. Nobody answers: the test times it out in the gateway.
   const q5 = "Ship it?";
   await live(q5, "q5");
+  await fetch(url + "/__timeout");
   await waitClosed(q5, "q5");
   const s5 = await shape(q5);
   assert.deepStrictEqual(s5.rows.map((r) => r[0]), ["", "", "", "other"], kind + ": nothing is checked");
