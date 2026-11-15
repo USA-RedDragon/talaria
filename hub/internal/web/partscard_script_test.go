@@ -10,6 +10,8 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway/gatewaytest"
 )
 
+const choiceSource = "source"
+
 // A smart approval card shows its text as parts: a subagent is named once on
 // a line of its own, then Rule and Why (and Source when the card offers the
 // source choice) as a list, then the command and the buttons. It fits the
@@ -45,7 +47,7 @@ func TestSmartApprovalCardShowsItsParts(t *testing.T) {
 				Reason: optr("Runs a saved copy of a command that was blocked a moment ago (the hub v0.26.111 rollout), retrying it a different way.")})})
 	e.gw.AddSession(&gatewaytest.Session{ID: "s3", Title: "Parts source", Live: true, StartedAt: 700, Messages: msgs,
 		Prompts: card("p-src", appimage, `Smart approval rule "Code from External": old text`,
-			gateway.Prompt{Choices: []string{gateway.ChoiceOnce, gateway.ChoiceDeny, "source"},
+			gateway.Prompt{Choices: []string{gateway.ChoiceOnce, gateway.ChoiceDeny, choiceSource},
 				Subagent: optr("relift chunk appimage-runtime: package the runtime"), Rule: optr("Code from External"),
 				Reason:      optr("Downloads an AppImage from GitHub and runs it. You didn't name this tool or where it comes from."),
 				GrantSource: optr("github.com/AppImage/appimagetool")})})

@@ -8,14 +8,64 @@ The card of a smart approval was one run-on string ("Subagent "<goal>" asks: Sma
 
 The approval prompt event now carries `rule` (the rule name) and `reason` (the checker's words; a ledger write's entry and source lines follow as further lines) as fields of their own, next to `subagent` (the goal) and `grant_source`. `description` stays, with the same text as one string, for clients that do not read the fields. The review prompt asks the judge to name an earlier action by what it did, never by a transcript id, and the card strips any `c<digits>`, `call_...` or `toolu_...` reference that is left.
 ---
+ apps/shared/src/gateway-contract.generated.ts |   2 +
+ apps/shared/src/gateway-contract.openrpc.json |  24 +++
  gateway/session_pending_controls.py           |   3 +
  tests/tools/test_smart_approval_card_parts.py | 175 ++++++++++++++++++
  tools/approval.py                             |  11 +-
  tools/approval_automode.py                    |  33 +++-
  tui_gateway/contracts/canonical_sessions.py   |   4 +
- 5 files changed, 222 insertions(+), 4 deletions(-)
+ 7 files changed, 248 insertions(+), 4 deletions(-)
  create mode 100644 tests/tools/test_smart_approval_card_parts.py
 
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index c7872a1cd1..78f25e374c 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -5190,6 +5190,8 @@ export interface CanonicalPendingPrompt {
+   command?: string | null
+   description?: string | null
+   subagent?: string | null
++  rule?: string | null
++  reason?: string | null
+   edit?: Record<string, unknown> | null
+   question?: string | null
+   multi_select?: boolean | null
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index c3042ad99c..1a067049a7 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -9611,6 +9611,30 @@
+             "default": null,
+             "title": "Subagent"
+           },
++          "rule": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Rule"
++          },
++          "reason": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Reason"
++          },
+           "edit": {
+             "anyOf": [
+               {
 diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
 index b213ec5f9a..f5ff2a4593 100644
 --- a/gateway/session_pending_controls.py
