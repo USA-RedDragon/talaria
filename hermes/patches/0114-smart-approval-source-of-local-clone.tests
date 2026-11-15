@@ -1,0 +1,7 @@
+# New: a build of a session clone by its local path offers the clone's source
+tests/tools/test_smart_provenance_source_paths.py
+# The review and the source grants it builds on
+tests/tools/test_smart_provenance.py
+tests/tools/test_smart_provenance_source_grants.py
+tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_approval_provenance.py
