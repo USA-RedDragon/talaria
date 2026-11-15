@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/talaria/internal/filelock"
+	"golang.org/x/sys/unix"
 )
 
 // HolderCommand is the first argument that makes talaria a command holder.
@@ -117,8 +118,8 @@ func RunHolder(dir string) int {
 	// The daemon's end of stdout goes away with the daemon; nothing more
 	// is written to it, nor to stderr.
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {
-		_ = syscall.Dup2(int(devnull.Fd()), 1)
-		_ = syscall.Dup2(int(devnull.Fd()), 2)
+		_ = unix.Dup2(int(devnull.Fd()), 1)
+		_ = unix.Dup2(int(devnull.Fd()), 2)
 		_ = devnull.Close()
 	}
 
