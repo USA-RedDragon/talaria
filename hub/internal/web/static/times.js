@@ -78,6 +78,38 @@ window.HubTimes = (() => {
       t.dayPeriod.toUpperCase() + " " + t.timeZoneName;
   }
 
+  // dayNo is the calendar day of ms in zone as a day count, for the
+  // number of days between two times.
+  function dayNo(ms, zone) {
+    const d = dayParts(ms, zone);
+    return Date.UTC(Number(d.year), Number(d.month) - 1, Number(d.day)) / 86400000;
+  }
+
+  const zoneName = (ms, zone) => parts(fmt(zone, "zn", { hour: "numeric", timeZoneName: "short" }), ms).timeZoneName || "";
+
+  // reset writes the time a usage window resets in the viewer's zone, with
+  // the zone name: "today 1:59 PM CST", "tomorrow 2:00 AM CST", "Mon 2:00 AM
+  // CST" within the next six days, else "Dec 1, 2:00 AM CST". A time that has
+  // passed reads as today.
+  function reset(ms, now, zone) {
+    if (!valid(ms)) return "";
+    if (!valid(now)) now = Date.now();
+    const gap = dayNo(ms, zone) - dayNo(now, zone);
+    const at = hm(ms, zone) + " " + zoneName(ms, zone);
+    if (gap <= 0) return "today " + at;
+    if (gap === 1) return "tomorrow " + at;
+    const d = parts(fmt(zone, "rd", { weekday: "short", month: "short", day: "numeric" }), ms);
+    if (gap <= 6) return d.weekday + " " + at;
+    return d.month + " " + d.day + ", " + at;
+  }
+
+  // resetDay writes the day a monthly reset falls on: "Dec 1".
+  function resetDay(ms, zone) {
+    if (!valid(ms)) return "";
+    const d = parts(fmt(zone, "rd", { weekday: "short", month: "short", day: "numeric" }), ms);
+    return d.month + " " + d.day;
+  }
+
   // span writes a run length given in seconds: 329 ms, 3.2 s, 12 s, 4 min,
   // 4 min 5 s, 1 h 3 min. A length that is not known or is 0 is "": a call
   // that took no time to measure shows no time, not "1 ms".
@@ -188,5 +220,5 @@ window.HubTimes = (() => {
     for (const ev of ["touchend", "touchmove", "touchcancel", "scroll"]) root.addEventListener(ev, stop, { passive: true, capture: true });
   }
 
-  return { clock, range, full, span, counter, stamp, ticking, running, finished, press, valid };
+  return { clock, range, full, reset, resetDay, span, counter, stamp, ticking, running, finished, press, valid };
 })();

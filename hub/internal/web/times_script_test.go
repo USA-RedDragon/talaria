@@ -33,3 +33,18 @@ func TestNoticeTimesScript(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+// A usage window resets in the viewer's zone with the zone name and the day
+// when it is not today, from the ISO time the hub sends.
+func TestResetTimesScript(t *testing.T) {
+	t.Parallel()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "times", "reset.js"), filepath.Join("static", "times.js"),
+		filepath.Join("static", "claude.js")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}

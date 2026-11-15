@@ -2956,7 +2956,7 @@
         const w = ((a.usage && a.usage.windows) || []).find((x) => x.kind === kind);
         if (!w || typeof w.used_percent !== "number") continue;
         const pct = Math.min(100, Math.round(w.used_percent));
-        out.push(metric("lim", short, pct, pct + "%", "", long + ": " + pct + "% used" + (w.resets_text ? ", resets " + w.resets_text : "")));
+        out.push(metric("lim", short, pct, pct + "%", "", long + ": " + pct + "% used" + (claude.reset(w) ? ", resets " + claude.reset(w) : "")));
       }
     }
     return { name: a, parts: out };

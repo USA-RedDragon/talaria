@@ -104,13 +104,22 @@ window.HubClaude = (ctx) => {
       const p = await pool(backend, session, model);
       if (!p) return null;
       if (!p.account) return { bad: true, parts: [p.message || "No Claude account can run this chat now."] };
-      const tag = el("span", "tag", p.resets_text ? "resets " + p.resets_text : "");
-      return { parts: ["Runs on ", el("b", "", p.account), " ", ...(p.resets_text ? [tag] : []),
+      const tag = el("span", "tag", resetOf(p) ? "resets " + resetOf(p) : "");
+      return { parts: ["Runs on ", el("b", "", p.account), " ", ...(resetOf(p) ? [tag] : []),
         p.pinned ? "" : ", the soonest reset with room."] };
     }
     if (provider && provider.startsWith(creditsPrefix)) return { parts: ["Bills that account's monthly API credits."] };
     return null;
   }
+
+  // at writes a reset time in the viewer's zone from the ISO time the hub
+  // sends (day and zone name included), else the text the backend wrote.
+  function at(iso, text, dayOnly) {
+    const ms = Date.parse(iso || "");
+    if (!window.HubTimes.valid(ms)) return text || "";
+    return dayOnly ? window.HubTimes.resetDay(ms) : window.HubTimes.reset(ms);
+  }
+  const resetOf = (w) => at(w.resets_at, w.resets_text);
 
   // money is a dollar amount as the credits line shows it: whole dollars
   // from $10 up, cents below.
@@ -119,7 +128,8 @@ window.HubClaude = (ctx) => {
   // creditsLine is an account's API credit estimate for the Usage page.
   function creditsLine(c) {
     if (c.error || typeof c.spent_usd !== "number") return "API credits: no estimate" + (c.error ? " (" + c.error + ")" : "") + ".";
-    const resets = c.resets_text ? ", resets " + c.resets_text : "";
+    const when = at(c.resets_at, c.resets_text, true);
+    const resets = when ? ", resets " + when : "";
     if (typeof c.left_usd === "number" && typeof c.monthly_usd === "number") {
       return "API credits: about " + money(c.left_usd) + " of " + money(c.monthly_usd) + " left" + resets + ".";
     }
@@ -159,8 +169,8 @@ window.HubClaude = (ctx) => {
       const w = windowOf(a.usage, kind);
       if (!w) continue;
       const sp = el("span", "claude-use" + (w.used_percent >= 80 ? " full" : ""),
-        short + " " + pct(w) + (w.resets_text ? " (resets " + w.resets_text + ")" : ""));
-      sp.title = long + ": " + pct(w) + " used" + (w.resets_text ? ", resets " + w.resets_text : "");
+        short + " " + pct(w) + (resetOf(w) ? " (resets " + resetOf(w) + ")" : ""));
+      sp.title = long + ": " + pct(w) + " used" + (resetOf(w) ? ", resets " + resetOf(w) : "");
       out.push(sp);
     }
     return out;
@@ -340,7 +350,7 @@ window.HubClaude = (ctx) => {
       return s;
     }
     s.append(el("p", "mem-hint", "The Claude and ChatGPT subscription accounts the agent reports, with the share of each usage window used. " +
-      "Reset times are in " + (data.time_zone || "UTC") + " time. API credits are an estimate: the credit the plan includes each " +
+      "API credits are an estimate: the credit the plan includes each " +
       "month, less what the agent spent through the account's API key since the month started. Anthropic does not report the balance, " +
       "so use outside Talaria is not counted."));
     if (!(data.accounts || []).length) s.append(el("p", "none", "No accounts."));
@@ -361,7 +371,7 @@ window.HubClaude = (ctx) => {
       if (a.status_error) box.append(el("p", "err", a.status_error));
       const u = a.usage;
       if (u && u.unavailable) box.append(el("p", "hint", "Usage not available: " + u.unavailable));
-      const rows = reported(u).map((w) => [w.label || w.kind, pct(w) + " used", w.resets_text ? "resets " + w.resets_text : ""]);
+      const rows = reported(u).map((w) => [w.label || w.kind, pct(w) + " used", resetOf(w) ? "resets " + resetOf(w) : ""]);
       if (rows.length) {
         const list = el("ul", "claude-windows");
         for (const r of rows) list.append(el("li", "", r.filter(Boolean).join(", ")));
@@ -413,7 +423,7 @@ window.HubClaude = (ctx) => {
       const room = Math.round(p.room_accounts * 10) / 10;
       box.append(el("p", "claude-meta", "About " + room.toFixed(1) + (room === 1 ? " account" : " accounts") + " of room left"));
       if (p.next_account) {
-        box.append(el("p", "claude-meta", "Next room back: " + (p.next_text || "unknown") + " (" + shortName(p.next_account) + " resets)"));
+        box.append(el("p", "claude-meta", "Next room back: " + (at(p.next_at, p.next_text) || "unknown") + " (" + shortName(p.next_account) + " resets)"));
       }
       if (p.read < p.accounts) box.append(el("p", "hint", "(" + p.read + " of " + p.accounts + " accounts read)"));
     }
@@ -434,7 +444,7 @@ window.HubClaude = (ctx) => {
     return box;
   }
 
-  return { parts, note, afterReply, chatNotice, signIn, panel, apiName, apiProvider, chatgptProvider, route,
+  return { reset: resetOf, parts, note, afterReply, chatNotice, signIn, panel, apiName, apiProvider, chatgptProvider, route,
     account: (backend, provider, session, model) => {
       parts(backend, { provider });
       if (provider === poolProvider && session && me().claude) {

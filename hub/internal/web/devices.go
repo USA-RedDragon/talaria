@@ -36,7 +36,7 @@ const pairHTML = `<!doctype html>
 <dt>Computer</dt><dd>{{.Pairing.Hostname}}</dd>
 <dt>System</dt><dd>{{.Pairing.OS}} {{.Pairing.Arch}}</dd>
 <dt>Address</dt><dd>{{.Pairing.Addr}}</dd>
-<dt>Asked at</dt><dd>{{.Asked}}</dd>
+<dt>Asked at</dt><dd><time id="asked" datetime="{{.AskedISO}}">{{.Asked}}</time></dd>
 <dt>talaria</dt><dd>{{.Pairing.ClientVersion}}</dd>
 </dl>
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
@@ -55,13 +55,13 @@ const pairHTML = `<!doctype html>
 <label>Code <input name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" required autofocus></label>
 <div class="buttons"><button class="primary" type="submit" name="action" value="lookup">Continue</button></div>
 </form>{{end}}
-{{end}}</main></body></html>`
+{{end}}</main><script src="/static/pairtime.js" defer></script></body></html>`
 
 type pairView struct {
-	User, CSRF, Error, Name, Backend, BackendName, Asked string
-	Pairing                                              *hub.Pairing
-	Backends                                             []hub.Backend
-	Done, Declined, Locked                               bool
+	User, CSRF, Error, Name, Backend, BackendName, Asked, AskedISO string
+	Pairing                                                        *hub.Pairing
+	Backends                                                       []hub.Backend
+	Done, Declined, Locked                                         bool
 }
 
 func (s *Server) renderPair(w http.ResponseWriter, code int, v pairView) {
@@ -179,6 +179,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		v.BackendName = backends[0].Name
 	}
 	v.Asked = p.CreatedAt.UTC().Format("2006-01-02 15:04 UTC")
+	v.AskedISO = p.CreatedAt.UTC().Format(time.RFC3339)
 	v.Backend = s.defaults[sess.User]
 	switch r.PostFormValue("action") {
 	case "deny":

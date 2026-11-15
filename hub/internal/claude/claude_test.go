@@ -3,6 +3,7 @@ package claude_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -568,5 +569,28 @@ func TestPresent(t *testing.T) {
 	}
 	if svc(map[string]device.Requester{other: creds(bare.URL())}).Present(ctx, alice) {
 		t.Error("alice has no access to other")
+	}
+}
+
+// The page writes reset times in the viewer's zone, so the API carries each
+// as an ISO 8601 time in UTC next to the text.
+func TestUsageJSONHasISOTimes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.plugin.SetLoggedIn(account, true, aliceEmail)
+	e.plugin.Lock()
+	e.plugin.Usages[account] = claude.Usage{Windows: []claude.Window{
+		{Kind: "weekly_all", Label: "Current week", UsedPercent: pct(40), ResetsAt: time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)}}}
+	e.plugin.Unlock()
+	got, err := e.svc.ClaudeAccounts(context.Background(), bob, backendMain, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"resets_at":"2026-11-16T14:00:00Z"`) {
+		t.Errorf("resets_at is not an ISO time: %s", raw)
 	}
 }
