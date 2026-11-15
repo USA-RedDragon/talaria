@@ -1444,6 +1444,10 @@ func (g *Gateway) hClarify(_ *conn, p map[string]any) (any, string, func()) {
 		g.publishLocked(s, "clarify.request", next)
 		return map[string]any{kStatus: kResolved}, "", nil
 	}
+	if len(s.prompts) > 0 {
+		// Another question still waits (a subagent's beside the chat's own): the turn goes on.
+		return map[string]any{kStatus: kResolved}, "", nil
+	}
 	s.Running = false
 	g.publishLocked(s, "message.complete", map[string]any{kText: "answered: " + str(p, "answer"), kStatus: kComplete})
 	return map[string]any{kStatus: kResolved}, "", nil
