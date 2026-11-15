@@ -230,7 +230,7 @@ func TestHelloFields(t *testing.T) {
 	want := protocol.Hello{
 		Type: protocol.TypeHello, Version: 2, MaxVersion: 3, Roots: []string{resolved}, TempDir: "/home/alice/.cache/talaria/tmp",
 		Home: "/home/alice", Hostname: testName, OS: runtime.GOOS, Arch: runtime.GOARCH, Shell: "bash", ClientVersion: "v0.2.0",
-		Capabilities: []string{protocol.CapabilityDetach},
+		Capabilities: []string{protocol.CapabilityDetach, protocol.CapabilityFileRead},
 	}
 	if !reflect.DeepEqual(hello, want) {
 		t.Errorf("hello = %+v, want %+v", hello, want)

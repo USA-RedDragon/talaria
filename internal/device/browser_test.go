@@ -114,14 +114,14 @@ func TestBrowserHelloOffersCapability(t *testing.T) {
 	srv := serve(t, f)
 	opts := options(t, srv.URL, t.TempDir())
 	start(t, opts)
-	if h := recv(t, hellos); !slices.Equal(h.Capabilities, []string{protocol.CapabilityDetach}) {
+	if h := recv(t, hellos); !slices.Equal(h.Capabilities, []string{protocol.CapabilityDetach, protocol.CapabilityFileRead}) {
 		t.Errorf("capabilities without a browser = %v", h.Capabilities)
 	}
 	srv2 := serve(t, f)
 	opts = options(t, srv2.URL, t.TempDir())
 	opts.Browser = newFakeBrowser(false)
 	start(t, opts)
-	if h := recv(t, hellos); !slices.Equal(h.Capabilities, []string{protocol.CapabilityDetach, protocol.CapabilityBrowser}) {
+	if h := recv(t, hellos); !slices.Equal(h.Capabilities, []string{protocol.CapabilityDetach, protocol.CapabilityFileRead, protocol.CapabilityBrowser}) {
 		t.Errorf("capabilities = %v", h.Capabilities)
 	}
 }

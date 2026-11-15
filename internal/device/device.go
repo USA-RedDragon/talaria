@@ -90,6 +90,9 @@ type Options struct {
 	// MCP serves MCP requests for the servers of the device config. With
 	// servers the device offers protocol.CapabilityMCP in hello.
 	MCP MCP
+	// NoFileRead turns off protocol.CapabilityFileRead, which the device
+	// otherwise offers in hello.
+	NoFileRead bool
 	// StartBrowser starts the user's Firefox for a browser_start, when
 	// the extension is not connected. Nil turns browser_start off.
 	StartBrowser func(ctx context.Context) error
@@ -268,6 +271,9 @@ func (c *Client) Hello() protocol.Hello {
 		Shell: c.opts.Shell, ClientVersion: c.opts.ClientVersion,
 		Capabilities: []string{protocol.CapabilityDetach},
 	}
+	if !c.opts.NoFileRead {
+		h.Capabilities = append(h.Capabilities, protocol.CapabilityFileRead)
+	}
 	if ws := c.opts.WinShell; ws != nil {
 		h.Shell, h.TempDir, h.Home = ws.Kind, ws.ToWire(h.TempDir), ws.ToWire(h.Home)
 		h.Roots = make([]string, 0, len(c.opts.Allow.Roots()))
@@ -395,6 +401,10 @@ type session struct {
 	// mcpCalls holds the cancel function of each MCP request in flight.
 	mcp      bool
 	mcpCalls map[string]context.CancelFunc
+	// fileRead is true when the leg negotiated protocol.CapabilityFileRead.
+	// fileCalls holds the cancel function of each file request in flight.
+	fileRead  bool
+	fileCalls map[string]context.CancelFunc
 }
 
 func (s *session) write(ctx context.Context, v any) error {
@@ -492,7 +502,8 @@ func (c *Client) serveOnce(ctx context.Context) (time.Duration, error) {
 
 	connCtx, cancel := context.WithCancel(ctx)
 	s := &session{c: c, conn: conn, ctx: connCtx, cancel: cancel, pings: map[int64]uint64{},
-		calls: map[string]context.CancelFunc{}, mcpCalls: map[string]context.CancelFunc{}}
+		calls: map[string]context.CancelFunc{}, mcpCalls: map[string]context.CancelFunc{},
+		fileCalls: map[string]context.CancelFunc{}}
 	defer func() {
 		cancel()
 		s.wg.Wait()
@@ -542,11 +553,12 @@ func (c *Client) serveOnce(ctx context.Context) (time.Duration, error) {
 	}
 	s.mcp = c.opts.MCP != nil && slices.Contains(c.Hello().Capabilities, protocol.CapabilityMCP) &&
 		slices.Contains(welcome.Capabilities, protocol.CapabilityMCP)
+	s.fileRead = !c.opts.NoFileRead && slices.Contains(welcome.Capabilities, protocol.CapabilityFileRead)
 	connected := time.Now()
 	slog.Info("Exec leg connected", "device_id", welcome.DeviceID, "name", welcome.Name, "protocol", s.version,
 		"plugin_version", welcome.PluginVersion, "hermes_version", welcome.HermesVersion, "hermes_image", welcome.HermesImage,
 		"roots", c.opts.Allow.Roots(),
-		"browser", s.browser, "mcp", s.mcp)
+		"browser", s.browser, "mcp", s.mcp, "file_read", s.fileRead)
 
 	if s.browser {
 		s.wg.Go(func() { s.browserStatus(connCtx) })
@@ -663,6 +675,7 @@ func (s *session) readLoop(ctx context.Context) error {
 				s.c.kill(req.ID)
 				s.cancelBrowser(req.ID)
 				s.cancelMCP(req.ID)
+				s.cancelFile(req.ID)
 			}
 		case protocol.TypeDetach:
 			var req protocol.Detach
@@ -682,6 +695,8 @@ func (s *session) readLoop(ctx context.Context) error {
 			s.browserCall(ctx, req)
 		case protocol.TypeMCP:
 			s.mcpRequest(ctx, data)
+		case protocol.TypeFileStat, protocol.TypeFileRead:
+			s.fileRequest(ctx, env.Type, data)
 		case protocol.TypeBrowserStart:
 			if !s.browser {
 				continue

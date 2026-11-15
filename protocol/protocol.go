@@ -58,6 +58,16 @@ const (
 	// to the background: the device stops its own timeout for it (section
 	// 4.10). Only on a leg that negotiated CapabilityDetach.
 	TypeDetach = "detach"
+	// TypeFileStat asks the device for the facts of one file and its first
+	// bytes. The device answers with exactly one TypeFileResult. Only on a
+	// leg that negotiated CapabilityFileRead.
+	TypeFileStat = "file_stat"
+	// TypeFileRead asks the device for a window of one file. The device
+	// answers with binary frames (FileIDLen id bytes, then file bytes) and
+	// then one TypeFileResult. A Kill with the same ID cancels it. Only on
+	// a leg that negotiated CapabilityFileRead.
+	TypeFileRead   = "file_read"
+	TypeFileResult = "file_result"
 )
 
 // Capabilities a device offers in Hello.Capabilities. The plugin answers
@@ -71,6 +81,37 @@ const (
 	CapabilityMCP = "mcp"
 	// CapabilityDetach: the device serves TypeDetach.
 	CapabilityDetach = "detach"
+	// CapabilityFileRead: the device serves TypeFileStat and TypeFileRead.
+	CapabilityFileRead = "file_read"
+)
+
+// Limits of file reads.
+const (
+	// FileReadMaxLength is the most bytes one file_read asks for.
+	FileReadMaxLength = 16777216
+	// FileFrameMax is the most file bytes in one binary frame.
+	FileFrameMax = 262144
+	// FileIDLen is the length of the request id that starts each binary
+	// frame: 32 lowercase hex characters.
+	FileIDLen = 32
+)
+
+// Error codes in a FileResult.
+const (
+	// FileNotFound: no such path.
+	FileNotFound = "not_found"
+	// FileNotRegular: a directory, device, fifo or socket.
+	FileNotRegular = "not_regular"
+	// FileRefused: outside the device roots, a symbolic link as the last
+	// part, or more than one hard link.
+	FileRefused = "refused"
+	// FileChanged: the file is not the one the stat saw (dev, ino, size or
+	// mtime differ).
+	FileChanged = "changed"
+	// FileFailed: an I/O error, or the device is busy.
+	FileFailed = "failed"
+	// FileCancelled: a Kill with the same ID stopped it.
+	FileCancelled = "cancelled"
 )
 
 // Operations of an MCP request.
@@ -384,6 +425,42 @@ type MCP struct {
 
 // MCPResult answers an MCP request. Code is set when OK is false.
 type MCPResult struct {
+	Type   string          `json:"type"`
+	ID     string          `json:"id"`
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Code   string          `json:"code,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+// FileStat asks for the facts of the file at Path (an absolute, clean
+// path).
+type FileStat struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
+// FileRead asks for Length bytes of Path from Offset. Dev, Ino, Size and
+// MTimeNS are the ones the file_stat returned; the read fails with
+// FileChanged when the file differs. A zero Dev and Ino mean unknown, and
+// only Size and MTimeNS are compared.
+type FileRead struct {
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Path    string `json:"path"`
+	Offset  int64  `json:"offset"`
+	Length  int64  `json:"length"`
+	Dev     uint64 `json:"dev"`
+	Ino     uint64 `json:"ino"`
+	Size    int64  `json:"size"`
+	MTimeNS int64  `json:"mtime_ns"`
+}
+
+// FileResult answers a FileStat or FileRead. Code is set when OK is
+// false. Result of a stat is {"real","size","mtime_ns","dev","ino",
+// "head"}; of a read, {"bytes"}.
+type FileResult struct {
 	Type   string          `json:"type"`
 	ID     string          `json:"id"`
 	OK     bool            `json:"ok"`
