@@ -250,6 +250,52 @@ assert.ok(nowText("sa-8").includes("Running a command") && !nowText("sa-8").incl
 list = [{ id: "sa-8", goal: "Eighth", status: "running", started_at: now / 1000, tool_count: 15, last_tool: "terminal", last_preview: "ls -la" }];
 await round();
 assert.match(rowOf("sa-8").querySelector("button.now2").textContent, /^Running ls -la/);
+// A goal of several lines: the title shows its first line, a tap on the title opens the whole goal
+// (line breaks kept) under the same title and a second tap closes it, Enter and Space do the same,
+// and the tap does not open the row. A short one-line goal is a plain title.
+{
+  const bigGoal = "Fix the parser\n" + "check this case too\n".repeat(30);
+  list = [{ id: "sa-g", goal: bigGoal, status: "running", started_at: now / 1000, tool_count: 1 }, { id: "sa-s", goal: "Short goal", status: "running", started_at: now / 1000, tool_count: 1 }];
+  await round();
+  const title = (id) => rowOf(id).querySelector(".goal");
+  const tap = (id) => { let stopped = 0; title(id).onclick({ stopPropagation() { stopped++; } }); return stopped; };
+  let t = title("sa-g");
+  assert.strictEqual(t.textContent, "Fix the parser");
+  assert.strictEqual(t.getAttribute("role"), "button");
+  assert.strictEqual(t.getAttribute("aria-expanded"), "false");
+  assert.strictEqual(t.tabIndex, 0);
+  assert.strictEqual(tap("sa-g"), 1, "the tap stays on the title");
+  t = title("sa-g");
+  assert.strictEqual(t.textContent, bigGoal.trim());
+  assert.strictEqual(t.getAttribute("aria-expanded"), "true");
+  assert.ok(t.classList.contains("full"));
+  assert.ok(!rowOf("sa-g").classList.contains("open"), "the title tap does not open the row");
+  assert.match(rowOf("sa-g").querySelector(".goal").getAttribute("aria-label"), /^Hide the whole goal/);
+  tap("sa-g");
+  t = title("sa-g");
+  assert.strictEqual(t.textContent, "Fix the parser");
+  assert.strictEqual(t.getAttribute("aria-expanded"), "false");
+  assert.ok(!t.classList.contains("full"));
+  const key = (k) => { let prevented = false, stopped = false; title("sa-g").onkeydown({ key: k, preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } }); return prevented && stopped; };
+  assert.ok(key("Enter"));
+  assert.strictEqual(title("sa-g").textContent, bigGoal.trim());
+  assert.ok(key(" "));
+  assert.strictEqual(title("sa-g").textContent, "Fix the parser");
+  assert.ok(!key("a"), "another key is not taken");
+  // A selection being made is not a tap: the title stays as it is.
+  sandbox.window.getSelection = () => ({ isCollapsed: false, toString: () => "check" });
+  tap("sa-g");
+  assert.strictEqual(title("sa-g").textContent, "Fix the parser");
+  delete sandbox.window.getSelection;
+  // A short goal has nothing more to show: no button.
+  assert.strictEqual(title("sa-s").getAttribute("role"), null);
+  assert.strictEqual(title("sa-s").textContent, "Short goal");
+  // The start event may carry the goal cut; the list's whole goal wins, and a later cut one does not shrink it.
+  act.event("subagent.start", { subagent_id: "sa-g", goal: "Fix the parser" });
+  assert.ok(title("sa-g").getAttribute("aria-expanded") !== null);
+  assert.ok(key("Enter") && title("sa-g").textContent === bigGoal.trim(), "the whole goal is kept");
+  key("Enter");
+}
 // A subagent that ended its turn waiting on a background job (Hermes status "waiting") is not
 // failed and not finished: it shows what it waits on, counts as running, and shows its elapsed time.
 const liveCount = () => Number(ids.actcount.textContent || 0);

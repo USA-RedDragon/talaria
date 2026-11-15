@@ -115,6 +115,11 @@ type ChildTranscript struct {
 	TranscriptResult
 	Available bool `json:"available"`
 	Running   bool `json:"running"`
+	// Goal and Context are the whole goal and context the child was given
+	// (Hermes patch 0108), null for a Hermes without them or a child stored
+	// before they were kept.
+	Goal    *string `json:"goal"`
+	Context *string `json:"context"`
 }
 
 // TranscriptRow is the part of a session.transcript row the hub reads for a

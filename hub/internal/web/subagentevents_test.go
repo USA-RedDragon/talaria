@@ -32,6 +32,7 @@ type stepsReply struct {
 }
 
 const (
+	kindsPlain   = "goal,thinking,tool_start,tool_end,message"
 	eventsA      = activityBase + "/subagents/sa-0-a/events"
 	goalRead     = "Read the store"
 	kArgs        = "args"
@@ -84,7 +85,7 @@ func TestSubagentEventsAPI(t *testing.T) {
 	c := client(t)
 	login(t, e, c)
 	r := steps(t, c, e.url+eventsA)
-	if got := kinds(r); got != "goal,thinking,tool_start,tool_end,message" || !r.Live || !r.Running || !r.Details {
+	if got := kinds(r); got != kindsPlain || !r.Live || !r.Running || !r.Details {
 		t.Fatalf("events = %s %+v", got, r)
 	}
 	end := r.Events[3]
@@ -110,6 +111,50 @@ func TestSubagentEventsAPI(t *testing.T) {
 	}
 	if resp, _ := get(t, c, e.url+eventsA+"?after=x"); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad after = %d", resp.StatusCode)
+	}
+}
+
+// A Hermes that names the child's whole goal and context (patch 0108) gives
+// the events the goal uncut, then the context as a step of its own, also
+// when the subagent has ended and the hub answers from its copy.
+func TestSubagentEventsCarryTheWholeGoalAndContext(t *testing.T) {
+	t.Parallel()
+	e := activityEnv(t)
+	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
+	goal := "Fix the parser\n" + strings.Repeat("check this case too\n", 1500)
+	ctx := "Background:\n\n  indented\n" + strings.Repeat("more background ", 2000)
+	e.gw.AddChildRows("s1", "sa-0-a", firstSteps()...)
+	e.gw.SetChildBrief("s1", "sa-0-a", goal, ctx)
+	c := client(t)
+	login(t, e, c)
+	r := steps(t, c, e.url+eventsA)
+	if got := kinds(r); got != "goal,context,thinking,tool_start,tool_end,message" {
+		t.Fatalf("events = %s", got)
+	}
+	if r.Events[0].Text != goal || r.Events[1].Text != ctx {
+		t.Fatalf("goal %d chars, context %d chars; want %d and %d", len(r.Events[0].Text), len(r.Events[1].Text), len(goal), len(ctx))
+	}
+	e.gw.EndSubagent("s1", "sa-0-a", "completed", "done")
+	e.gw.Stop()
+	again := steps(t, c, e.url+eventsA)
+	if again.Live || again.Events[0].Text != goal || again.Events[1].Text != ctx {
+		t.Fatalf("stored copy: live=%v goal ok=%v context ok=%v", again.Live, again.Events[0].Text == goal, again.Events[1].Text == ctx)
+	}
+}
+
+// A child with no context, or a Hermes without the brief, keeps the first
+// row as the goal and adds no context step.
+func TestSubagentEventsWithoutABriefKeepTheFirstRow(t *testing.T) {
+	t.Parallel()
+	e := activityEnv(t)
+	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
+	e.gw.AddChildRows("s1", "sa-0-a", firstSteps()...)
+	e.gw.SetChildBrief("s1", "sa-0-a", "The whole goal", "")
+	c := client(t)
+	login(t, e, c)
+	r := steps(t, c, e.url+eventsA)
+	if got := kinds(r); got != kindsPlain || r.Events[0].Text != "The whole goal" {
+		t.Fatalf("events = %s %q", got, r.Events[0].Text)
 	}
 }
 
@@ -153,7 +198,7 @@ func TestSubagentEventsStoredWhileHermesRestarts(t *testing.T) {
 	e.gw.BeginRestart()
 	c.Timeout = 5 * time.Second
 	r := steps(t, c, e.url+eventsA)
-	if got := kinds(r); got != "goal,thinking,tool_start,tool_end,message" || r.Live {
+	if got := kinds(r); got != kindsPlain || r.Live {
 		t.Fatalf("stored events = %s live=%v", got, r.Live)
 	}
 }

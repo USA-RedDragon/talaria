@@ -201,6 +201,7 @@ func (s *Service) readChild(ctx context.Context, b *backend, ls *live, subagentI
 		if r.Reset {
 			conv = newRowConverter()
 		}
+		conv.goalText, conv.context = deref(r.Goal), deref(r.Context)
 		take(conv.rows(r.Rows), r.Reset)
 		if r.NextCursor != nil {
 			cursor = *r.NextCursor
@@ -224,6 +225,11 @@ const (
 type rowConverter struct {
 	calls map[string]string
 	goal  bool
+	// goalText and context are the whole goal and context Hermes names for
+	// the child: the goal replaces the text of the first user row (which
+	// the transcript may carry cut or with notes added), and the context
+	// follows it as a step of its own. Neither is cut.
+	goalText, context string
 }
 
 func newRowConverter() *rowConverter { return &rowConverter{calls: map[string]string{}} }
@@ -255,6 +261,15 @@ func (c *rowConverter) row(row gateway.TranscriptRow) []hub.SubagentEvent {
 		kind := hub.StepUser
 		if !c.goal {
 			kind, c.goal = hub.StepGoal, true
+			text := capText(row.Text)
+			if strings.TrimSpace(c.goalText) != "" {
+				text = c.goalText
+			}
+			out := []hub.SubagentEvent{{TS: at, Type: kind, Text: text}}
+			if strings.TrimSpace(c.context) != "" {
+				out = append(out, hub.SubagentEvent{TS: at, Type: hub.StepContext, Text: c.context})
+			}
+			return out
 		}
 		return []hub.SubagentEvent{{TS: at, Type: kind, Text: capText(row.Text)}}
 	case roleAssistant:

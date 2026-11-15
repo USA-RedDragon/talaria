@@ -10,6 +10,9 @@ import (
 const (
 	// StepGoal is the task the subagent was given, its first user row.
 	StepGoal = "goal"
+	// StepContext is the context the subagent was given with its goal. It
+	// follows the goal and is never cut.
+	StepContext = "context"
 	// StepUser is a later user row of the subagent's transcript, such as a
 	// summary of earlier steps.
 	StepUser = "user"

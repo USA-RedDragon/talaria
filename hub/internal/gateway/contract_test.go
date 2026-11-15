@@ -475,6 +475,7 @@ func contract() map[string][]string {
 		"tui_gateway/contracts/canonical_stored_reads.py": {
 			"    order: Literal['" + gateway.OrderOldest + "', '" + gateway.OrderLatest + "'] = 'oldest'",
 			"    rows: list[StoredTranscriptRow]", "    next_cursor: str | None", "    reset: bool",
+			"    goal: str | None = None", "    context: str | None = None",
 		},
 		"tui_gateway/contracts/common.py": {"    row_id: int | None = None"},
 		// Slash commands: commands.catalog lists them; slash.exec runs the reviewed ones. prompt.submit would

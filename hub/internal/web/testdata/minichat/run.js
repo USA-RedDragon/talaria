@@ -56,7 +56,8 @@ assert.strictEqual(M.pill(3), "3 new steps");
 // The view.
 const v = M.create({ el, toast: () => {} });
 const box = v.node;
-const kids = () => box.children.map((n) => n.className.split(" ")[0] + (n.classList.contains("running") ? ".running" : ""));
+const kidsOf = (b) => b.children.map((n) => n.className.split(" ")[0] + (n.classList.contains("running") ? ".running" : ""));
+const kids = () => kidsOf(box);
 v.set({ model: "claude-opus-5-5" });
 v.add([
   ev({ type: "goal", text: "Count the rows", at: 0 }),
@@ -310,4 +311,41 @@ console.log("ok");
   more.onclick();
   assert.ok(t.classList.contains("clamped"));
   assert.strictEqual(more.textContent, "Show all");
+}
+
+// The context comes under the task and before the start note, as plain text with
+// its own head and its own fold; no context, or an empty one, draws nothing.
+{
+  const goal = "Fix the parser\nsecond line";
+  const long = Array.from({ length: 12 }, (_, i) => "context " + (i + 1)).join("\n");
+  const w = M.create({ el, toast: () => {} });
+  w.add([ev({ type: "goal", text: goal, at: 0 }), ev({ type: "context", text: long, at: 0 }), ev({ type: "message", text: "On it.", at: 1 })]);
+  const box = w.node;
+  const heads = box.children.filter((c) => c.classList.contains("mc-brief")).map((c) => c.querySelector(".mc-brief-head").textContent);
+  assert.deepStrictEqual(heads, ["Task", "Context"]);
+  assert.deepStrictEqual(kidsOf(box).slice(0, 3), ["mc-brief", "mc-brief", "note"]);
+  const [task, ctx] = box.children.filter((c) => c.classList.contains("mc-brief"));
+  assert.strictEqual(task.querySelector(".mc-brief-text").textContent, goal);
+  assert.strictEqual(task.querySelector(".mc-brief-more"), null);
+  const t = ctx.querySelector(".mc-brief-text");
+  const more = ctx.querySelector(".mc-brief-more");
+  assert.strictEqual(t.textContent, long);
+  assert.ok(t.classList.contains("clamped"));
+  assert.strictEqual(more.textContent, "Show all");
+  assert.strictEqual(more.getAttribute("aria-expanded"), "false");
+  assert.strictEqual(more.getAttribute("aria-label"), "Context: show all");
+  more.onclick();
+  assert.ok(!t.classList.contains("clamped"));
+  assert.strictEqual(more.textContent, "Show less");
+  assert.strictEqual(more.getAttribute("aria-expanded"), "true");
+  more.onclick();
+  assert.ok(t.classList.contains("clamped"));
+  // The Task fold stays its own.
+  const w2 = M.create({ el, toast: () => {} });
+  w2.add([ev({ type: "goal", text: "just a goal", at: 0 }), ev({ type: "context", text: "   ", at: 0 })]);
+  assert.strictEqual(w2.node.children.filter((c) => c.classList.contains("mc-brief")).length, 1);
+  // A reset draws the brief again, once.
+  w.reset();
+  w.add([ev({ type: "goal", text: goal, at: 0 }), ev({ type: "context", text: "short context", at: 0 })]);
+  assert.deepStrictEqual(kidsOf(w.node).slice(0, 3), ["mc-brief", "mc-brief", "note"]);
 }

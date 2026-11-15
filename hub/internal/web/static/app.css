@@ -900,6 +900,11 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
 .act .row-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 10px; }
 .act .row-head .goal { font-size: .88rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .act .row.open .row-head .goal { white-space: normal; overflow-wrap: anywhere; }
+.act .row-head .goal.expandable { cursor: pointer; }
+.act .row-head .goal.expandable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.act .row-head .goal.full, .act .row.open .row-head .goal.full { white-space: pre-wrap; overflow-wrap: anywhere; text-overflow: clip; overflow: auto; max-height: 40vh; font-weight: 500; user-select: text; -webkit-user-select: text; }
+.act .row-head:has(.goal.full) { align-items: start; }
+.act .row-head:has(.goal.full) > :first-child, .act .row-head:has(.goal.full) .time { margin-top: .3rem; }
 .act .row-head .meta { grid-column: 2 / 4; color: var(--muted); font-size: .76rem; font-variant-numeric: tabular-nums;
   display: flex; gap: .55rem; flex-wrap: wrap; }
 .act .row-head .now { grid-column: 2 / 4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem;

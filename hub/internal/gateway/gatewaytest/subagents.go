@@ -20,6 +20,8 @@ const (
 // session.transcript with subagent_id reads it.
 type child struct {
 	rows []map[string]any
+	// goal and context are the child's brief; empty when none was set.
+	goal, context string
 	// gen moves when the transcript is rewritten: a cursor of another
 	// generation reads it again from the start, with reset.
 	gen int
@@ -43,6 +45,23 @@ func (g *Gateway) AddChildRows(sessionID, subagentID string, rows ...map[string]
 		s.children[subagentID] = c
 	}
 	c.rows = append(c.rows, rows...)
+}
+
+// SetChildBrief sets the whole goal and context session.transcript names for
+// the child, as a Hermes with patch 0108 does; an empty string is null.
+func (g *Gateway) SetChildBrief(sessionID, subagentID, goal, context string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.sessions[sessionID]
+	if s.children == nil {
+		s.children = map[string]*child{}
+	}
+	c := s.children[subagentID]
+	if c == nil {
+		c = &child{}
+		s.children[subagentID] = c
+	}
+	c.goal, c.context = goal, context
 }
 
 // RewriteChild replaces a child's transcript, as a compaction does: the
@@ -106,8 +125,15 @@ func (g *Gateway) childTranscript(s *Session, p map[string]any, limit int) (any,
 	if rows == nil {
 		rows = []map[string]any{}
 	}
-	return map[string]any{kSessionID: s.ID, kRows: rows, kNextCursor: fmt.Sprintf("%d:%d", c.gen, end), kReset: reset,
-		kSubagentID: id, kAvailable: true, statusRun: running, "child_session_id": "child-" + id}, "", nil
+	res := map[string]any{kSessionID: s.ID, kRows: rows, kNextCursor: fmt.Sprintf("%d:%d", c.gen, end), kReset: reset,
+		kSubagentID: id, kAvailable: true, statusRun: running, "child_session_id": "child-" + id}
+	if c.goal != "" {
+		res["goal"] = c.goal
+	}
+	if c.context != "" {
+		res["context"] = c.context
+	}
+	return res, "", nil
 }
 
 // childRow is row i as Hermes projects it; without tool details an

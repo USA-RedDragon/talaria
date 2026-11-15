@@ -118,7 +118,7 @@ window.HubMiniChat = (() => {
     jump.hidden = true;
     jump.append(window.HubIcons.icon("chev"), el("span"));
     box.append(jump);
-    const st = { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, ended: false, info: {}, endNode: null, known: null };
+    const st = { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, ended: false, info: {}, endNode: null, known: null, started: null };
     // memory is what the steps taught so far: a background command by its
     // session id, for naming it in the row's status line.
     const view = { node: box, events: () => st.events.slice(), memory: () => st.known };
@@ -209,22 +209,25 @@ window.HubMiniChat = (() => {
       finish(hit.c, { ...e, name: hit.name });
     }
 
-    // brief is the subagent's first entry: the task it was given, in full as
+    // brief is one of the subagent's first entries, the task it was given
+    // ("Task") or the context that came with it ("Context"), in full as
     // plain text (line breaks kept, selectable), folded after briefLines
     // lines with Show all / Show less.
-    function brief(text) {
+    function brief(text, head) {
       const box = el("div", "mc-brief");
       const body = el("div", "mc-brief-text", String(text).trim());
-      box.append(el("div", "mc-brief-head", "Task"), body);
+      box.append(el("div", "mc-brief-head", head || "Task"), body);
       if (briefLong(body.textContent)) {
         body.classList.add("clamped");
         const b = el("button", "mc-brief-more", "Show all");
         b.type = "button";
         b.setAttribute("aria-expanded", "false");
+        b.setAttribute("aria-label", (head || "Task") + ": show all");
         b.onclick = () => {
           const open = body.classList.toggle("clamped") === false;
           b.textContent = open ? "Show less" : "Show all";
           b.setAttribute("aria-expanded", String(open));
+          b.setAttribute("aria-label", (head || "Task") + ": " + (open ? "show less" : "show all"));
         };
         box.append(b);
       }
@@ -279,7 +282,16 @@ window.HubMiniChat = (() => {
           const n = el("div", "note");
           n.append("Started ", stamp(e.ts));
           if (st.info.model) n.append(" · " + st.info.model);
+          st.started = n;
           put(n);
+          break;
+        }
+        case "context": {
+          // The context belongs under the task, before the start note.
+          if (!String(e.text || "").trim()) break;
+          const c = brief(e.text, "Context");
+          if (st.started && st.started.parentNode === box) box.insertBefore(c, st.started);
+          else put(c);
           break;
         }
         case "user": {
@@ -389,7 +401,7 @@ window.HubMiniChat = (() => {
     // reset drops everything drawn, for a transcript Hermes rewrote.
     view.reset = () => {
       for (const n of Array.from(box.children)) if (n !== jump) n.remove();
-      Object.assign(st, { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, endNode: null, known: null });
+      Object.assign(st, { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, endNode: null, known: null, started: null });
       showJump();
     };
 
