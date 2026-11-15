@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -19,11 +18,6 @@ import (
 // (or the context ends), and TestMain kills every live group on SIGTERM,
 // SIGINT, SIGQUIT and just before the -timeout panic, which would otherwise
 // skip t.Cleanup and leave the browsers running for days.
-
-var (
-	liveMu   sync.Mutex
-	liveCmds = map[*exec.Cmd]struct{}{}
-)
 
 // killGroup SIGKILLs the whole process group of a started command.
 func killGroup(cmd *exec.Cmd) error {
@@ -37,14 +31,6 @@ func killGroup(cmd *exec.Cmd) error {
 	return err
 }
 
-func killAllGroups() {
-	liveMu.Lock()
-	defer liveMu.Unlock()
-	for c := range liveCmds {
-		_ = killGroup(c)
-	}
-}
-
 // browserCmd is exec.CommandContext for a node script that starts a browser.
 // The test's profile directory must come from t.TempDir().
 func browserCmd(ctx context.Context, t *testing.T, name string, args ...string) *exec.Cmd {
@@ -53,14 +39,8 @@ func browserCmd(ctx context.Context, t *testing.T, name string, args ...string) 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	setPdeathsig(cmd.SysProcAttr)
 	cmd.Cancel = func() error { return killGroup(cmd) }
-	liveMu.Lock()
-	liveCmds[cmd] = struct{}{}
-	liveMu.Unlock()
 	t.Cleanup(func() {
 		_ = killGroup(cmd)
-		liveMu.Lock()
-		delete(liveCmds, cmd)
-		liveMu.Unlock()
 		// Wait for the group to be gone so the profile can be removed.
 		if cmd.Process != nil {
 			for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
@@ -81,7 +61,9 @@ func TestMain(m *testing.M) {
 		s := <-sigs
 		killAllGroups()
 		signal.Reset(s)
-		_ = syscall.Kill(os.Getpid(), s.(syscall.Signal))
+		if sig, ok := s.(syscall.Signal); ok {
+			_ = syscall.Kill(os.Getpid(), sig)
+		}
 	}()
 	// The -timeout panic skips every cleanup, so reap just before it.
 	if f := flag.Lookup("test.timeout"); f != nil {
