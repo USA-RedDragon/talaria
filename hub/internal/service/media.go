@@ -191,7 +191,8 @@ func (o *offer) sendFile(raw json.RawMessage, p string) {
 
 // offers says how the session offered p: a send_file result, a reply
 // (a MEDIA directive, or a Markdown link or image with any extension),
-// a browser_screenshot result, a user's image attachment or the image a
+// a browser_screenshot result, a page_publish result (the card of a page
+// shows before the reply that names it), a user's image attachment or the image a
 // vision_analyze or browser_vision call looked at, in the snapshot's
 // transcript or the events since.
 func (ls *live) offers(p string) offer {
@@ -291,6 +292,10 @@ func rowsOffer(rows []json.RawMessage, p string, o *offer) {
 			switch {
 			case name == hub.ScreenshotTool && screenshotNames(content, p):
 				o.named = true
+			case name == hub.PagePublishTool:
+				if hub.PublishedPage(r.Content, content) == p {
+					o.named = true
+				}
 			case name == hub.SendFileTool && content != "":
 				o.sendFile(json.RawMessage(content), p)
 			case name == hub.SendFileTool:
@@ -309,6 +314,8 @@ func eventsOffer(ring []hub.Event, p string, o *offer) {
 			Name   string          `json:"name"`
 			Args   json.RawMessage `json:"args"`
 			Result json.RawMessage `json:"result"`
+			// ResultText is the text of a result that is not JSON.
+			ResultText string `json:"result_text"`
 		}
 		_ = json.Unmarshal(e.Data, &d)
 		text := ""
@@ -336,6 +343,10 @@ func eventsOffer(ring []hub.Event, p string, o *offer) {
 			switch d.Name {
 			case hub.SendFileTool:
 				o.sendFile(d.Result, p)
+			case hub.PagePublishTool:
+				if hub.PublishedPage(d.Result, d.ResultText) == p {
+					o.named = true
+				}
 			case hub.ScreenshotTool:
 				var res string
 				if json.Unmarshal(d.Result, &res) != nil {

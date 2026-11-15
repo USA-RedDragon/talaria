@@ -125,6 +125,10 @@ type Session struct {
 	Attachments [][]gateway.Attachment
 	// Prompts are the prompts pending when the session is added.
 	Prompts []gateway.Prompt
+	// NextPrompts are raised one at a time, each after the one before is
+	// answered, as a question of several is (the hermes clarify tool asks
+	// them in turn). The turn ends with the last.
+	NextPrompts []gateway.Prompt
 	// Subagents are the subagents the session runs, as subagent.list
 	// lists them.
 	Subagents []gateway.SubagentRow
@@ -173,6 +177,8 @@ type Gateway struct {
 	// StaleApprovals makes approval.respond refuse with stale_generation, as
 	// a restarted Hermes does for a prompt of its earlier run.
 	StaleApprovals bool
+	// answers are the answers clarify.respond took, in order.
+	answers []string
 	// ReplayMax bounds each session's replay ring as Hermes does
 	// (tui_gateway/event_replay.py _REPLAY_BUFFER_MAX, 512): older events
 	// are dropped, and session.events.since from before them answers
@@ -1430,6 +1436,14 @@ func (g *Gateway) hClarify(_ *conn, p map[string]any) (any, string, func()) {
 	}
 	delete(s.prompts, pr.PromptID)
 	g.publishLocked(s, "clarify.settled", map[string]any{"prompt_id": pr.PromptID, kExecGen: pr.ExecutionGeneration})
+	g.answers = append(g.answers, str(p, "answer"))
+	if len(s.NextPrompts) > 0 {
+		next := s.NextPrompts[0]
+		s.NextPrompts = s.NextPrompts[1:]
+		s.prompts[next.PromptID] = next
+		g.publishLocked(s, "clarify.request", next)
+		return map[string]any{kStatus: "resolved"}, "", nil
+	}
 	s.Running = false
 	g.publishLocked(s, "message.complete", map[string]any{kText: "answered: " + str(p, "answer"), kStatus: kComplete})
 	return map[string]any{kStatus: "resolved"}, "", nil
@@ -1607,4 +1621,11 @@ func (g *Gateway) hFileAttach(c *conn, p map[string]any) (any, string, func()) {
 	name := path.Base(str(p, kName))
 	return map[string]any{"attached": true, kName: name, kPath: StagedFiles + name, "ref_path": StagedFiles + name,
 		"ref_text": "@file:" + StagedFiles + name, "uploaded": true}, "", nil
+}
+
+// ClarifyAnswers are the answers clarify.respond took, in order.
+func (g *Gateway) ClarifyAnswers() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.answers...)
 }

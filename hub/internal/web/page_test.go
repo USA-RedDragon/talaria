@@ -194,3 +194,25 @@ func TestPageFromAReplyInPieces(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A page the agent just published opens before any reply names it: the
+// page_publish result offers the file.
+func TestPublishedPageOpensBeforeReply(t *testing.T) {
+	t.Parallel()
+	e := setupWith(t, func(cfg *config.Config, _ *web.Options, _ *store.Store) {
+		cfg.Backends[0].MediaRoots = []string{"/srv/out"}
+	})
+	const file = "/srv/out/pages/new.html"
+	e.gw.SetFile(file, []byte("<!doctype html><title>Fresh</title><p>x</p>"))
+	e.gw.AddSession(&gatewaytest.Session{ID: "m1", Title: titleMedia, Live: true, StartedAt: 200, Messages: []map[string]any{
+		{kRole: roleUser, kText: "publish it"},
+		{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "c1", fnKey: map[string]any{fieldName: "page_publish", ilArgs: `{"path": "/home/u/new.html"}`}}}},
+		{kRole: stepTool, kCallID: "c1", fieldContent: `{"ok": true, "path": "` + file + `", "title": "Fresh"}`},
+	}})
+	c := client(t)
+	login(t, e, c)
+	resp, body := get(t, c, e.url+"/api/sessions/pc/m1/page-info?path="+url.QueryEscape(file))
+	if resp.StatusCode != http.StatusOK || body != "{\"title\":\"Fresh\"}\n" {
+		t.Fatalf("page info = %d %q", resp.StatusCode, body)
+	}
+}

@@ -54,6 +54,7 @@ window.HubApprovals = (() => {
       if (split) box.append(el("pre", "", split[2]));
       if (p.command && !rule) box.append(el("pre", "", p.command));
       if (rule && !p.description) box.append(el("div", "rule", "An approval rule asks before the " + rule[1].replace(/_/g, " ") + " tool runs."));
+      if (p.subagent) box.append(el("div", "who", "Asked by a subagent: " + p.subagent));
       if (p.question) box.append(el("div", "", p.question));
       const actions = el("div", "actions");
       const buttons = [];

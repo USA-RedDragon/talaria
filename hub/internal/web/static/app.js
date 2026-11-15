@@ -2444,14 +2444,22 @@
     };
     if (page.path) {
       ready(page.path);
-      api("GET", base + "/page-info?path=" + encodeURIComponent(page.path)).then((r) => {
+      // A device that is busy with other reads (429) or has not answered yet (503) is asked again a few
+      // times before the card says the file is gone: a card drawn right after a publish asks while the
+      // device is reading other files.
+      const probe = (tries) => api("GET", base + "/page-info?path=" + encodeURIComponent(page.path)).then((r) => {
         if (r && r.title) { name.textContent = r.title; pageInfo.get(page.path).title = r.title; }
-      }, () => {
+      }, (e) => {
+        if (tries < 4 && e && (e.status === 429 || e.status === 503)) {
+          setTimeout(() => probe(tries + 1), 1000 * (tries + 1));
+          return;
+        }
         card.classList.add("gone");
         kind.textContent = "Gone";
         card.title = "This file is gone, or the computer that has it is offline.";
         open.disabled = true;
       });
+      probe(0);
     } else if (window.crypto && crypto.subtle) {
       pageId(page.html).then(ready, () => { kind.textContent = "Cannot open"; });
     } else {

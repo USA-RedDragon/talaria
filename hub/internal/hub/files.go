@@ -18,6 +18,9 @@ import (
 // a file card into the chat.
 const SendFileTool = "send_file"
 
+// PagePublishTool is the tool that publishes an HTML file as a page.
+const PagePublishTool = "page_publish"
+
 // DefaultMaxFileBytes is the largest file the hub passes on when the
 // config sets no other cap.
 const DefaultMaxFileBytes int64 = 8 << 30
