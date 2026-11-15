@@ -10,8 +10,8 @@
 // script then throws the log more than a screen further up: one jump
 // report), grow (a wheel up while 4000 px go in above the reader before
 // the page judged its scroll; the reader stays put), shrink and
-// shrinktouch (Chrome only, a finger on a phone: 4000 px above the
-// reader go away as the log scrolls; the reader stays put), swipe (Chrome only: a finger swipes up on a phone while older
+// shrinktouch (Chrome only, a finger on a phone: 4000 px of messages
+// above the reader go away as the log scrolls; the reader stays put), swipe (Chrome only: a finger swipes up on a phone while older
 // rows render above; the reader stays put) or hand (Alt+J sends the record by hand, with a toast).
 // Prints ok when the page's own count is right; the Go test counts the
 // lines the hub logged.
@@ -153,11 +153,10 @@ const { proc, connect } = driver();
   } else if (mode === "shrink" || mode === "shrinktouch") {
     // The reader is a little above the newest message, and right as the
     // next wheel or finger move scrolls the log, 4000 px above the reader
-    // go away (a reply that ends draws shorter, a box folds): the browser
+    // go away (a reply that ends draws shorter, a box folds; here the
+    // first messages of the log): the browser
     // drops scrollTop to the shorter log's end. That drop is the page's,
     // not the reader's: the reader stays on what they read.
-    await ev(`(() => { const d = document.createElement("div"); d.id = "tall"; d.style.height = "4000px"; d.style.flex = "none"; document.getElementById("log").prepend(d); return 1; })()`);
-    await sleep(300);
     const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + (${mode === "shrink"} ? r.height / 2 : 60) }; })()`);
     const move = (dy) => (mode === "shrink" ? c.wheel(box.x, box.y, -dy) : c.swipe(box.x, box.y, dy));
     await move(400);
@@ -167,7 +166,10 @@ const { proc, connect } = driver();
     // The first message in view and where it is.
     const at = `(() => { const l = document.getElementById("log"); const top = l.getBoundingClientRect().top; const n = window.__ref || [...l.querySelectorAll(".msg")].find((m) => m.getBoundingClientRect().bottom > top + 1); window.__ref = n; return Math.round(n.getBoundingClientRect().top - top); })()`;
     const y0 = await ev(at);
-    await ev(`(() => { const l = document.getElementById("log"); let armed = true; l.addEventListener("scroll", () => { if (!armed) return; armed = false; document.getElementById("tall").remove(); }, { passive: true }); return 1; })()`);
+    // The messages at the top of the log that make 4000 px.
+    const gone = await ev(`(() => { const l = document.getElementById("log"); window.__gone = []; let h = 0; for (const n of l.children) { if (h >= 4000 || n === window.__ref) break; window.__gone.push(n); h += n.getBoundingClientRect().height; } return Math.round(h); })()`);
+    assert.ok(gone >= 4000, "the log has too little above the reader for the test: " + gone);
+    await ev(`(() => { const l = document.getElementById("log"); let armed = true; l.addEventListener("scroll", () => { if (!armed) return; armed = false; for (const n of window.__gone) n.remove(); }, { passive: true }); return 1; })()`);
     await move(mode === "shrink" ? 40 : 400);
     await sleep(2500);
     const y1 = await ev(at);
