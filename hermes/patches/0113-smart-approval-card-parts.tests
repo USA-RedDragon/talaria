@@ -1,0 +1,10 @@
+# New: the card's parts as fields, no call ids in the reason
+tests/tools/test_smart_approval_card_parts.py
+# The review, the card and the pending prompt it feeds
+tests/tools/test_smart_provenance.py
+tests/tools/test_smart_provenance_ledger.py
+tests/tools/test_smart_provenance_clarify.py
+tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_smart_provenance_source_grants.py
+tests/tools/test_subagent_approval_routing.py
+tests/tools/test_approval_provenance.py

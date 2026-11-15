@@ -1,0 +1,323 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 11:47:48 +0000
+Subject: [PATCH] feat(approval): a smart approval card's rule, reason,
+ subagent and source are separate fields
+
+The card of a smart approval was one run-on string ("Subagent "<goal>" asks: Smart approval rule "X": <reason>") and the reason could name internal call ids ("an earlier similar kill call (c56) was blocked") that nobody can look up.
+
+The approval prompt event now carries `rule` (the rule name) and `reason` (the checker's words; a ledger write's entry and source lines follow as further lines) as fields of their own, next to `subagent` (the goal) and `grant_source`. `description` stays, with the same text as one string, for clients that do not read the fields. The review prompt asks the judge to name an earlier action by what it did, never by a transcript id, and the card strips any `c<digits>`, `call_...` or `toolu_...` reference that is left.
+---
+ gateway/session_pending_controls.py           |   3 +
+ tests/tools/test_smart_approval_card_parts.py | 175 ++++++++++++++++++
+ tools/approval.py                             |  11 +-
+ tools/approval_automode.py                    |  33 +++-
+ tui_gateway/contracts/canonical_sessions.py   |   4 +
+ 5 files changed, 222 insertions(+), 4 deletions(-)
+ create mode 100644 tests/tools/test_smart_approval_card_parts.py
+
+diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
+index b213ec5f9a..f5ff2a4593 100644
+--- a/gateway/session_pending_controls.py
++++ b/gateway/session_pending_controls.py
+@@ -47,6 +47,9 @@ class PendingControls:
+                       'choices': choices}
+             if data.get('subagent'):
+                 prompt['subagent'] = str(data['subagent'])  # the goal of the subagent that asks
++            for part in ('rule', 'reason'):  # the card's parts; ``description`` stays for older clients
++                if data.get(part):
++                    prompt[part] = _redact_approval_command(str(data[part]))
+             if data.get('grant_source'):
+                 prompt['grant_source'] = _redact_approval_command(str(data['grant_source']))
+             if 'edit' in data:
+diff --git a/tests/tools/test_smart_approval_card_parts.py b/tests/tools/test_smart_approval_card_parts.py
+new file mode 100644
+index 0000000000..a2f6a6ba1e
+--- /dev/null
++++ b/tests/tools/test_smart_approval_card_parts.py
+@@ -0,0 +1,175 @@
++"""Smart approval cards carry their text as separate fields, and no internal call id reaches the user.
++
++Invariants:
++  1. The prompt event of a smart approval card has ``rule`` and ``reason`` as fields of their own, next to the
++     single ``description`` older clients still read; a subagent's goal is its own ``subagent`` field and a
++     source the card can allow is ``grant_source``.
++  2. The checker's reason never carries a transcript call id such as ``c56`` (judge prompt asks for plain words;
++     the card text strips any that are left).
++  3. A ledger write's entry and source lines follow the reason as further lines of ``reason``.
++  4. The pending prompt a client reads (``PendingControls``) keeps the fields.
++"""
++
++from __future__ import annotations
++
++import re
++import threading
++import time
++
++import pytest
++
++from agent.delegation_context import delegated_child_context
++from tools import approval as approval_mod
++from tools import approval_automode as A
++
++KEY = "card-parts-session"
++REASON = ("The kill call names no session_id, so it cannot be shown to target a process this agent started, "
++          "and an earlier similar kill call (c56) was blocked.")
++
++
++@pytest.fixture()
++def gateway(monkeypatch, tmp_path):
++    cards = []
++    monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": KEY)
++    monkeypatch.setattr(A, "_cwd", lambda: str(tmp_path))
++    monkeypatch.setattr(A, "_current_agent", lambda: None)
++    monkeypatch.setattr(A.HeldReview, "INTERVAL", 0.0)
++    approval_mod.register_gateway_notify(KEY, cards.append)
++    yield cards
++    approval_mod.unregister_gateway_notify(KEY)
++
++
++def _ask(monkeypatch, verdict, goal=None, tool="process_manage", args=None):
++    monkeypatch.setattr(A, "review", lambda *a, **k: verdict)
++    args = args or {"action": "kill"}
++    holder = {}
++
++    def run():
++        def decide():
++            holder["result"] = approval_mod._provenance_decision(
++                approval_mod._ACTION_GATE, tool, args, command=f"<{tool}> {args}", approval_callback=None,
++                is_cli=False, is_gateway=True, is_ask=False)
++        if goal is None:
++            decide()
++        else:
++            with delegated_child_context("child-session", goal):
++                decide()
++
++    worker = threading.Thread(target=run, daemon=True)
++    worker.start()
++    return worker, holder
++
++
++def _card(cards, limit=10.0):
++    end = time.monotonic() + limit
++    while not cards and time.monotonic() < end:
++        time.sleep(0.02)
++    assert cards, "no approval card was raised"
++    return cards[0]
++
++
++def _finish(worker, card):
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(10)
++
++
++def test_the_card_event_carries_rule_and_reason_as_fields(gateway, monkeypatch):
++    verdict = A.Verdict("block", rule="Interfere With Workloads", reason=REASON, tier="soft", stage=2)
++    worker, _ = _ask(monkeypatch, verdict)
++    card = _card(gateway)
++    try:
++        assert card["rule"] == "Interfere With Workloads"
++        assert card["reason"].startswith("The kill call names no session_id")
++        assert card["reason"].endswith("an earlier similar kill call was blocked.")
++        assert not re.search(r"\bc\d+\b", card["reason"] + card["description"])
++        # older clients read the one string
++        assert card["description"].startswith('Smart approval rule "Interfere With Workloads": ')
++        assert "subagent" not in card
++    finally:
++        _finish(worker, card)
++
++
++def test_a_subagent_card_names_the_goal_once_as_a_field(gateway, monkeypatch):
++    verdict = A.Verdict("block", rule="Interfere With Workloads", reason=REASON, tier="soft", stage=2)
++    worker, _ = _ask(monkeypatch, verdict, goal="Analyze the chat-view jump and fix it")
++    card = _card(gateway)
++    try:
++        assert card["subagent"] == "Analyze the chat-view jump and fix it"
++        assert card["rule"] == "Interfere With Workloads" and "c56" not in card["reason"]
++        assert card["description"].startswith('Subagent "Analyze the chat-view jump and fix it" asks: ')
++    finally:
++        _finish(worker, card)
++
++
++def test_a_card_that_offers_a_source_names_it_as_a_field(gateway, monkeypatch):
++    monkeypatch.setattr(A, "grant_chat", lambda agent: ("sid", object(), "root"))
++    verdict = A.Verdict("block", rule="Code from External", reason="Downloads an AppImage and runs it.",
++                        tier="soft", stage=2, detail={"grant_sources": ["github.com/AppImage/appimagetool"]})
++    worker, _ = _ask(monkeypatch, verdict, tool="terminal", args={"command": "curl -O x && ./x"})
++    card = _card(gateway)
++    try:
++        assert card["grant_source"] == "github.com/AppImage/appimagetool"
++        assert card["rule"] == "Code from External" and card["reason"] == "Downloads an AppImage and runs it."
++    finally:
++        _finish(worker, card)
++
++
++def test_an_unsure_card_has_a_reason_and_no_rule(gateway, monkeypatch):
++    verdict = A.Verdict("unsure", reason="the review model's answer had no verdict", stage=2)
++    worker, _ = _ask(monkeypatch, verdict)
++    card = _card(gateway)
++    try:
++        assert "rule" not in card
++        assert card["reason"] == "Could not decide (the review model's answer had no verdict)"
++    finally:
++        _finish(worker, card)
++
++
++def test_a_ledger_write_adds_its_entry_and_source_lines_to_the_reason(gateway, monkeypatch):
++    monkeypatch.setattr(A, "card_context", lambda tool, args, agent=None: "It closes ledger entry L1 (open).\n"
++                                                                         "Nothing you said matches.")
++    verdict = A.Verdict("block", rule="Self-Modification", reason="Records an approval the user did not give.",
++                        tier="soft", stage=2)
++    worker, _ = _ask(monkeypatch, verdict, tool="ledger", args={"action": "close", "id": "L1"})
++    card = _card(gateway)
++    try:
++        assert card["reason"].split("\n") == ["Records an approval the user did not give.",
++                                              "It closes ledger entry L1 (open).", "Nothing you said matches."]
++    finally:
++        _finish(worker, card)
++
++
++@pytest.mark.parametrize("text, want", [
++    ("an earlier similar kill call (c56) was blocked.", "an earlier similar kill call was blocked."),
++    ("it repeats c72 and c73, which were blocked", "it repeats, which were blocked"),
++    ("the kill (call c56) and (c57, c58) were blocked", "the kill and were blocked"),
++    ("Runs a saved copy of the command blocked in c9.", "Runs a saved copy of the command blocked in."),
++    ("Nothing to strip here, version c3po stays.", "Nothing to strip here, version c3po stays."),
++])
++def test_call_ids_are_stripped_from_the_reason(text, want):
++    assert A.plain_reason(text) == want
++
++
++def test_the_judge_prompt_asks_for_plain_words_without_ids():
++    prompt = A.system_prompt(2)
++    assert "never by a transcript id or call number" in prompt
++
++
++def test_the_pending_prompt_a_client_reads_keeps_the_fields():
++    from gateway.session_pending_controls import PendingControls
++
++    class _Events:
++        lock = threading.RLock()
++
++        def publish(self, *a, **k):
++            pass
++
++    controls = PendingControls(_Events())
++    controls.register("s", object(), 1, {"request_id": "r1", "command": "c", "description": "old text",
++                                         "rule": "Code from External", "reason": "Line one\nLine two",
++                                         "subagent": "the goal", "smart_denied": True})
++    prompt = controls.pending["r1"][1]
++    assert prompt["rule"] == "Code from External" and prompt["reason"] == "Line one\nLine two"
++    assert prompt["subagent"] == "the goal" and prompt["description"] == "old text"
++    controls.register("s", object(), 1, {"request_id": "r2", "command": "c", "description": "old text"})
++    assert "rule" not in controls.pending["r2"][1] and "reason" not in controls.pending["r2"][1]
+diff --git a/tools/approval.py b/tools/approval.py
+index ea6f579c6a..935105602b 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -1138,14 +1138,21 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+             if not record_card_grant(db, sid, sources):
+                 logger.warning("Smart approval: could not record the card grant for %s", ", ".join(sources))
+ 
++    # A ledger write says what entry it is and where the approval it claims came from, so the user can judge it.
++    context = _automode.card_context(tool_name, args, agent)
++    # The card's parts as fields (a client that knows them shows each on its own line; the description stays
++    # for older clients): the rule, and the checker's reason followed by the extra lines of a ledger write.
++    parts = dict(verdict.card_parts)
++    if context:
++        parts["reason"] = "\n".join(x for x in (parts.get("reason"), context) if x)
++    card_extra = {**card_extra, **{k: v for k, v in parts.items() if v}}
++
+     watch = None
+     try:
+         watch = _automode.HeldReview(tool_name, args, agent=agent, cwd=cwd)
+     except Exception as exc:
+         logger.debug("Smart approval (provenance): no held-card re-review: %s", exc)
+     from tools.approval_gateway_wait import held_review
+-    # A ledger write says what entry it is and where the approval it claims came from, so the user can judge it.
+-    context = _automode.card_context(tool_name, args, agent)
+     card_description = f"{verdict.card_text}\n{context}" if context else verdict.card_text
+     with held_review(watch):
+         result = _human_decision(spec, command=command, description=card_description, pattern_key="smart_provenance",
+diff --git a/tools/approval_automode.py b/tools/approval_automode.py
+index 62acd351da..3bfa7edea0 100644
+--- a/tools/approval_automode.py
++++ b/tools/approval_automode.py
+@@ -1078,6 +1078,8 @@ If the action should be blocked:
+ If the action should be allowed:
+ <block>no</block>
+ 
++The reason is read by the user as plain words. Say what the action does and why the rule applies. Name an earlier action by what it did (such as "an earlier kill like this one was blocked"), never by a transcript id or call number.
++
+ The category is the matching BLOCK rule's exact name. An ALLOW exception name is never a category: if an exception covers the action, answer <block>no</block>. If you cannot name a BLOCK rule the action matches, answer <block>no</block>. If several match, name the most severe (HARD first).
+ """
+ 
+@@ -1132,6 +1134,22 @@ def user_prompt(review: ReviewInput) -> str:
+ 
+ # --- verdict ----------------------------------------------------------------------------------------------
+ 
++_CALL_ID = r"(?:c\d+|call_[A-Za-z0-9]+|toolu_[A-Za-z0-9]+)"
++_CALL_IDS = rf"{_CALL_ID}(?:\s*(?:,|and|&)\s*{_CALL_ID})*"
++_CALL_ID_PAREN = re.compile(rf"\s*[(\[](?:(?:call|calls|id|ids|entry)\s+)?{_CALL_IDS}[)\]]", re.I)
++_CALL_ID_WORD = re.compile(rf"\s*\b(?:(?:calls?|ids?)\s+)?{_CALL_IDS}\b", re.I)
++
++
++def plain_reason(text: str) -> str:
++    """The checker's words for the card without internal transcript ids such as ``c56``: the judge sees its
++    tool calls by id, and a user cannot look one up. ``an earlier kill call (c56) was blocked`` reads
++    ``an earlier kill call was blocked``."""
++    out = _CALL_ID_PAREN.sub("", text or "")
++    out = _CALL_ID_WORD.sub("", out)
++    out = re.sub(r"[ \t]{2,}", " ", out)
++    return "\n".join(line.strip() for line in out.split("\n")).strip()
++
++
+ @dataclass
+ class Verdict:
+     decision: str                 # "allow" | "block" | "unsure"
+@@ -1151,9 +1169,20 @@ class Verdict:
+                     "Approve or deny it yourself.")
+         if self.decision == "unsure":
+             return f"Smart approval could not decide ({self.reason or 'no valid answer from the review model'})"
+-        reason = self.reason.strip()
++        reason = plain_reason(self.reason)
+         return f"Smart approval rule \"{self.rule}\": {reason}" if reason else f"Smart approval rule \"{self.rule}\""
+ 
++    @property
++    def card_parts(self) -> dict:
++        """The card's text as separate fields, so a client shows each on its own line: ``rule`` (the rule
++        name; absent when no rule blocked) and ``reason`` (the checker's words, without call ids)."""
++        if self.decision == "unsure":
++            why = self.card_text
++            why = why[len("Smart approval "):] if why.startswith("Smart approval ") else why
++            return {"reason": why[:1].upper() + why[1:]}
++        reason = plain_reason(self.reason)
++        return {"rule": self.rule, **({"reason": reason} if reason else {})}
++
+ 
+ _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S | re.I)
+ 
+@@ -1207,7 +1236,7 @@ def parse_stage2(text: str) -> Verdict:
+         return Verdict("unsure", reason="the review model blocked without naming a known rule", stage=2)
+     name, tier = known
+     why = re.sub(r"^\s*\[[^\]]*\]\s*", "", reason[-1]).strip() if reason else ""
+-    why = " ".join(why.split())[:300]
++    why = plain_reason(" ".join(why.split())[:300])
+     return Verdict("block", rule=name, reason=why, tier=tier, stage=2)
+ 
+ 
+diff --git a/tui_gateway/contracts/canonical_sessions.py b/tui_gateway/contracts/canonical_sessions.py
+index eee8066e3c..3682edb183 100644
+--- a/tui_gateway/contracts/canonical_sessions.py
++++ b/tui_gateway/contracts/canonical_sessions.py
+@@ -115,6 +115,10 @@ class CanonicalPendingPrompt(Result):
+     description: str | None = None
+     # The goal of the subagent that asks: a subagent's approval belongs to the session, not to one turn.
+     subagent: str | None = None
++    # The parts of a smart approval card: the rule, and the checker's reason in plain words (a ledger write adds
++    # its entry and source as further lines). ``description`` carries the same text as one string.
++    rule: str | None = None
++    reason: str | None = None
+     edit: dict[str, JsonValue] | None = None
+     question: str | None = None
+     multi_select: bool | None = None
