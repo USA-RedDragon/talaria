@@ -20,6 +20,10 @@ The hub reads and changes jobs through the cron routes of the Hermes dashboard o
 
 The hub checks on every request that the user may use the backend. On a backend that more than one person may use (not exactly one name in `users`, or any `groups`), a job shows only to the person who made it: the owner that the talaria plugin recorded (`job_owners` in `browser.json`), else the `talaria_owner` the hub recorded. A job whose maker is not known shows to nobody there, and its notices go to every user of the backend as before. On a backend of one person, that person sees every job. The hub acts only on a job's id, though Hermes also takes a name. Every change needs the CSRF token.
 
+### Runs in the chat list
+
+Each run of a job is a chat. In Recent, the run chats of one job share one row, titled with the job's name, so a job that runs every 3 hours does not fill the list. The row says "Scheduled, every 3 hours · Sandbox" (the schedule text of the Scheduled page), sits at the time of the newest run, and has a badge with the runs not opened yet and the unread dot while there are any. A tap opens the newest run. The chevron lists the recent runs, "Run at 1:00 PM" with how each ended (Finished, Running, Stopped or Failed, as on the Scheduled page), and "All runs on the Scheduled page" opens that job there. A run opens as read like any chat. A failed run, and a run that waits for the user, also show as their own row, and a result that wakes a chat shows in that chat (below). Search finds each run chat, and the hub knows a run's job the same way the Scheduled page does (the job's runs, `GET /api/scheduled/chats`), not by the chat's title.
+
 ### A result that wakes its chat
 
 A chat can ask Hermes to schedule a task (Hermes cron, `cronjob_manage`). Since patch `0103` the result of such a job can start a turn in the chat, not only leave a note, so an agent that scheduled "check the temperature at 6 pm" reads the answer without you asking "so?".

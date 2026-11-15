@@ -504,3 +504,30 @@ func TestOptionsListSignedInModels(t *testing.T) {
 		t.Fatalf("options = %+v", o)
 	}
 }
+
+func TestRunChatsListMoreRunsThanThePage(t *testing.T) {
+	t.Parallel()
+	e := setup(t, alice)
+	ctx := context.Background()
+	e.dash.Add(map[string]any{"id": "b1", kName: "Chapter watch", "schedule_display": "every 3 hours"})
+	runs := make([]map[string]any, 0, 8)
+	for i := range 8 {
+		at := float64(e.now.Add(-time.Duration(i+1) * time.Hour).Unix())
+		runs = append(runs, map[string]any{"id": fmt.Sprintf("run%d", i), kSource: kindCron, kStarted: at, kEnded: at + 30})
+	}
+	e.dash.Runs["b1"] = runs
+	page, err := e.svc.Jobs(ctx, alice)
+	if err != nil || len(page.Jobs) != 1 || len(page.Jobs[0].Runs) != 5 {
+		t.Fatalf("Jobs = %+v, %v; the page shows 5 runs", page, err)
+	}
+	all, err := e.svc.RunChats(ctx, alice)
+	if err != nil || len(all.Jobs) != 1 || len(all.Jobs[0].Runs) != 8 {
+		t.Fatalf("RunChats = %+v, %v; want all 8 runs", all, err)
+	}
+	if j := all.Jobs[0]; j.Name != "Chapter watch" || j.Schedule != "every 3 hours" || j.Runs[7].SessionID != "run7" {
+		t.Fatalf("job = %+v", j)
+	}
+	if _, err := e.svc.RunChats(ctx, "carol"); err != nil {
+		t.Fatalf("a user without access: %v", err)
+	}
+}

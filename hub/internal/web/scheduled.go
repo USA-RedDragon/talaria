@@ -12,6 +12,7 @@ import (
 func (s *Server) scheduledRoutes(mux *http.ServeMux) {
 	const base = "/api/scheduled/{backend}"
 	mux.Handle("GET /api/scheduled", s.api(s.lastAnswer(s.handleJobs)))
+	mux.Handle("GET /api/scheduled/chats", s.api(s.handleRunChats))
 	mux.Handle("GET "+base+"/options", s.api(s.handleJobOptions))
 	mux.Handle("POST "+base+"/preview", s.api(s.handlePreviewSchedule))
 	mux.Handle("DELETE "+base+"/drafts/{draft}", s.api(s.handleDiscardDraft))
@@ -49,6 +50,20 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := s.scheduled.Jobs(r.Context(), userFrom(r))
+	if err != nil {
+		s.scheduledFail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRunChats lists the jobs with their run chats, which the chat list
+// groups by job.
+func (s *Server) handleRunChats(w http.ResponseWriter, r *http.Request) {
+	if s.noScheduled(w) {
+		return
+	}
+	out, err := s.scheduled.RunChats(r.Context(), userFrom(r))
 	if err != nil {
 		s.scheduledFail(w, err)
 		return

@@ -169,6 +169,9 @@
       const refreshing = unreachableIDs(meta.headers && meta.headers.get("X-Talaria-Refreshing"));
       const sessions = keepUnreachable(lastList, got, down);
       const alarm = unreachableIDs(meta.headers && meta.headers.get("X-Talaria-Down"));
+      // Run chats of scheduled jobs are grouped by job: the answer that says
+      // which job a run belongs to is in before the list is drawn.
+      await jobRows.ensure(sessions);
       lastList = { backends, sessions };
       if (down.size) {
         // One status, in the top bar. While the agent may be restarting it
@@ -348,7 +351,9 @@
       found += hits.length;
       if (!mine.length && !b.error) group.append(el("p", "none", "No chats yet."));
       if (!hits.length && mine.length && !b.error && !many) continue;
-      for (const s of hits) group.append(chatItem(s));
+      // The run chats of one scheduled job share a row; a search lists each.
+      if (q) for (const s of hits) group.append(chatItem(s));
+      else for (const e of jobRows.group(hits)) group.append(e.group ? jobRows.item(e.group, many) : chatItem(e.chat));
       if (!q) pinOrder.enable(group);
       out.append(group);
     }
@@ -3813,7 +3818,7 @@
   }
 
   // showScheduled opens the Scheduled page in place of the chat.
-  function showScheduled() {
+  function showScheduled(job) {
     parkView();
     pagesView.destroy();
     memory.hide();
@@ -3831,7 +3836,7 @@
     $("subtitle").textContent = "";
     document.title = "Scheduled - Talaria";
     banner("");
-    scheduled.show();
+    scheduled.show(job);
   }
 
   // fileRoute shows the one card a #/file/<backend>/<session>/<path> link
@@ -3867,7 +3872,7 @@
     const fl = location.hash.match(/^#\/files\/([^/]+)\/([^/]+)$/);
     const fc = location.hash.match(/^#\/file\/([^/]+)\/([^/]+)\/(.+)$/);
     const us = location.hash.match(/^#\/usage(?:\/(.*))?$/);
-    const sc = /^#\/scheduled\/?$/.test(location.hash);
+    const sc = location.hash.match(/^#\/scheduled(?:\/([^/]+)\/([^/]+))?\/?$/);
     const dec = (x) => { try { return decodeURIComponent(x); } catch (_) { return null; } };
     const same = (b, s) => view && view.backend === b && view.session === s;
     if (page) {
@@ -3901,7 +3906,7 @@
       if (m && !under) showChat(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
       else if (!m && mem && me.memory) showMemory(mem[1] || "");
       else if (!m && us && me.usage) showUsage(us[1] || "");
-      else if (!m && sc && me.scheduled) showScheduled();
+      else if (!m && sc && me.scheduled) showScheduled(sc[1] && sc[2] ? [dec(sc[1]), dec(sc[2])] : null);
       else if (!m) showWelcome();
     }
     menuOpen = false;
@@ -4407,6 +4412,10 @@
   const chats = window.HubChatList({ api, el, toast, banner, refresh: () => refreshList(),
     exportChat: (b, s, title) => msgActs.exportChat(b, s, title), computers: () => computers,
     newChat: () => newChat(), pickFolder: (c) => { openSide(false); picker.open({ computer: c }); }, me: () => me });
+
+  const jobRows = window.HubJobRows({ api, el, I: window.HubIcons, enabled: () => !!(me && me.scheduled), ago,
+    isCurrent: (s) => isCurrent(s), hash: (s) => chatHash(s.backend_id, s.id), mark: (s) => chats.mark(s),
+    opened: () => openSide(false), redraw: () => drawList() });
 
   const worksWith = window.HubWorksWith.create({ api, el, toast, banner, me: () => me,
     backends: () => (lastList ? lastList.backends : []), sessions: () => (lastList ? lastList.sessions : []),

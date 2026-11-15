@@ -56,8 +56,10 @@ window.HubScheduled = (ctx) => {
     timer = setTimeout(() => { if (!document.hidden) refresh(); else schedule(); }, busy ? 4000 : 30000);
   }
 
-  async function show() {
+  // show opens the page; job is [backend, id] of a job to show open.
+  async function show(job) {
     shown = true;
+    if (job && job[0] && job[1]) open.add(job[0] + "/" + job[1]);
     root.hidden = false;
     badge();
     if (!backends.length) {

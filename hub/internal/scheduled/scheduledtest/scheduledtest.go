@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -305,7 +306,15 @@ func (d *Dash) runs(w http.ResponseWriter, r *http.Request) {
 	if runs == nil {
 		runs = []map[string]any{}
 	}
-	answer(w, http.StatusOK, map[string]any{"runs": runs, "limit": 5})
+	// Hermes keeps to the limit asked for (default 20, at most 100).
+	limit := 20
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = min(n, 100)
+	}
+	if len(runs) > limit {
+		runs = runs[:limit]
+	}
+	answer(w, http.StatusOK, map[string]any{"runs": runs, "limit": limit})
 }
 
 func (d *Dash) action(w http.ResponseWriter, r *http.Request) {

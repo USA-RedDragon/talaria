@@ -52,6 +52,9 @@ const (
 	maxPrompt   = 20000
 	// runsShown is how many runs each job shows.
 	runsShown = 5
+	// runChatsShown is how many runs of each job RunChats reads, so the
+	// chat list can tell a run's job for more runs than the page shows.
+	runChatsShown = 50
 	// draftReason marks the paused draft job that checks a schedule while
 	// the form is open. Hermes keeps it as the job's paused_reason.
 	draftReason = "Talaria draft: not saved yet"
@@ -209,6 +212,16 @@ func (s *Service) readChoices(ctx context.Context, b *backend, home string) choi
 
 // Jobs lists the user's jobs on every backend they may use.
 func (s *Service) Jobs(ctx context.Context, user string) (hub.Jobs, error) {
+	return s.jobs(ctx, user, runsShown)
+}
+
+// RunChats is Jobs with more runs for each job: the chat list uses it to
+// group the run chats of one job.
+func (s *Service) RunChats(ctx context.Context, user string) (hub.Jobs, error) {
+	return s.jobs(ctx, user, runChatsShown)
+}
+
+func (s *Service) jobs(ctx context.Context, user string, limit int) (hub.Jobs, error) {
 	now := s.o.Now()
 	out := hub.Jobs{Zone: ZoneLabel(s.o.Location, now), Jobs: []hub.Job{}, Errors: map[string]string{}}
 	var mu sync.Mutex
@@ -219,7 +232,7 @@ func (s *Service) Jobs(ctx context.Context, user string) (hub.Jobs, error) {
 			continue
 		}
 		g.Go(func() error {
-			jobs, err := s.backendJobs(gctx, user, b)
+			jobs, err := s.backendJobs(gctx, user, b, limit)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -244,7 +257,7 @@ func (s *Service) Jobs(ctx context.Context, user string) (hub.Jobs, error) {
 	return out, nil
 }
 
-func (s *Service) backendJobs(ctx context.Context, user string, b *backend) ([]hub.Job, error) {
+func (s *Service) backendJobs(ctx context.Context, user string, b *backend, limit int) ([]hub.Job, error) {
 	cctx, cancel := s.call(ctx)
 	raw, err := b.c.list(cctx)
 	cancel()
@@ -277,7 +290,7 @@ func (s *Service) backendJobs(ctx context.Context, user string, b *backend) ([]h
 	g.SetLimit(4)
 	for i, j := range mine {
 		g.Go(func() error {
-			jobs[i] = s.view(gctx, user, b, j, ch, defModel, s.readRuns(gctx, b, string(j.ID)))
+			jobs[i] = s.view(gctx, user, b, j, ch, defModel, s.readRuns(gctx, b, string(j.ID), limit))
 			return nil
 		})
 	}
@@ -300,10 +313,10 @@ func (s *Service) dropStaleDraft(ctx context.Context, b *backend, j rawJob) {
 	}()
 }
 
-func (s *Service) readRuns(ctx context.Context, b *backend, id string) []rawRun {
+func (s *Service) readRuns(ctx context.Context, b *backend, id string, limit int) []rawRun {
 	ctx, cancel := s.call(ctx)
 	defer cancel()
-	runs, err := b.c.runs(ctx, id, runsShown)
+	runs, err := b.c.runs(ctx, id, limit)
 	if err != nil {
 		s.log.Debug("Failed to read job runs", "backend", b.cfg.ID, "error", err.Error())
 		return nil
@@ -525,7 +538,7 @@ func (s *Service) find(ctx context.Context, user, backendID, jobID string) (*bac
 }
 
 func (s *Service) fullView(ctx context.Context, user string, b *backend, j rawJob, ch choices) hub.Job {
-	return s.view(ctx, user, b, j, ch, s.defaultModel(ctx, b), s.readRuns(ctx, b, string(j.ID)))
+	return s.view(ctx, user, b, j, ch, s.defaultModel(ctx, b), s.readRuns(ctx, b, string(j.ID), runsShown))
 }
 
 // JobRuns lists a job's latest runs.
@@ -535,7 +548,7 @@ func (s *Service) JobRuns(ctx context.Context, user, backendID, jobID string) ([
 		return nil, cmp.Or(err, hub.ErrUnknownJob)
 	}
 	out := []hub.JobRun{}
-	for i, r := range s.readRuns(ctx, b, jobID) {
+	for i, r := range s.readRuns(ctx, b, jobID, runsShown) {
 		out = append(out, runView(r, i == 0, j, s.o.Location))
 	}
 	return out, nil

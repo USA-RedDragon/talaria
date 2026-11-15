@@ -133,6 +133,8 @@ type JobOptions struct {
 // backend's dashboard API.
 type Scheduled interface {
 	Jobs(ctx context.Context, user string) (Jobs, error)
+	// RunChats is Jobs with up to 50 runs for each job, for the chat list.
+	RunChats(ctx context.Context, user string) (Jobs, error)
 	JobRuns(ctx context.Context, user, backendID, jobID string) ([]JobRun, error)
 	JobOptions(ctx context.Context, user, backendID string) (JobOptions, error)
 	PreviewSchedule(ctx context.Context, user, backendID, schedule, draft string) (SchedulePreview, error)

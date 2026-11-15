@@ -1717,3 +1717,16 @@ pre.code .body { display: block; background: transparent; padding: 0 .75rem 0 0;
   .fc-act { grid-column: 1 / -1; grid-row: auto; justify-content: flex-end; }
   .fc-act .dl { flex: 1; justify-content: center; }
 }
+
+/* One row for the run chats of a scheduled job. */
+.item .jobtoggle { visibility: visible; width: 1.5rem; }
+.item .jobtoggle svg { transition: transform .12s; transform: rotate(-90deg); }
+.item .jobtoggle[aria-expanded="true"] svg { transform: none; }
+.jobtop { display: flex; align-items: center; gap: .35rem; min-width: 0; }
+.jobtop .name { flex: 0 1 auto; }
+.jobrow .badge { color: var(--accent); white-space: nowrap; }
+.jobruns { margin: 0 0 .25rem 1.6rem; padding-left: .3rem; border-left: 1px solid var(--line); }
+.jobruns .item .go { padding-top: .3rem; padding-bottom: .3rem; }
+.jobruns .item .name { font-size: .88rem; }
+.jobruns-all { display: block; padding: .3rem .5rem; font-size: .8rem; color: var(--accent); text-decoration: none; border-radius: 8px; }
+.jobruns-all:hover, .jobruns-all:focus-visible { background: var(--hover); }
