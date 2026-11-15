@@ -76,10 +76,13 @@ const { proc, connect } = open;
   const shot = async (name) => {
     if (!shots || firefox) return;
     for (const [w, h] of [[412, 915], [1280, 900]]) {
+      await c.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: w < 500 ? 2 : 1, mobile: w < 500 });
+      phone = w < 500;
+      // A fresh load at this width, as a window opened that wide would be.
+      await nav(url + "/?shot=" + w + (await ev("location.hash")));
+      await until(`document.querySelectorAll("#sessions .jobrow").length === 3`, "the job rows in the screenshot");
       for (const scheme of ["light", "dark"]) {
-        await c.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: w < 500 ? 2 : 1, mobile: w < 500 });
         await c.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }] });
-        if (w < 500) { phone = true; } else { phone = false; }
         await sleep(400);
         if (w < 500) await side();
         await sleep(300);
@@ -90,6 +93,53 @@ const { proc, connect } = open;
     await c.send("Emulation.setEmulatedMedia", { features: [] });
     await c.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true });
     phone = true;
+    await nav(url + "/?shot=back" + (await ev("location.hash")));
+    await until(`document.querySelectorAll("#sessions .jobrow").length === 3`, "the job rows after the screenshots");
+    await side();
+  };
+
+  // The name of a job with a two-digit count shows at least its first 20
+  // characters, at 412 (a phone) and at 1280 (a desktop), and the badge and
+  // the time sit beside it. Chrome checks both widths, Firefox its own.
+  const fits = () => ev(`(() => {
+    const r = Array.from(document.querySelectorAll("#sessions .jobrow")).find((x) => x.querySelector(".name").textContent.startsWith("Overnight"));
+    if (!r) return { err: "no long row" };
+    const n = r.querySelector(".name"), b = r.querySelector(".badge");
+    const p = document.createElement("span");
+    const cs = getComputedStyle(n);
+    p.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font:" + cs.font + ";font-weight:" + cs.fontWeight;
+    p.textContent = n.textContent.slice(0, 20);
+    document.body.append(p);
+    const need = p.getBoundingClientRect().width;
+    p.remove();
+    const rr = r.getBoundingClientRect();
+    return { badge: b && b.textContent, need, have: n.clientWidth, vw: innerWidth, rowRight: rr.right,
+      badgeRight: b ? b.getBoundingClientRect().right : 0, whenRight: r.querySelector(".when").getBoundingClientRect().right };
+  })()`);
+  const longName = async () => {
+    const widths = firefox ? [0] : [412, 1280];
+    for (const w of widths) {
+      if (w) {
+        await c.send("Emulation.setDeviceMetricsOverride", { width: w, height: w < 500 ? 915 : 900, deviceScaleFactor: 1, mobile: w < 500 });
+        phone = w < 500;
+        // A fresh load at this width, as a user's window would be.
+        await nav(url + "/?w=" + w);
+        await until(`document.querySelectorAll("#sessions .jobrow").length === 3`, "the job rows at " + w);
+        await side();
+        await sleep(300);
+      }
+      const f = await fits();
+      assert.strictEqual(f.badge, "12 new", JSON.stringify(f));
+      assert.ok(f.have >= f.need, `at ${f.vw}px the job name has ${f.have}px, its first 20 characters need ${f.need}px`);
+      assert.ok(f.badgeRight <= f.rowRight + 1 && f.whenRight <= f.rowRight + 1, "badge and time stay in the row: " + JSON.stringify(f));
+    }
+    if (!firefox) {
+      await c.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true });
+      phone = true;
+      await nav(url + "/?w=back");
+      await until(`document.querySelectorAll("#sessions .jobrow").length === 3`, "the job rows after the widths");
+      await side();
+    }
   };
 
   await nav(url + "/auth/login?next=/");
@@ -97,10 +147,10 @@ const { proc, connect } = open;
   await side();
 
   // One row for each job, the failed run on its own.
-  await until(`document.querySelectorAll("#sessions .jobrow").length === 2`, "two job rows");
+  await until(`document.querySelectorAll("#sessions .jobrow").length === 3`, "three job rows");
   let all = await rows();
   const jobs = all.filter((r) => r.job);
-  assert.strictEqual(jobs.length, 2, JSON.stringify(all));
+  assert.strictEqual(jobs.length, 3, JSON.stringify(all));
   const cw = await job("Chapter watch");
   assert.ok(cw, JSON.stringify(all));
   assert.strictEqual(cw.badge, "4 new", "count of the Chapter watch row");
@@ -116,6 +166,7 @@ const { proc, connect } = open;
   for (const id of ["r1", "r2", "r3", "r4", "d1"]) assert.ok(!own.includes("#/s/pc/" + id), id + " is in its job's row");
   assert.ok(own.includes("#/s/pc/plain"), "a chat of no job is unchanged");
   assert.strictEqual(await ev(`document.querySelectorAll("#sessions .jobruns").length`), 0, "runs are listed only when opened");
+  await longName();
   await shot("collapsed");
 
   // A tap on the row opens the newest run; the count drops.
@@ -147,7 +198,7 @@ const { proc, connect } = open;
 
   // It survives a reload, and so does the open list.
   await nav(url + "/?again=1#/s/pc/r2");
-  await until(`document.querySelectorAll("#sessions .jobrow").length === 2`, "the job rows after the reload");
+  await until(`document.querySelectorAll("#sessions .jobrow").length === 3`, "the job rows after the reload");
   await side();
   await until(`Array.from(document.querySelectorAll("#sessions .jobrow .badge")).some((b) => b.textContent === "2 new")`, "the count after the reload");
   assert.strictEqual(await ev(`document.querySelectorAll("#sessions .jobrun").length`), 4, "the open list after the reload");
@@ -162,7 +213,7 @@ const { proc, connect } = open;
   await ev(`(() => { const i = document.getElementById("search"); i.value = "Chapter"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
   await until(`document.querySelectorAll('#sessions a.go[href^="#/s/pc/r"]').length === 4 && !document.querySelector("#sessions .jobrow")`, "each run chat in the search");
   await ev(`(() => { const i = document.getElementById("search"); i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
-  await until(`document.querySelectorAll("#sessions .jobrow").length === 2`, "the rows after the search");
+  await until(`document.querySelectorAll("#sessions .jobrow").length === 3`, "the rows after the search");
   console.log("ok");
   c.close();
   process.exit(0);

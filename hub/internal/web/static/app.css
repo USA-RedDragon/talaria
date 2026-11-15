@@ -1723,7 +1723,9 @@ pre.code .body { display: block; background: transparent; padding: 0 .75rem 0 0;
 .item .jobtoggle svg { transition: transform .12s; transform: rotate(-90deg); }
 .item .jobtoggle[aria-expanded="true"] svg { transform: none; }
 .jobtop { display: flex; align-items: center; gap: .35rem; min-width: 0; }
-.jobtop .name { flex: 0 1 auto; }
+.jobtop .name { flex: 1 1 auto; }
+.jobsub { display: flex; align-items: center; gap: .35rem; min-width: 0; }
+.jobsub .where { flex: 0 1 auto; min-width: 0; }
 .jobrow .badge { color: var(--accent); white-space: nowrap; }
 .jobruns { margin: 0 0 .25rem 1.6rem; padding-left: .3rem; border-left: 1px solid var(--line); }
 .jobruns .item .go { padding-top: .3rem; padding-bottom: .3rem; }

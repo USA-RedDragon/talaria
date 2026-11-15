@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -35,6 +36,11 @@ func TestJobRunsOneRowFirefox(t *testing.T) {
 const (
 	jobWatch  = "Chapter watch"
 	jobDigest = "Morning digest"
+	jobLong   = "Overnight chapter watch for the serial"
+
+	jobSchedule = "schedule_display"
+	jobSource   = "source"
+	jobCron     = "cron"
 )
 
 func jobRows(t *testing.T, bin string) {
@@ -50,21 +56,33 @@ func jobRows(t *testing.T, bin string) {
 			Requesters: map[string]scheduled.Requester{"pc": d}})
 	})
 	dash := scheduledtest.New(e.gw)
-	dash.Add(map[string]any{"id": "j1", fieldName: jobWatch, "schedule_display": "every 3 hours"})
-	dash.Add(map[string]any{"id": "j2", fieldName: jobDigest, "schedule_display": "every day at 9:00 AM", "last_status": "error", "last_error": "no network"})
+	dash.Add(map[string]any{"id": "j1", fieldName: jobWatch, jobSchedule: "every 3 hours"})
+	dash.Add(map[string]any{"id": "j2", fieldName: jobDigest, jobSchedule: "every day at 9:00 AM", "last_status": "error", "last_error": "no network"})
+	dash.Add(map[string]any{"id": "j3", fieldName: jobLong, jobSchedule: "every hour"})
 	now := time.Now()
 	run := func(id string, ago time.Duration) map[string]any {
 		at := float64(now.Add(-ago).Unix())
-		return map[string]any{"id": id, "source": "cron", "started_at": at, "ended_at": at + 60, "title": jobWatch}
+		return map[string]any{"id": id, jobSource: jobCron, "started_at": at, "ended_at": at + 60, kTitle: jobWatch}
 	}
 	dash.Runs["j1"] = []map[string]any{run("r4", 1*time.Hour), run("r3", 4*time.Hour), run("r2", 7*time.Hour), run("r1", 10*time.Hour)}
 	dash.Runs["j2"] = []map[string]any{run("d2", 2*time.Hour), run("d1", 26*time.Hour)}
+	// A long name with a two-digit count of new runs.
+	var longIDs []string
+	for i := 1; i <= 12; i++ {
+		id := fmt.Sprintf("L%02d", i)
+		ago := time.Duration(i) * 20 * time.Minute
+		at := float64(now.Add(-ago).Unix())
+		dash.Runs["j3"] = append(dash.Runs["j3"], map[string]any{"id": id, jobSource: jobCron, "started_at": at, "ended_at": at + 60, kTitle: jobLong})
+		e.gw.AddSession(&gatewaytest.Session{ID: id, Title: jobLong, Live: true, Source: jobCron, StartedAt: at,
+			Messages: []map[string]any{{kRole: roleUser, kText: "go"}, {kRole: roleAssistant, kText: "done " + id}}})
+		longIDs = append(longIDs, id)
+	}
 	for id, ago := range map[string]time.Duration{"r1": 10 * time.Hour, "r2": 7 * time.Hour, "r3": 4 * time.Hour, "r4": time.Hour, "d1": 26 * time.Hour, "d2": 2 * time.Hour} {
 		title := jobWatch
 		if id[0] == 'd' {
 			title = jobDigest
 		}
-		e.gw.AddSession(&gatewaytest.Session{ID: id, Title: title, Live: true, Source: "cron",
+		e.gw.AddSession(&gatewaytest.Session{ID: id, Title: title, Live: true, Source: jobCron,
 			StartedAt: float64(now.Add(-ago).Unix()),
 			Messages:  []map[string]any{{kRole: roleUser, kText: "go"}, {kRole: roleAssistant, kText: "done " + id}}})
 	}
@@ -73,7 +91,7 @@ func jobRows(t *testing.T, bin string) {
 	// None of the run chats has been opened.
 	api := client(t)
 	m := login(t, e, api)
-	for _, id := range []string{"r1", "r2", "r3", "r4", "d1", "d2"} {
+	for _, id := range append([]string{"r1", "r2", "r3", "r4", "d1", "d2"}, longIDs...) {
 		if s := apiJSON(t, api, http.MethodPost, e.url+"/api/sessions/pc/"+id+"/read", m.CSRF, map[string]bool{"unread": true}, nil); s != http.StatusNoContent {
 			t.Fatalf("mark %s unread = %d", id, s)
 		}
