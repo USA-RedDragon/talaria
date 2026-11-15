@@ -105,8 +105,9 @@ window.HubApprovals = (() => {
       if (!clarify && !choices.length) {
         actions.append(button("primary", words("allow"), { allow: true }), button("danger", words("deny"), { allow: false }));
       } else if (!clarify) {
-        const names = { once: words("allow"), session: "Allow in this chat", always: "Always allow", source: "Always allow code from this source in this chat", deny: words("deny") };
-        for (const c of choices) actions.append(button(c === "deny" ? "danger" : c === "once" ? "primary" : "", names[c] || c, { choice: c }));
+        const names = { once: words("allow"), session: "Allow in this chat", always: "Always allow", source: p.grant_source ? "Allow code from " + p.grant_source + " in this chat" : "Allow code from this source in this chat", deny: words("deny") };
+        // Deny stays the last button; the source choice names what it allows.
+        for (const c of [...choices.filter((x) => x !== "deny"), ...choices.filter((x) => x === "deny")]) actions.append(button(c === "deny" ? "danger" : c === "once" ? "primary" : "", names[c] || c, { choice: c }));
       } else {
         const picks = [];
         if (p.multi_select) {

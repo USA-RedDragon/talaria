@@ -164,6 +164,10 @@ type Prompt struct {
 	Subagent    *string `json:"subagent,omitempty"`
 	Question    *string `json:"question,omitempty"`
 	MultiSelect bool    `json:"multi_select,omitempty"`
+	// GrantSource names the source (such as github.com/owner/repo) a smart
+	// approval card offers to allow for the whole chat: the card's "source"
+	// choice grants it. Empty when the card offers none.
+	GrantSource *string `json:"grant_source,omitempty"`
 	// Timeout is how many seconds Hermes waits for the answer, 0 when it
 	// did not say.
 	Timeout float64 `json:"timeout_s,omitempty"`

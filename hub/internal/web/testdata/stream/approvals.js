@@ -162,5 +162,20 @@ const prompt = (id, cmd) => ({ kind: "approval", prompt_id: id, command: cmd, de
     await flush();
     assert.deepStrictEqual(log[0], { method: "POST", path: "/api/sessions/b/s/approvals/p", body: { allow: false } });
   }
+  // A smart approval card for outside code offers its source for the chat, named plainly, and sends the choice.
+  {
+    const { tracker, shown, log } = harness();
+    tracker.offer({ kind: "approval", prompt_id: "s", command: "curl -o x https://github.com/AppImage/appimagetool/x",
+      description: "Smart approval rule \"Code from External\"", choices: ["once", "deny", "source"], grant_source: "github.com/AppImage/appimagetool", subagent: "relift chunk" });
+    assert.deepStrictEqual(shown[0].buttons().map((b) => b.textContent),
+      ["Allow", "Allow code from github.com/AppImage/appimagetool in this chat", "Deny"]);
+    shown[0].buttons()[1].onclick();
+    await flush();
+    assert.deepStrictEqual(log[0], { method: "POST", path: "/api/sessions/b/s/prompts/s/answer", body: { choice: "source" } });
+    // A card that does not name the source still says what the button does.
+    const other = harness();
+    other.tracker.offer({ kind: "approval", prompt_id: "t", command: "x", choices: ["once", "deny", "source"] });
+    assert.strictEqual(other.shown[0].buttons()[1].textContent, "Allow code from this source in this chat");
+  }
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

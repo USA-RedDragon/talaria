@@ -73,11 +73,20 @@ func approvalLabel(choice string) string {
 	case hub.ChoiceAlways:
 		return "Always"
 	case hub.ChoiceSource:
-		return "This source in this chat"
+		return sourceLabel("")
 	case hub.ChoiceDeny:
 		return "Deny"
 	}
 	return choice
+}
+
+// sourceLabel is the button that allows a source for the chat, such as
+// "Allow code from github.com/owner/repo in this chat".
+func sourceLabel(source string) string {
+	if source == "" {
+		return "Allow code from this source in this chat"
+	}
+	return "Allow code from " + truncate(source, 36) + " in this chat"
 }
 
 // approvalVerdict says what an approval choice did.
@@ -243,13 +252,22 @@ func promptKeyboard(prefix, key string, p hub.PromptInfo, picks []bool) *InlineK
 	if p.Kind != hub.PromptClarify {
 		choices := approvalChoices(p)
 		row := make([]InlineButton, 0, len(choices))
+		var source []InlineButton
 		for i, c := range choices {
+			if c == hub.ChoiceSource {
+				// It names a source: a row of its own, so the label is not cut.
+				source = []InlineButton{{Text: sourceLabel(p.GrantSource), CallbackData: cb(strconv.Itoa(i))}}
+				continue
+			}
 			row = append(row, InlineButton{Text: approvalLabel(c), CallbackData: cb(strconv.Itoa(i))})
 		}
 		if len(row) > 2 {
 			rows = append(rows, row[:2], row[2:])
 		} else {
 			rows = append(rows, row)
+		}
+		if source != nil {
+			rows = append(rows, source)
 		}
 		return &InlineKeyboard{InlineKeyboard: rows}
 	}

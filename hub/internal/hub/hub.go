@@ -403,7 +403,10 @@ type PromptInfo struct {
 	// Subagent is the goal of the subagent that asks an approval, empty
 	// when the chat itself does.
 	Subagent string `json:"subagent,omitempty"`
-	Question string `json:"question,omitempty"`
+	// GrantSource is the source the "source" choice allows for the chat
+	// and its subagents, such as github.com/owner/repo.
+	GrantSource string `json:"grant_source,omitempty"`
+	Question    string `json:"question,omitempty"`
 	// Timeout is how many seconds Hermes waits for the answer, 0 when
 	// it did not say.
 	Timeout float64 `json:"timeout_s,omitempty"`
