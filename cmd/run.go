@@ -192,6 +192,9 @@ func runDaemon(ctx context.Context, cfg *config.Config, version, userAgent strin
 		return err
 	}
 	opts.Scope = commandScope(ctx, cfg, opts.Env)
+	spool, releaseSpool := commandSpool(stateDir, opts.Scope)
+	defer releaseSpool()
+	opts.Spool = spool
 	br, stopBrowser, err := setupBrowser(ctx, cfg, version, &opts)
 	if err != nil {
 		return err
@@ -460,8 +463,85 @@ func commandScope(ctx context.Context, cfg *config.Config, env []string) *execut
 		slog.Info("Commands run in the daemon's cgroup", "reason", err)
 		return nil
 	}
-	slog.Info("Each command runs in a systemd scope of its own", "memory_max", scope.MemoryMax, "tasks_max", scope.TasksMax, "part_of", scope.PartOf)
+	slog.Info("Each command runs in a systemd scope of its own", "memory_max", scope.MemoryMax, "tasks_max", scope.TasksMax)
 	return scope
+}
+
+// spoolLockWait is how long a starting daemon waits for the one before it
+// to let go of the command spool.
+const spoolLockWait = 15 * time.Second
+
+// commandSpool returns the spool in which commands outlive the daemon, so
+// that the next daemon adopts them, and the function that lets go of it at
+// exit. It is the commands directory in stateDir, the state directory of a
+// device that logged in. It returns nil, logged, where commands cannot
+// outlive the daemon: on Windows, under a systemd service when commands
+// cannot have a scope of their own (the service's stop then stops them
+// too), and on a service device, which has no state directory. With the
+// spool a command's scope is no longer part of the service.
+func commandSpool(stateDir string, scope *executor.Scope) (*executor.Spool, func()) {
+	none := func(why string, args ...any) (*executor.Spool, func()) {
+		if scope != nil && scope.PartOf != "" {
+			args = append(args, "part_of", scope.PartOf)
+		}
+		slog.Info("Commands end when the daemon stops: "+why, args...)
+		return nil, func() {}
+	}
+	if runtime.GOOS == goosWindows {
+		return none("not on Windows")
+	}
+	if scope == nil && inSystemdService("/proc/self/cgroup") {
+		return none("they cannot have a systemd scope of their own, and the service's stop stops them")
+	}
+	if stateDir == "" {
+		return none("a service device (hub.token or hub.token-file) keeps no state; its commands end with its container")
+	}
+	dir := stateDir
+	exe, err := holderExecutable()
+	if err != nil {
+		return none("cannot find this program", "error", err)
+	}
+	sp, err := executor.NewSpool(filepath.Join(dir, "commands"), exe, scope)
+	if err != nil {
+		return none("cannot create the command spool", "error", err)
+	}
+	release, err := sp.Lock(spoolLockWait)
+	if err != nil {
+		return none("the command spool is in use", "error", err)
+	}
+	if scope != nil {
+		scope.PartOf = ""
+	}
+	slog.Info("Commands keep running when the daemon restarts", "spool", sp.Dir)
+	return sp, release
+}
+
+// holderExecutable is the program that holds each command: this binary.
+// On Linux it is /proc/<pid>/exe, which stays this build after an update
+// replaces the file, so holder and daemon are always one release.
+func holderExecutable() (string, error) {
+	if runtime.GOOS == goosLinux {
+		p := fmt.Sprintf("/proc/%d/exe", os.Getpid())
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return os.Executable()
+}
+
+// inSystemdService reports whether the cgroup file at path (Linux
+// /proc/self/cgroup) puts this process in a systemd service.
+func inSystemdService(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if cg, ok := strings.CutPrefix(line, "0::"); ok {
+			return strings.HasSuffix(filepath.Base(cg), ".service")
+		}
+	}
+	return false
 }
 
 // setupBrowser turns browser control on in opts when browser.enabled is set:

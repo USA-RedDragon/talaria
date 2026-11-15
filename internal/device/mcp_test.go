@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/talaria/internal/device"
+	"github.com/USA-RedDragon/talaria/internal/executor"
 	"github.com/USA-RedDragon/talaria/internal/mcp"
 	"github.com/USA-RedDragon/talaria/internal/mcp/mcptest"
 	"github.com/USA-RedDragon/talaria/protocol"
@@ -20,6 +21,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if dir, ok := executor.HolderInvocation(os.Args); ok {
+		os.Exit(executor.RunHolder(dir))
+	}
 	mcptest.Main()
 	os.Exit(m.Run())
 }

@@ -105,6 +105,11 @@ type Options struct {
 	// Scope, when set, runs each command in a systemd scope of its own
 	// with a memory cap.
 	Scope *executor.Scope
+	// Spool, when set, runs each command under a holder process that
+	// outlives the daemon, and Run adopts the commands an earlier daemon
+	// left in it (docs/protocol.md section 4.7). Without it the commands
+	// end with the daemon.
+	Spool *executor.Spool
 	// TempDir is sent as hello.tmp_dir.
 	TempDir string
 	// Home is sent as hello.home. Defaults to $HOME.
@@ -173,12 +178,18 @@ type Client struct {
 // drainingMessage ends the refusal of work that arrives after Drain.
 const drainingMessage = "is restarting for an update; try again in a few seconds"
 
-// Busy reports whether the device holds a command (running, or with
-// output or an exit the plugin has not confirmed), or runs a browser
-// operation or an MCP call.
+// Busy reports whether the device holds a command that would not survive
+// a restart of the daemon (running, or with output or an exit the plugin
+// has not confirmed), or runs a browser operation or an MCP call. A
+// command in the spool survives a restart: the next daemon adopts it.
 func (c *Client) Busy() bool {
 	c.mu.Lock()
-	n := len(c.cmds)
+	n := 0
+	for _, cmd := range c.cmds {
+		if !cmd.durable() {
+			n++
+		}
+	}
 	c.mu.Unlock()
 	return n > 0 || c.calls.Load() > 0
 }
@@ -293,14 +304,22 @@ func (c *Client) Hello() protocol.Hello {
 
 // Run connects and serves until ctx ends or the hub or plugin tells the
 // device to stop: hubapi.ErrUnauthorized, ErrReplaced or
-// ErrUnsupportedVersion. Every other drop is retried with backoff. Run
-// kills every command it still holds before it returns.
+// ErrUnsupportedVersion. Every other drop is retried with backoff. With a
+// spool, Run first adopts the commands an earlier daemon left there, and
+// when ctx ends it leaves the commands in the spool running for the next
+// daemon. It kills every other command it still holds before it returns.
 func (c *Client) Run(ctx context.Context) error {
 	sctx, stopSweep := context.WithCancel(ctx)
 	c.wg.Go(func() { c.sweeper(sctx) })
+	c.adopt(ctx)
+	stopped := false
 	defer func() {
 		stopSweep()
-		c.killAll("the daemon stopped")
+		if stopped {
+			c.leave()
+		} else {
+			c.killAll("the exec leg stopped for good")
+		}
 		c.wg.Wait()
 	}()
 	backoff := c.opts.MinBackoff
@@ -308,6 +327,7 @@ func (c *Client) Run(ctx context.Context) error {
 	for {
 		up, err := c.serveOnce(ctx)
 		if ctx.Err() != nil {
+			stopped = true
 			return nil //nolint:nilerr // shutdown is not an error
 		}
 		if isFatal(err) {
@@ -325,6 +345,7 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		slog.Warn("Exec leg lost; reconnecting", "error", err, "in", wait)
 		if !sleep(ctx, wait) {
+			stopped = true
 			return nil
 		}
 	}
@@ -795,17 +816,39 @@ type command struct {
 	link    *session
 	partial []byte
 	next    int64
+	// fpos counts the output bytes read from the command: for a command
+	// in the spool, the offset in its output file.
+	fpos    int64
 	chunks  []chunk
 	size    int
 	exit    *protocol.Exit
 	exitSeq uint64
 }
 
-// chunk is one output message. seq is 0 until it was written.
+// chunk is one output message. seq is 0 until it was written. fend is
+// the command's fpos at the chunk's end.
 type chunk struct {
 	off  int64
 	data string
 	seq  uint64
+	fend int64
+}
+
+// durable reports whether the command survives a restart of the daemon.
+func (cmd *command) durable() bool {
+	cmd.mu.Lock()
+	defer cmd.mu.Unlock()
+	return cmd.proc != nil && cmd.proc.Durable()
+}
+
+// forget drops the command's spool entry once it has ended.
+func (cmd *command) forget() {
+	cmd.mu.Lock()
+	p := cmd.proc
+	cmd.mu.Unlock()
+	if p != nil {
+		p.Forget()
+	}
 }
 
 func (cmd *command) running() bool {
@@ -817,18 +860,20 @@ func (cmd *command) running() bool {
 func (cmd *command) onOutput(b []byte) {
 	cmd.mu.Lock()
 	defer cmd.mu.Unlock()
+	cmd.fpos += int64(len(b))
 	cmd.partial = append(cmd.partial, b...)
 	cut := completeUTF8(cmd.partial)
 	if cut == 0 {
 		return
 	}
-	cmd.emit(cmd.partial[:cut])
+	cmd.emit(cmd.partial[:cut], cmd.fpos-int64(len(cmd.partial)-cut))
 	cmd.partial = append(cmd.partial[:0], cmd.partial[cut:]...)
 }
 
-// emit buffers and sends one chunk. Call with mu held.
-func (cmd *command) emit(b []byte) {
-	ch := chunk{off: cmd.next, data: validUTF8(b)}
+// emit buffers and sends one chunk, which ends at fpos fend. Call with mu
+// held.
+func (cmd *command) emit(b []byte, fend int64) {
+	ch := chunk{off: cmd.next, data: validUTF8(b), fend: fend}
 	cmd.next += int64(len(ch.data))
 	cmd.chunks = append(cmd.chunks, ch)
 	cmd.size += len(ch.data)
@@ -865,7 +910,7 @@ func (cmd *command) finish(exit protocol.Exit) bool {
 	cmd.mu.Lock()
 	defer cmd.mu.Unlock()
 	if len(cmd.partial) > 0 {
-		cmd.emit(cmd.partial)
+		cmd.emit(cmd.partial, cmd.fpos)
 		cmd.partial = nil
 	}
 	cmd.exit = &exit
@@ -880,28 +925,49 @@ func (cmd *command) finish(exit protocol.Exit) bool {
 // also confirmed the exit.
 func (cmd *command) trim(acked uint64) bool {
 	cmd.mu.Lock()
-	defer cmd.mu.Unlock()
 	i := 0
 	for i < len(cmd.chunks) && cmd.chunks[i].seq != 0 && cmd.chunks[i].seq <= acked {
 		cmd.size -= len(cmd.chunks[i].data)
 		i++
 	}
-	cmd.chunks = cmd.chunks[i:]
-	return cmd.exit != nil && cmd.exitSeq != 0 && cmd.exitSeq <= acked
+	confirm := cmd.dropLocked(i)
+	done := cmd.exit != nil && cmd.exitSeq != 0 && cmd.exitSeq <= acked
+	cmd.mu.Unlock()
+	confirm()
+	return done
+}
+
+// dropLocked drops the first n chunks, which the plugin has, and returns
+// the function that records this in the spool. Call with mu held, and the
+// result without.
+func (cmd *command) dropLocked(n int) func() {
+	if n == 0 {
+		return func() {}
+	}
+	last := cmd.chunks[n-1]
+	cmd.chunks = cmd.chunks[n:]
+	p := cmd.proc
+	if p == nil {
+		return func() {}
+	}
+	return func() { p.Confirm(last.fend, last.off+int64(len(last.data))) }
 }
 
 // attach links the command to s and sends the output from offset on, and
 // the exit when the command has ended.
 func (cmd *command) attach(s *session, offset int64) {
 	cmd.mu.Lock()
-	defer cmd.mu.Unlock()
 	cmd.link = s
 	i := 0
 	for i < len(cmd.chunks) && cmd.chunks[i].off+int64(len(cmd.chunks[i].data)) <= offset {
 		cmd.size -= len(cmd.chunks[i].data)
 		i++
 	}
-	cmd.chunks = cmd.chunks[i:]
+	confirm := cmd.dropLocked(i)
+	defer func() {
+		cmd.mu.Unlock()
+		confirm()
+	}()
 	for i := range cmd.chunks {
 		ch := &cmd.chunks[i]
 		ch.seq = s.sendCmd(s.ctx, protocol.Output{Type: protocol.TypeOutput, ID: cmd.id, Data: ch.data, Offset: ch.off})
@@ -966,6 +1032,7 @@ func (c *Client) remove(cmd *command) {
 		delete(c.cmds, cmd.id)
 	}
 	c.mu.Unlock()
+	cmd.forget()
 }
 
 func (c *Client) snapshot() []*command {
@@ -1020,6 +1087,7 @@ func killEach(cmds map[string]*command, why string) {
 			n++
 		}
 		cmd.kill()
+		cmd.forget()
 	}
 	if n > 0 {
 		slog.Warn("Killing commands", "count", n, "why", why)
@@ -1028,6 +1096,83 @@ func killEach(cmds map[string]*command, why string) {
 
 // killAll kills every running command and forgets every command.
 func (c *Client) killAll(why string) { killEach(c.takeAll(), why) }
+
+// leave is what a daemon that stops does with its commands: it releases
+// each one in the spool to the next daemon, running or not, and kills the
+// rest.
+func (c *Client) leave() {
+	kill := map[string]*command{}
+	n := 0
+	for id, cmd := range c.takeAll() {
+		if !cmd.durable() {
+			kill[id] = cmd
+			continue
+		}
+		cmd.mu.Lock()
+		p := cmd.proc
+		cmd.mu.Unlock()
+		p.Release()
+		n++
+	}
+	if n > 0 {
+		slog.Info("Leaving commands running for the next daemon", "count", n)
+	}
+	killEach(kill, "the daemon stopped")
+}
+
+// adopt takes over the commands an earlier daemon left in the spool and
+// keeps them for a resume, as after a drop, for MaxGrace.
+func (c *Client) adopt(ctx context.Context) {
+	sp := c.opts.Spool
+	if sp == nil {
+		return
+	}
+	var dups []*executor.Process
+	n := 0
+	for _, a := range sp.Adoptable() {
+		cmd := &command{id: a.ID, max: c.opts.ResumeBuffer, next: a.Wire, fpos: a.File}
+		p := sp.Adopt(a, cmd.onOutput) //nolint:contextcheck // a command outlives the daemon's context; its scope check has its own timeout
+		cmd.mu.Lock()
+		cmd.proc = p
+		cmd.mu.Unlock()
+		c.mu.Lock()
+		_, dup := c.cmds[a.ID]
+		if !dup {
+			c.cmds[a.ID] = cmd
+		}
+		c.mu.Unlock()
+		if dup {
+			dups = append(dups, p)
+			continue
+		}
+		n++
+		c.wait(ctx, cmd, p)
+	}
+	for _, p := range dups {
+		p.Kill()
+		p.Forget()
+	}
+	if n > 0 {
+		slog.Info("Adopted commands from the previous daemon", "count", n, "spool", sp.Dir)
+		c.park(nil, c.opts.MaxGrace)
+	}
+}
+
+// wait reports the end of the command's process p to the plugin, unless
+// the daemon releases it first.
+func (c *Client) wait(ctx context.Context, cmd *command, p *executor.Process) {
+	c.wg.Go(func() {
+		res, err := p.Wait(context.WithoutCancel(ctx))
+		if err != nil {
+			return
+		}
+		c.finished(cmd, exitMessage(cmd.id, res))
+		if res.OOM {
+			slog.Warn("Command killed: out of memory", "id", cmd.id, "memory_max", res.MemoryMax)
+		}
+		slog.Debug("Command ended", "id", cmd.id, "code", res.Code, "killed", res.Killed, "signal", res.Signal)
+	})
+}
 
 // park keeps the commands of the dropped leg s running for grace, waiting
 // for a resume on the next connection.
@@ -1078,6 +1223,7 @@ func (c *Client) resume(ctx context.Context, s *session, r *protocol.Resume) {
 	for id, cmd := range held {
 		if cmd.trim(acked) {
 			delete(held, id)
+			cmd.forget()
 		}
 	}
 	orphans := map[string]*command{}
@@ -1179,23 +1325,21 @@ func (c *Client) exec(ctx context.Context, s *session, req protocol.Exec) {
 	if ws := c.opts.WinShell; ws != nil {
 		ereq.Argv, ereq.Env = ws.Argv, append(append([]string(nil), c.opts.Env...), ws.Env()...)
 	}
-	p, err := executor.Start(c.opts.Shell, ereq, cmd.onOutput) //nolint:contextcheck // a command outlives the request; its scope check has its own timeout
+	var p *executor.Process
+	if sp := c.opts.Spool; sp != nil {
+		p, err = sp.Start(req.ID, c.opts.Shell, ereq, cmd.onOutput) //nolint:contextcheck // a command outlives the request
+	} else {
+		p, err = executor.Start(c.opts.Shell, ereq, cmd.onOutput) //nolint:contextcheck // a command outlives the request; its scope check has its own timeout
+	}
 	if err != nil {
 		refuse(fmt.Sprintf("device %s could not start the command: %s", s.name, err))
 		return
 	}
-	slog.Debug("Started command", "id", req.ID, "pid", p.Pid(), "cwd", cwd, "login", req.Login)
+	slog.Debug("Started command", "id", req.ID, "pid", p.Pid(), "cwd", cwd, "login", req.Login, "durable", p.Durable())
 	cmd.mu.Lock()
 	cmd.proc = p
 	cmd.mu.Unlock()
-	c.wg.Go(func() {
-		res, _ := p.Wait(context.WithoutCancel(ctx))
-		c.finished(cmd, exitMessage(req.ID, res))
-		if res.OOM {
-			slog.Warn("Command killed: out of memory", "id", req.ID, "memory_max", res.MemoryMax)
-		}
-		slog.Debug("Command ended", "id", req.ID, "code", res.Code, "killed", res.Killed, "signal", res.Signal)
-	})
+	c.wait(ctx, cmd, p)
 }
 
 // checkCwd turns the working directory of an exec request into a local
@@ -1219,6 +1363,9 @@ func exitMessage(id string, res executor.Result) protocol.Exit {
 	}
 	if res.OOM {
 		e.Reason, e.MemoryMax = protocol.ExitReasonOOM, res.MemoryMax
+	}
+	if res.Note != "" {
+		e.Error = res.Note
 	}
 	return e
 }
