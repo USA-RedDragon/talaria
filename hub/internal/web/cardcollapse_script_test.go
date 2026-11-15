@@ -33,11 +33,11 @@ func cardCollapse(t *testing.T, bin string) {
 	}
 	e := setup(t)
 	goal := "Find, with proof, why a pending clarify question stays on screen after it is answered.\nLook at the page and the hub.\nReport what you find."
-	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Games", Live: true, StartedAt: 900,
+	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Card chat", Live: true, StartedAt: 900,
 		Subagents: []gateway.SubagentRow{{SubagentID: subA, Goal: goal, Status: optr(statusRunning), AcceptingSteer: optr(true)}}})
 	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
 	e.gw.AddChildRows("s9", subA, map[string]any{kRole: roleUser, keyText: goal, kTimestamp: 1000.0},
-		map[string]any{kRole: roleAssistant, keyText: "Looking.", kTimestamp: 1001.0})
+		map[string]any{kRole: roleAssistant, keyText: "On it.", kTimestamp: 1001.0})
 	e.gw.SetChildBrief("s9", subA, goal, "")
 	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "cardcollapse", "run.js"), bin, e.url, t.TempDir()).CombinedOutput()
 	if err != nil {
