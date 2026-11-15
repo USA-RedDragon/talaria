@@ -85,6 +85,27 @@ window.HubMiniChat = (() => {
     return { head, body: lines.filter(Boolean).join("\n"), bad: r.state !== "ok" };
   }
 
+  // steerRow reads a stored user row that is a steer (wrapped in the steer
+  // marker): { from, lines } with the sender's label when it names one (a
+  // message from another agent), else the user's lines; null for any other row.
+  function steerRow(text) {
+    const o = window.HubOrigin;
+    if (!o) return null;
+    const inner = o.unwrapSteer(text);
+    if (inner === text) return null;
+    const c = o.classify({ text, display_kind: "steer" });
+    if (c.show === "card" && c.notice) return { from: c.notice.title, lines: [c.notice.result] };
+    return { from: "", lines: String(inner).split("\n").map((l) => l.trim()) };
+  }
+
+  // briefLines is how many lines of the brief show before "Show all".
+  const briefLines = 6;
+  const briefChars = 360;
+
+  // briefLong tells whether a brief needs the fold: more than briefLines
+  // lines, or enough text to wrap past them on a narrow screen.
+  const briefLong = (t) => t.split("\n").length > briefLines || t.length > briefChars;
+
   function create(ctx) {
     const { el } = ctx;
     const T = window.HubTimes;
@@ -97,7 +118,7 @@ window.HubMiniChat = (() => {
     jump.hidden = true;
     jump.append(window.HubIcons.icon("chev"), el("span"));
     box.append(jump);
-    const st = { events: [], calls: new Map(), steers: [], unseen: 0, ended: false, info: {}, endNode: null, known: null };
+    const st = { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, ended: false, info: {}, endNode: null, known: null };
     // memory is what the steps taught so far: a background command by its
     // session id, for naming it in the row's status line.
     const view = { node: box, events: () => st.events.slice(), memory: () => st.known };
@@ -188,6 +209,28 @@ window.HubMiniChat = (() => {
       finish(hit.c, { ...e, name: hit.name });
     }
 
+    // brief is the subagent's first entry: the task it was given, in full as
+    // plain text (line breaks kept, selectable), folded after briefLines
+    // lines with Show all / Show less.
+    function brief(text) {
+      const box = el("div", "mc-brief");
+      const body = el("div", "mc-brief-text", String(text).trim());
+      box.append(el("div", "mc-brief-head", "Task"), body);
+      if (briefLong(body.textContent)) {
+        body.classList.add("clamped");
+        const b = el("button", "mc-brief-more", "Show all");
+        b.type = "button";
+        b.setAttribute("aria-expanded", "false");
+        b.onclick = () => {
+          const open = body.classList.toggle("clamped") === false;
+          b.textContent = open ? "Show less" : "Show all";
+          b.setAttribute("aria-expanded", String(open));
+        };
+        box.append(b);
+      }
+      return box;
+    }
+
     function steer(e) {
       const b = el("div", "msg user sm");
       b.textContent = e.text || "";
@@ -195,6 +238,30 @@ window.HubMiniChat = (() => {
       put(b);
       put(line);
       st.steers.push({ e, b, line });
+    }
+
+    // settle decides what each stored steer row shows. Hermes stores a
+    // steer as its own user row in the steer marker; the message the user
+    // sent through this page is already drawn as a bubble, so the row's
+    // lines that a bubble has are dropped, once per bubble. What is left came
+    // from elsewhere and shows once, labeled.
+    function settle() {
+      const free = st.steers.map((s) => ({ text: String(s.e.text || "").trim(), used: false }));
+      for (const r of st.rows) {
+        let body = "\n" + r.lines.join("\n") + "\n";
+        if (!r.from) {
+          for (const f of free) {
+            if (f.used || !f.text) continue;
+            const at = body.indexOf("\n" + f.text + "\n");
+            if (at < 0) continue;
+            f.used = true;
+            body = body.slice(0, at) + body.slice(at + f.text.length + 1);
+          }
+        }
+        const left = r.from ? r.lines.join("\n") : body.split("\n").map((l) => l.trim()).filter(Boolean).join("\n");
+        r.node.hidden = !left;
+        r.node.replaceChildren(...(left ? [r.from ? r.from + ": " + cut(left, noteLen) : "Message from elsewhere: " + cut(left, noteLen)] : []));
+      }
     }
 
     function drawSteers() {
@@ -208,16 +275,24 @@ window.HubMiniChat = (() => {
     function one(e) {
       switch (e.type) {
         case "goal": {
+          if (e.text) put(brief(e.text));
           const n = el("div", "note");
           n.append("Started ", stamp(e.ts));
           if (st.info.model) n.append(" · " + st.info.model);
-          n.title = e.text || "";
           put(n);
           break;
         }
-        case "user":
-          put(el("div", "note", cut(e.text, noteLen)));
+        case "user": {
+          const r = steerRow(e.text);
+          if (!r) {
+            put(el("div", "note", cut(e.text, noteLen)));
+            break;
+          }
+          const n = el("div", "note steerrow");
+          put(n);
+          st.rows.push({ e, node: n, from: r.from, lines: r.lines });
           break;
+        }
         case "compaction":
           put(el("div", "note", "Earlier steps were summarized to make room."));
           break;
@@ -302,6 +377,7 @@ window.HubMiniChat = (() => {
       }
       if (st.endNode) put(st.endNode);
       fold();
+      settle();
       drawSteers();
       if (follow) toEnd();
       else {
@@ -313,7 +389,7 @@ window.HubMiniChat = (() => {
     // reset drops everything drawn, for a transcript Hermes rewrote.
     view.reset = () => {
       for (const n of Array.from(box.children)) if (n !== jump) n.remove();
-      Object.assign(st, { events: [], calls: new Map(), steers: [], unseen: 0, endNode: null, known: null });
+      Object.assign(st, { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, endNode: null, known: null });
       showJump();
     };
 

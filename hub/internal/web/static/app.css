@@ -899,6 +899,7 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
   padding: .5rem .6rem; cursor: pointer; }
 .act .row-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 10px; }
 .act .row-head .goal { font-size: .88rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act .row.open .row-head .goal { white-space: normal; overflow-wrap: anywhere; }
 .act .row-head .meta { grid-column: 2 / 4; color: var(--muted); font-size: .76rem; font-variant-numeric: tabular-nums;
   display: flex; gap: .55rem; flex-wrap: wrap; }
 .act .row-head .now { grid-column: 2 / 4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem;
@@ -959,6 +960,11 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
 .mc .msg.assistant .mc-text > :last-child { margin-bottom: 0; }
 .mc .msg.user.sm { max-width: 88%; white-space: pre-wrap; }
 .mc .queued { margin-top: -.3rem; text-align: right; }
+.mc-brief { border: 1px solid var(--line); border-radius: 10px; padding: .5rem .7rem; font-size: .86rem; user-select: text; -webkit-user-select: text; }
+.mc-brief-head { font-size: .72rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: .2rem; }
+.mc-brief-text { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.mc-brief-text.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
+.mc-brief-more { margin-top: .3rem; padding: .2rem .5rem; font: inherit; font-size: .8rem; color: var(--accent); background: none; border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
 .mc .ts { font-size: .7rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .mc .msg > .ts { display: block; margin-top: .15rem; }
 .mc .note .ts, .mc summary .ts { font-size: inherit; }

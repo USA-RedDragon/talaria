@@ -71,16 +71,20 @@ v.add([
   ev({ type: "tool_end", call_id: "c3", name: "terminal", result: '{"output": "0", "exit_code": 1}', result_size: 31, duration_ms: 100300, at: 108 }),
   ev({ type: "tool_start", call_id: "c4", name: "terminal", args: { command: "sed -i s/a/b/ x" }, at: 109 }),
 ]);
-assert.ok(box.textContent.startsWith("Started "), box.textContent);
-assert.ok(box.children[0].textContent.endsWith(" · claude-opus-5-5"));
+// The brief opens the chat, in full, then the start time and model.
+assert.ok(box.children[0].classList.contains("mc-brief"));
+assert.strictEqual(box.children[0].querySelector(".mc-brief-text").textContent, "Count the rows");
+assert.strictEqual(box.children[0].querySelector(".mc-brief-more"), null);
+assert.ok(box.children[1].textContent.startsWith("Started "), box.textContent);
+assert.ok(box.children[1].textContent.endsWith(" · claude-opus-5-5"));
 // Finished calls before newer text fold into a group with the chat's
 // words; the newest calls of a running subagent stay open as cards, the
 // failed one red, the running one running.
-assert.deepStrictEqual(kids(), ["note", "reasoning", "msg", "toolgroup", "msg", "tool", "tool.running", "jump"]);
+assert.deepStrictEqual(kids(), ["mc-brief", "note", "reasoning", "msg", "toolgroup", "msg", "tool", "tool.running", "jump"]);
 const group = box.querySelector("details.toolgroup");
 assert.strictEqual(group.firstChild.textContent.split(" \u00B7 ")[0], "Ran a command, read a file (2.6 s)");
 assert.strictEqual(group.querySelectorAll(".tool").length, 2);
-const failed = box.children[5];
+const failed = box.children[6];
 assert.ok(failed.classList.contains("failed"), failed.className);
 assert.strictEqual(failed.dataset.state, "bad");
 // A cut result says how long it was.
@@ -93,9 +97,9 @@ assert.ok(box.querySelector(".jump").hidden);
 // The running call ends and a reply comes: the reader at the end follows.
 v.add([ev({ type: "tool_end", call_id: "c4", name: "terminal", result: '{"output": "", "exit_code": 0}', duration_ms: 400, at: 110 }),
   ev({ type: "message", text: "Done with the filter.", at: 111 })]);
-assert.deepStrictEqual(kids(), ["note", "reasoning", "msg", "toolgroup", "msg", "toolgroup", "msg", "jump"]);
-assert.match(box.children[5].firstChild.textContent, /^Ran 2 commands \(1 min 41 s\)/);
-assert.match(box.children[5].textContent, /1 step failed/);
+assert.deepStrictEqual(kids(), ["mc-brief", "note", "reasoning", "msg", "toolgroup", "msg", "toolgroup", "msg", "jump"]);
+assert.match(box.children[6].firstChild.textContent, /^Ran 2 commands \(1 min 41 s\)/);
+assert.match(box.children[6].textContent, /1 step failed/);
 assert.strictEqual(box.scrollTop, box.scrollHeight - box.clientHeight);
 
 // Scrolled up, new steps stay below and the pill counts them.
@@ -255,3 +259,55 @@ assert.deepStrictEqual(kids(), ["jump"]);
     "Searched past chats, used a saved login, called a tool on your computer, looked up a tool, used the project notes");
 }
 console.log("ok");
+
+// A message the user sent shows once. Hermes stores a steer as a user row in
+// the steer marker; the bubble the page drew is its only copy.
+{
+  const open = "[OUT-OF-BAND USER MESSAGE \u2014 a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]";
+  const wrap = (t) => open + "\n" + t + "\n[/OUT-OF-BAND USER MESSAGE]";
+  const w = M.create({ el, toast: () => {} });
+  const b = w.node;
+  const shown = (t) => b.textContent.split(t).length - 1;
+  w.set({ model: "m" });
+  w.add([ev({ type: "goal", text: "Do it", at: 0 }), ev({ type: "steer", text: "just a note, look at the status bar", at: 10 }), ev({ type: "steer", text: "it's showing over the game", at: 11 })]);
+  w.add([ev({ type: "tool_start", call_id: "z1", name: "terminal", args: { command: "ls" }, at: 12 }), ev({ type: "tool_end", call_id: "z1", name: "terminal", result: "{}", at: 13 }),
+    ev({ type: "user", text: wrap("just a note, look at the status bar\nit's showing over the game"), at: 13 })]);
+  assert.strictEqual(shown("just a note"), 1, b.textContent);
+  assert.strictEqual(shown("showing over the game"), 1, b.textContent);
+  assert.strictEqual(b.querySelectorAll(".msg.user.sm").length, 2);
+  assert.match(b.querySelectorAll(".queued")[0].textContent, / · read by the subagent$/);
+  assert.strictEqual(b.querySelectorAll(".steerrow").filter((n) => !n.hidden).length, 0);
+  // The row can come before the bubble in a batch: still once.
+  const w2 = M.create({ el, toast: () => {} });
+  w2.add([ev({ type: "goal", text: "Do it", at: 0 }), ev({ type: "user", text: wrap("same words"), at: 5 }), ev({ type: "steer", text: "same words", at: 4 })]);
+  assert.strictEqual(w2.node.textContent.split("same words").length - 1, 1);
+  // A steer from elsewhere (a parent's or another agent's) shows once, labeled.
+  const w3 = M.create({ el, toast: () => {} });
+  w3.add([ev({ type: "goal", text: "Do it", at: 0 }), ev({ type: "user", text: wrap("Use the other branch"), at: 5 }),
+    ev({ type: "user", text: wrap("[Agent message am_0123456789abcdef from build]\nHold the push."), at: 6 })]);
+  const rows = w3.node.querySelectorAll(".steerrow");
+  assert.match(rows[0].textContent, /^Message from elsewhere: Use the other branch$/);
+  assert.match(rows[1].textContent, /^Message from build: Hold the push\.$/);
+  // An ordinary later user row (a summary) stays a plain note.
+  w3.add([ev({ type: "user", text: "Summary of earlier steps", at: 7 })]);
+  assert.strictEqual(w3.node.textContent.split("Summary of earlier steps").length - 1, 1);
+}
+
+// The brief: short ones show whole; a long one folds after six lines and opens
+// with Show all / Show less, line breaks kept.
+{
+  const long = Array.from({ length: 10 }, (_, i) => "line " + (i + 1)).join("\n");
+  const w = M.create({ el, toast: () => {} });
+  w.add([ev({ type: "goal", text: long, at: 0 })]);
+  const t = w.node.querySelector(".mc-brief-text");
+  const more = w.node.querySelector(".mc-brief-more");
+  assert.strictEqual(t.textContent, long);
+  assert.ok(t.classList.contains("clamped"));
+  assert.strictEqual(more.textContent, "Show all");
+  more.onclick();
+  assert.ok(!t.classList.contains("clamped"));
+  assert.strictEqual(more.textContent, "Show less");
+  more.onclick();
+  assert.ok(t.classList.contains("clamped"));
+  assert.strictEqual(more.textContent, "Show all");
+}
