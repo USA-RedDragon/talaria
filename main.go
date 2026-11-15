@@ -6,6 +6,7 @@ import (
 
 	"github.com/USA-RedDragon/talaria/cmd"
 	"github.com/USA-RedDragon/talaria/internal/browser/host"
+	"github.com/USA-RedDragon/talaria/internal/executor"
 )
 
 // https://goreleaser.com/cookbooks/using-main.version/
@@ -20,6 +21,9 @@ var (
 )
 
 func main() {
+	if dir, ok := executor.HolderInvocation(os.Args); ok {
+		os.Exit(executor.RunHolder(dir))
+	}
 	if manifest, extensionID, ok := host.Invocation(os.Args); ok {
 		if err := cmd.RunNativeHost(manifest, extensionID); err != nil {
 			slog.Error("Native messaging host failed.", "error", err.Error())

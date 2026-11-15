@@ -56,11 +56,13 @@ type Result struct {
 	// that cap in bytes.
 	OOM       bool
 	MemoryMax int64
+	// Note says what went wrong when the device could not learn how the
+	// command ended.
+	Note string
 }
 
 // Process is a running command.
 type Process struct {
-	cmd      *exec.Cmd
 	done     chan struct{}
 	killOnce sync.Once
 	mu       sync.Mutex
@@ -69,11 +71,17 @@ type Process struct {
 	// timer kills the command at its timeout plus TimeoutGrace; nil
 	// without a timeout or after Detach.
 	timer *time.Timer
-	// tree is the command's process tree.
-	tree *proctree.Tree
+	pid   int
+	// terminate and hardKill signal the command's process tree, and
+	// releaseTree lets go of it.
+	terminate, hardKill func() error
+	releaseTree         func()
 	// scope and unit are the systemd scope the command runs in, if any.
 	scope *Scope
 	unit  string
+	// spooled is set for a command that a holder process runs, so that it
+	// outlives the daemon (spool_unix.go).
+	spooled *spooled
 }
 
 // Start runs req with shell. Output chunks go to out from one goroutine, in
@@ -128,7 +136,8 @@ func start(shell string, req Request, out func([]byte), grace time.Duration) (*P
 		return nil, err
 	}
 
-	p := &Process{cmd: cmd, tree: tree, done: make(chan struct{}), scope: req.Scope, unit: unit}
+	p := &Process{done: make(chan struct{}), scope: req.Scope, unit: unit, pid: cmd.Process.Pid,
+		terminate: tree.Terminate, hardKill: tree.Kill, releaseTree: tree.Release}
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -159,7 +168,7 @@ func start(shell string, req Request, out func([]byte), grace time.Duration) (*P
 		if !killed {
 			// Processes the command left running keep running, as a
 			// process group's members outlive its leader.
-			p.tree.Release()
+			p.releaseTree()
 		}
 		// Background children may keep the pipe open; do not wait for them
 		// longer than a moment once bash itself has exited.
@@ -219,14 +228,17 @@ func (p *Process) Kill() {
 		p.mu.Lock()
 		p.killed = true
 		p.mu.Unlock()
-		_ = p.tree.Terminate()
+		if s := p.spooled; s != nil {
+			s.markKilled()
+		}
+		_ = p.terminate()
 		go func() {
 			select {
 			case <-p.done:
 			case <-time.After(KillGrace):
 			}
-			_ = p.tree.Kill()
-			p.tree.Release()
+			_ = p.hardKill()
+			p.releaseTree()
 		}()
 	})
 }
@@ -239,22 +251,77 @@ func (p *Process) Detach() {
 	if p.timer != nil {
 		p.timer.Stop()
 		p.timer = nil
+		if s := p.spooled; s != nil {
+			s.setDeadline(time.Time{})
+		}
 	}
 }
 
-// Pid returns the process id, which is also the process group id on Unix.
+// Pid returns the process id of the shell, which is also its process
+// group id on Unix.
 func (p *Process) Pid() int {
-	return p.cmd.Process.Pid
+	return p.pid
 }
 
-// Wait blocks until the command exits or ctx ends.
+// ErrReleased is Wait's error after Release: the command runs on, and the
+// next daemon adopts it.
+var ErrReleased = errors.New("the command was released to the next daemon")
+
+// Wait blocks until the command exits, Release lets go of it, or ctx ends.
 func (p *Process) Wait(ctx context.Context) (Result, error) {
+	var released <-chan struct{}
+	if p.spooled != nil {
+		released = p.spooled.released
+	}
 	select {
 	case <-p.done:
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.result, nil
+	case <-released:
+		return Result{}, ErrReleased
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
+	}
+}
+
+// Durable reports whether the command outlives the daemon: a holder
+// process runs it and keeps its output and exit in the spool.
+func (p *Process) Durable() bool { return p.spooled != nil }
+
+// Release lets go of a durable command without stopping it: its output is
+// no longer read and its timeout no longer applies here, and Wait returns
+// ErrReleased. The next daemon adopts it from the spool. It does nothing
+// for a command that is not durable.
+func (p *Process) Release() {
+	if p.spooled == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+	p.mu.Unlock()
+	p.spooled.release()
+}
+
+// Confirm records that the plugin has every output byte up to file bytes
+// of the command's spool file, which were wire bytes on the exec leg, so
+// that the next daemon resends only what comes after. The spool may then
+// free the confirmed part of the file. It does nothing for a command that
+// is not durable.
+func (p *Process) Confirm(file, wire int64) {
+	if p.spooled != nil {
+		p.spooled.confirm(file, wire)
+	}
+}
+
+// Forget removes a durable command's spool entry once it has ended: at
+// once when it already has, else when it does. The daemon calls it when it
+// no longer keeps the command for the plugin.
+func (p *Process) Forget() {
+	if p.spooled != nil {
+		p.spooled.forget()
 	}
 }
