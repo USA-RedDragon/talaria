@@ -156,6 +156,7 @@ hermes:
 #     devices: false
 #     acp_url: ""
 #     media_roots: []
+#     max_file_bytes: 0
 #     service_devices:
 #       - id: ""
 #         name: ""
