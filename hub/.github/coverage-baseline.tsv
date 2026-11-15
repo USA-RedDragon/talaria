@@ -43,7 +43,7 @@ internal/device/rpc.go	229	210
 internal/device/sessioncheck.go	23	22
 internal/device/usage.go	50	40
 internal/device/views.go	17	17
-internal/gateway/client.go	248	207
+internal/gateway/client.go	248	213
 internal/gateway/gatewaytest/activity.go	109	91
 internal/gateway/gatewaytest/compose.go	195	170
 internal/gateway/gatewaytest/fake.go	744	684
@@ -98,7 +98,7 @@ internal/scheduled/scheduledtest/scheduledtest.go	178	166
 internal/scheduled/service.go	478	416
 internal/secretbox/secretbox.go	37	31
 internal/server/server.go	40	0
-internal/service/activity.go	144	123
+internal/service/activity.go	144	122
 internal/service/agents.go	31	26
 internal/service/attach.go	100	85
 internal/service/claude.go	41	33
@@ -112,7 +112,7 @@ internal/service/outcome.go	95	90
 internal/service/page.go	63	57
 internal/service/pdf.go	74	56
 internal/service/rows.go	22	21
-internal/service/service.go	956	880
+internal/service/service.go	956	881
 internal/service/stopsend.go	93	77
 internal/service/subagentlog.go	178	146
 internal/service/toolout.go	39	32
@@ -138,13 +138,13 @@ internal/store/telegram.go	64	55
 internal/store/views.go	11	11
 internal/subagents/subagents.go	39	32
 internal/telegram/api.go	192	152
-internal/telegram/bot.go	666	543
+internal/telegram/bot.go	666	546
 internal/telegram/budget.go	23	20
 internal/telegram/claude.go	107	89
 internal/telegram/commands.go	245	203
 internal/telegram/computers.go	186	146
 internal/telegram/config.go	18	18
-internal/telegram/dmtopics.go	105	86
+internal/telegram/dmtopics.go	105	88
 internal/telegram/draft.go	78	63
 internal/telegram/echo.go	133	112
 internal/telegram/format.go	126	123
@@ -153,7 +153,7 @@ internal/telegram/media.go	39	37
 internal/telegram/prompts.go	458	351
 internal/telegram/react.go	36	32
 internal/telegram/render.go	512	467
-internal/telegram/replymedia.go	102	87
+internal/telegram/replymedia.go	102	89
 internal/telegram/status.go	59	53
 internal/telegram/todo.go	58	51
 internal/telegram/topics.go	521	380
@@ -162,7 +162,7 @@ internal/web/accounts.go	255	192
 internal/web/activity.go	135	93
 internal/web/admin.go	119	81
 internal/web/agent.go	263	169
-internal/web/api.go	345	271
+internal/web/api.go	345	267
 internal/web/assets.go	40	36
 internal/web/auth.go	145	112
 internal/web/authpages.go	44	40
