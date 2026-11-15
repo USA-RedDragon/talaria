@@ -1,0 +1,600 @@
+From 7d0ae799b8b5320ad15d011ae8adfc4022574044 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 04:25:33 -0600
+Subject: [PATCH] fix(gateway): a subagent's answer no longer withdraws the
+ chat's open question
+
+Answering a background subagent's approval or question took the running turn's own clarify off every viewer while its tool kept waiting. A subagent prompt keeps the generation it was asked in, and both the answer (PendingControls.respond, with the generation the answer carries) and the subagent's own card retirement (the spawning turn runner's generation) withdrew every prompt of any other generation, so the chat's question published clarify.settled and left session.resume. The viewers showed a running clarify tool card with no form, and the agent waited the whole clarify timeout. Stale prompts are now withdrawn by the session's own execution generation.
+
+A local chat (hub, TUI, Desktop) shows a question only as its viewers' card. When that card could not be registered (no session owner for the turn, a refused registration, a subagent whose chat is not live), the plain-text re-ask went to LocalSessionAdapter.send, which publishes nothing, was acknowledged, and the agent waited the clarify timeout. The local adapter now has no text fallback, and such a question returns at once with "[clarify prompt could not be delivered: the question could not be shown to the user]".
+---
+ gateway/run_turn_runner.py                    |  69 +++++--
+ gateway/run_turn_runner_clarify_delivery.py   |   7 +-
+ gateway/session_authority.py                  |  10 +-
+ gateway/session_local.py                      |   4 +
+ gateway/session_pending_controls.py           |  11 +-
+ .../gateway/fixtures/subagent_answer_peer.py  | 173 ++++++++++++++++++
+ ...est_subagent_answer_keeps_chat_question.py | 155 ++++++++++++++++
+ 7 files changed, 404 insertions(+), 25 deletions(-)
+ create mode 100644 tests/gateway/fixtures/subagent_answer_peer.py
+ create mode 100644 tests/gateway/test_subagent_answer_keeps_chat_question.py
+
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+index c1d1c5fb..f92dbd80 100644
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -78,6 +78,13 @@ _LEDGER_PASSTHROUGH_KEYS = (
+ _FAILURE_DESCRIPTOR_KEYS = ("free_tier", "failure_retryable", "failure_resets_at", "usage_window_message")
+ 
+ 
++def _not_shown_result(why: str):
++    """The failed send of a question no viewer can see (``LocalSessionAdapter``): definitive, so the
++    clarify returns ``UNDELIVERED_NOT_SHOWN`` at once."""
++    from gateway.platforms.base import SendResult
++    return SendResult(success=False, error=f"clarify not shown: {why}")
++
++
+ def _finite_viewer_turn() -> bool:
+     from gateway.session_finite import finite_turn_required
+     return finite_turn_required() is True
+@@ -586,27 +593,45 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+             return False
+ 
+     async def _send_shared_clarify(self, entry, **kwargs):
+-        result = await self._ctx._status_adapter.send_clarify(**kwargs)
+-        if self._approval_owner is not None and result.success:
+-            authority, session_id, generation = self._approval_owner
+-            from gateway import local_viewer_events
+-            timeout_s = local_viewer_events.prompt_timeout_s(self, "clarify")
+-            if entry.subagent:
+-                # A subagent's question belongs to the chat, not to this turn's generation. The card is out
+-                # already: a viewer that cannot list it does not withdraw it.
+-                try:
+-                    authority.register_background_clarify(session_id, entry, timeout_s=timeout_s)
+-                except Exception:
+-                    logger.warning("Subagent question registration failed; the card stands", exc_info=True)
+-            else:
++        adapter = self._ctx._status_adapter
++        result = await adapter.send_clarify(**kwargs)
++        if not result.success:
++            return result
++        # A local chat (hub, TUI, Desktop) shows a question only as its viewers' card: its adapter's send
++        # reaches nobody. A question that card cannot carry fails here, so the wait ends at once instead of
++        # waiting the whole clarify timeout for an answer nobody can give.
++        viewers_only = getattr(adapter, "clarify_text_fallback", True) is False
++        if self._approval_owner is None:
++            return _not_shown_result("the chat's viewers are not reachable from this turn") if viewers_only else result
++        authority, session_id, generation = self._approval_owner
++        from gateway import local_viewer_events
++        timeout_s = local_viewer_events.prompt_timeout_s(self, "clarify")
++        if entry.subagent:
++            # A subagent's question belongs to the chat, not to this turn's generation. The card is out
++            # already: a viewer that cannot list it does not withdraw it.
++            try:
++                registered = authority.register_background_clarify(session_id, entry, timeout_s=timeout_s)
++            except Exception:
++                logger.warning("Subagent question registration failed; the card stands", exc_info=True)
++                registered = False
++            if registered is False and viewers_only:
++                return _not_shown_result("the subagent's question could not be registered with the chat's viewers")
++        else:
++            try:
+                 authority.register_clarify(session_id, generation, entry, timeout_s=timeout_s)
++            except Exception as exc:
++                if not viewers_only:
++                    raise
++                logger.warning("Clarify question not registered with the chat's viewers (%s); it is undeliverable",
++                               exc, exc_info=True)
++                return _not_shown_result(f"the question could not be registered with the chat's viewers: {exc}")
+         return result
+ 
+     def _clarify_callback_sync(self, questions) -> dict:
+         """Answer the clarify tool's questions (clarify_tool's synchronous contract): one card per
+         question, stop at the first the user never answers. The stream/typing re-arm waits for the
+         last question — between two cards it only opens a bubble the next boundary closes."""
+-        from gateway.run_turn_runner_clarify_delivery import UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE
++        from gateway.run_turn_runner_clarify_delivery import UNDELIVERED_ALL
+         from tools.clarify_gateway import CANCELLED, SKIPPED
+         if _finite_viewer_turn():
+             # `chat -q` / `-z`: the viewer detaches on the first prompt, so nobody can answer.
+@@ -636,7 +661,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 # The surface's own no-answer text ("could not be delivered", "did not respond
+                 # within Nm") rides along as ``notice``: blank answers alone read as user
+                 # inactivity, which is the misreport #112684 describes for an undelivered card.
+-                undelivered = raw in (UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE)
++                undelivered = raw in UNDELIVERED_ALL
+                 reply.update(outcome="undelivered" if undelivered else "timed_out", notice=raw)
+                 break
+             answers[entry["qid"]] = None if raw == SKIPPED else raw
+@@ -647,7 +672,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+         chat's own question cards, each naming the subagent that asks. Same reply as ``_clarify_callback_sync``.
+         The card belongs to the chat, not to the turn that spawned the subagent: it is shown and answered after
+         that turn ended, and it waits the clarify timeout."""
+-        from gateway.run_turn_runner_clarify_delivery import UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE
++        from gateway.run_turn_runner_clarify_delivery import UNDELIVERED_ALL
+         from tools.clarify_gateway import CANCELLED, SKIPPED
+         if _finite_viewer_turn():
+             from gateway.session_finite import finite_clarify_reply
+@@ -664,7 +689,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 reply["outcome"] = "cancelled"
+                 break
+             if not answered:
+-                undelivered = raw in (UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE)
++                undelivered = raw in UNDELIVERED_ALL
+                 reply.update(outcome="undelivered" if undelivered else "timed_out", notice=raw)
+                 break
+             answers[entry["qid"]] = None if raw == SKIPPED else raw
+@@ -675,7 +700,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+         Returns ``(response, answered)``; the caller decides what "no answer" means. A subagent's card
+         (``subagent`` = its goal) leaves this turn's stream and typing alone: the turn may be over."""
+         from gateway.run_turn_runner_clarify_delivery import (
+-            UNDELIVERED_NO_SURFACE, _clarify_send_then_wait, text_fallback_coro)
++            UNDELIVERED, UNDELIVERED_NO_SURFACE, UNDELIVERED_NOT_SHOWN, _clarify_send_then_wait, text_fallback_coro)
+         from tools import clarify_gateway as clarify_mod
+         import uuid
+         ctx = self._ctx
+@@ -727,8 +752,16 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+         response, answered = _clarify_send_then_wait(
+             fut, clarify_id=clarify_id, session_key=session_key, clarify_mod=clarify_mod,
+             fallback=_text_fallback)
++        if not answered and response == UNDELIVERED and getattr(ctx._status_adapter, "clarify_text_fallback", True) is False:
++            # The viewers' card was the only surface and it could not be shown: say so plainly.
++            response = UNDELIVERED_NOT_SHOWN
+         if self._approval_owner is not None:
+             authority, session_id, generation = self._approval_owner
++            if subagent:
++                # This runner is the turn that spawned the subagent, often long over: retire the card by the
++                # session's generation now, or the snapshot takes a later turn's open question off the viewers.
++                with suppress(Exception):
++                    generation = authority.db.get_session(session_id)["runtime_generation"]
+             # A subagent's card outlives the conversation's memory (retired idle, or a restart): nothing to snapshot.
+             if (live := authority.sessions.get(session_id)) is not None:
+                 live.controls.snapshot(session_id, generation)
+diff --git a/gateway/run_turn_runner_clarify_delivery.py b/gateway/run_turn_runner_clarify_delivery.py
+index e3bd3f4f..5f241e0f 100644
+--- a/gateway/run_turn_runner_clarify_delivery.py
++++ b/gateway/run_turn_runner_clarify_delivery.py
+@@ -20,6 +20,10 @@ UNDELIVERED = "[clarify prompt could not be delivered]"
+ UNDELIVERED_DECLINED = "[clarify prompt could not be delivered: destination refused]"
+ # No status adapter (a run whose chat surface is gone).
+ UNDELIVERED_NO_SURFACE = "[clarify prompt could not be delivered: no chat surface]"
++# A chat whose only surface is its viewers' card (a local session: the hub, the TUI) could not
++# register the card with them, so nobody sees the question.
++UNDELIVERED_NOT_SHOWN = "[clarify prompt could not be delivered: the question could not be shown to the user]"
++UNDELIVERED_ALL = (UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE, UNDELIVERED_NOT_SHOWN)
+ 
+ # Seconds a scheduled card send may take before it is classified ``ambiguous`` (possibly posted).
+ SEND_ACK_WINDOW = 15
+@@ -32,7 +36,8 @@ def text_fallback_coro(adapter, **send_kwargs):
+     from gateway.platforms.base import BasePlatformAdapter
+ 
+     if not isinstance(adapter, BasePlatformAdapter) \
+-            or type(adapter).send_clarify is BasePlatformAdapter.send_clarify:
++            or type(adapter).send_clarify is BasePlatformAdapter.send_clarify \
++            or getattr(adapter, "clarify_text_fallback", True) is False:
+         return None
+     # A human-decision prompt: Telegram's "important" mode must push it, not deliver it silently (#132516).
+     metadata = {**(send_kwargs.pop("metadata", None) or {}), "is_approval_prompt": True}
+diff --git a/gateway/session_authority.py b/gateway/session_authority.py
+index e2b11a82..657b6dce 100644
+--- a/gateway/session_authority.py
++++ b/gateway/session_authority.py
+@@ -1111,10 +1111,11 @@ class SessionAuthority:
+         ``register_background_approval``), so it stays answerable after its parent's turn ended."""
+         live = self._background_live(session_id, 'question')
+         if live is None:
+-            return
++            return False
+         with live.event_stream.lock:
+             generation = self.db.get_session(session_id)['runtime_generation']
+             live.controls.register_clarify(session_id, generation, entry, timeout_s=timeout_s, background=True)
++        return True
+ 
+     def register_clarify(self, session_id, generation, entry, *, timeout_s=None):
+         live = self.sessions[session_id]
+@@ -1138,7 +1139,12 @@ class SessionAuthority:
+                 self.check_approval_generation(ref.session_id, generation)
+             if not isinstance(prompt_id, str) or not prompt_id:
+                 raise RuntimeStoreError("invalid_params")
+-            return live.controls.respond(ref.session_id, generation, prompt_id, response, kind=kind)
++            # Stale prompts are withdrawn by the session's own execution generation, never by the one the
++            # answer carries: a subagent's prompt keeps the generation it was asked in, and withdrawing by
++            # it took the running turn's open question off every viewer while its tool still waited.
++            current = self._handle(ref).execution_generation
++            return live.controls.respond(ref.session_id, generation, prompt_id, response, kind=kind,
++                                         prune_generation=current)
+ 
+     async def _claim_next(self, ref, live):
+         # False asks the pump to re-read after a queued head changed during preflight.
+diff --git a/gateway/session_local.py b/gateway/session_local.py
+index 88041f03..c2f8a29d 100644
+--- a/gateway/session_local.py
++++ b/gateway/session_local.py
+@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
+ class LocalSessionAdapter(BasePlatformAdapter):
+     """Delivery stays in the canonical event stream; no second local transport."""
+ 
++    # A question here reaches a person only as the viewers' card (``clarify.request``): ``send()``
++    # publishes nothing, so a plain-text re-ask would be acknowledged and never seen.
++    clarify_text_fallback = False
++
+     def __init__(self, authority):
+         super().__init__(PlatformConfig(enabled=True), Platform.LOCAL)
+         self.authority = authority
+diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
+index 601284a9..b213ec5f 100644
+--- a/gateway/session_pending_controls.py
++++ b/gateway/session_pending_controls.py
+@@ -90,9 +90,12 @@ class PendingControls:
+                         'execution_generation': prompt['execution_generation']}, event_type=prompt['kind'] + '.settled')
+             return tuple(deepcopy(prompt) for _, prompt in self.pending.values())
+ 
+-    def respond(self, session_id, generation, prompt_id, response, *, kind="approval"):
++    def respond(self, session_id, generation, prompt_id, response, *, kind="approval", prune_generation=None):
++        """``prune_generation``: the generation whose prompts stay listed (the session's running one);
++        ``generation`` (the answer's) when not given."""
++        prune = generation if prune_generation is None else prune_generation
+         with self.events.lock:
+-            self.snapshot(session_id, generation)
++            self.snapshot(session_id, prune)
+             entry = self.pending.get(prompt_id)
+             if entry is None:
+                 return {'status': 'already_resolved', 'prompt_id': prompt_id}
+@@ -118,12 +121,12 @@ class PendingControls:
+                         or not isinstance(response['answer'], str)):
+                     raise RuntimeStoreError('invalid_params')
+                 resolved = resolve_gateway_clarify(prompt_id, response['answer'])
+-                self.snapshot(session_id, generation)
++                self.snapshot(session_id, prune)
+                 return {'status': 'resolved' if resolved else 'already_resolved', 'prompt_id': prompt_id}
+             if not isinstance(response, dict) or set(response) != {'choice'} or response['choice'] not in prompt['choices']:
+                 raise RuntimeStoreError('invalid_params')
+             # The tools lock arbitrates native taps versus attached responders;
+             # an exact request ID can never consume the next FIFO approval.
+             resolved = resolve_gateway_approval(route, response['choice'], request_id=prompt_id)
+-            self.snapshot(session_id, generation)
++            self.snapshot(session_id, prune)
+             return {'status': 'resolved' if resolved else 'already_resolved', 'prompt_id': prompt_id}
+diff --git a/tests/gateway/fixtures/subagent_answer_peer.py b/tests/gateway/fixtures/subagent_answer_peer.py
+new file mode 100644
+index 00000000..74df0e0b
+--- /dev/null
++++ b/tests/gateway/fixtures/subagent_answer_peer.py
+@@ -0,0 +1,173 @@
++"""Owned loopback model, real gateway, one hub-shaped viewer: a subagent asks in turn 1, the chat's own agent
++asks in turn 2, and the viewer answers the subagent's card with that card's own (older) generation."""
++import asyncio
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++import json
++import os
++from pathlib import Path
++import threading
++import time
++import traceback
++
++
++def _call(name, args):
++    return {'index': 0, 'id': f'call-{name}', 'type': 'function',
++            'function': {'name': name, 'arguments': json.dumps(args)}}
++
++
++def _script(messages):
++    """The model: the subagent asks once; the chat delegates in turn 1 and asks in turn 2."""
++    users = [i for i, m in enumerate(messages) if m['role'] == 'user']
++    tail = messages[users[-1]:] if users else messages
++    called = [c['function']['name'] for m in tail if m['role'] == 'assistant' for c in (m.get('tool_calls') or [])]
++    if any('CHILDGOAL' in str(m.get('content', '')) for m in messages if m['role'] == 'user'):
++        return None if 'clarify' in called else _call('clarify', {'questions': [
++            {'question': 'Which lane?', 'choices': ['lane-a', 'lane-b']}]})
++    if len(users) < 2:
++        return None if 'delegate_task' in called else _call('delegate_task', {'goal': 'CHILDGOAL ask the user'})
++    return None if 'clarify' in called else _call('clarify', {'questions': [
++        {'question': 'Ship it?', 'choices': ['ship', 'hold']}]})
++
++
++class ModelPeer(BaseHTTPRequestHandler):
++    def log_message(self, *args):
++        pass
++
++    def do_GET(self):
++        self.send_response(200)
++        self.end_headers()
++        self.wfile.write(b'{"data": []}')
++
++    def do_POST(self):
++        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
++        messages = body.get('messages', [])
++        call = _script(messages) if body.get('tools') else None
++        if body.get('tools'):
++            self.server.requests.append(messages)
++        message = ({'role': 'assistant', 'content': None, 'tool_calls': [call]} if call
++                   else {'role': 'assistant', 'content': 'DONE'})
++        finish = 'tool_calls' if call else 'stop'
++        self.send_response(200)
++        self.send_header('Content-Type', 'text/event-stream' if body.get('stream') else 'application/json')
++        self.end_headers()
++        if body.get('stream'):
++            for delta, fin in [(message, None), ({}, finish)]:
++                frame = {'id': 'local', 'object': 'chat.completion.chunk', 'created': 1, 'model': 'local',
++                         'choices': [{'index': 0, 'delta': delta, 'finish_reason': fin}]}
++                self.wfile.write(('data: ' + json.dumps(frame) + '\n\n').encode())
++            self.wfile.write(b'data: [DONE]\n\n')
++        else:
++            self.wfile.write(json.dumps({'id': 'local', 'choices': [
++                {'index': 0, 'message': message, 'finish_reason': finish}]}).encode())
++        self.wfile.flush()
++
++
++async def probe(peer):
++    import websockets
++    from gateway.run import GatewayRunner
++    from gateway.run_api import start_gateway_api, stop_gateway_api
++    from gateway.session_authority import initialize_session_authority
++    from hermes_cli import web_server
++    from tools import clarify_gateway
++
++    runner = GatewayRunner()
++    authority = await initialize_session_authority(runner, profile_id='fixture', instance_id='subagent-answer')
++    api = await start_gateway_api(runner)
++    url = api.api_origin.replace('http:', 'ws:') + '/api/ws?token=' + web_server._SESSION_TOKEN
++    ws = await websockets.connect(url, max_size=None)
++    frames, waiters, ids = [], {}, iter(range(1, 1000))
++
++    async def reader():
++        async for raw in ws:
++            frame = json.loads(raw)
++            if frame.get('id') in waiters and 'method' not in frame:
++                waiters.pop(frame['id']).set_result(frame)
++            else:
++                frames.append(frame.get('params') or {})
++
++    task = asyncio.create_task(reader())
++
++    async def rpc(method, **params):
++        rid = next(ids)
++        waiters[rid] = asyncio.get_running_loop().create_future()
++        await ws.send(json.dumps({'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params}))
++        return await asyncio.wait_for(waiters[rid], 20)
++
++    async def until(pred, what, timeout=30):
++        deadline = time.monotonic() + timeout
++        while not (found := pred()):
++            if time.monotonic() > deadline:
++                raise AssertionError(f'{what} never came')
++            await asyncio.sleep(.05)
++        return found
++
++    def requests(subagent):
++        return [f['payload'] for f in frames if f.get('type') == 'clarify.request'
++                and bool(f['payload'].get('subagent')) == subagent]
++
++    sid = None
++    try:
++        sid = (await rpc('session.create', request_id='fixture-create', source='gui'))['result']['session_id']
++        await rpc('session.resume', session_id=sid)
++        await rpc('prompt.submit', session_id=sid, text='start the lane', submission_id='turn-1')
++        child = (await until(lambda: requests(True), "the subagent's question"))[0]
++        await until(lambda: any(f.get('type') == 'message.complete' for f in frames), 'the end of turn 1')
++        await rpc('prompt.submit', session_id=sid, text='now ask me', submission_id='turn-2')
++        main = (await until(lambda: requests(False), "the chat's own question"))[0]
++        assert child['execution_generation'] < main['execution_generation'], (child, main)
++        mark = len(frames)
++        answered = await rpc('clarify.respond', session_id=sid, prompt_id=child['prompt_id'],
++                             execution_generation=child['execution_generation'], answer='lane-a')
++        assert answered['result']['status'] == 'resolved', answered
++        await until(lambda: any('lane-a' in json.dumps(m) for ms in peer.requests for m in ms if m['role'] == 'tool'),
++                    "the subagent's answer reaching its model")
++        await asyncio.sleep(1)
++        settled = [f['payload']['prompt_id'] for f in frames[mark:] if f.get('type') == 'clarify.settled']
++        assert main['prompt_id'] not in settled, f"the chat's question was withdrawn: {settled}"
++        listed = [p['prompt_id'] for p in (await rpc('session.resume', session_id=sid))['result']['prompts']]
++        assert listed == [main['prompt_id']], listed
++        done = await rpc('clarify.respond', session_id=sid, prompt_id=main['prompt_id'],
++                         execution_generation=main['execution_generation'], answer='ship')
++        assert done['result']['status'] == 'resolved', done
++        await until(lambda: any('ship' in json.dumps(m) for ms in peer.requests for m in ms if m['role'] == 'tool'),
++                    "the chat's answer reaching its model")
++        Path(os.environ['HERMES_HOME'], 'subagent-answer-passed').write_text('chat question kept and answered')
++    finally:
++        for live in authority.sessions.values():
++            clarify_gateway.clear_session(live.route)
++        for live in list(authority.sessions.values()):
++            if live.task is not None:
++                try:
++                    await asyncio.wait_for(live.task, 15)
++                except Exception:
++                    pass
++        task.cancel()
++        await ws.close()
++        await stop_gateway_api(api)
++
++
++def main():
++    peer = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer)
++    peer.requests = []
++    threading.Thread(target=peer.serve_forever, daemon=True).start()
++    url = f'http://127.0.0.1:{peer.server_port}/v1'
++    os.environ.update(OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
++    Path(os.environ['HERMES_HOME'], 'config.yaml').write_text(
++        f'model:\n  default: local\n  provider: custom\n  base_url: {url}\n'
++        'agent:\n  clarify_timeout: 60\nauxiliary:\n  title_generation:\n    enabled: false\n'
++        'delegation:\n  gateway_mode: background\n')
++    try:
++        asyncio.run(probe(peer))
++    finally:
++        peer.shutdown()
++        peer.server_close()
++
++
++if __name__ == '__main__':
++    status = 0
++    try:
++        main()
++    except BaseException:
++        traceback.print_exc()
++        status = 1
++    os._exit(status)
+diff --git a/tests/gateway/test_subagent_answer_keeps_chat_question.py b/tests/gateway/test_subagent_answer_keeps_chat_question.py
+new file mode 100644
+index 00000000..069a97b2
+--- /dev/null
++++ b/tests/gateway/test_subagent_answer_keeps_chat_question.py
+@@ -0,0 +1,155 @@
++"""A subagent's prompt answered with its own (older) generation keeps the chat's open question on the viewers,
++and a question a local chat's viewers cannot be shown returns at once instead of waiting the clarify timeout."""
++import asyncio
++import os
++from pathlib import Path
++import subprocess
++import sys
++import threading
++import time
++from types import SimpleNamespace
++
++import pytest
++
++from gateway.config import Platform
++from tools import clarify_gateway
++
++
++def test_real_gateway_subagent_answer_keeps_the_chat_question(tmp_path):
++    """Turn 1 spawns a subagent that asks; turn 2's agent asks too. Answering the subagent's card with the
++    generation it carries took the turn's question off every viewer (``clarify.settled``, gone from
++    ``session.resume``) while its clarify tool kept waiting: a running tool card with no form."""
++    home, state = tmp_path / 'home', tmp_path / 'state'
++    home.mkdir()
++    state.mkdir()
++    repo = Path(__file__).resolve().parents[2]
++    env = {key: os.environ[key] for key in ('PATH', 'LANG', 'TZ') if key in os.environ}
++    env.update(HOME=str(home), USERPROFILE=str(home), HERMES_HOME=str(state), PYTHONPATH=str(repo))
++    result = subprocess.run(
++        [sys.executable, str(Path(__file__).parent / 'fixtures' / 'subagent_answer_peer.py')],
++        cwd=repo, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False)
++    assert result.returncode == 0, result.stdout + result.stderr
++    assert (state / 'subagent-answer-passed').read_text() == 'chat question kept and answered'
++
++
++class _Events:
++    def __init__(self):
++        self.lock = threading.RLock()
++        self.out = []
++
++    def publish(self, session_id, payload, event_type):
++        self.out.append((event_type, payload.get('prompt_id')))
++
++
++@pytest.mark.parametrize('kind', ['clarify', 'approval'])
++def test_answering_an_older_subagent_prompt_prunes_by_the_running_generation(kind, monkeypatch):
++    from gateway.session_authority import SessionAuthority
++    from gateway.session_pending_controls import PendingControls
++    events = _Events()
++    controls = PendingControls(events)
++    main = clarify_gateway.register('main-q', 'route-k', 'Ship it?', ['ship', 'hold'])
++    try:
++        if kind == 'clarify':
++            sub = clarify_gateway.register('sub-q', 'route-k', 'Which lane?', ['a', 'b'], subagent='lane')
++            controls.register_clarify('s', 4, sub, background=True)
++            answer = {'answer': 'a'}
++        else:
++            import tools.approval as approval
++            monkeypatch.setattr(approval, 'resolve_gateway_approval', lambda *a, **k: True)
++            import gateway.session_pending_controls as spc
++            monkeypatch.setattr(spc, 'list_gateway_approvals', lambda route: [{'request_id': 'sub-q'}])
++            monkeypatch.setattr(spc, 'resolve_gateway_approval', lambda *a, **k: True, raising=False)
++            controls.register('s', 'route-k', 4, {'request_id': 'sub-q', 'command': 'rm x', 'subagent': 'lane'},
++                              background=True)
++            answer = {'choice': 'once'}
++        controls.register_clarify('s', 5, main)
++        actor = object()
++        fake = SimpleNamespace(
++            authorize=lambda *a: None,
++            sessions={'s': SimpleNamespace(event_stream=events, subscribers={'v': actor}, controls=controls)},
++            check_approval_generation=lambda *a: pytest.fail('a subagent prompt is not fenced to a turn'),
++            _handle=lambda ref: SimpleNamespace(execution_generation=5, execution_state='running'))
++        ref = SimpleNamespace(session_id='s')
++        reply = asyncio.run(SessionAuthority.respond(fake, actor, ref, 4, 'sub-q', answer, kind=kind))
++        assert reply['status'] == 'resolved'
++        assert 'main-q' in controls.pending, events.out
++        assert ('clarify.settled', 'main-q') not in events.out
++    finally:
++        clarify_gateway.clear_session('route-k')
++
++
++class _Runner:
++    """Just enough of a TurnRunner to drive one real ``_ask_clarify_question`` through the real delivery chain."""
++
++    def __init__(self, adapter, owner, loop):
++        from gateway.run_turn_runner import TurnRunner
++        self._approval_owner = owner
++        self._ctx = SimpleNamespace(_status_adapter=adapter, session_key='route-local', _status_chat_id='chat',
++                                    _status_thread_metadata=None, _loop_for_step=loop,
++                                    source=SimpleNamespace(platform=Platform.LOCAL, chat_id='chat'),
++                                    stream_consumer_holder=[None])
++        self._send_shared_clarify = TurnRunner._send_shared_clarify.__get__(self)
++        self.ask = TurnRunner._ask_clarify_question.__get__(self)
++
++    def _schedule(self, coro, _message):
++        return asyncio.run_coroutine_threadsafe(coro, self._ctx._loop_for_step)
++
++    def _close_native_stream_boundary(self, *args, **kwargs):
++        return True
++
++    def _stream_consumer(self):
++        return None
++
++
++@pytest.fixture
++def loop():
++    loop = asyncio.new_event_loop()
++    thread = threading.Thread(target=loop.run_forever, daemon=True)
++    thread.start()
++    yield loop
++    loop.call_soon_threadsafe(loop.stop)
++    thread.join(timeout=5)
++
++
++def _local_adapter():
++    from gateway.session_local import LocalSessionAdapter
++    return LocalSessionAdapter(SimpleNamespace(runner=None, sessions={}))
++
++
++@pytest.mark.parametrize('case', ['registration_fails', 'no_owner'])
++def test_a_local_question_no_viewer_can_see_returns_at_once(case, loop, monkeypatch):
++    """A local chat's question reaches a person only as its viewers' card. When that card cannot be
++    registered, the plain-text re-ask went to ``LocalSessionAdapter.send`` (which publishes nothing), was
++    acknowledged, and the agent waited the whole clarify timeout for an answer nobody could give."""
++    from gateway.run_turn_runner_clarify_delivery import UNDELIVERED_NOT_SHOWN
++    from hermes_state_runtime import RuntimeStoreError
++    monkeypatch.setattr(clarify_gateway, 'get_clarify_timeout', lambda: 30)
++
++    def refuse(*args, **kwargs):
++        raise RuntimeStoreError('stale_generation')
++    authority = SimpleNamespace(sessions={}, register_clarify=refuse)
++    owner = None if case == 'no_owner' else (authority, 'chat', 7)
++    runner = _Runner(_local_adapter(), owner, loop)
++    started = time.monotonic()
++    response, answered = runner.ask('Ship it?', ['ship', 'hold'], False)
++    assert (response, answered) == (UNDELIVERED_NOT_SHOWN, False)
++    assert time.monotonic() - started < 10, 'the agent waited for an answer nobody could give'
++    assert 'could not be shown to the user' in response
++    assert not clarify_gateway.has_pending('route-local')
++
++
++def test_a_local_subagent_question_with_no_live_chat_returns_at_once(loop, monkeypatch):
++    from gateway.run_turn_runner_clarify_delivery import UNDELIVERED_NOT_SHOWN
++    monkeypatch.setattr(clarify_gateway, 'get_clarify_timeout', lambda: 30)
++    authority = SimpleNamespace(sessions={}, register_background_clarify=lambda *a, **k: False)
++    runner = _Runner(_local_adapter(), (authority, 'chat', 7), loop)
++    started = time.monotonic()
++    response, answered = runner.ask('Subagent "lane" asks: Which?', ['a', 'b'], False, rearm=False, subagent='lane')
++    assert (response, answered) == (UNDELIVERED_NOT_SHOWN, False)
++    assert time.monotonic() - started < 10
++
++
++def test_the_local_adapter_has_no_invisible_text_fallback():
++    from gateway.run_turn_runner_clarify_delivery import text_fallback_coro
++    assert text_fallback_coro(_local_adapter(), chat_id='chat', question='q', choices=['a'], clarify_id='x',
++                              session_key='k') is None
+-- 
+2.56.0
+

@@ -1,0 +1,23 @@
+# New: a subagent's answer keeps the chat's open question; a local question no viewer can see returns at once
+# (tests/gateway/test_subagent_answer_keeps_chat_question.py, with its real-gateway fixture)
+# The prompt projection, answers and subagent prompt paths it changes
+tests/gateway/test_shared_clarify.py
+tests/gateway/test_authority_approval_projection.py
+tests/gateway/test_authority_active_list.py
+tests/gateway/test_peer_client_approvals.py
+tests/gateway/test_session_bot_state.py
+tests/gateway/test_subagent_approval_outlives_turn.py
+tests/gateway/test_subagent_clarify_outlives_turn.py
+tests/gateway/test_subagent_prompt_without_live_session.py
+tests/gateway/test_steer_releases_pending_clarify.py
+tests/gateway/test_clarify_card_retire_on_timeout.py
+# The clarify delivery chain and the local adapter
+tests/gateway/test_clarify_delivery_fallback.py
+tests/gateway/test_clarify_send_timeout_ambiguity.py
+tests/gateway/test_prompt_decline_no_fallback.py
+tests/gateway/test_hosted_clarification_refusal.py
+tests/gateway/test_local_viewer_clarify_batch.py
+tests/gateway/test_local_viewer_events_turn.py
+tests/plugins/platforms/telegram/test_notification_kwargs.py
+tests/tools/test_clarify_gateway.py
+tests/tools/test_subagent_clarify_routing.py
