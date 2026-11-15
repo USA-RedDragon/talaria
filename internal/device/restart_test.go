@@ -69,16 +69,27 @@ func (d *daemon) stop() {
 	}
 }
 
-func joined(r resumed) (string, int64) {
-	var out string
-	first := int64(-1)
-	for _, o := range r.outputs {
-		if first < 0 {
-			first = o.Offset
-		}
-		out += o.Data
+// joined is the output of r from byte from on, as the plugin keeps it: a
+// message may start before from (section 4.7), and the plugin drops the
+// bytes it already has. ok is false when the first message starts after
+// from, which would be a gap.
+func joined(r resumed, from int64) (out string, ok bool) {
+	if len(r.outputs) == 0 {
+		return "", true
 	}
-	return out, first
+	if r.outputs[0].Offset > from {
+		return "", false
+	}
+	var b strings.Builder
+	for _, o := range r.outputs {
+		b.WriteString(o.Data)
+	}
+	all := b.String()
+	skip := from - r.outputs[0].Offset
+	if skip > int64(len(all)) {
+		return "", false
+	}
+	return all[skip:], true
 }
 
 // TestRestartAdoptsRunningCommand is a restart of the daemon in the middle
@@ -109,9 +120,9 @@ func TestRestartAdoptsRunningCommand(t *testing.T) {
 				t.Error(err)
 			}
 			r := readResumed(ctx, t, conn, "1")
-			out, first := joined(r)
-			if out != "second\n" || first != 6 || r.exit.Code != 7 || r.exit.Error != "" {
-				t.Errorf("resumed output %q from %d, exit %+v", out, first, r.exit)
+			out, ok := joined(r, 6)
+			if out != "second\n" || !ok || r.exit.Code != 7 || r.exit.Error != "" {
+				t.Errorf("resumed output %q (no gap %v), exit %+v", out, ok, r.exit)
 			}
 			close(finished)
 		}
@@ -159,9 +170,9 @@ func TestRestartWhileFinished(t *testing.T) {
 			close(gotFirst)
 		case 2:
 			r := readResumed(ctx, t, conn, "1")
-			out, first := joined(r)
-			if out != "first\nsecond\n" || first != 0 || r.exit.Code != 3 {
-				t.Errorf("resumed output %q from %d, exit %+v", out, first, r.exit)
+			out, ok := joined(r, 0)
+			if out != "first\nsecond\n" || !ok || r.exit.Code != 3 {
+				t.Errorf("resumed output %q (no gap %v), exit %+v", out, ok, r.exit)
 			}
 			close(finished)
 		}
@@ -256,7 +267,7 @@ func TestRestartStdin(t *testing.T) {
 				t.Error(err)
 			}
 			r := readResumed(ctx, t, conn, "stdin-1")
-			if out, _ := joined(r); out != "got: from the agent\n" || r.exit.Code != 0 {
+			if out, ok := joined(r, 6); out != "got: from the agent\n" || !ok || r.exit.Code != 0 {
 				t.Errorf("output %q, exit %+v", out, r.exit)
 			}
 			close(finished)
