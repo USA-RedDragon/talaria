@@ -104,7 +104,7 @@ func TestModelsDeploymentItemsAreReadOnly(t *testing.T) {
 		t.Fatalf("connected: %d %s", code, body)
 	}
 	pinned, _ := out["pinned"].(map[string]any)
-	if pinned == nil || pinned[keyModel] != pinnedModel || !strings.Contains(text(pinned["source"]), "/etc/hermes-managed") {
+	if pinned == nil || pinned[keyModel] != pinnedModel || !strings.Contains(text(pinned[keySource]), "/etc/hermes-managed") {
 		t.Fatalf("pinned default not reported: %s", body)
 	}
 	if !strings.Contains(body, `"managed":true`) {

@@ -25,7 +25,7 @@ func TestNoIdsInVisibleText(t *testing.T) {
 			toolset("brand_new_set", "", "calls new_tool and other_tool"),
 			toolset("code_execution", "Code Execution", "execute_code"))
 		a.Skills = append(a.Skills, map[string]any{fieldName: "weather_brief_daily", keyDesc: "Short forecasts", keyEnabled: true, "provenance": "hub"})
-		a.Servers = append(a.Servers, map[string]any{fieldName: "home_assistant", "transport": "http", keyURL: "https://ha.example/mcp", keyEnabled: true, "source": "config"})
+		a.Servers = append(a.Servers, map[string]any{fieldName: "home_assistant", "transport": "http", keyURL: "https://ha.example/mcp", keyEnabled: true, keySource: "config"})
 	})
 	prof := t.TempDir()
 	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "ids", "run.js"), chrome, e.url, prof).CombinedOutput()

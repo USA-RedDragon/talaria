@@ -289,7 +289,7 @@ func TestSessionsCarrySource(t *testing.T) {
 	for _, x := range list {
 		if x["backend_id"] == "pc" {
 			id, _ := x["id"].(string)
-			src[id] = x["source"]
+			src[id] = x[keySource]
 		}
 	}
 	if src["s-code"] != gateway.SourceACP || src["s-cli"] != gateway.SourceCLI {
