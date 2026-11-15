@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway"
@@ -36,6 +37,12 @@ func (g *Gateway) BumpRevision(id string) {
 // hMutate follows gateway/session_mutations.py and hermes_state_mutations.py
 // for the operations the hub sends.
 func (g *Gateway) hMutate(_ *conn, p map[string]any) (any, string, func()) {
+	if gate := g.compressGate; gate != nil && str(p, kOperation) == gateway.OpCompress {
+		// Hermes takes a while to summarize: wait without the lock.
+		g.mu.Unlock()
+		<-gate
+		g.mu.Lock()
+	}
 	s, op, payload, reason := g.mutateParams(p)
 	if reason != "" {
 		return nil, reason, nil
@@ -255,4 +262,15 @@ func (g *Gateway) Compressions() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return slices.Clone(g.compressed)
+}
+
+// HoldCompress makes compress mutations wait, as Hermes does while it
+// summarizes, until the returned release is called.
+func (g *Gateway) HoldCompress() (release func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	gate := make(chan struct{})
+	g.compressGate = gate
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
 }

@@ -220,6 +220,7 @@ type Gateway struct {
 	orphanBranches    bool
 	commands          []string
 	compressed        []string
+	compressGate      chan struct{}
 	// stalls hold the next call of a method on its connection (StallNext).
 	stalls map[string]chan struct{}
 	// resumeDelay is how long session.resume takes (SlowResume).

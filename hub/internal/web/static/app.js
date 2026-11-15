@@ -1061,6 +1061,7 @@
 
     setRunning(on) {
       this.running = !!on;
+      if (!on && this.afterTurn && this.afterTurn.length) this.afterTurn.splice(0).forEach((f) => f());
       $("subtitle").textContent = on ? t("working") : "";
       if (view === this) {
         composer.setRunning(on);
@@ -3907,7 +3908,8 @@
   // leaves the message box and its files alone and throws when it fails.
   async function deliver(chat, text, files, extra, page) {
     const input = $("input");
-    const steer = !!chat.running;
+    let steer = !!chat.running;
+    const cmd = !page ? window.HubCmd.parse(text) : null;
     const cid = window.HubSend.newID();
     const shown = files.map((a) => ({ name: a.file.name || "attachment", image: a.image,
       url: a.url ? URL.createObjectURL(a.file) : "", pdf: a.pdf, pages: a.pages }));
@@ -3925,6 +3927,35 @@
     if (!page) {
       input.value = "";
       grow();
+    }
+    // A command runs now, not in a queue: the bubble shows as received, and
+    // a line says what is going on until the result replaces it.
+    let line = null, tick = 0;
+    const endLine = (result) => {
+      clearInterval(tick);
+      if (!line) return;
+      if (result) {
+        line.className = "msg result";
+        line.textContent = result;
+        if (!line.isConnected) chat.add(line);
+      } else line.remove();
+      line = null;
+    };
+    if (cmd) {
+      bubble.classList.remove("pending");
+      bubble.classList.add("command");
+      line = chat.add(el("div", "status cmdline", window.HubCmd.waiting(cmd)));
+      if (cmd.compress && steer) {
+        // Hermes compresses only between turns: wait for this one to end.
+        chat.bottom();
+        await new Promise((done) => (chat.afterTurn = chat.afterTurn || []).push(done));
+        steer = false;
+      }
+      const t0 = Date.now();
+      const paint = () => { if (line) line.textContent = window.HubCmd.running(cmd, Date.now() - t0); };
+      paint();
+      tick = setInterval(paint, 1000);
+      chat.bottom();
     }
     let body = steer ? { text, steer: true, id: cid } : { text, id: cid };
     if (extra) Object.assign(body, extra);
@@ -3966,7 +3997,8 @@
           chat.pending = chat.pending.filter((x) => x !== p);
           p.bubble.classList.remove("pending");
           if (p.label) p.label.remove();
-          if (r.output) chat.add(el("div", "msg result", r.output));
+          if (cmd) endLine(window.HubCmd.result(cmd, r.output));
+          else if (r.output) chat.add(el("div", "msg result", r.output));
         } else if (r && r.steered && p) {
           chat.steered(p);
           toast("Sent. Read after the current step.", { ok: true });
@@ -3979,6 +4011,7 @@
       if (r && r.notice && chat === view) chat.add(el("div", "note", r.notice));
       for (const a of files) if (a.url) URL.revokeObjectURL(a.url);
     } catch (e) {
+      endLine();
       const p = item();
       if (p) {
         p.bubble.remove();
@@ -3995,6 +4028,7 @@
       }
       banner("Could not send: " + e.message + (e.mayBeSent ? ". It may have reached Talaria: look at the chat before you send it again." : ""), true);
     } finally {
+      endLine(null);
       if (files.length) sending--;
       composer.update();
     }
