@@ -2,7 +2,7 @@
 
 ## Update
 
-The daemon updates itself. When the service runs `talaria run` and `update.auto` is on (the default), it looks for a new stable release shortly after it starts and then every `update.interval` (6 hours by default). It installs a release with the same checks as the `update` command, runs the new program with `run --check-config` before it installs it, waits until no command, browser operation, MCP call or chat is running on this computer, and restarts. It never installs a pre-release or an older release. It updates only the program that setup installed (`~/.talaria/bin/talaria`) and only when the service runs that program: a daemon you started from another path does not update itself. `update.interval` is at least `1h`.
+The daemon updates itself. When the service runs `talaria run` and `update.auto` is on (the default), it looks for a new stable release shortly after it starts and then every `update.interval` (6 hours by default). It installs a release with the same checks as the `update` command, runs the new program with `run --check-config` before it installs it, waits until no browser operation, MCP call or chat is running on this computer, and restarts. Agent commands keep running across the restart and the new daemon takes them over, with their output and exit code; on Windows, and where commands cannot get a systemd scope of their own, it waits for them to end first. It never installs a pre-release or an older release. It updates only the program that setup installed (`~/.talaria/bin/talaria`) and only when the service runs that program: a daemon you started from another path does not update itself. `update.interval` is at least `1h`.
 
 To update by hand:
 

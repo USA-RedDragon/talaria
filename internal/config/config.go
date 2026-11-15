@@ -107,7 +107,7 @@ type Reconnect struct {
 
 // Update is how run keeps talaria up to date (README, Updates).
 type Update struct {
-	Auto     bool          `name:"auto" default:"true" description:"Let run install new releases by itself: it checks GitHub, verifies the release like talaria update, waits until no command, browser operation, MCP call or chat runs, and exits so the service restarts it. Only when the talaria service runs it and the device token comes from login, so never on a service device that uses hub.token or hub.token-file. The sandbox and device images turn it off"`
+	Auto     bool          `name:"auto" default:"true" description:"Let run install new releases by itself: it checks GitHub, verifies the release like talaria update, waits until no browser operation, MCP call or chat runs (commands keep running across the restart where they can, else it waits for them too), and exits so the service restarts it. Only when the talaria service runs it and the device token comes from login, so never on a service device that uses hub.token or hub.token-file. The sandbox and device images turn it off"`
 	Interval time.Duration `name:"interval" default:"6h" description:"Time between release checks of run, with up to 10% jitter. At least 1h"`
 }
 
