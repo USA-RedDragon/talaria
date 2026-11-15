@@ -1,0 +1,597 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 20:49:25 +0000
+Subject: [PATCH] feat(gateway): a clarify result keeps what its card needs
+
+The stored clarify tool result now carries, per question, multi_select,
+answered_at (epoch seconds) and answered_via (the client that answered:
+hub, telegram, or the chat platform of a typed reply), and for the call
+ended_at and, for a timeout, timeout_s. clarify.settled carries the same
+with outcome (answered, skipped, timed_out, cancelled), the question, its
+choices, the answer and the subagent that asked, so a viewer can draw a
+finished question from stored data after a reload or a restart. Before, the
+result held only the question, the choices and the answer, and a client
+could show nothing more than "Answered".
+
+clarify.respond takes an optional via (runtime.describe lists
+clarify-card-v1). An answer typed in a chat platform records that platform.
+---
+ apps/shared/src/gateway-contract.generated.ts |   1 +
+ apps/shared/src/gateway-contract.openrpc.json |  12 ++
+ gateway/run_inbound.py                        |   3 +-
+ gateway/run_turn_runner.py                    |  28 +++-
+ gateway/session_controls.py                   |   9 +-
+ gateway/session_pending_controls.py           |  47 +++++-
+ tests/gateway/test_clarify_card_record.py     | 134 ++++++++++++++++++
+ .../test_clarify_card_retire_on_timeout.py    |   9 +-
+ .../gateway/test_clarify_delivery_fallback.py |   3 +-
+ .../test_subagent_clarify_outlives_turn.py    |   2 +-
+ tools/clarify_gateway.py                      |  22 ++-
+ tools/clarify_tool.py                         |  26 +++-
+ tui_gateway/contracts/canonical.py            |   1 +
+ 13 files changed, 269 insertions(+), 28 deletions(-)
+ create mode 100644 tests/gateway/test_clarify_card_record.py
+
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index 78f25e37..fac5e14e 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -4981,6 +4981,7 @@ export interface ClarifyRespondParams {
+   execution_generation: number
+   prompt_id: string
+   answer: string
++  via?: string | null
+ }
+ export interface PromptResponseResult {
+   status: 'resolved' | 'already_resolved'
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index 1a067049..b7378e2d 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -12363,6 +12363,18 @@
+           "answer": {
+             "title": "Answer",
+             "type": "string"
++          },
++          "via": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Via"
+           }
+         },
+         "required": [
+diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
+index c1862d8d..e810744a 100644
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -391,7 +391,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
+         # they can retry; on timeout the agent unblocks with an empty response.
+         if not _raw_clarify_reply or _raw_clarify_reply.startswith("/"):
+             return None
+-        _text_outcome = _clarify_mod.attempt_text_response_for_session(_quick_key, _raw_clarify_reply)
++        _text_outcome = _clarify_mod.attempt_text_response_for_session(
++            _quick_key, _raw_clarify_reply, str(getattr(getattr(source, "platform", None), "value", "") or ""))
+         if _text_outcome == _clarify_mod.TEXT_RESOLVED:
+             logger.info(
+                 "Gateway intercepted clarify text response (session=%s, id=%s)",
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+index f92dbd80..96526eac 100644
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -652,8 +652,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+         hint = "" if platform == Platform.LOCAL else f"\n{t('gateway.clarify.skip_hint')}"
+         for index, entry in enumerate(questions):
+             question = f"{entry['question']}{hint}"
++            marks: dict[str, Any] = {}
+             raw, answered = self._ask_clarify_question(
+-                question, entry["choices"], bool(entry["multi_select"]), rearm=index == last)
++                question, entry["choices"], bool(entry["multi_select"]), rearm=index == last, marks=marks)
++            if marks:
++                reply["ended_at"] = marks["ended_at"]
++                if answered:
++                    reply.setdefault("marks", {})[entry["qid"]] = marks
+             if raw == CANCELLED:
+                 reply["outcome"] = "cancelled"
+                 break
+@@ -663,6 +668,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 # inactivity, which is the misreport #112684 describes for an undelivered card.
+                 undelivered = raw in UNDELIVERED_ALL
+                 reply.update(outcome="undelivered" if undelivered else "timed_out", notice=raw)
++                if not undelivered:
++                    from tools.clarify_gateway import get_clarify_timeout
++                    reply["timeout_s"] = get_clarify_timeout()
+                 break
+             answers[entry["qid"]] = None if raw == SKIPPED else raw
+         return reply
+@@ -683,21 +691,31 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+         hint = "" if platform == Platform.LOCAL else f"\n{t('gateway.clarify.skip_hint')}"
+         for entry in questions:
+             question = f'Subagent "{goal}" asks: {entry["question"]}{hint}'
++            marks: dict[str, Any] = {}
+             raw, answered = self._ask_clarify_question(
+-                question, entry["choices"], bool(entry["multi_select"]), rearm=False, subagent=goal)
++                question, entry["choices"], bool(entry["multi_select"]), rearm=False, subagent=goal, marks=marks)
++            if marks:
++                reply["ended_at"] = marks["ended_at"]
++                if answered:
++                    reply.setdefault("marks", {})[entry["qid"]] = marks
+             if raw == CANCELLED:
+                 reply["outcome"] = "cancelled"
+                 break
+             if not answered:
+                 undelivered = raw in UNDELIVERED_ALL
+                 reply.update(outcome="undelivered" if undelivered else "timed_out", notice=raw)
++                if not undelivered:
++                    from tools.clarify_gateway import get_clarify_timeout
++                    reply["timeout_s"] = get_clarify_timeout()
+                 break
+             answers[entry["qid"]] = None if raw == SKIPPED else raw
+         return reply
+ 
+-    def _ask_clarify_question(self, question, choices, multi_select, rearm: bool = True, subagent: str = "") -> tuple[str, bool]:
++    def _ask_clarify_question(self, question, choices, multi_select, rearm: bool = True, subagent: str = "",
++                              marks: dict | None = None) -> tuple[str, bool]:
+         """One card: register, send, wait, then retire it (no answer) or re-arm (answer).
+-        Returns ``(response, answered)``; the caller decides what "no answer" means. A subagent's card
++        Returns ``(response, answered)``; the caller decides what "no answer" means. ``marks`` (a dict) is filled
++        with ``at`` / ``via`` of the answer and ``ended_at`` of the wait, for the result the model reads. A subagent's card
+         (``subagent`` = its goal) leaves this turn's stream and typing alone: the turn may be over."""
+         from gateway.run_turn_runner_clarify_delivery import (
+             UNDELIVERED, UNDELIVERED_NO_SURFACE, UNDELIVERED_NOT_SHOWN, _clarify_send_then_wait, text_fallback_coro)
+@@ -789,6 +807,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 ctx._status_adapter.resume_typing_for_chat(ctx._status_chat_id)
+             except Exception:
+                 logger.debug("resume_typing_for_chat after clarify answer failed", exc_info=True)
++        if marks is not None:
++            marks.update(at=entry.answered_at, via=entry.answered_via, ended_at=entry.ended_at or time.time())
+         return response, answered
+ 
+     def _background_approval_notify(self, approval_data: dict) -> None:
+diff --git a/gateway/session_controls.py b/gateway/session_controls.py
+index 3edf1c76..16269f99 100644
+--- a/gateway/session_controls.py
++++ b/gateway/session_controls.py
+@@ -564,7 +564,7 @@ class AuthorityConnection:
+                 'authority_epoch': self.authority.epoch,
+                 'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1', 'acp-editor-policy-v1',
+                                  'acp-session-mcp-v1', 'clarify-batch-v1', 'plugin-rpc-v1', 'session-client-v1', 'session-transcript-v1', 'session-list-picker-v1',
+-                                 'session-list-audience-v1', 'tool-background-v1', 'transcript-tool-details-v1',
++                                 'session-list-audience-v1', 'tool-background-v1', 'transcript-tool-details-v1', 'clarify-card-v1',
+                                  *await asyncio.to_thread(self._image_render_capabilities)],
+                 'session_create': {'sources': sorted(SURFACES),
+                                    'parameters': sorted(CREATE_FIELDS | {'title'})},
+@@ -1001,10 +1001,13 @@ class AuthorityConnection:
+                                             params["prompt_id"], {"choice": params["choice"]})
+ 
+     async def respond_clarify(self, ref, params):
+-        if set(params) != {"session_id", "execution_generation", "prompt_id", "answer"}:
++        if set(params) - {"via"} != {"session_id", "execution_generation", "prompt_id", "answer"}:
+             raise RuntimeStoreError("invalid_params")
++        response = {"answer": params["answer"]}
++        if isinstance(params.get("via"), str) and params["via"]:
++            response["via"] = params["via"]  # the client that answers, kept for the question's card
+         return await self.authority.respond(self.actor, ref, params["execution_generation"],
+-            params["prompt_id"], {"answer": params["answer"]}, kind="clarify")
++            params["prompt_id"], response, kind="clarify")
+ 
+     async def close(self):
+         for sibling in self._siblings.values():
+diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
+index f5ff2a45..5ef6e735 100644
+--- a/gateway/session_pending_controls.py
++++ b/gateway/session_pending_controls.py
+@@ -9,6 +9,38 @@ from hermes_state_runtime import RuntimeStoreError
+ from tools.approval import list_gateway_approvals, resolve_gateway_approval
+ 
+ 
++def _clarify_record(entry, prompt):
++    """What a settled question keeps for its card, as ``clarify.settled`` carries it: the question as it was
++    asked (so a viewer that never saw it can draw the card), how the wait ended and the answer with its time and
++    the client that gave it. ``outcome`` is ``answered`` / ``skipped`` / ``timed_out`` / ``cancelled``; ``answer``
++    is the text the user gave, or a JSON array of the picks of a multi-select question."""
++    from tools.clarify_gateway import CANCELLED, SKIPPED
++    response = getattr(entry, 'response', None)
++    if response == CANCELLED:
++        outcome = 'cancelled'
++    elif response == SKIPPED or (response == '' and getattr(entry, 'answered_at', 0)):
++        outcome = 'skipped'  # an empty answer is a skip (clarify.respond)
++    elif response in (None, ''):
++        outcome = 'timed_out'
++    else:
++        outcome = 'answered'
++    record = {'question': prompt.get('question', ''), 'choices': list(prompt.get('choices') or []),
++              'multi_select': bool(prompt.get('multi_select')), 'outcome': outcome}
++    if prompt.get('subagent'):
++        record['subagent'] = prompt['subagent']
++    if prompt.get('timeout_s') is not None:
++        record['timeout_s'] = prompt['timeout_s']
++    if outcome == 'answered':
++        record['answer'] = response
++    if getattr(entry, 'ended_at', 0):
++        record['ended_at'] = entry.ended_at
++    if outcome == 'answered':
++        record['answered_at'] = entry.answered_at
++        if entry.answered_via:
++            record['answered_via'] = entry.answered_via
++    return record
++
++
+ class PendingControls:
+     def __init__(self, events):
+         self.events = events
+@@ -89,8 +121,10 @@ class PendingControls:
+                     del self.pending[prompt_id]
+                     self.background.discard(prompt_id)
+                     self.remote_responders.pop(prompt_id, None)
+-                    self.events.publish(session_id, {'prompt_id': prompt_id,
+-                        'execution_generation': prompt['execution_generation']}, event_type=prompt['kind'] + '.settled')
++                    settled = {'prompt_id': prompt_id, 'execution_generation': prompt['execution_generation']}
++                    if prompt['kind'] == 'clarify':
++                        settled.update(_clarify_record(route, prompt))
++                    self.events.publish(session_id, settled, event_type=prompt['kind'] + '.settled')
+             return tuple(deepcopy(prompt) for _, prompt in self.pending.values())
+ 
+     def respond(self, session_id, generation, prompt_id, response, *, kind="approval", prune_generation=None):
+@@ -107,7 +141,7 @@ class PendingControls:
+                 raise RuntimeStoreError('invalid_params')
+             if prompt_id in self.remote_responders:
+                 field = 'answer' if kind == 'clarify' else 'choice'
+-                if (not isinstance(response, dict) or set(response) != {field}
++                if (not isinstance(response, dict) or set(response) - {'via'} != {field}
+                         or not isinstance(response[field], str) or len(response[field]) > 16384
+                         or (kind == 'approval' and response[field] not in prompt['choices'])):
+                     raise RuntimeStoreError('invalid_params')
+@@ -120,10 +154,11 @@ class PendingControls:
+                 return {'status': 'resolved', 'prompt_id': prompt_id}
+             if kind == 'clarify':
+                 from tools.clarify_gateway import resolve_gateway_clarify
+-                if (not isinstance(response, dict) or set(response) != {'answer'}
+-                        or not isinstance(response['answer'], str)):
++                if (not isinstance(response, dict) or set(response) - {'via'} != {'answer'}
++                        or not isinstance(response['answer'], str)
++                        or not isinstance(response.get('via', ''), str)):
+                     raise RuntimeStoreError('invalid_params')
+-                resolved = resolve_gateway_clarify(prompt_id, response['answer'])
++                resolved = resolve_gateway_clarify(prompt_id, response['answer'], response.get('via', ''))
+                 self.snapshot(session_id, prune)
+                 return {'status': 'resolved' if resolved else 'already_resolved', 'prompt_id': prompt_id}
+             if not isinstance(response, dict) or set(response) != {'choice'} or response['choice'] not in prompt['choices']:
+diff --git a/tests/gateway/test_clarify_card_record.py b/tests/gateway/test_clarify_card_record.py
+new file mode 100644
+index 00000000..354c61a7
+--- /dev/null
++++ b/tests/gateway/test_clarify_card_record.py
+@@ -0,0 +1,134 @@
++"""A question keeps what its card needs once it is over: the choices that were offered, the answer, when and
++where it was given, or that the wait timed out. ``clarify.settled`` carries it for a viewer that watches, and the
++stored clarify tool result carries it for a viewer that reads the transcript later."""
++import json
++import threading
++import time
++
++from tools import clarify_gateway
++from tools.clarify_tool import clarify_tool
++
++
++class _Events:
++    def __init__(self):
++        self.lock = threading.RLock()
++        self.out = []
++
++    def publish(self, session_id, payload, event_type):
++        self.out.append((event_type, dict(payload)))
++
++    def settled(self, prompt_id):
++        return next(p for kind, p in self.out if kind == 'clarify.settled' and p['prompt_id'] == prompt_id)
++
++
++def _controls():
++    from gateway.session_pending_controls import PendingControls
++    events = _Events()
++    return PendingControls(events), events
++
++
++def _ask(controls, clarify_id, choices, multi=False, subagent=''):
++    entry = clarify_gateway.register(clarify_id, 'route-card', 'Which layouts?', choices, multi, subagent=subagent)
++    controls.register_clarify('s', 3, entry, timeout_s=1800)
++    return entry
++
++
++def test_a_pick_settles_with_the_question_the_answer_the_time_and_the_client():
++    controls, events = _controls()
++    try:
++        _ask(controls, 'q-pick', ['Switch', 'Game Boy', 'NDS'], multi=True)
++        before = time.time()
++        reply = controls.respond('s', 3, 'q-pick', {'answer': '["Switch", "NDS"]', 'via': 'telegram'}, kind='clarify')
++        assert reply['status'] == 'resolved'
++        done = events.settled('q-pick')
++        assert done['outcome'] == 'answered'
++        assert (done['question'], done['choices'], done['multi_select']) == ('Which layouts?', ['Switch', 'Game Boy', 'NDS'], True)
++        assert json.loads(done['answer']) == ['Switch', 'NDS']
++        assert done['answered_via'] == 'telegram'
++        assert before <= done['answered_at'] <= time.time()
++        assert done['timeout_s'] == 1800
++    finally:
++        clarify_gateway.clear_session('route-card')
++
++
++def test_a_typed_answer_and_a_skip_settle_with_their_outcome():
++    controls, events = _controls()
++    try:
++        _ask(controls, 'q-typed', ['a', 'b'])
++        controls.respond('s', 3, 'q-typed', {'answer': 'something else'}, kind='clarify')
++        done = events.settled('q-typed')
++        assert (done['outcome'], done['answer']) == ('answered', 'something else')
++        assert 'answered_via' not in done  # a client that does not say where it answers
++
++        _ask(controls, 'q-skip', ['a', 'b'])
++        controls.respond('s', 3, 'q-skip', {'answer': '', 'via': 'hub'}, kind='clarify')
++        skipped = events.settled('q-skip')
++        assert skipped['outcome'] == 'skipped' and 'answer' not in skipped
++    finally:
++        clarify_gateway.clear_session('route-card')
++
++
++def test_a_subagent_question_names_the_subagent_and_a_wait_that_ran_out_says_so():
++    controls, events = _controls()
++    try:
++        entry = _ask(controls, 'q-sub', ['a', 'b'], subagent='relift lane')
++        assert clarify_gateway.wait_for_response('q-sub', 0.05) is None
++        controls.snapshot('s', 3)
++        done = events.settled('q-sub')
++        assert (done['outcome'], done['subagent']) == ('timed_out', 'relift lane')
++        assert 'answer' not in done and done['ended_at'] == entry.ended_at > 0
++    finally:
++        clarify_gateway.clear_session('route-card')
++
++
++def test_a_withdrawn_question_settles_as_cancelled():
++    controls, events = _controls()
++    _ask(controls, 'q-gone', ['a'])
++    assert clarify_gateway.clear_session('route-card') == 1
++    controls.snapshot('s', 3)
++    assert events.settled('q-gone')['outcome'] == 'cancelled'
++
++
++def test_the_stored_result_keeps_multi_select_the_time_and_the_client():
++    marks = {'q0': {'at': 1763228160.5, 'via': 'hub'}}
++    reply = {'answers': {'q0': 'Double-tap the stick', 'q1': '["Switch"]'}, 'outcome': 'submitted',
++             'marks': {**marks, 'q1': {'at': 1763228200.0, 'via': 'telegram'}}, 'ended_at': 1763228200.0}
++    result = json.loads(clarify_tool([
++        {'question': 'Stick clicks?', 'choices': ['Double-tap the stick', 'Separate buttons']},
++        {'question': 'Layouts?', 'choices': ['Switch', 'NDS'], 'multi_select': True}], callback=lambda qs: reply))
++    first, second = result['responses']
++    assert (first['multi_select'], first['answered_at'], first['answered_via']) == (False, 1763228160.5, 'hub')
++    assert (second['multi_select'], second['user_response'], second['answered_via']) == (True, ['Switch'], 'telegram')
++    assert second['choices_offered'] == ['Switch', 'NDS']
++    assert result['ended_at'] == 1763228200.0 and 'timeout_s' not in result
++
++
++def test_a_timed_out_result_says_how_long_it_waited():
++    reply = {'answers': {}, 'outcome': 'timed_out', 'notice': '[user did not respond within 30m]', 'timeout_s': 1800,
++             'ended_at': 1763228200.0}
++    result = json.loads(clarify_tool([{'question': 'Rename?', 'choices': ['a', 'b']}], callback=lambda qs: reply))
++    assert (result['outcome'], result['timeout_s'], result['ended_at']) == ('timed_out', 1800, 1763228200.0)
++    assert result['responses'][0]['status'] == 'unanswered'
++    assert 'answered_at' not in result['responses'][0]
++
++
++def test_respond_over_the_wire_takes_the_client_name_and_nothing_else():
++    import asyncio
++    from types import SimpleNamespace
++
++    import pytest
++
++    from gateway.session_controls import AuthorityConnection as SessionControls
++    from hermes_state_runtime import RuntimeStoreError
++    seen = []
++
++    async def respond(actor, ref, generation, prompt_id, response, kind):
++        seen.append(response)
++        return {'status': 'resolved', 'prompt_id': prompt_id}
++    me = SimpleNamespace(authority=SimpleNamespace(respond=lambda *a, **k: respond(*a, **k)), actor='a')
++    base = {'session_id': 's', 'execution_generation': 1, 'prompt_id': 'p', 'answer': 'x'}
++    asyncio.run(SessionControls.respond_clarify(me, 'ref', {**base, 'via': 'hub'}))
++    asyncio.run(SessionControls.respond_clarify(me, 'ref', dict(base)))
++    assert seen == [{'answer': 'x', 'via': 'hub'}, {'answer': 'x'}]
++    with pytest.raises(RuntimeStoreError):
++        asyncio.run(SessionControls.respond_clarify(me, 'ref', {**base, 'extra': 1}))
+diff --git a/tests/gateway/test_clarify_card_retire_on_timeout.py b/tests/gateway/test_clarify_card_retire_on_timeout.py
+index 04ba5e3b..5f502762 100644
+--- a/tests/gateway/test_clarify_card_retire_on_timeout.py
++++ b/tests/gateway/test_clarify_card_retire_on_timeout.py
+@@ -106,11 +106,16 @@ def test_timeout_schedules_nothing_for_adapters_without_a_card():
+     assert labels == ["Clarify send failed to schedule"]
+ 
+ 
++def _core(reply):
++    """The reply without what the stored result adds for the question's card (marks, ended_at, timeout_s)."""
++    return {k: v for k, v in reply.items() if k not in ("marks", "ended_at", "timeout_s")}
++
++
+ def test_real_answer_starting_with_a_bracket_is_not_mistaken_for_a_sentinel():
+     """'[A] staging' is a user answer, not a timeout: no card retirement, typing re-armed."""
+     adapter = _CardAdapter()
+     reply, labels = _run_clarify(adapter, answers=("[A] staging",))
+-    assert reply == {"answers": {"q0": "[A] staging"}, "outcome": "submitted"}
++    assert _core(reply) == {"answers": {"q0": "[A] staging"}, "outcome": "submitted"}
+     assert adapter.retired == []
+     assert labels == ["Clarify send failed to schedule"]
+     assert adapter.resumed == 1  # a lone card re-arms typing the moment it is answered
+@@ -139,7 +144,7 @@ def test_batch_routing(answers, asked, payload, resumed):
+     adapter = _CardAdapter()
+     reply, _labels = _run_clarify(adapter, questions=_THREE_QUESTIONS, answers=answers)
+     assert _asked(adapter) == asked
+-    assert reply == payload
++    assert _core(reply) == payload
+     assert adapter.resumed == resumed
+     if payload["outcome"] == "timed_out":
+         assert len(adapter.retired) == 1  # the card that expired is retired
+diff --git a/tests/gateway/test_clarify_delivery_fallback.py b/tests/gateway/test_clarify_delivery_fallback.py
+index 0e181626..cff39345 100644
+--- a/tests/gateway/test_clarify_delivery_fallback.py
++++ b/tests/gateway/test_clarify_delivery_fallback.py
+@@ -97,7 +97,8 @@ def test_rejected_card_is_reasked_as_plain_text_and_the_typed_answer_counts(loop
+     adapter = _CardAdapter(rejected)
+     _answer_once_text_prompt_is_seen(adapter, "2")
+     reply = _runner(adapter, loop, monkeypatch)._clarify_callback_sync(PICK)
+-    assert reply == {"answers": {"q0": "beta"}, "outcome": "submitted"}  # the numbered text prompt maps "2" back to the choice
++    assert {k: reply[k] for k in ("answers", "outcome")} == {"answers": {"q0": "beta"}, "outcome": "submitted"}  # the numbered text prompt maps "2" back to the choice
++    assert reply["marks"]["q0"]["at"] and reply["ended_at"]  # the card of the answered question keeps when
+     assert adapter.cards == 1
+     assert len(adapter.sent_text) == 1 and "1. alpha" in adapter.sent_text[0]
+ 
+diff --git a/tests/gateway/test_subagent_clarify_outlives_turn.py b/tests/gateway/test_subagent_clarify_outlives_turn.py
+index aa73bec1..db5dfd0b 100644
+--- a/tests/gateway/test_subagent_clarify_outlives_turn.py
++++ b/tests/gateway/test_subagent_clarify_outlives_turn.py
+@@ -133,7 +133,7 @@ async def test_a_subagents_question_is_a_card_of_the_chat_that_outlives_the_turn
+             actor, ref, generation, prompt["prompt_id"], {"answer": "b"}, kind="clarify")
+         assert result["status"] == "resolved"
+         thread.join(timeout=10)
+-    assert holder["reply"] == {"answers": {"q0": "b"}, "outcome": "submitted"}
++    assert {k: v for k, v in holder["reply"].items() if k not in ("marks", "ended_at")} == {"answers": {"q0": "b"}, "outcome": "submitted"}
+     assert live.controls.snapshot("s", generation2) == ()
+ 
+ 
+diff --git a/tools/clarify_gateway.py b/tools/clarify_gateway.py
+index 6694a675..fb127159 100644
+--- a/tools/clarify_gateway.py
++++ b/tools/clarify_gateway.py
+@@ -28,6 +28,12 @@ class _ClarifyEntry:
+     response: Optional[str] = None
+     awaiting_text: bool = False  # set when user picked "Other" or clarify is open-ended
+     subagent: str = ""  # goal of the delegate_task child that asks; "" for the chat's own question
++    # How the wait ended, for the card that keeps the question after it: when the user answered and where
++    # (``answered_via``: "hub", "telegram", ... as the answering client names itself, "" when it did not), and
++    # when the wait ended whatever the way (``ended_at``, epoch seconds; 0 while it waits).
++    answered_at: float = 0.0
++    answered_via: str = ""
++    ended_at: float = 0.0
+ 
+ 
+ _lock = threading.RLock()
+@@ -98,6 +104,7 @@ def wait_for_response(clarify_id: str, timeout: float) -> Optional[str]:
+             touch_activity_if_due(activity_state, "waiting for user clarify response")
+     with _lock:
+         _entries.pop(clarify_id, None)  # regardless of outcome
++        entry.ended_at = entry.ended_at or time.time()
+         entry.event.set()  # Timeout also retires shared projections of this waiter.
+         ids = _session_index.get(entry.session_key) or []
+         if clarify_id in ids:
+@@ -107,13 +114,16 @@ def wait_for_response(clarify_id: str, timeout: float) -> Optional[str]:
+     return entry.response
+ 
+ 
+-def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
+-    """Unblock the waiter on ``clarify_id``; False if already resolved/expired/unknown."""
++def resolve_gateway_clarify(clarify_id: str, response: str, via: str = "") -> bool:
++    """Unblock the waiter on ``clarify_id``; False if already resolved/expired/unknown. ``via`` names the client
++    that answered (``"hub"``, ``"telegram"``); it is kept with the time for the card of the answered question."""
+     with _lock:
+         entry = _entries.get(clarify_id)
+         if entry is None or entry.event.is_set():
+             return False
+         entry.response = str(response) if response is not None else ""
++        entry.answered_at = entry.ended_at = time.time()
++        entry.answered_via = str(via or "")[:32]
+         entry.event.set()
+         return True
+ 
+@@ -248,7 +258,7 @@ def _coerce_multi_select_text(entry: _ClarifyEntry, text: str) -> Optional[str]:
+     return json.dumps(selected, ensure_ascii=False) if selected else None
+ 
+ 
+-def attempt_text_response_for_session(session_key: str, response: str) -> str:
++def attempt_text_response_for_session(session_key: str, response: str, via: str = "") -> str:
+     """Try to resolve the oldest pending clarify from typed text; returns a TEXT_* outcome."""
+     entry = get_pending_for_session(session_key, include_choice_prompts=True)
+     if entry is None:
+@@ -256,14 +266,14 @@ def attempt_text_response_for_session(session_key: str, response: str) -> str:
+     coerced, reason = _coerce_text_response_detailed(entry, response)
+     if coerced is None:
+         return TEXT_REJECTED_SELECTION if reason == "invalid_selection" else TEXT_REJECTED_PROSE
+-    if resolve_gateway_clarify(entry.clarify_id, coerced):
++    if resolve_gateway_clarify(entry.clarify_id, coerced, via):
+         return TEXT_RESOLVED
+     return TEXT_NO_PENDING  # lost a race with a button/callback resolution — no work left
+ 
+ 
+-def resolve_text_response_for_session(session_key: str, response: str) -> bool:
++def resolve_text_response_for_session(session_key: str, response: str, via: str = "") -> bool:
+     """True only when the typed reply was accepted and the waiter unblocked."""
+-    return attempt_text_response_for_session(session_key, response) == TEXT_RESOLVED
++    return attempt_text_response_for_session(session_key, response, via) == TEXT_RESOLVED
+ 
+ 
+ def mark_awaiting_text(clarify_id: str) -> bool:
+diff --git a/tools/clarify_tool.py b/tools/clarify_tool.py
+index c5798b46..a3af5c4d 100644
+--- a/tools/clarify_tool.py
++++ b/tools/clarify_tool.py
+@@ -3,6 +3,7 @@ Schema, validation and a thin dispatcher; the UI lives in a platform-provided
+ callback (cli.py, gateway/run.py, tui_gateway)."""
+ 
+ import json
++import time
+ from typing import Callable, Dict, List, Optional
+ 
+ MAX_CHOICES = 4  # the UI always appends an "Other (type your answer)" row
+@@ -96,17 +97,34 @@ def _result(normalized: list[dict], reply: dict, shown: list[dict] | None = None
+     """Result JSON from a callback reply ``{"answers": {qid: raw | None}, "outcome", "notice"?}``:
+     every response carries ``status`` and ``user_response`` (null unless answered); ``outcome``
+     says how the wait ended and ``notice`` (surface-supplied) says why. A picked display-copy
+-    choice (from ``shown``) maps back to the raw choice by position."""
++    choice (from ``shown``) maps back to the raw choice by position.
++
++    The result also keeps what a question card needs once the question is over, so the card can be drawn again
++    from the stored transcript: every response says whether it was ``multi_select`` and, when the surface told,
++    ``answered_at`` (epoch seconds) and ``answered_via`` (``"hub"``, ``"telegram"``); the result has ``ended_at``
++    and, for a wait that timed out, ``timeout_s``. A typed answer is the value that is not one of
++    ``choices_offered`` (the \"Other\" row)."""
+     answers = reply.get("answers") or {}
++    marks = reply.get("marks") or {}
+     responses = []
+     for entry, seen in zip(normalized, shown or normalized):
+         status, value = _response_status(entry["qid"], answers, entry["multi_select"])
+         back = dict(zip(seen["choices_offered"] or [], entry["choices_offered"] or []))
+         if back and value:
+             value = [back.get(v, v) for v in value] if isinstance(value, list) else back.get(value, value)
+-        responses.append({"question": entry["question"], "choices_offered": entry["choices_offered"],
+-                          "status": status, "user_response": value})
+-    result: dict[str, object] = {"responses": responses, "outcome": reply["outcome"]}
++        response = {"question": entry["question"], "choices_offered": entry["choices_offered"],
++                    "multi_select": bool(entry["multi_select"]), "status": status, "user_response": value}
++        mark = marks.get(entry["qid"]) if isinstance(marks, dict) else None
++        if status == "answered" and isinstance(mark, dict):
++            if mark.get("at"):
++                response["answered_at"] = round(float(mark["at"]), 3)
++            if mark.get("via"):
++                response["answered_via"] = str(mark["via"])
++        responses.append(response)
++    result: dict[str, object] = {"responses": responses, "outcome": reply["outcome"],
++                                 "ended_at": round(float(reply.get("ended_at") or time.time()), 3)}
++    if reply.get("timeout_s") and reply["outcome"] == "timed_out":
++        result["timeout_s"] = int(reply["timeout_s"])
+     if reply.get("notice"):
+         result["notice"] = str(reply["notice"])
+     return json.dumps(result, ensure_ascii=False)
+diff --git a/tui_gateway/contracts/canonical.py b/tui_gateway/contracts/canonical.py
+index 90295a8a..99e36c3a 100644
+--- a/tui_gateway/contracts/canonical.py
++++ b/tui_gateway/contracts/canonical.py
+@@ -389,6 +389,7 @@ class ClarifyRespondParams(Params):
+     execution_generation: int
+     prompt_id: str
+     answer: str
++    via: str | None = None  # the client that answers ("hub", "telegram"): kept with the answer for the question's card
+ 
+ 
+ class PromptResponseResult(Result):

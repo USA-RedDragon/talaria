@@ -1,0 +1,11 @@
+# New: the stored result, the settled event and the respond verb of a question
+tests/gateway/test_clarify_card_record.py
+# The clarify tool and the delivery paths it changes
+tests/tools/test_clarify_tool.py
+tests/gateway/test_shared_clarify.py
+tests/gateway/test_clarify_delivery_fallback.py
+tests/gateway/test_local_viewer_clarify_batch.py
+tests/gateway/test_subagent_answer_keeps_chat_question.py
+tests/gateway/test_steer_releases_pending_clarify.py
+tests/gateway/test_clarify_card_retire_on_timeout.py
+tests/gateway/test_subagent_clarify_outlives_turn.py
