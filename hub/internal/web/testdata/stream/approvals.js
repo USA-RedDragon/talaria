@@ -195,5 +195,44 @@ const prompt = (id, cmd) => ({ kind: "approval", prompt_id: id, command: cmd, de
     one.tracker.offer({ kind: "approval", prompt_id: "m", command: "x", description: "recursive delete" });
     assert.deepStrictEqual(one.shown[0].children.filter((c) => c.tag === "div" && c.className === "").map((c) => c.textContent), ["recursive delete"]);
   }
+  // A smart approval card in parts: who asks once (a chip and the goal), Rule, Why with one block per line, Source
+  // only when the card offers the source choice, then the command. No "Asked by a subagent" line, no description.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer({ kind: "approval", prompt_id: "pa", command: "<process_manage> {\"action\": \"kill\"}",
+      description: "Subagent \"relift chunk\" asks: Smart approval rule \"Interfere With Workloads\": old text",
+      choices: ["once", "deny"], subagent: "relift chunk", rule: "Interfere With Workloads",
+      reason: "The kill names no process.\nA kill like this one was blocked earlier." });
+    const card = shown[0];
+    const kids = (cls) => card.children.filter((c) => c.className === cls);
+    const by = kids("by")[0];
+    assert.deepStrictEqual(by.children.map((c) => [c.className, c.textContent]), [["chip", "Subagent"], ["goal", "relift chunk"]]);
+    const dl = kids("parts")[0];
+    assert.strictEqual(dl.tag, "dl");
+    assert.deepStrictEqual(dl.children.map((c) => c.tag + ":" + c.text()), [
+      "dt:Rule", "dd:Interfere With Workloads", "dt:Why", "dd:The kill names no process. A kill like this one was blocked earlier."]);
+    assert.deepStrictEqual(dl.children[3].children.map((c) => c.textContent), ["The kill names no process.", "A kill like this one was blocked earlier."]);
+    assert.ok(!card.text().includes("Asked by a subagent") && !card.text().includes("old text") && !card.text().includes("asks:"));
+    assert.deepStrictEqual(card.children.map((c) => c.tag), ["b", "div", "dl", "pre", "div"]);
+    assert.strictEqual(card.children[0].textContent, "Talaria asks to run this");
+    assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow", "Deny"]);
+    // The chat's own card has no who line; a source row only with the source choice.
+    const own = harness();
+    own.tracker.offer({ kind: "approval", prompt_id: "pb", command: "x", choices: ["once", "deny"], rule: "Auto-Mode Bypass", reason: "Retries a blocked command.", grant_source: "github.com/o/r" });
+    assert.deepStrictEqual(own.shown[0].children.map((c) => c.className || c.tag), ["b", "parts", "pre", "actions"]);
+    assert.ok(!own.shown[0].text().includes("Source") && !own.shown[0].text().includes("Subagent"));
+    const src = harness();
+    src.tracker.offer({ kind: "approval", prompt_id: "pc", command: "x", choices: ["once", "deny", "source"], rule: "Code from External", reason: "Downloads and runs it.", grant_source: "github.com/AppImage/appimagetool", subagent: "g" });
+    assert.deepStrictEqual(src.shown[0].querySelector("parts").children.map((c) => c.text()), ["Rule", "Code from External", "Why", "Downloads and runs it.", "Source", "github.com/AppImage/appimagetool"]);
+    // A reason without a rule (a review that could not decide) still gets its list.
+    const unsure = harness();
+    unsure.tracker.offer({ kind: "approval", prompt_id: "pd", command: "x", choices: ["once", "deny"], reason: "Could not decide (no answer)" });
+    assert.deepStrictEqual(unsure.shown[0].querySelector("parts").children.map((c) => c.text()), ["Why", "Could not decide (no answer)"]);
+    // A prompt from a Hermes that sends only the description keeps the old card, with its subagent line.
+    const old = harness();
+    old.tracker.offer({ kind: "approval", prompt_id: "pe", command: "x", choices: ["once", "deny"], subagent: "relift chunk", description: "Subagent \"relift chunk\" asks: Smart approval rule \"R\": why" });
+    assert.ok(old.shown[0].text().includes("Asked by a subagent: relift chunk") && old.shown[0].text().includes("asks: Smart approval rule"));
+    assert.strictEqual(old.shown[0].querySelector("parts"), null);
+  }
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

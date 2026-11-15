@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -166,10 +167,14 @@ func promptBody(p *hub.PromptInfo) string {
 		return ""
 	}
 	var parts []string
+	parted := p.Kind != hub.PromptClarify && (p.Rule != "" || p.Reason != "")
+	if parted {
+		parts = append(parts, approvalParts(p))
+	}
 	if p.Command != "" {
 		parts = append(parts, "<pre>"+escapeHTML(truncate(p.Command, 2500))+"</pre>")
 	}
-	if p.Description != "" {
+	if p.Description != "" && !parted {
 		parts = append(parts, escapeHTML(truncate(p.Description, 1000)))
 	}
 	if p.Question != "" {
@@ -182,6 +187,46 @@ func promptBody(p *hub.PromptInfo) string {
 	}
 	return strings.Join(parts, "\n")
 }
+
+// approvalParts is the card of a smart approval as separate lines with
+// bold labels, as the hub shows it: who asks (a subagent's goal, once),
+// the rule, why (each further line of the reason on a line of its own) and
+// the source the card offers to allow. Hermes sent them as fields; one that
+// sends only the description gets the description alone.
+func approvalParts(p *hub.PromptInfo) string {
+	var lines []string
+	if p.Subagent != "" {
+		lines = append(lines, "<b>Subagent:</b> "+escapeHTML(truncate(oneLine(p.Subagent), 160)))
+	}
+	if p.Rule != "" {
+		lines = append(lines, "<b>Rule:</b> "+escapeHTML(truncate(oneLine(p.Rule), 120)))
+	}
+	if why := reasonLines(p.Reason); len(why) > 0 {
+		lines = append(lines, "<b>Why:</b> "+escapeHTML(truncate(why[0], 600)))
+		for _, l := range why[1:] {
+			lines = append(lines, escapeHTML(truncate(l, 600)))
+		}
+	}
+	if p.GrantSource != "" && slices.Contains(p.Choices, hub.ChoiceSource) {
+		lines = append(lines, "<b>Source:</b> "+escapeHTML(truncate(p.GrantSource, 160)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// reasonLines are the non-empty lines of a reason, each with its spaces
+// collapsed.
+func reasonLines(reason string) []string {
+	var out []string
+	for _, l := range strings.Split(reason, "\n") {
+		if l = oneLine(l); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// oneLine collapses all white space to single spaces.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // promptFooter says how to answer a question.
 func promptFooter(p hub.PromptInfo) string {

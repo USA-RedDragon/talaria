@@ -45,19 +45,46 @@ window.HubApprovals = (() => {
       const box = el("div", "approval");
       const clarify = p.kind === "clarify";
       box.append(el("b", "", clarify ? "Question" : words("approval")));
-      // A plugin's description may carry the script it asks to run after "Script:"; that goes in a code box of its
-      // own, not in the sentence. The command of a plugin rule is "<tool> (plugin approval rule)", which is
-      // internal: the description already says it, and without one the card says it in words.
-      const rule = p.command ? /^<([\w.-]+)> \(plugin approval rule\)$/.exec(p.command) : null;
-      const split = p.description ? /^([\s\S]*?)\s*\bScript:\s*([\s\S]+)$/.exec(p.description) : null;
-      // A description of several lines (a ledger write names the entry, the note and where the approval came
-      // from) is one block per line: the page collapses a newline in a block.
-      const sentence = split ? split[1] : p.description;
-      for (const line of sentence ? String(sentence).split("\n") : []) if (line.trim()) box.append(el("div", "", line));
-      if (split) box.append(el("pre", "", split[2]));
-      if (p.command && !rule) box.append(el("pre", "", p.command));
-      if (rule && !p.description) box.append(el("div", "rule", "An approval rule asks before the " + rule[1].replace(/_/g, " ") + " tool runs."));
-      if (p.subagent) box.append(el("div", "who", "Asked by a subagent: " + p.subagent));
+      // A smart approval card comes in parts (Hermes sends rule, reason, the subagent's goal and the source as
+      // fields of their own): who asks, then Rule, Why and Source as a list, then the command. A Hermes that
+      // sends only the description gets the one-sentence card below.
+      const parted = !clarify && (p.rule || p.reason);
+      if (parted) {
+        if (p.subagent) {
+          const by = el("div", "by");
+          const goal = el("span", "goal", p.subagent);
+          goal.title = p.subagent;
+          by.append(el("span", "chip", "Subagent"), goal);
+          box.append(by);
+        }
+        const list = el("dl", "parts");
+        if (p.rule) list.append(el("dt", "", "Rule"), el("dd", "rulename", p.rule));
+        // The reason's lines (a ledger write adds its entry and the source of the approval it claims) are one block
+        // each: the page collapses a newline in a block.
+        const why = String(p.reason || "").split("\n").filter((x) => x.trim());
+        if (why.length) {
+          const dd = el("dd", "why");
+          for (const line of why) dd.append(el("div", "", line));
+          list.append(el("dt", "", "Why"), dd);
+        }
+        if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) list.append(el("dt", "", "Source"), el("dd", "", p.grant_source));
+        box.append(list);
+        if (p.command) box.append(el("pre", "", p.command));
+      } else {
+        // A plugin's description may carry the script it asks to run after "Script:"; that goes in a code box of its
+        // own, not in the sentence. The command of a plugin rule is "<tool> (plugin approval rule)", which is
+        // internal: the description already says it, and without one the card says it in words.
+        const rule = p.command ? /^<([\w.-]+)> \(plugin approval rule\)$/.exec(p.command) : null;
+        const split = p.description ? /^([\s\S]*?)\s*\bScript:\s*([\s\S]+)$/.exec(p.description) : null;
+        // A description of several lines (a ledger write names the entry, the note and where the approval came
+        // from) is one block per line: the page collapses a newline in a block.
+        const sentence = split ? split[1] : p.description;
+        for (const line of sentence ? String(sentence).split("\n") : []) if (line.trim()) box.append(el("div", "", line));
+        if (split) box.append(el("pre", "", split[2]));
+        if (p.command && !rule) box.append(el("pre", "", p.command));
+        if (rule && !p.description) box.append(el("div", "rule", "An approval rule asks before the " + rule[1].replace(/_/g, " ") + " tool runs."));
+        if (p.subagent && !parted) box.append(el("div", "who", "Asked by a subagent: " + p.subagent));
+      }
       if (p.question) box.append(el("div", "", p.question));
       const actions = el("div", "actions");
       const buttons = [];

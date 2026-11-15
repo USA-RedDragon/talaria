@@ -406,7 +406,12 @@ type PromptInfo struct {
 	// GrantSource is the source the "source" choice allows for the chat
 	// and its subagents, such as github.com/owner/repo.
 	GrantSource string `json:"grant_source,omitempty"`
-	Question    string `json:"question,omitempty"`
+	// Rule and Reason are the parts of a smart approval card: the rule's
+	// name and the checker's reason in plain words, one line per line of
+	// Reason. Empty from a Hermes that sends only Description.
+	Rule     string `json:"rule,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Question string `json:"question,omitempty"`
 	// Timeout is how many seconds Hermes waits for the answer, 0 when
 	// it did not say.
 	Timeout float64 `json:"timeout_s,omitempty"`

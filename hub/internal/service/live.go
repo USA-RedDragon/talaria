@@ -393,7 +393,7 @@ func promptInfo(p gateway.Prompt) hub.PromptInfo {
 		return *s
 	}
 	return hub.PromptInfo{ID: p.PromptID, Kind: p.Kind, Choices: append([]string(nil), p.Choices...), Multi: p.MultiSelect,
-		Command: str(p.Command), Description: str(p.Description), Subagent: str(p.Subagent), GrantSource: str(p.GrantSource), Question: str(p.Question), Timeout: p.Timeout}
+		Command: str(p.Command), Description: str(p.Description), Subagent: str(p.Subagent), GrantSource: str(p.GrantSource), Rule: str(p.Rule), Reason: str(p.Reason), Question: str(p.Question), Timeout: p.Timeout}
 }
 
 // promptNotice announces a pending prompt. ls.mu is held.

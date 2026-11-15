@@ -249,6 +249,16 @@ details.toolgroup .group-body { display: flex; flex-direction: column; gap: .5re
 .approval pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20rem; overflow: auto; margin: .4rem 0; padding: .5rem; border-radius: 6px; background: var(--code);
   font: .82rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .approval .rule { margin: .2rem 0 0; font-size: .82rem; color: var(--muted); }
+/* A smart approval card in parts: who asks (a chip and the goal on one line), then Rule, Why and Source, then the command. */
+.approval .by { display: flex; gap: .5rem; align-items: baseline; margin: .35rem 0 .5rem; font-size: .88rem; color: var(--muted); min-width: 0; }
+.approval .by .chip { flex: none; padding: 0 .55rem; border-radius: 999px; font-size: .75rem; font-weight: 600; line-height: 1.4;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.approval .by .goal { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval dl.parts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .25rem .75rem; margin: .35rem 0 .5rem; font-size: .94rem; }
+.approval dl.parts dt { color: var(--muted); }
+.approval dl.parts dd { margin: 0; min-width: 0; }
+.approval dl.parts dd.rulename { font-weight: 600; }
+.approval dl.parts dd.why div + div { margin-top: .25rem; }
 .approval .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
 .approval .sendnote { margin-top: .5rem; font-size: .85rem; color: var(--muted, inherit); }
 .approval .sendnote.bad { color: var(--warn); }
