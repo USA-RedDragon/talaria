@@ -90,7 +90,7 @@ internal/notify/jobs.go	55	43
 internal/notify/notify.go	307	195
 internal/origin/fallback.go	76	74
 internal/origin/origin.go	141	125
-internal/pdf/pdf.go	185	164
+internal/pdf/pdf.go	185	165
 internal/pdf/pdftest/pdftest.go	32	32
 internal/scheduled/client.go	110	88
 internal/scheduled/clock.go	75	66
@@ -98,7 +98,7 @@ internal/scheduled/scheduledtest/scheduledtest.go	178	166
 internal/scheduled/service.go	478	416
 internal/secretbox/secretbox.go	37	31
 internal/server/server.go	40	0
-internal/service/activity.go	144	122
+internal/service/activity.go	144	121
 internal/service/agents.go	31	26
 internal/service/attach.go	100	85
 internal/service/claude.go	41	33
@@ -112,7 +112,7 @@ internal/service/outcome.go	95	90
 internal/service/page.go	63	57
 internal/service/pdf.go	74	56
 internal/service/rows.go	22	21
-internal/service/service.go	956	881
+internal/service/service.go	956	882
 internal/service/stopsend.go	93	77
 internal/service/subagentlog.go	178	146
 internal/service/toolout.go	39	32
@@ -138,7 +138,7 @@ internal/store/telegram.go	64	55
 internal/store/views.go	11	11
 internal/subagents/subagents.go	39	32
 internal/telegram/api.go	192	152
-internal/telegram/bot.go	666	546
+internal/telegram/bot.go	666	543
 internal/telegram/budget.go	23	20
 internal/telegram/claude.go	107	89
 internal/telegram/commands.go	245	203
@@ -153,10 +153,10 @@ internal/telegram/media.go	39	37
 internal/telegram/prompts.go	458	351
 internal/telegram/react.go	36	32
 internal/telegram/render.go	512	467
-internal/telegram/replymedia.go	102	89
+internal/telegram/replymedia.go	102	87
 internal/telegram/status.go	59	53
 internal/telegram/todo.go	58	51
-internal/telegram/topics.go	521	380
+internal/telegram/topics.go	521	382
 internal/updates/updates.go	95	82
 internal/web/accounts.go	255	192
 internal/web/activity.go	135	93
