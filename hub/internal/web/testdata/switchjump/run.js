@@ -8,8 +8,8 @@
 // hub's held copy comes first and the chat's own snapshot later) in a
 // varied order and at varied moments, sometimes after reading back in the
 // chat it leaves, and records the log every frame. Asserts that once the
-// chosen chat is drawn it shows its newest message (at most 24 px from
-// the end) in every frame, until the reader scrolls.
+// chosen chat is drawn it shows its newest message (at most 3 px from
+// the end) in every frame painted, until the reader scrolls.
 const assert = require("assert");
 const [bin, url, dir] = process.argv.slice(2);
 const nArg = process.env.SWITCHJUMP_N;
@@ -127,8 +127,16 @@ const { proc, connect } = driver();
     const onScroll = () => snap("scroll");
     log.addEventListener("scroll", onScroll, { passive: true });
     window.__unrec = () => log.removeEventListener("scroll", onScroll);
-    // A frame is read after it is drawn (the timer runs once the frame is done): the page puts a streamed write at the end within that frame, before it is painted, and this callback runs ahead of the page's own.
-    const step = () => { setTimeout(() => { snap("frame"); if (!window.__stop) requestAnimationFrame(step); else window.__unrec(); }, 0); };
+    // A frame is read where the browser has laid the page out and not yet painted it: a ResizeObserver callback of a probe that is resized each frame, nested deeper than anything of the page, is delivered after the page's own observers (the log's stick puts it at the end there) and before the paint. A timer instead can run between a write that came in as an event and the frame that pins it, a state that is never painted.
+    const root = document.createElement("div");
+    root.style.cssText = "position:fixed;left:-9999px;top:0;width:0;height:0;overflow:hidden;contain:strict";
+    let leaf = root;
+    for (let i = 0; i < 24; i++) { const d = document.createElement("div"); leaf.append(d); leaf = d; }
+    document.body.append(root);
+    const ro = new ResizeObserver(() => snap("frame"));
+    ro.observe(leaf);
+    let w = 0;
+    const step = () => { if (window.__stop) { ro.disconnect(); root.remove(); window.__unrec(); return; } leaf.style.width = (1 + (w++ % 2)) + "px"; requestAnimationFrame(step); };
     requestAnimationFrame(step); }; return 1; })()`);
   await install();
   const linkBox = (id) => ev(`(() => { const a = document.querySelector('#sessions a.go[href="#/s/pc/${id}"]'); if (!a) return null; a.scrollIntoView({ block: "nearest" }); const r = a.getBoundingClientRect(); return { x: r.x + Math.min(40, r.width / 2), y: r.y + r.height / 2 }; })()`);
@@ -217,13 +225,10 @@ const { proc, connect } = driver();
     // The first frames can still show the chat left.
     const first = mine.findIndex((x) => !x.loading && x.rows > 0 && x.who === to);
     assert.ok(first >= 0, `switch ${i} to ${to}: never drawn; ` + f.map((x) => `${x.t}:${x.why[0]}:${x.hash.slice(7)}:${x.loading ? "L" : x.who}:${x.rows}:${x.gap}`).join(" ") + JSON.stringify(kinds));
-    const bad = mine.slice(first).filter((x) => x.gap > 24 && x.why === "frame");
-    // A frame between a change and the scroll that answers it can be off;
-    // the view is wrong when it stays off.
+    // Every frame is read as it would be painted: any frame more than a few px off the end fails.
+    const bad = mine.slice(first).filter((x) => x.gap > 3 && x.why === "frame");
     const last = mine[mine.length - 1];
-    // The last frame read can be one a write came into after its draw: the page puts it at the end in the next frame, before that is painted. The view is off when the last two frames are.
-    const prev = mine[mine.length - 2] || last;
-    if ((last.gap > 24 && prev.gap > 24) || bad.length > 1) {
+    if (bad.length) {
       fails.push({ i, to, how, last, firstBad: bad[0], kinds, flips, around: mine.slice(Math.max(first, mine.indexOf(bad[0]) - 6), mine.indexOf(bad[0]) + 10) });
       console.log(`switch ${i} to ${to} (${how}${coast ? ", coasting" : ""}): ${bad.length} frames off the end, last gap ${last.gap}`);
     }
