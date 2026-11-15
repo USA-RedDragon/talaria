@@ -29,6 +29,7 @@ const (
 	account     = "account1"
 	aliceEmail  = "alice@example.com"
 	provider1   = "claude-account1"
+	currentWeek = "Current week"
 )
 
 // access lets alice and bob use backendMain, and only bob use other.
@@ -112,7 +113,7 @@ func TestAccountsAndUsage(t *testing.T) {
 	e.plugin.Lock()
 	e.plugin.Usages[account] = claude.Usage{Windows: []claude.Window{
 		{Kind: "session", Label: "Current session", UsedPercent: pct(12), ResetsAt: time.Date(2026, 11, 11, 21, 40, 0, 0, time.UTC)},
-		{Kind: "weekly_all", Label: "Current week", UsedPercent: pct(40), ResetsAt: time.Date(2026, 11, 13, 15, 0, 0, 0, time.UTC)},
+		{Kind: "weekly_all", Label: currentWeek, UsedPercent: pct(40), ResetsAt: time.Date(2026, 11, 13, 15, 0, 0, 0, time.UTC)},
 		{Kind: "weekly_opus", Label: "Opus week"}}}
 	e.plugin.Unlock()
 
@@ -199,7 +200,7 @@ func TestChatGPTUsage(t *testing.T) {
 	if w := a.Usage.Windows[0]; w.Kind != hub.ClaudeWindowSession || w.Label != "Current session" || *w.UsedPercent != 12 || w.ResetsText != "3:40 PM CST" {
 		t.Errorf("session window = %+v", w)
 	}
-	if w := a.Usage.Windows[1]; w.Kind != hub.ClaudeWindowWeekly || w.Label != "Current week" || *w.UsedPercent != 2 || w.ResetsText != "Fri 9:00 AM CST" {
+	if w := a.Usage.Windows[1]; w.Kind != hub.ClaudeWindowWeekly || w.Label != currentWeek || *w.UsedPercent != 2 || w.ResetsText != "Fri 9:00 AM CST" {
 		t.Errorf("weekly window = %+v", w)
 	}
 	if n := e.chatgpt.CallCount(); n != 2 {
@@ -580,7 +581,7 @@ func TestUsageJSONHasISOTimes(t *testing.T) {
 	e.plugin.SetLoggedIn(account, true, aliceEmail)
 	e.plugin.Lock()
 	e.plugin.Usages[account] = claude.Usage{Windows: []claude.Window{
-		{Kind: "weekly_all", Label: "Current week", UsedPercent: pct(40), ResetsAt: time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)}}}
+		{Kind: "weekly_all", Label: currentWeek, UsedPercent: pct(40), ResetsAt: time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)}}}
 	e.plugin.Unlock()
 	got, err := e.svc.ClaudeAccounts(context.Background(), bob, backendMain, true)
 	if err != nil {
