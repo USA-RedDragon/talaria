@@ -1,0 +1,9 @@
+# New: page_publish is a read-only tool for smart approval; public uploads still reviewed; rule text
+tests/tools/test_smart_approval_page_publish.py
+# Changed: the read-only tool set test now allows page_publish
+tests/tools/test_smart_approval_send_file.py
+# The review and hold it changes
+tests/tools/test_smart_provenance.py
+tests/tools/test_smart_provenance_clarify.py
+tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_approval.py

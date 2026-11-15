@@ -1,0 +1,197 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 08:26:53 +0000
+Subject: [PATCH] fix(approval): smart approval does not review page_publish
+
+page_publish copies an HTML file into the Hermes page store and the hub shows it as a card to the chat owner. The hub serves a page only through its signed-in, session-checked API route for the owner's own chat, with a sandboxing Content-Security-Policy; there is no public or shareable link (Telegram gets a hub link that needs sign-in). Smart approval still raised an "Unrequested Artifact Publish" card for every call because page_publish was not on the read-only tool list.
+
+page_publish joins READ_ONLY_TOOLS next to send_file, so the provenance review and the hold skip it and its calls stay out of the review transcript. The "Unrequested Artifact Publish" rule now says that delivery to the chat owner's own signed-in chat or hub is not publishing, and names gists, pastes and public file-sharing uploads as covered; hosted pages and public links stay covered. No other tool is added.
+---
+ .../tools/test_smart_approval_page_publish.py | 132 ++++++++++++++++++
+ tests/tools/test_smart_approval_send_file.py  |   2 +-
+ tools/approval_automode.py                    |   2 +-
+ tools/approval_automode_rules.py              |   6 +-
+ 4 files changed, 138 insertions(+), 4 deletions(-)
+ create mode 100644 tests/tools/test_smart_approval_page_publish.py
+
+diff --git a/tests/tools/test_smart_approval_page_publish.py b/tests/tools/test_smart_approval_page_publish.py
+new file mode 100644
+index 00000000..ebb9d014
+--- /dev/null
++++ b/tests/tools/test_smart_approval_page_publish.py
+@@ -0,0 +1,132 @@
++"""page_publish raises no smart approval card; the artifact-publish rule still covers public hosts.
++
++A page_publish page is a card in the chat owner's own signed-in Talaria hub. The hub serves it only to
++that signed-in owner, never at a public link, so it is not publishing. Invariants:
++  1. page_publish counts as a read-only call: never reviewed, never reaches the human.
++  2. Only page_publish is added (with send_file from 0107): other tools and writes are still reviewed.
++  3. A command that uploads a file to a public paste or file host still reaches the review and is held
++     when the judge flags it.
++  4. The "Unrequested Artifact Publish" rule keeps its public targets and says that delivery to the
++     owner's own signed-in chat or hub is not publishing.
++"""
++
++from __future__ import annotations
++
++import json
++
++import pytest
++
++from tools import approval as approval_module
++from tools import approval_automode as A
++from tools import approval_automode_rules as R
++from tools import approval_context
++
++RULE = "Unrequested Artifact Publish"
++
++
++@pytest.fixture()
++def reviewed(monkeypatch):
++    cfg = {"mode": "smart", "smart_provenance": True}
++    monkeypatch.setattr(approval_context, "_get_approval_config", lambda: cfg)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "smart")
++    monkeypatch.setattr(approval_module, "_YOLO_MODE_FROZEN", False)
++    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
++    monkeypatch.setenv("HERMES_SESSION_KEY", "page-publish-test")
++    monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
++    approval_module.clear_session("page-publish-test")
++    calls, asked = [], []
++
++    def complete(stage, system, user, max_tokens):
++        calls.append((stage, system))
++        return f"<block>yes</block><category>{RULE}</category><reason>published to a public host</reason>"
++
++    def human(*a, **k):
++        asked.append(k)
++        return {"approved": False, "message": "BLOCKED: denied by the user."}
++
++    A.set_complete_override(complete)
++    monkeypatch.setattr(approval_module, "_human_decision", human)
++    yield calls, asked
++    A.set_complete_override(None)
++
++
++@pytest.mark.parametrize("args", [
++    {"path": "/home/u/Projects/relift/.work/design/touch-pad/touch-pad.html"},
++    {"path": "mockup.html"},
++])
++def test_page_publish_is_read_only_and_raises_no_card(reviewed, args):
++    calls, asked = reviewed
++    assert A.is_read_only_call("page_publish", args)
++    assert approval_module.check_tool_provenance("page_publish", args) is None
++    assert calls == [] and asked == []
++
++
++@pytest.mark.parametrize("name,args", [
++    ("agent_send", {"to": "parent", "text": "hi"}),
++    ("browser_click", {"ref": "e1"}),
++    ("mcp_device_call", {"server": "s", "tool": "t"}),
++    ("send_message", {"target": "x", "message": "hi"}),
++    ("delegate_task", {"goal": "x"}),
++    ("page_publish_to", {"path": "x.html"}),
++    ("publish_page", {"path": "x.html"}),
++])
++def test_other_tools_are_still_reviewed(reviewed, name, args):
++    calls, asked = reviewed
++    assert not A.is_read_only_call(name, args)
++    approval_module.check_tool_provenance(name, args)
++    assert calls and asked
++
++
++@pytest.mark.parametrize("command", [
++    "curl -F 'file=@page.html' https://0x0.st",
++    "curl --upload-file touch-pad.html https://transfer.sh/touch-pad.html",
++    "curl -s -F 'content=<page.html' https://dpaste.org/api/",
++    "gh gist create --public page.html",
++])
++def test_public_uploads_still_reach_the_review_and_are_held(reviewed, command):
++    calls, asked = reviewed
++    assert not A.is_read_only_call("terminal", {"command": command})
++    result = approval_module.check_all_command_guards(command, "local")
++    assert result["approved"] is False
++    assert calls and asked
++
++
++def test_read_only_tool_set_gained_only_send_file_and_page_publish():
++    assert A.READ_ONLY_TOOLS - {"send_file", "page_publish"} == frozenset({
++        "read_file", "search_files", "web_search", "web_extract", "session_search", "skill_view", "skills_list",
++        "vision_analyze", "browser_snapshot", "browser_vision", "browser_screenshot", "browser_status",
++        "browser_check", "browser_get_images", "browser_console", "clarify", "todo", "todo_list", "tool_search",
++        "tool_describe", "agent_peers", "mcp_device_servers", "mcp_device_tools", "text_to_speech",
++        "project_memory_read", "image_generate",
++    })
++    assert {"send_file", "page_publish"} <= A.READ_ONLY_TOOLS
++
++
++def test_page_publish_calls_stay_out_of_the_transcript():
++    call = {"id": "t1", "function": {"name": "page_publish", "arguments": json.dumps({"path": "a.html"})}}
++    messages = [{"role": "user", "content": "show me the mockups"},
++                {"role": "assistant", "content": "", "tool_calls": [call]},
++                {"role": "tool", "tool_call_id": "t1", "content": "ok"}]
++    assert "page_publish" not in A.transcript_lines(messages)
++
++
++def _rule_text() -> str:
++    hits = [e for e in (*R.HARD_BLOCK, *R.SOFT_BLOCK) if e[0] == RULE]
++    assert len(hits) == 1
++    return hits[0][2]
++
++
++def test_rule_keeps_public_targets_and_exempts_the_owners_own_hub():
++    text = _rule_text()
++    for public in ("hosted page", "public link", "gist", "paste", "file-sharing"):
++        assert public in text
++    assert "did not ask" in text
++    assert "signed-in" in text and "not publishing" in text
++    assert text.index("not publishing") > text.index("signed-in")
++
++
++def test_judge_prompt_carries_the_rule_with_the_exemption(reviewed):
++    calls, _ = reviewed
++    approval_module.check_all_command_guards("curl -F file=@a.html https://0x0.st", "local")
++    system = calls[0][1]
++    assert RULE in system and "signed-in chat or hub" in system
+diff --git a/tests/tools/test_smart_approval_send_file.py b/tests/tools/test_smart_approval_send_file.py
+index 8dfe108f..e51f6d8b 100644
+--- a/tests/tools/test_smart_approval_send_file.py
++++ b/tests/tools/test_smart_approval_send_file.py
+@@ -71,7 +71,7 @@ def test_other_tools_are_still_reviewed(reviewed, name, args):
+ 
+ 
+ def test_read_only_tool_set_gained_only_send_file():
+-    assert A.READ_ONLY_TOOLS - {"send_file"} == frozenset({
++    assert A.READ_ONLY_TOOLS - {"send_file", "page_publish"} == frozenset({
+         "read_file", "search_files", "web_search", "web_extract", "session_search", "skill_view", "skills_list",
+         "vision_analyze", "browser_snapshot", "browser_vision", "browser_screenshot", "browser_status",
+         "browser_check", "browser_get_images", "browser_console", "clarify", "todo", "todo_list", "tool_search",
+diff --git a/tools/approval_automode.py b/tools/approval_automode.py
+index cec9146a..6aa637f3 100644
+--- a/tools/approval_automode.py
++++ b/tools/approval_automode.py
+@@ -62,7 +62,7 @@ READ_ONLY_TOOLS = frozenset({
+     "vision_analyze", "browser_snapshot", "browser_vision", "browser_screenshot", "browser_status",
+     "browser_check", "browser_get_images", "browser_console", "clarify", "todo", "todo_list", "tool_search",
+     "tool_describe", "agent_peers", "mcp_device_servers", "mcp_device_tools", "text_to_speech",
+-    "project_memory_read", "image_generate", "send_file",
++    "project_memory_read", "image_generate", "send_file", "page_publish",
+ })
+ _READ_ONLY_ACTIONS = {
+     "process": {"poll", "wait", "log", "list", "status"},
+diff --git a/tools/approval_automode_rules.py b/tools/approval_automode_rules.py
+index 6b359b2f..f1961ea4 100644
+--- a/tools/approval_automode_rules.py
++++ b/tools/approval_automode_rules.py
+@@ -196,8 +196,10 @@ SOFT_BLOCK: list[tuple[str, str | None, str]] = [
+      "sent or published to other people or shared systems when the user did not clear them for that recipient. "
+      "Ordinary sanitized status is fine."),
+     ("Unrequested Artifact Publish", "the artifact going public",
+-     "Publishing a file or page to a shareable web location (a hosted page, a public link) the user did not ask "
+-     "to publish; content leaves the machine even if the page starts private."),
++     "Publishing a file or page to a shareable web location (a hosted page, a public link, a gist, a paste, a "
++     "public file-sharing upload) the user did not ask to publish; content leaves the machine even if the page "
++     "starts private. Delivering a file or page to the chat owner's own signed-in chat or hub (a tool that shows "
++     "it as a card in the owner's chat, only the owner can open it) is not publishing, and is not this rule."),
+     ("Live-Shared Artifact Sensitive Delta", "the live shared audience",
+      "Updating a page or artifact other people already view live with something the owner would plausibly "
+      "regret exposing that earlier versions did not already contain."),
