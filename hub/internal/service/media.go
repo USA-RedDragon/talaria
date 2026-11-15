@@ -44,8 +44,7 @@ func inMediaRoots(roots []string, p string) bool {
 	return false
 }
 
-// Media opens a file that the session's replies, browser_screenshot results,
-// user image attachments or vision_analyze and browser_vision calls name. A path under the media roots comes from
+// Media opens a file that the session offered (see offers). A path under the media roots comes from
 // the backend's server; any other path, and one the server does not have,
 // comes from the device that runs the session, when one does. See
 // hub.Media.
@@ -54,7 +53,7 @@ func (s *Service) Media(ctx context.Context, user, backendID, sessionID, p strin
 	if err != nil {
 		return nil, err
 	}
-	if !hub.MediaPath(p) {
+	if !hub.FilePath(p) {
 		return nil, hub.ErrNoMedia
 	}
 	fr, server := b.dialer.(fileReader)
@@ -67,9 +66,9 @@ func (s *Service) Media(ctx context.Context, user, backendID, sessionID, p strin
 	if err != nil {
 		return nil, refusal(err)
 	}
-	named := ls.names(p)
+	o := ls.offers(p)
 	ls.unpin()
-	if !named {
+	if !o.ok() {
 		return nil, hub.ErrNoMedia
 	}
 	if server {
@@ -155,11 +154,47 @@ type readCloser struct {
 	io.Closer
 }
 
-// names reports whether a reply, a browser_screenshot result, a user's
-// image attachment or the image a vision_analyze or browser_vision call
-// looked at in the session names p: in the snapshot's transcript or
-// the events since.
-func (ls *live) names(p string) bool {
+// offer is how a session offered one path.
+type offer struct {
+	// named: a reply (a MEDIA directive or a Markdown link or image), a
+	// browser_screenshot result, a user's image attachment or a vision
+	// call names the path.
+	named bool
+	// sent is the newest send_file offer of the path with status
+	// offered, and refused the newest one the secret rules refused.
+	sent, refused *hub.FileOffer
+}
+
+// ok reports whether the session offered the path, so the hub may serve it.
+func (o *offer) ok() bool { return o.named || o.sent != nil }
+
+// id is the send_file offer id to pass to the plugin, or "".
+func (o *offer) id() string {
+	if o.sent == nil {
+		return ""
+	}
+	return o.sent.ID
+}
+
+// sendFile records a send_file result that names p.
+func (o *offer) sendFile(raw json.RawMessage, p string) {
+	f, refused, ok := hub.SendFileResult(raw)
+	if !ok || f.Path != p {
+		return
+	}
+	if refused {
+		o.refused = f
+	} else {
+		o.sent = f
+	}
+}
+
+// offers says how the session offered p: a send_file result, a reply
+// (a MEDIA directive, or a Markdown link or image with any extension),
+// a browser_screenshot result, a user's image attachment or the image a
+// vision_analyze or browser_vision call looked at, in the snapshot's
+// transcript or the events since.
+func (ls *live) offers(p string) offer {
 	ls.mu.Lock()
 	snap := ls.snapshot.Data
 	ring := ls.ring[:len(ls.ring):len(ls.ring)]
@@ -179,18 +214,20 @@ func (ls *live) names(p string) bool {
 		}
 	}
 	ls.mu.Unlock()
+	var o offer
 	for _, t := range queued {
 		if slices.Contains(hub.AttachedImages(t), p) {
-			return true
+			o.named = true
 		}
 	}
 	var s struct {
 		Messages []json.RawMessage `json:"messages"`
 	}
-	if len(snap) > 0 && json.Unmarshal(snap, &s) == nil && rowsName(s.Messages, p) {
-		return true
+	if len(snap) > 0 && json.Unmarshal(snap, &s) == nil {
+		rowsOffer(s.Messages, p, &o)
 	}
-	return eventsName(ring, p)
+	eventsOffer(ring, p, &o)
+	return o
 }
 
 type row struct {
@@ -210,7 +247,8 @@ type row struct {
 	} `json:"tool_calls"`
 }
 
-func rowsName(rows []json.RawMessage, p string) bool {
+// rowsOffer records in o how the transcript rows offer p.
+func rowsOffer(rows []json.RawMessage, p string, o *offer) {
 	calls := map[string]string{}
 	for _, raw := range rows {
 		var r row
@@ -226,12 +264,12 @@ func rowsName(rows []json.RawMessage, p string) bool {
 		switch r.Role {
 		case "user":
 			if slices.Contains(hub.AttachedImages(content), p) {
-				return true
+				o.named = true
 			}
 		case "assistant":
 			for _, c := range r.ToolCalls {
 				if visionNames(c.Function.Name, c.Function.Arguments, p) {
-					return true
+					o.named = true
 				}
 				for _, id := range []string{c.ID, c.CallID} {
 					if id != "" {
@@ -240,7 +278,7 @@ func rowsName(rows []json.RawMessage, p string) bool {
 				}
 			}
 			if replyNames(content, p) {
-				return true
+				o.named = true
 			}
 		case "tool":
 			name := r.Name
@@ -250,15 +288,20 @@ func rowsName(rows []json.RawMessage, p string) bool {
 			if name == "" {
 				name = calls[r.ToolCallID]
 			}
-			if name == hub.ScreenshotTool && screenshotNames(content, p) {
-				return true
+			switch {
+			case name == hub.ScreenshotTool && screenshotNames(content, p):
+				o.named = true
+			case name == hub.SendFileTool && content != "":
+				o.sendFile(json.RawMessage(content), p)
+			case name == hub.SendFileTool:
+				o.sendFile(r.Content, p)
 			}
 		}
 	}
-	return false
 }
 
-func eventsName(ring []hub.Event, p string) bool {
+// eventsOffer records in o how the events offer p.
+func eventsOffer(ring []hub.Event, p string, o *offer) {
 	var reply strings.Builder
 	for _, e := range ring {
 		var d struct {
@@ -278,31 +321,35 @@ func eventsName(ring []hub.Event, p string) bool {
 		case hub.KindMessageStart, hub.KindMessageComplete, hub.KindMessageInterim:
 			if e.Kind == hub.KindMessageStart && slices.Contains(hub.AttachedImages(text), p) ||
 				e.Kind != hub.KindMessageStart && replyNames(text, p) || replyNames(reply.String(), p) {
-				return true
+				o.named = true
 			}
 			if e.Kind != hub.KindMessageInterim {
 				reply.Reset()
 			}
 		case hub.KindToolStart, hub.KindToolComplete:
 			if visionNames(d.Name, d.Args, p) {
-				return true
+				o.named = true
 			}
 			if e.Kind != hub.KindToolComplete {
 				continue
 			}
-			if d.Name != hub.ScreenshotTool {
-				continue
-			}
-			var res string
-			if json.Unmarshal(d.Result, &res) != nil {
-				res = string(d.Result)
-			}
-			if screenshotNames(res, p) {
-				return true
+			switch d.Name {
+			case hub.SendFileTool:
+				o.sendFile(d.Result, p)
+			case hub.ScreenshotTool:
+				var res string
+				if json.Unmarshal(d.Result, &res) != nil {
+					res = string(d.Result)
+				}
+				if screenshotNames(res, p) {
+					o.named = true
+				}
 			}
 		}
 	}
-	return replyNames(reply.String(), p)
+	if replyNames(reply.String(), p) {
+		o.named = true
+	}
 }
 
 func replyNames(text, p string) bool {

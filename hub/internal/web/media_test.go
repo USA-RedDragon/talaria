@@ -2,6 +2,8 @@ package web_test
 
 import (
 	"context"
+	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"net/url"
@@ -32,6 +34,9 @@ const (
 	mimePNG       = "image/png"
 )
 
+// pdfBytes is the content of a small PDF file.
+const pdfBytes = "%PDF-1.7"
+
 func mediaURL(e *hubEnv, backend, p string) string {
 	return e.url + "/api/sessions/" + backend + "/m1/media?path=" + url.QueryEscape(p)
 }
@@ -42,7 +47,7 @@ func TestMedia(t *testing.T) {
 	named, tool, report := shotDir+"named.jpg", shotDir+"tool.jpg", shotDir+"report.pdf"
 	fake, unnamed, private := shotDir+"fake.png", shotDir+"unnamed.jpg", "/opt/data/hermes/config.yaml"
 	upload, ref, typed := "/opt/data/hermes/cache/images/up.png", "/opt/data/hermes/cache/images/my ref.png", "/opt/data/hermes/cache/images/typed.png"
-	for p, data := range map[string]string{named: shotJPEG, tool: shotJPEG, report: "%PDF-1.7", fake: "<script>alert(1)</script>",
+	for p, data := range map[string]string{named: shotJPEG, tool: shotJPEG, report: pdfBytes, fake: "<script>alert(1)</script>",
 		unnamed: shotJPEG, private: "key: value", upload: shotPNG, ref: shotPNG, typed: shotPNG} {
 		e.gw.SetFile(p, []byte(data))
 	}
@@ -149,16 +154,20 @@ func TestMediaRootsServeFiles(t *testing.T) {
 		cfg.Backends[0].MediaRoots = []string{"/srv/out"}
 	})
 	report, shot := "/srv/out/report.pdf", shotDir+"named.jpg"
-	e.gw.SetFile(report, []byte("%PDF-1.7"))
+	e.gw.SetFile(report, []byte(pdfBytes))
 	e.gw.SetFile(shot, []byte(shotJPEG))
 	e.gw.AddSession(&gatewaytest.Session{ID: "m1", Title: titleMedia, Live: true, StartedAt: 200, Messages: []map[string]any{
 		{kRole: roleAssistant, kText: "MEDIA:" + report + "\nMEDIA:" + shot}}})
 	c := client(t)
 	login(t, e, c)
 	resp, body := get(t, c, mediaURL(e, "pc", report))
-	if resp.StatusCode != http.StatusOK || body != "%PDF-1.7" || resp.Header.Get("Content-Type") != octetStream ||
-		!strings.HasPrefix(resp.Header.Get("Content-Disposition"), "attachment") {
+	if resp.StatusCode != http.StatusOK || body != pdfBytes || resp.Header.Get("Content-Type") != hub.MIMEPDF ||
+		!strings.HasPrefix(resp.Header.Get("Content-Disposition"), "inline") {
 		t.Fatalf("report = %d %q %v", resp.StatusCode, body, resp.Header)
+	}
+	if resp, body = get(t, c, mediaURL(e, "pc", report)+"&download=1"); resp.StatusCode != http.StatusOK || body != pdfBytes ||
+		resp.Header.Get("Content-Type") != octetStream || !strings.HasPrefix(resp.Header.Get("Content-Disposition"), "attachment") {
+		t.Fatalf("report download = %d %q %v", resp.StatusCode, body, resp.Header)
 	}
 	if resp, _ = get(t, c, mediaURL(e, "pc", shot)); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("outside the roots = %d", resp.StatusCode)
@@ -171,6 +180,15 @@ type deviceFiles struct {
 	files   map[string]string
 	offline bool
 	reads   []string
+	// secret are paths the secret rules refuse, with the offer id that
+	// lets one through ("" for none).
+	secret map[string]string
+	// offers are the offer ids of the reads.
+	offers []string
+	// hold sends the first 4 bytes of a body, then keeps it open until
+	// it is closed.
+	hold  bool
+	pipes []*io.PipeWriter
 }
 
 func (d *deviceFiles) PutFile(context.Context, string, string, string, string, []byte) (string, bool, error) {
@@ -191,10 +209,64 @@ func (d *deviceFiles) DeviceMedia(_ context.Context, user, backendID, sessionID,
 	return &hub.MediaFile{Name: path.Base(p), Size: int64(len(data)), NoStore: true, Body: io.NopCloser(strings.NewReader(data))}, true, nil
 }
 
+// DeviceFile serves the files as the plugin's stat and stream routes do,
+// typed by hub.GuessFile, with an etag that changes with the content.
+func (d *deviceFiles) DeviceFile(_ context.Context, user, backendID, sessionID, p string, req hub.FileRequest) (*hub.FileInfo, io.ReadCloser, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.reads = append(d.reads, user+"|"+backendID+"|"+sessionID+"|"+p)
+	if d.offline {
+		return nil, nil, true, hub.ErrMediaOffline
+	}
+	data, ok := d.files[p]
+	if !ok {
+		return nil, nil, true, hub.ErrFileGone
+	}
+	if allowed, ok := d.secret[p]; ok && (allowed == "" || req.Offer != allowed) {
+		return nil, nil, true, &hub.RefusedError{Reason: secretWhy}
+	}
+	fi := &hub.FileInfo{Name: path.Base(p), Path: p, Size: int64(len(data)), ModTime: time.Unix(1_700_000_000, 0).UTC(),
+		ETag: fmt.Sprintf(`"%x-%x"`, len(data), crc32.ChecksumIEEE([]byte(data))), Machine: pcName, MachineKind: hub.MachineDevice}
+	fi.MIME, fi.Kind = hub.GuessFile(p, []byte(data))
+	if !req.Open {
+		return fi, nil, true, nil
+	}
+	if req.ETag != "" && req.ETag != fi.ETag {
+		return nil, nil, true, hub.ErrFileChanged
+	}
+	d.offers = append(d.offers, req.Offer)
+	end := int64(len(data))
+	if req.Length >= 0 {
+		end = min(end, req.Offset+req.Length)
+	}
+	var body io.Reader = strings.NewReader(data[min(req.Offset, int64(len(data))):end])
+	if d.hold {
+		body = io.LimitReader(body, 4)
+		pr, pw := io.Pipe()
+		d.pipes = append(d.pipes, pw)
+		return fi, struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(body, pr), pr}, true, nil
+	}
+	return fi, io.NopCloser(body), true, nil
+}
+
 func (d *deviceFiles) read() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return slices.Clone(d.reads)
+}
+
+// wantFile fails unless u answers 200 with body, the content type and the
+// disposition.
+func wantFile(t *testing.T, c *http.Client, u, body, ctype, disposition string) {
+	t.Helper()
+	resp, got := get(t, c, u)
+	if resp.StatusCode != http.StatusOK || got != body || resp.Header.Get("Content-Type") != ctype ||
+		!strings.HasPrefix(resp.Header.Get("Content-Disposition"), disposition) {
+		t.Fatalf("%s = %d %q %v", u, resp.StatusCode, got, resp.Header)
+	}
 }
 
 func TestMediaFromTheDevice(t *testing.T) {
@@ -214,17 +286,12 @@ func TestMediaFromTheDevice(t *testing.T) {
 	resp, body := get(t, c, mediaURL(e, "pc", chart))
 	if resp.StatusCode != http.StatusOK || body != shotPNG || resp.Header.Get("Content-Type") != hub.MIMEPNG ||
 		!strings.HasPrefix(resp.Header.Get("Content-Disposition"), "inline") ||
-		resp.Header.Get("Content-Security-Policy") != "default-src 'none'; sandbox" || resp.Header.Get("X-Content-Type-Options") != nosniff ||
+		resp.Header.Get("Content-Security-Policy") != cspSandbox || resp.Header.Get("X-Content-Type-Options") != nosniff ||
 		resp.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("chart = %d %q %v", resp.StatusCode, body, resp.Header)
 	}
-	for _, p := range []string{notes, fake} {
-		resp, body = get(t, c, mediaURL(e, "pc", p))
-		if resp.StatusCode != http.StatusOK || body != dev.files[p] || resp.Header.Get("Content-Type") != octetStream ||
-			!strings.HasPrefix(resp.Header.Get("Content-Disposition"), "attachment") {
-			t.Fatalf("%s = %d %q %v", p, resp.StatusCode, body, resp.Header)
-		}
-	}
+	wantFile(t, c, mediaURL(e, "pc", notes), textHello, hub.MIMEText, "inline")
+	wantFile(t, c, mediaURL(e, "pc", fake), dev.files[fake], octetStream, "attachment")
 	if resp, body = get(t, c, mediaURL(e, "pc", shot)); resp.StatusCode != http.StatusOK || body != shotJPEG ||
 		resp.Header.Get("Cache-Control") != "private, max-age=300" {
 		t.Fatalf("a server file = %d %q", resp.StatusCode, body)

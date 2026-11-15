@@ -28,10 +28,12 @@ type MediaFile struct {
 
 // Media reads the files the agent named in a session's replies.
 type Media interface {
-	// Media opens a file that a MEDIA directive in the session names. It
-	// fails with ErrNoMedia when no reply or browser_screenshot result of
-	// the session names path, when path is outside the backend's media
-	// roots, or when the backend has no such file.
+	// Media opens a file the session offered: a send_file result, a
+	// Markdown link or image or a MEDIA directive in a reply, a
+	// browser_screenshot result, an attached image or a vision call. It
+	// fails with ErrNoMedia when the session did not offer path or the
+	// file is not there, and ErrMediaTooLarge over MaxMediaBytes. Files
+	// streams files of any size in ranges.
 	Media(ctx context.Context, user, backendID, sessionID, path string) (*MediaFile, error)
 }
 
@@ -54,10 +56,11 @@ var ErrNoMedia = errors.New("no such file in this chat")
 // ErrMediaOffline is a file on a device that is not connected.
 var ErrMediaOffline = errors.New("the computer that has this file is offline")
 
-// ErrMediaTooLarge is a file over MaxMediaBytes.
+// ErrMediaTooLarge is a file over the cap: MaxMediaBytes for Media, the
+// backend's max_file_bytes for Files.
 var ErrMediaTooLarge = errors.New("file too large")
 
-// MaxMediaBytes bounds a file the hub passes on.
+// MaxMediaBytes bounds a file Media passes on whole.
 const MaxMediaBytes = 64 << 20
 
 // ScreenshotTool is the talaria tool that saves a browser screenshot
@@ -163,7 +166,8 @@ func MediaDirectives(text string) (paths []string, cleaned string) {
 // MarkdownMedia finds the local files a reply names with standard Markdown:
 // an image ![alt](/abs/path.png) or a link [label](/abs/path/file.pdf),
 // with the path bare or in angle brackets (<...>, for a path with spaces).
-// Only MediaPath paths count; remote URLs and relative paths are ordinary
+// Any FilePath counts, with any extension or none, so a reply offers the
+// files it links; remote URLs and relative paths are ordinary
 // Markdown. Fenced code and inline code are examples and stay. It returns
 // the paths in order without repeats.
 func MarkdownMedia(text string) []string {
@@ -234,7 +238,7 @@ type mdRef struct {
 }
 
 // markdownRefs finds the images and links of text whose destination is a
-// MediaPath, outside code.
+// FilePath, outside code.
 func markdownRefs(text string) []mdRef {
 	if !strings.Contains(text, "](") {
 		return nil
@@ -249,7 +253,7 @@ func markdownRefs(text string) []mdRef {
 		closer := pos + i
 		pos = closer + 2
 		p, end, ok := MarkdownDest(scan, pos)
-		if !ok || !MediaPath(p) {
+		if !ok || !FilePath(p) {
 			continue
 		}
 		open, depth := -1, 0

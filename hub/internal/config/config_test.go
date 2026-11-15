@@ -13,6 +13,7 @@ import (
 	"github.com/USA-RedDragon/configulator/v2"
 	"github.com/USA-RedDragon/talaria/assertion"
 	"github.com/USA-RedDragon/talaria/hub/internal/config"
+	"github.com/USA-RedDragon/talaria/hub/internal/hub"
 	"github.com/USA-RedDragon/talaria/hub/internal/webpush"
 	"github.com/goccy/go-yaml"
 )
@@ -284,6 +285,24 @@ func TestMediaRoots(t *testing.T) {
 		if _, err := load(t, secrets(), file+"    media_roots: ["+bad+"]\n"); !errors.Is(err, config.ErrBackend) {
 			t.Errorf("media root %q: %v", bad, err)
 		}
+	}
+}
+
+// max_file_bytes caps offered files per backend; unset is 8 GiB.
+func TestMaxFileBytes(t *testing.T) {
+	t.Parallel()
+	cfg, err := load(t, secrets(), file+"    max_file_bytes: 1073741824\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Backends[1].MaxFileBytes; got != 1<<30 {
+		t.Fatalf("max_file_bytes = %d", got)
+	}
+	if got := cfg.Backends[0].MaxFileBytes; got != hub.DefaultMaxFileBytes {
+		t.Fatalf("default max_file_bytes = %d", got)
+	}
+	if _, err := load(t, secrets(), file+"    max_file_bytes: -1\n"); !errors.Is(err, config.ErrBackend) {
+		t.Fatalf("negative max_file_bytes: %v", err)
 	}
 }
 

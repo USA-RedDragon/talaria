@@ -165,6 +165,7 @@ type backendShadow struct {
 	Devices        *bool                  `json:"devices"         toml:"devices"         yaml:"devices"`
 	ACPURL         *string                `json:"acp_url"         toml:"acp_url"         yaml:"acp_url"`
 	MediaRoots     *[]string              `json:"media_roots"     toml:"media_roots"     yaml:"media_roots"`
+	MaxFileBytes   *int64                 `json:"max_file_bytes"  toml:"max_file_bytes"  yaml:"max_file_bytes"`
 	ServiceDevices *[]serviceDeviceShadow `json:"service_devices" toml:"service_devices" yaml:"service_devices"`
 	Honcho         *honchoShadow          `json:"honcho"          toml:"honcho"          yaml:"honcho"`
 	AgentMessages  *bool                  `json:"agent_messages"  toml:"agent_messages"  yaml:"agent_messages"`
@@ -764,6 +765,10 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 			if esh.MediaRoots != nil {
 				e.MediaRoots = *esh.MediaRoots
 				set(idx+".media_roots", configulator.LayerFile, file)
+			}
+			if esh.MaxFileBytes != nil {
+				e.MaxFileBytes = *esh.MaxFileBytes
+				set(idx+".max_file_bytes", configulator.LayerFile, file)
 			}
 			if esh.ServiceDevices != nil {
 				out1 := make([]ServiceDevice, len(*esh.ServiceDevices))
@@ -5168,6 +5173,22 @@ func (s *backendShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 					return err
 				}
 				s.MediaRoots = &out
+			}
+		case "max_file_bytes":
+			v, err := dec.ReadToken()
+			if err != nil {
+				return err
+			}
+			switch v.Kind() {
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				num, err := v.Int()
+				if err != nil {
+					return configJSONError(path+".max_file_bytes", v, err)
+				}
+				s.MaxFileBytes = &num
+			default:
+				return configJSONError(path+".max_file_bytes", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "service_devices":
 			if dec.PeekKind() == jsontext.KindNull {

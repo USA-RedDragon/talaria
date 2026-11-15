@@ -119,6 +119,8 @@ type Plugin struct {
 	diffs, changes map[string]map[string]any
 	// gw is the gateway whose branches record their parents.
 	gw *gatewaytest.Gateway
+	// fr is the state of the stat and stream routes (files.go).
+	fr *fileRoutes
 }
 
 // NewPlugin mounts a fake plugin for backendID on gw. It accepts
@@ -144,6 +146,7 @@ func NewPlugin(gw *gatewaytest.Gateway, backendID string, key ed25519.PublicKey)
 	gw.Handle("GET "+base+"/sessions/{session}/diff", http.HandlerFunc(p.diff), true)
 	gw.Handle("GET "+base+"/sessions/{session}/changes", http.HandlerFunc(p.getChanges), true)
 	gw.Handle("GET "+protocol.PluginExecPath, http.HandlerFunc(p.exec), false)
+	p.mountFileRoutes(base)
 	return p
 }
 

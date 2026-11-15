@@ -136,7 +136,10 @@ type Server struct {
 	// openTimes keeps the hub's time for recent event streams.
 	openTimes openTimes
 	// snaps keeps what the event stream made of recent snapshots.
-	snaps        snapCache
+	snaps snapCache
+	// transfers are the file downloads in progress, for /media/info and
+	// /media/stop.
+	transfers    transfers
 	svc          hub.Service
 	links        hub.Links
 	tokens       hub.TokenStore
@@ -452,6 +455,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/sessions/{backend}/{session}/delete", s.api(s.handleDelete))
 	mux.Handle("GET /api/sessions/{backend}/{session}/models", s.api(s.handleModels))
 	mux.Handle("GET /api/sessions/{backend}/{session}/media", s.api(s.handleMedia))
+	mux.Handle("GET /api/sessions/{backend}/{session}/media/info", s.api(s.handleMediaInfo))
+	mux.Handle("GET /api/sessions/{backend}/{session}/media/preview", s.api(s.handleMediaPreview))
+	mux.Handle("POST /api/sessions/{backend}/{session}/media/stop", s.api(s.handleMediaStop))
 	mux.Handle("GET /api/sessions/{backend}/{session}/tool-output", s.api(s.handleToolOutput))
 	mux.Handle("GET /api/sessions/{backend}/{session}/page", s.api(s.handlePage))
 	mux.Handle("GET /api/sessions/{backend}/{session}/page-info", s.api(s.handlePageInfo))
@@ -594,14 +600,14 @@ func (s *Server) api(h http.HandlerFunc) http.Handler {
 			s.crossOrigin(w)
 			return
 		}
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			tok := r.Header.Get("X-CSRF-Token")
 			if tok == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(sess.CSRF)) != 1 {
 				errorJSON(w, http.StatusForbidden, "bad CSRF token")
 				return
 			}
 		}
-		if r.Method != http.MethodGet && !readPost(r) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !readPost(r) {
 			// A change is shown by the next read, not hidden by a kept answer.
 			s.last.forget(sess.User)
 			defer s.last.forget(sess.User)

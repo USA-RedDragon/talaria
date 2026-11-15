@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 // PluginBase is where the Hermes dashboard mounts the device plugin's
@@ -39,6 +40,8 @@ type PluginError struct {
 	Status  int
 	Code    string `json:"error"`
 	Message string `json:"message"`
+	// Secret is set on a read the secret rules refused.
+	Secret bool `json:"secret"`
 }
 
 func (e *PluginError) Error() string {
@@ -313,7 +316,13 @@ func (p *Plugin) ReadFile(ctx context.Context, sessionID, path string) (*http.Re
 	if s, ok := p.r.(slowRequester); ok {
 		send = s.RequestSlow
 	}
-	resp, err := send(ctx, http.MethodGet, PluginBase+"/sessions/"+url.PathEscape(sessionID)+"/files?path="+url.QueryEscape(path), nil)
+	return p.stream(ctx, send, "/sessions/"+url.PathEscape(sessionID)+"/files?path="+url.QueryEscape(path))
+}
+
+// stream sends a GET whose 200 answer the caller reads and closes; any
+// other answer is a *PluginError.
+func (p *Plugin) stream(ctx context.Context, send func(context.Context, string, string, []byte) (*http.Response, error), route string) (*http.Response, error) {
+	resp, err := send(ctx, http.MethodGet, PluginBase+route, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
@@ -327,4 +336,51 @@ func (p *Plugin) ReadFile(ctx context.Context, sessionID, path string) (*http.Re
 		e.Code = http.StatusText(resp.StatusCode)
 	}
 	return nil, e
+}
+
+// FileStat is the plugin's answer to a file stat (docs/protocol.md
+// section 9, file offers).
+type FileStat struct {
+	Name        string  `json:"name"`
+	Path        string  `json:"path"`
+	Real        string  `json:"real"`
+	Size        int64   `json:"size"`
+	MTime       float64 `json:"mtime"`
+	MIME        string  `json:"mime"`
+	Kind        string  `json:"kind"`
+	TypeLabel   string  `json:"type_label"`
+	Machine     string  `json:"machine"`
+	MachineKind string  `json:"machine_kind"`
+	ETag        string  `json:"etag"`
+	Secret      bool    `json:"secret"`
+	Requested   bool    `json:"requested"`
+}
+
+// fileQuery is the query of the stat and stream routes.
+func fileQuery(path, offer string) url.Values {
+	return url.Values{"path": {path}, "offer": {offer}}
+}
+
+// StatFile stats a file where a session runs: a device, the sandbox or
+// the Hermes server, with the secret rules. offer is the send_file offer
+// id that names the file, or "".
+func (p *Plugin) StatFile(ctx context.Context, sessionID, path, offer string) (FileStat, error) {
+	var out FileStat
+	return out, p.call(ctx, http.MethodGet, "/sessions/"+url.PathEscape(sessionID)+"/files/stat?"+fileQuery(path, offer).Encode(), nil, &out)
+}
+
+// StreamFile reads length bytes from offset (-1: to the end) of a file
+// where a session runs. A non-empty etag must match the file's, or the
+// plugin answers 412 changed. Only ctx bounds it. On a 200 answer the
+// caller closes the response body; any other answer is a *PluginError.
+func (p *Plugin) StreamFile(ctx context.Context, sessionID, path, offer string, offset, length int64, etag string) (*http.Response, error) {
+	q := fileQuery(path, offer)
+	q.Set("offset", strconv.FormatInt(offset, 10))
+	q.Set("length", strconv.FormatInt(length, 10))
+	q.Set("etag", etag)
+	send := p.r.Request
+	if s, ok := p.r.(slowRequester); ok {
+		send = s.RequestSlow
+	}
+	return p.stream(ctx, send, "/sessions/"+url.PathEscape(sessionID)+"/files/stream?"+q.Encode())
 }
