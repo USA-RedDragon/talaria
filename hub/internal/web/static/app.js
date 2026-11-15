@@ -1762,6 +1762,9 @@
           x.id = c.p.id;
         }
         for (const p of s.prompts || []) this.approval(p);
+        // A command's bubble and its progress or result line are the page's
+        // own: the snapshot Hermes sends after the command does not hold them.
+        for (const n of this.cmdKeep || []) if (!n.isConnected) this.add(n);
       } catch (err) {
         this.filling = false;
         vreport.note("snap:err");
@@ -3945,6 +3948,8 @@
       bubble.classList.remove("pending");
       bubble.classList.add("command");
       line = chat.add(el("div", "status cmdline", window.HubCmd.waiting(cmd)));
+      if (mine) chat.pending = chat.pending.filter((x) => x !== mine);
+      chat.cmdKeep = (chat.cmdKeep || []).concat([bubble, line]).slice(-10);
       if (cmd.compress && steer) {
         // Hermes compresses only between turns: wait for this one to end.
         chat.bottom();
@@ -3980,6 +3985,17 @@
           p.retrying = true;
         },
       });
+      if (cmd && mine) {
+        if (r && r.status === "command") endLine(window.HubCmd.result(cmd, r.output));
+        else {
+          // Hermes made a prompt of it: it goes on as a message.
+          endLine();
+          chat.cmdKeep = chat.cmdKeep.filter((n) => n !== bubble);
+          bubble.classList.remove("command");
+          bubble.classList.add("pending");
+          chat.pending.push(mine);
+        }
+      }
       const p = item();
       if (p) {
         p.inflight = false;
@@ -4012,6 +4028,7 @@
       for (const a of files) if (a.url) URL.revokeObjectURL(a.url);
     } catch (e) {
       endLine();
+      if (cmd && mine) bubble.remove();
       const p = item();
       if (p) {
         p.bubble.remove();

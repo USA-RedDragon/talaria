@@ -50,7 +50,10 @@ const { proc, connect } = require("../cdp.js").launch(bin, dir);
   assert.strictEqual(await ev(`document.querySelectorAll("#log .queued").length`), 0, "no queued label");
   await shots("running");
   fs.writeFileSync(path.join(dir, "release"), "1");
-  await c.until(`document.querySelector("#log .msg.result")`, "the result");
+  await c.until(`document.querySelector("#log .msg.result")`, "the result").catch(async (e) => {
+    e.message += " | banner: " + (await ev(`document.body.innerText.slice(0, 600)`)) + " | log: " + (await ev(`document.getElementById("log").innerText`));
+    throw e;
+  });
   const res = await ev(`document.querySelector("#log .msg.result").textContent`);
   assert.match(res, /^Compressed: \d+ tokens to \d+$/);
   assert.strictEqual(await ev(`document.querySelectorAll("#log .cmdline").length`), 0, "the progress line is gone");
