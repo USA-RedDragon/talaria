@@ -143,13 +143,15 @@ func (pjPlaces) Computers(context.Context, string) ([]hub.Computer, error) { ret
 func (pjPlaces) Places(_ context.Context, _ string, refs []hub.SessionRef) map[hub.SessionRef]hub.Place {
 	out := map[hub.SessionRef]hub.Place{}
 	for _, r := range refs {
-		out[r] = pjPlace
+		out[r] = pjPlace()
 	}
 	return out
 }
 
 func (pjPlaces) Place(context.Context, string, string, string) (hub.Place, error) {
-	return pjPlace, nil
+	return pjPlace(), nil
 }
 
-var pjPlace = hub.Place{Kind: "computer", DeviceID: "d1", Name: "Desktop", Dir: "/home/me/work", Online: true, Mine: true}
+func pjPlace() hub.Place {
+	return hub.Place{Kind: "computer", DeviceID: "d1", Name: "Desktop", Dir: "/home/me/work", Online: true, Mine: true}
+}
