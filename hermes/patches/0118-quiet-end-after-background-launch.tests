@@ -1,0 +1,7 @@
+# Extends patch 0117: tests/agent/test_quiet_end.py (background delegate_task, steers)
+tests/agent/test_empty_response_recovery_persistence.py
+tests/agent/test_turn_completion_explainer.py
+tests/agent/test_reasoning_only_stop_persistence.py
+tests/agent/test_turn_finalizer_final_response_persistence.py
+tests/gateway/test_normalize_empty_agent_response.py
+tests/gateway/test_gateway_silence_tokens.py

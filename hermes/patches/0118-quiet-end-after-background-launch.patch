@@ -1,0 +1,177 @@
+From 21c887b0e7e62b87f9accd8f895984a1537a37a6 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 16:58:34 -0600
+Subject: [PATCH] fix(agent): a quiet end also follows a background
+ delegate_task
+
+delegate_task's background result says results are delivered only after
+the model ends its turn, yet an empty reply there took the empty-response
+nudge, so a model that had nothing else to do ran a harmless tool call
+(execute_code print(1)) instead of stopping. An empty reply after a round
+of only background delegate_task launches now ends the turn quietly, as it
+does after agent_send (patch 0117). A failed launch still gets the nudge.
+
+Tests also pin that a steer never needs a tool call to be read: one written
+while the launch ran reaches the very next request, and one that lands
+after the last request comes back as pending_steer for the next turn.
+---
+ agent/quiet_end.py            | 45 +++++++++++++++++++------
+ tests/agent/test_quiet_end.py | 62 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 97 insertions(+), 10 deletions(-)
+
+diff --git a/agent/quiet_end.py b/agent/quiet_end.py
+index 84cefb5d..15beff14 100644
+--- a/agent/quiet_end.py
++++ b/agent/quiet_end.py
+@@ -7,6 +7,12 @@ Two shapes end this way without being a model failure:
+   model's call; "nothing to do" is a valid answer.
+ * an ``agent_send`` round: the model sent its message and has nothing more to add. The send's own
+   result ("delivered") is the whole outcome.
++* a background ``delegate_task`` round: the result says "Results are delivered only after you END YOUR
++  TURN", so a model with nothing else to do may end with no text instead of a one-line status.
++
++A steer (``agent.steer``) never needs a tool call to be read: it is drained before every request, and one
++that arrives after the last request comes back as ``pending_steer`` and starts the next turn. A quiet end
++keeps that path (see tests/agent/test_quiet_end.py).
+ 
+ Both used to take the empty-response ladder (a "you returned an empty response, continue" nudge,
+ then retries, then a "no reply" error bubble), so models learned to end such turns with a harmless
+@@ -27,6 +33,7 @@ _WAKE_RE = re.compile(
+     r"\[(?:Agent message am_|ASYNC DELEGATION|Background process |IMPORTANT: (?:Background process |\d+ background |"
+     r"\d+ async))")
+ _QUIET_AFTER_TOOLS = frozenset({"agent_send"})
++_BACKGROUND_LAUNCH_TOOLS = frozenset({"delegate_task"})
+ 
+ 
+ def _text(content: Any) -> str:
+@@ -49,13 +56,22 @@ def is_wake_text(text: str) -> bool:
+     return first.startswith("[") and first.endswith("]") and bool(_WAKE_RE.match(rest.lstrip()))
+ 
+ 
+-def _tool_names(msg: dict) -> list[str]:
+-    names = []
++def _calls(msg: dict) -> list[tuple[str, str]]:
++    """``(tool call id, tool name)`` of an assistant row."""
++    out = []
+     for tc in msg.get("tool_calls") or []:
+         fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+         name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
+-        names.append(str(name or ""))
+-    return names
++        cid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
++        out.append((str(cid or ""), str(name or "")))
++    return out
++
++
++def _is_background_launch(result: Any) -> bool:
++    """A delegate_task result that dispatched or queued a background run."""
++    text = _text(result)
++    return '"mode": "background"' in text.replace('":"', '": "') and any(
++        f'"status": "{s}"' in text.replace('":"', '": "') for s in ("dispatched", "queued"))
+ 
+ 
+ def quiet_end_allowed(messages: list[dict[str, Any]]) -> bool:
+@@ -64,15 +80,24 @@ def quiet_end_allowed(messages: list[dict[str, Any]]) -> bool:
+     i = len(messages) - 1
+     while i >= 0:
+         m = messages[i]
+-        if m.get("role") == "user" and not m.get("_empty_recovery_synthetic"):
++        if m.get("role") == "user" and not m.get("_empty_recovery_synthetic") and m.get("display_kind") != "steer":
+             break
+         i -= 1
+     if i < 0:
+         return False
+     rows = messages[i + 1:]
+-    assistants_with_tools = [m for m in rows if m.get("role") == "assistant" and m.get("tool_calls")]
+-    if not assistants_with_tools:
++    last_round = next((k for k in range(len(rows) - 1, -1, -1)
++                       if rows[k].get("role") == "assistant" and rows[k].get("tool_calls")), None)
++    if last_round is None:
+         return is_wake_text(_text(messages[i].get("content")))
+-    # Mid-turn: the newest tool round was only agent_send calls.
+-    names = _tool_names(assistants_with_tools[-1])
+-    return bool(names) and all(n in _QUIET_AFTER_TOOLS for n in names)
++    calls = _calls(rows[last_round])
++    if not calls:
++        return False
++    results = {r.get("tool_call_id"): r.get("content") for r in rows[last_round + 1:] if r.get("role") == "tool"}
++    for cid, name in calls:
++        if name in _QUIET_AFTER_TOOLS:
++            continue
++        if name in _BACKGROUND_LAUNCH_TOOLS and _is_background_launch(results.get(cid)):
++            continue
++        return False
++    return True
+diff --git a/tests/agent/test_quiet_end.py b/tests/agent/test_quiet_end.py
+index 8c2f89f2..f9b06f74 100644
+--- a/tests/agent/test_quiet_end.py
++++ b/tests/agent/test_quiet_end.py
+@@ -129,3 +129,65 @@ def test_the_next_request_replays_the_quiet_row_as_a_plain_empty_reply(loop_agen
+     sent = loop_agent.client.chat.completions.create.call_args.kwargs["messages"]
+     assert [m["role"] for m in sent][-3:] == ["user", "assistant", "user"]
+     assert all("_quiet_end" not in m for m in sent)
++
++
++DISPATCHED = '{"status": "dispatched", "mode": "background", "count": 4, "note": "Results are delivered only after you END YOUR TURN"}'
++
++
++def _delegate_round(loop_agent):
++    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
++
++    loop_agent.valid_tool_names = {"delegate_task"}
++    return _mock_response(content="", finish_reason="tool_calls",
++                          tool_calls=[_mock_tool_call("delegate_task", '{"tasks": []}', "c1")])
++
++
++def test_empty_reply_after_a_background_delegate_task_ends_the_turn_quietly(loop_agent):
++    with patch.object(loop_agent, "_dispatch_delegate_task", return_value=DISPATCHED):
++        result = _run(loop_agent, [_delegate_round(loop_agent), _empty(), _empty()], "do the spikes", list(HISTORY))
++    assert _calls(loop_agent) == 2
++    assert result["turn_exit_reason"] == "quiet_end"
++
++
++def test_empty_reply_after_a_failed_delegate_task_still_gets_the_nudge(loop_agent):
++    with patch.object(loop_agent, "_dispatch_delegate_task", return_value='{"error": "no capacity"}'):
++        result = _run(loop_agent, [_delegate_round(loop_agent)] + [_empty()] * 6, "do the spikes", list(HISTORY))
++    assert result["turn_exit_reason"] != "quiet_end"
++
++
++def test_a_steer_queued_while_the_model_ends_quietly_starts_the_next_turn_without_a_tool_call(loop_agent):
++    """A steer is never read only through a tool result: one that lands after the last request comes
++    back as pending_steer, which the gateway runs as the next input."""
++    loop_agent.valid_tool_names = {"delegate_task"}
++    queued = []
++
++    def dispatch(*_a, **_k):
++        loop_agent.steer("short spikes")  # the user wrote while the launch ran
++        return DISPATCHED
++
++    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
++    launch = _mock_response(content="", finish_reason="tool_calls",
++                            tool_calls=[_mock_tool_call("delegate_task", "{}", "c1")])
++    with patch.object(loop_agent, "_dispatch_delegate_task", side_effect=dispatch):
++        result = _run(loop_agent, [launch, _empty(), _empty()], "start the spikes", list(HISTORY))
++    sent = loop_agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
++    # the steer reached the very next request, after the tool result, with no extra tool call
++    assert "short spikes" in str(sent[-1]["content"]) and sent[-1]["role"] == "user"
++    assert _calls(loop_agent) == 2
++    assert result["turn_exit_reason"] == "quiet_end"
++    assert not queued
++
++
++def test_a_steer_that_lands_after_the_last_request_is_handed_back(loop_agent):
++    from tests.agent.test_run_agent import _mock_response
++
++    def reply(*_a, **_k):
++        loop_agent.steer("also this")  # arrives during the final request
++        return _empty()
++
++    loop_agent.client.chat.completions.create.side_effect = reply
++    with (patch.object(loop_agent, "_persist_session"), patch.object(loop_agent, "_save_trajectory"),
++          patch.object(loop_agent, "_cleanup_task_resources")):
++        result = loop_agent.run_conversation(WAKE, conversation_history=list(HISTORY))
++    assert result["turn_exit_reason"] == "quiet_end"
++    assert result.get("pending_steer") == "also this"
+-- 
+2.56.0
+
