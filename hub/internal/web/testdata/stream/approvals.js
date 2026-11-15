@@ -177,5 +177,23 @@ const prompt = (id, cmd) => ({ kind: "approval", prompt_id: id, command: cmd, de
     other.tracker.offer({ kind: "approval", prompt_id: "t", command: "x", choices: ["once", "deny", "source"] });
     assert.strictEqual(other.shown[0].buttons()[1].textContent, "Allow code from this source in this chat");
   }
+  // A description of several lines (a ledger write: the entry, the note, where the approval came from) shows as
+  // one block per line, with the rule sentence first and the command after.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer({ kind: "approval", prompt_id: "l", command: "<ledger> {\"action\": \"close\"}",
+      description: "Smart approval rule \"Self-Modification\": no user message gives that approval\nIt closes ledger entry L3da0b8 (a question waiting on the user, open): \"Download libadrenotools?\"\n\nNothing you said in this chat matches what this entry claims.",
+      choices: ["once", "deny"], subagent: "relift chunk" });
+    const divs = shown[0].children.filter((c) => c.tag === "div" && c.className === "").map((c) => c.textContent);
+    assert.deepStrictEqual(divs, [
+      "Smart approval rule \"Self-Modification\": no user message gives that approval",
+      "It closes ledger entry L3da0b8 (a question waiting on the user, open): \"Download libadrenotools?\"",
+      "Nothing you said in this chat matches what this entry claims."]);
+    assert.ok(shown[0].text().includes("Asked by a subagent: relift chunk"));
+    // A plugin's script still gets its own box, and a one-line description is one block as before.
+    const one = harness();
+    one.tracker.offer({ kind: "approval", prompt_id: "m", command: "x", description: "recursive delete" });
+    assert.deepStrictEqual(one.shown[0].children.filter((c) => c.tag === "div" && c.className === "").map((c) => c.textContent), ["recursive delete"]);
+  }
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

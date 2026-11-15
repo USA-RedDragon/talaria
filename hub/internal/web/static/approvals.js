@@ -50,7 +50,10 @@ window.HubApprovals = (() => {
       // internal: the description already says it, and without one the card says it in words.
       const rule = p.command ? /^<([\w.-]+)> \(plugin approval rule\)$/.exec(p.command) : null;
       const split = p.description ? /^([\s\S]*?)\s*\bScript:\s*([\s\S]+)$/.exec(p.description) : null;
-      if (p.description) box.append(el("div", "", split ? split[1] : p.description));
+      // A description of several lines (a ledger write names the entry, the note and where the approval came
+      // from) is one block per line: the page collapses a newline in a block.
+      const sentence = split ? split[1] : p.description;
+      for (const line of sentence ? String(sentence).split("\n") : []) if (line.trim()) box.append(el("div", "", line));
       if (split) box.append(el("pre", "", split[2]));
       if (p.command && !rule) box.append(el("pre", "", p.command));
       if (rule && !p.description) box.append(el("div", "rule", "An approval rule asks before the " + rule[1].replace(/_/g, " ") + " tool runs."));
