@@ -95,12 +95,19 @@ window.HubStick = (log, o) => {
     const top = log.scrollTop;
     if (Math.abs(top - r.top) < 1) return;
     const t = now();
-    if (t < until) until = Math.max(until, t + 300);
+    // A log that got shorter and now sits at its new end went up because
+    // the browser clamped scrollTop to the shorter log (a reply that ends
+    // draws shorter, a box folds above the reader), even while the reader
+    // scrolls: that move is the layout's, not the reader's, and counting it
+    // as the reader's sends the reader as far again into older rows (seen
+    // in Firefox with a slow wheel: 3800 px).
+    const clamped = top < r.top && log.scrollHeight < r.h && gap() < 1;
+    if (t < until && !clamped) until = Math.max(until, t + 300);
     // A log at its end thrown to its very top while its content changed,
     // with no wheel, touch, key or press: the page redrew it (a snapshot
     // empties the log and fills it again, which drops scrollTop to 0), not
     // the reader leaving the end, at any time after the open.
-    else if (layoutMoved(r) || (pinned && t < fresh) || (pinned && !held() && top < 1 && log.scrollHeight !== r.h)) { keep("undo"); sync(); return; }
+    else if (clamped || layoutMoved(r) || (pinned && t < fresh) || (pinned && !held() && top < 1 && log.scrollHeight !== r.h)) { keep("undo"); sync(); return; }
     const up = top < r.top;
     // The reader moved the log by top - r.top from where the anchor was.
     // What lies above the anchor may have changed size since the scroll

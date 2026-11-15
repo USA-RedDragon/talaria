@@ -9,7 +9,9 @@
 // mid (the reader scrolls up, presses something outside the log, and a
 // script then throws the log more than a screen further up: one jump
 // report), grow (a wheel up while 4000 px go in above the reader before
-// the page judged its scroll; the reader stays put), swipe (Chrome only: a finger swipes up on a phone while older
+// the page judged its scroll; the reader stays put), shrink and
+// shrinktouch (Chrome only, a finger on a phone: 4000 px above the
+// reader go away as the log scrolls; the reader stays put), swipe (Chrome only: a finger swipes up on a phone while older
 // rows render above; the reader stays put) or hand (Alt+J sends the record by hand, with a toast).
 // Prints ok when the page's own count is right; the Go test counts the
 // lines the hub logged.
@@ -58,7 +60,7 @@ function driver() {
       const c = await connect();
       await c.send("Page.enable");
       await c.send("Page.addScriptToEvaluateOnNewDocument", { source: "(" + preload + ")()" });
-      if (mode === "swipe") {
+      if (mode === "swipe" || mode === "shrinktouch") {
         // A phone: touch only, as Chrome on Android.
         await c.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 915, deviceScaleFactor: 2.6, mobile: true });
         await c.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
@@ -146,6 +148,31 @@ const { proc, connect } = driver();
     await sleep(2500);
     const g = await gap();
     assert.ok(g > 300 && g < 1400, "after a 600 px wheel with 4000 px put in above, the log is " + g + " px from its end");
+  } else if (mode === "shrink" || mode === "shrinktouch") {
+    // The reader is a little above the newest message, and right as the
+    // next wheel or finger move scrolls the log, 4000 px above the reader
+    // go away (a reply that ends draws shorter, a box folds): the browser
+    // drops scrollTop to the shorter log's end. That drop is the page's,
+    // not the reader's: the reader stays on what they read.
+    await ev(`(() => { const d = document.createElement("div"); d.id = "tall"; d.style.height = "4000px"; d.style.flex = "none"; document.getElementById("log").prepend(d); return 1; })()`);
+    await sleep(800);
+    const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + (${mode === "shrink"} ? r.height / 2 : 60) }; })()`);
+    const move = (dy) => (mode === "shrink" ? c.wheel(box.x, box.y, -dy) : c.swipe(box.x, box.y, dy));
+    await move(400);
+    await sleep(2500);
+    const g0 = await gap();
+    assert.ok(g0 > 100 && g0 < 3000, "the reader did not move up from the newest message: " + g0);
+    // The first message in view and where it is.
+    const at = `(() => { const l = document.getElementById("log"); const top = l.getBoundingClientRect().top; const n = window.__ref || [...l.querySelectorAll(".msg")].find((m) => m.getBoundingClientRect().bottom > top + 1); window.__ref = n; return Math.round(n.getBoundingClientRect().top - top); })()`;
+    const y0 = await ev(at);
+    await ev(`(() => { const l = document.getElementById("log"); let armed = true; l.addEventListener("scroll", () => { if (!armed) return; armed = false; document.getElementById("tall").remove(); }, { passive: true }); return 1; })()`);
+    await move(mode === "shrink" ? 40 : 400);
+    await sleep(2500);
+    const y1 = await ev(at);
+    const lim = mode === "shrink" ? 300 : 1500;
+    assert.ok(Math.abs(y1 - y0) < lim, "with 4000 px gone above the reader during a " + (mode === "shrink" ? "40 px wheel" : "400 px swipe") + ", what the reader read moved " + (y1 - y0) + " px (gap was " + g0 + ")");
+    const js = await ev(`window.__reports.filter((r) => r.kind === "jump").map((r) => r.body)`);
+    assert.strictEqual(js.length, 0, "a reader's scroll was reported as a jump: " + js.join("\n").slice(0, +(process.env.VR_DUMP || 600)));
   } else if (mode === "swipe") {
     // A finger swipes up from the newest message while older rows render
     // above: the reader stays on what the swipe brought into view.
