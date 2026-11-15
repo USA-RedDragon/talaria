@@ -1759,14 +1759,14 @@
         // and go to the place when they are here.
         this.afterOlder = kept;
         this.bottom();
-      } else this.place(kept);
+      } else this.placeReader(kept);
       if (this.onLoad) this.onLoad();
       this.onLoad = null;
     }
 
-    // place puts the reader where the snapshot found them (kept), at the
+    // placeReader puts the reader where the snapshot found them (kept), at the
     // message a search opened, or where a reload left them; else at the end.
-    place(kept) {
+    placeReader(kept) {
       if (kept !== null || window.HubRestore.state()) this.showOlder(() => true);
       if (window.HubReconcile.restore(this.log, kept, (p) => rowTop(this.log, p.row))) {
         // Back to where the reader was before the snapshot.
@@ -1788,7 +1788,7 @@
       if (this.afterOlder !== undefined) {
         const kept = this.afterOlder;
         this.afterOlder = undefined;
-        this.place(kept);
+        this.placeReader(kept);
       } else if (idle) this.topUp();
     }
 

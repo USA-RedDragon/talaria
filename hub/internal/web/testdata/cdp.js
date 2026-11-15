@@ -9,6 +9,7 @@
 // fails the pending and later calls at once with the reason. This reports
 // a wedge; it does not retry or skip anything.
 const { spawn } = require("child_process");
+const pageErrors = require("./pageerrors.js");
 
 const TIMEOUT = Number(process.env.CDP_TIMEOUT_MS) || 30000;
 
@@ -128,6 +129,9 @@ exports.launch = (bin, dir) => {
         pend.delete(d.id);
         clearTimeout(p.timer);
         if (d.error) p.rej(new Error(`${p.method} failed: ${JSON.stringify(d.error)} (at ${p.site})`)); else p.res(d.result);
+      } else if (d.method === "Runtime.exceptionThrown") {
+        const x = d.params.exceptionDetails || {};
+        pageErrors.track(`${(x.exception && (x.exception.description || x.exception.value)) || x.text} (${String(x.url || "").split("/").pop()}:${x.lineNumber + 1})`);
       } else if (d.method === "Inspector.targetCrashed") fail("the page renderer crashed (Inspector.targetCrashed)");
       else if (d.method === "Inspector.detached") fail("DevTools detached from the page: " + brief(d.params));
     };
@@ -154,6 +158,7 @@ exports.launch = (bin, dir) => {
       return r.result.value;
     };
     await send("Inspector.enable"); // so a renderer crash is reported
+    await send("Runtime.enable"); // so an error the page throws is reported (pageerrors.js)
     // load opens url and waits until the new document shows ready (a page
     // expression), not the one it replaces.
     const load = async (u, ready, what) => {

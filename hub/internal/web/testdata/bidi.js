@@ -4,6 +4,7 @@
 // trip has a bounded wait; a Firefox exit or a closed socket fails the
 // pending calls at once with the reason and the tail of Firefox's stderr.
 const { spawn } = require("child_process");
+const pageErrors = require("./pageerrors.js");
 
 const TIMEOUT = Number(process.env.CDP_TIMEOUT_MS) || 30000;
 
@@ -36,6 +37,11 @@ exports.launch = (bin, dir) => {
     };
     sock.onmessage = (m) => {
       const d = JSON.parse(m.data);
+      if (d.type === "event" && d.method === "log.entryAdded" && d.params.type === "javascript" && d.params.level === "error") {
+        const f = d.params.stackTrace && d.params.stackTrace.callFrames[0];
+        pageErrors.track(`${d.params.text}${f ? ` (${String(f.url).split("/").pop()}:${f.lineNumber})` : ""}`);
+        return;
+      }
       if (!d.id || !pend.has(d.id)) return;
       const p = pend.get(d.id);
       pend.delete(d.id);
@@ -52,6 +58,7 @@ exports.launch = (bin, dir) => {
       sock.send(JSON.stringify({ id: i, method, params }));
     });
     await send("session.new", { capabilities: {} });
+    await send("session.subscribe", { events: ["log.entryAdded"] });
     const context = (await send("browsingContext.getTree", {})).contexts[0].context;
     // Key presses reach the page only in the active window of the browser.
     await send("browsingContext.activate", { context });

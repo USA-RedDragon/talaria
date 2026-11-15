@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,8 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/talaria/hub/internal/config"
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway/gatewaytest"
+	"github.com/USA-RedDragon/talaria/hub/internal/hub"
 	"github.com/USA-RedDragon/talaria/hub/internal/service"
+	"github.com/USA-RedDragon/talaria/hub/internal/store"
+	"github.com/USA-RedDragon/talaria/hub/internal/web"
 )
 
 // The jump seen in the field: a long chat the page kept (parked) while the
@@ -63,7 +68,12 @@ func parkJump(t *testing.T, bin string, delay int, throw bool) {
 	if err != nil {
 		t.Skip("node is not installed")
 	}
-	e := setupService(t, nil, func(o *service.Options) { o.IdleDetach = time.Second })
+	// The page asks where each chat runs (/place), which sets an own
+	// property on the chat object of the page; a chat's methods must
+	// survive it (a method named place did not, and every later snapshot
+	// threw before it put the reader back).
+	e := setupService(t, func(_ *config.Config, o *web.Options, _ *store.Store) { o.Computers = pjPlaces{} },
+		func(o *service.Options) { o.IdleDetach = time.Second })
 	for k, c := range []struct {
 		id    string
 		turns int
@@ -113,10 +123,33 @@ func parkJump(t *testing.T, bin string, delay int, throw bool) {
 	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "parkjump", "run.js"), bin, e.url, prof, strconv.Itoa(delay))
 	cmd.Env = os.Environ()
 	if throw {
-		cmd.Env = append(cmd.Env, "PARKJUMP_THROW=1")
+		// The script throws on purpose and checks the errors itself.
+		cmd.Env = append(cmd.Env, "PARKJUMP_THROW=1", "PAGE_ERRORS_OK=1")
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+// pjPlaces answers the page's place questions: every chat runs on one
+// computer. The rest of hub.Computers is not used by the page here.
+type pjIface = hub.Computers
+
+type pjPlaces struct{ pjIface }
+
+func (pjPlaces) Computers(context.Context, string) ([]hub.Computer, error) { return nil, nil }
+
+func (pjPlaces) Places(_ context.Context, _ string, refs []hub.SessionRef) map[hub.SessionRef]hub.Place {
+	out := map[hub.SessionRef]hub.Place{}
+	for _, r := range refs {
+		out[r] = pjPlace
+	}
+	return out
+}
+
+func (pjPlaces) Place(context.Context, string, string, string) (hub.Place, error) {
+	return pjPlace, nil
+}
+
+var pjPlace = hub.Place{Kind: "computer", DeviceID: "d1", Name: "Desktop", Dir: "/home/me/work", Online: true, Mine: true}
