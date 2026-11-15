@@ -1,6 +1,6 @@
 "use strict";
 // Drives the real hub page in headless Chrome (DevTools protocol).
-// usage: node run.js CHROME_BIN HUB_URL PROFILE_DIR POKE_URL [SHOT_DIR]
+// usage: node run.js CHROME_BIN HUB_URL PROFILE_DIR POKE_URL (MINICHAT_SHOTS=dir keeps screenshots)
 // A subagent runs; the reader opens Activity, opens its row and sends it a
 // message from the page. POKE_URL?text=... makes the subagent read it: a tool
 // result, then the steer row Hermes stores. Asserts that the text shows once
@@ -8,7 +8,8 @@
 // full and folds a long one after six lines, at 412 and 1280 px, light and dark.
 const assert = require("assert");
 const fs = require("fs");
-const [bin, url, dir, poke, shots] = process.argv.slice(2);
+const [bin, url, dir, poke] = process.argv.slice(2);
+const shots = process.env.MINICHAT_SHOTS;
 const { launch } = require("../cdp.js");
 
 let chrome;
