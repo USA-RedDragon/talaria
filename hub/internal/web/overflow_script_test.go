@@ -41,7 +41,7 @@ func TestNoCardOverflowsTheStream(t *testing.T) {
 	}
 	table := "| a | b | c | d |\n|---|---|---|---|\n| " + longToken + " | " + longURL + " | " + longToken + " | x |\n"
 	code := "```go\nfunc main() { fmt." + longToken + "(\"" + longToken + longToken + "\") }\n```\n"
-	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Work", Live: true, StartedAt: 900,
+	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: titleWork, Live: true, StartedAt: 900,
 		Prompts: []gateway.Prompt{
 			{Kind: gateway.PromptApproval, PromptID: "p-shell", Choices: []string{gateway.ChoiceOnce, hub.ChoiceSession, gateway.ChoiceDeny},
 				Command: optr("delete " + longToken + longToken + " && curl " + longURL), Description: optr("dangerous command " + longToken)},

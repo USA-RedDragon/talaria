@@ -83,7 +83,7 @@ const { proc, connect } = driver();
   await open("ask", "Asking");
   await answerable(q1, "opened fresh");
   // 2. Shown again after another chat.
-  await open("elsewhere", "Other");
+  await open("away", "Other");
   await open("ask", "Asking");
   await answerable(q1, "shown again");
   assert.strictEqual(await ev(`document.querySelectorAll("#log .approval").length`), 1, kind + ": one card, not a copy after switching back");

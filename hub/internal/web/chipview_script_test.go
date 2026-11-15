@@ -25,7 +25,7 @@ func TestChipOpensViewer(t *testing.T) {
 	e.gw.QueueWhileRunning = true
 	const waiting = "/opt/data/hermes/cache/images/waiting.png"
 	e.gw.SetFile(waiting, []byte("\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x0a\x00\x00\x00\x0a\x08\x06\x00\x00\x00\x8d\x32\xcf\xbd\x00\x00\x00\x15\x49\x44\x41\x54\x78\xda\x63\xfc\xcf\xc0\xf0\x9f\x81\x08\xc0\x38\xaa\x90\xbe\x0a\x01\xc4\xfd\x18\xed\x14\xe0\x1c\x68\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82"))
-	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Work", Live: true, Running: true, StartedAt: 900,
+	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: titleWork, Live: true, Running: true, StartedAt: 900,
 		Pending: []gateway.PendingAdmission{{AdmissionID: "a1", Sequence: 1, Status: "queued", Text: "after this\n\n[Image attached at: " + waiting + "]"}}, Messages: []map[string]any{
 			{kRole: roleUser, kText: "start\n\n[Image attached at: " + waiting + "]"}, {kRole: roleAssistant, kText: "working"}}})
 	prof, err := os.MkdirTemp("", "chipview-profile-")

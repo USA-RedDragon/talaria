@@ -1390,7 +1390,7 @@ func (g *Gateway) hApproval(_ *conn, p map[string]any) (any, string, func()) {
 		return nil, errInvalidParams, nil
 	}
 	g.resolveApproval(s, pr, str(p, "choice"))
-	return map[string]any{kStatus: "resolved"}, "", nil
+	return map[string]any{kStatus: kResolved}, "", nil
 }
 
 // deniedResult is the result of a terminal call whose approval was denied
@@ -1442,11 +1442,11 @@ func (g *Gateway) hClarify(_ *conn, p map[string]any) (any, string, func()) {
 		s.NextPrompts = s.NextPrompts[1:]
 		s.prompts[next.PromptID] = next
 		g.publishLocked(s, "clarify.request", next)
-		return map[string]any{kStatus: "resolved"}, "", nil
+		return map[string]any{kStatus: kResolved}, "", nil
 	}
 	s.Running = false
 	g.publishLocked(s, "message.complete", map[string]any{kText: "answered: " + str(p, "answer"), kStatus: kComplete})
-	return map[string]any{kStatus: "resolved"}, "", nil
+	return map[string]any{kStatus: kResolved}, "", nil
 }
 
 // clarify raises a question: "ask me" asks with choices, "pick many" with
@@ -1629,3 +1629,5 @@ func (g *Gateway) ClarifyAnswers() []string {
 	defer g.mu.Unlock()
 	return append([]string(nil), g.answers...)
 }
+
+const kResolved = "resolved"

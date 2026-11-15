@@ -12,6 +12,9 @@ import (
 )
 
 const titleOther = "Other"
+
+// titleWork is the title of the chat a script works in.
+const titleWork = "Work"
 const toolOutBase = "/api/sessions/pc/"
 
 func toolOutURL(e *hubEnv, backend, query string) string {

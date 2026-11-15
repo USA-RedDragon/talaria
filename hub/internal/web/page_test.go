@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -197,16 +198,17 @@ func TestPageFromAReplyInPieces(t *testing.T) {
 
 // A page the agent just published opens before any reply names it: the
 // page_publish result offers the file.
+const file = "/srv/out/pages/new.html"
+
 func TestPublishedPageOpensBeforeReply(t *testing.T) {
 	t.Parallel()
 	e := setupWith(t, func(cfg *config.Config, _ *web.Options, _ *store.Store) {
-		cfg.Backends[0].MediaRoots = []string{"/srv/out"}
+		cfg.Backends[0].MediaRoots = []string{path.Dir(path.Dir(file))}
 	})
-	const file = "/srv/out/pages/new.html"
 	e.gw.SetFile(file, []byte("<!doctype html><title>Fresh</title><p>x</p>"))
 	e.gw.AddSession(&gatewaytest.Session{ID: "m1", Title: titleMedia, Live: true, StartedAt: 200, Messages: []map[string]any{
 		{kRole: roleUser, kText: "publish it"},
-		{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "c1", fnKey: map[string]any{fieldName: "page_publish", ilArgs: `{"path": "/home/u/new.html"}`}}}},
+		{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "c1", fnKey: map[string]any{fieldName: hub.PagePublishTool, ilArgs: `{"path": "/home/u/new.html"}`}}}},
 		{kRole: stepTool, kCallID: "c1", fieldContent: `{"ok": true, "path": "` + file + `", "title": "Fresh"}`},
 	}})
 	c := client(t)

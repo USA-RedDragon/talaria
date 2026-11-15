@@ -39,11 +39,11 @@ func clarifyLive(t *testing.T, bin string) {
 	e.gw.AddSession(&gatewaytest.Session{ID: "ask", Title: "Asking", Live: true, Running: true, StartedAt: 900,
 		Messages: []map[string]any{
 			{kRole: roleUser, kText: "plan the controls"},
-			{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "c1", fnKey: map[string]any{fieldName: "clarify", ilArgs: `{"questions": [{"question": "` + q1 + `", "choices": ["yes", "no", "later"]}]}`}}}},
+			{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "c1", fnKey: map[string]any{fieldName: gateway.PromptClarify, ilArgs: `{"questions": [{"question": "` + q1 + `", "choices": ["yes", "no", "later"]}]}`}}}},
 		},
-		Prompts:     []gateway.Prompt{{Kind: "clarify", PromptID: "cl-1", Question: &q1, Choices: []string{"L3", "R3", "none"}, MultiSelect: true}},
-		NextPrompts: []gateway.Prompt{{Kind: "clarify", PromptID: "cl-2", Question: &q2, Choices: []string{}, Subagent: &who}}})
-	e.gw.AddSession(&gatewaytest.Session{ID: "elsewhere", Title: titleOther, Live: true, StartedAt: 700,
+		Prompts:     []gateway.Prompt{{Kind: gateway.PromptClarify, PromptID: "cl-1", Question: &q1, Choices: []string{"L3", "R3", "none"}, MultiSelect: true}},
+		NextPrompts: []gateway.Prompt{{Kind: gateway.PromptClarify, PromptID: "cl-2", Question: &q2, Choices: []string{}, Subagent: &who}}})
+	e.gw.AddSession(&gatewaytest.Session{ID: "away", Title: titleOther, Live: true, StartedAt: 700,
 		Messages: []map[string]any{{kRole: roleUser, kText: "hello"}, {kRole: roleAssistant, kText: "hi"}}})
 	prof, err := os.MkdirTemp("", "clarifylive-profile-")
 	if err != nil {
