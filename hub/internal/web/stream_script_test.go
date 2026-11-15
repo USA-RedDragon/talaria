@@ -40,6 +40,8 @@ func TestSendScript(t *testing.T) {
 // A snapshot that arrives after part of the page was drawn keeps the
 // messages still being sent, maps the others by the ID they were sent
 // under, and keeps the reader's place.
+// A steer the running turn read shows in its stored row, not again at the
+// end with the steers it holds.
 func TestReconcileScript(t *testing.T) {
 	t.Parallel()
 	runStreamScript(t, "reconcile.js", "origin.js", "reconcile.js")

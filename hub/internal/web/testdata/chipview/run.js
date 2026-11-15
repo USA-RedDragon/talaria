@@ -175,7 +175,10 @@ async function run(c, w, h, touch, dark) {
   await until(ev, `!!document.querySelector(".msg.user .att.image img")`, tag + ": the sent message to show its image");
   assert.ok(await ev(`!!document.querySelector(".msg.user .att.image img")`), tag + ": the sent message shows its image");
   await shot(c, tag + "-queued");
-  await press(".msg.user .att.image img");
+  // The image of the message just sent: the chat also shows the earlier
+  // passes' steers, which the running turn still holds.
+  await ev(`(() => { const all = document.querySelectorAll(".msg.user .att.image img"); const img = all[all.length - 1]; img.dataset.sent = "1"; img.scrollIntoView({ block: "center" }); return 1; })()`);
+  await press(".msg.user .att.image img[data-sent]");
   assert.ok(await shown(ev), tag + ": the queued message's image opens the viewer");
   await key("Escape", "Escape");
   await gone(ev, tag + ": Escape on the queued message's viewer");

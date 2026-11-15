@@ -72,6 +72,38 @@ const got3 = JSON.parse(JSON.stringify(R.carry(steered, snap3, now).map((c) => [
 // "steer" is only a part of a line, and a message still in flight is not taken for one stored.
 assert.deepStrictEqual(got3, [["first steer", "done"], ["> quoted line\nsecond steer\n", "done"], ["alone", "done"], ["steer", "again"], ["alone", "again"]]);
 
+// Hermes lists a steer as steering until its turn ends, and stores it where
+// the turn read it, after a tool result. A steer of the running turn that
+// its rows show is read: it shows there, not again at the end. Only rows
+// after the turn's prompt count, each read steer answers once, and a steer
+// not read yet, or a part of a line, is not read.
+const tool = (n) => [{ role: "assistant", text: "", tool_calls: [{ id: "c" + n }] }, { role: "tool", tool_call_id: "c" + n, text: "{}" }];
+const snap4 = {
+  running: true,
+  messages: [
+    { role: "user", display_kind: "steer", text: open + "\nolder turn\n" + close },
+    { role: "user", text: "the prompt" },
+    ...tool(1), ...tool(2),
+    { role: "user", display_kind: "steer", text: open + "\none\n> quoted line\nsecond steer\n" + close },
+    ...tool(3),
+    { role: "user", display_kind: "steer", text: "\n\n" + open + "\ntwice\ntwice\n" + close },
+  ],
+};
+const read = R.readSteers(snap4);
+assert.strictEqual(read("one"), true);
+assert.strictEqual(read("> quoted line\nsecond steer\n"), true);
+assert.strictEqual(read("twice"), true);
+assert.strictEqual(read("twice"), true);
+assert.strictEqual(read("twice"), false, "each read steer answers one steer");
+assert.strictEqual(read("one"), false, "taken already");
+assert.strictEqual(read("older turn"), false, "a steer of an earlier turn is not this turn's");
+assert.strictEqual(read("not read yet"), false);
+assert.strictEqual(read("quoted"), false, "a part of a line");
+assert.strictEqual(read(""), false);
+// Once the turn ended, Hermes lists no steer as steering: nothing is read.
+assert.strictEqual(R.readSteers({ ...snap4, running: false })("one"), false);
+assert.strictEqual(R.readSteers({ running: true })("one"), false);
+
 // A pending input is known by the ID the page sent it under, else by the hub's.
 assert.strictEqual(R.idOf({ id: "adm-2", submission_id: id(2) }), id(2));
 assert.strictEqual(R.idOf({ id: "adm-9" }), "adm-9");

@@ -684,12 +684,13 @@ func (ls *live) attach(sinceSeq int64) (<-chan hub.Event, func()) {
 		ls.send(v, ls.turnStartSeq())
 	case covered:
 		ls.send(v, sinceSeq)
-	case ls.truncated, ls.turnStartSeq() > 0:
+	case ls.truncated, ls.turnStartSeq() > 0, ls.steeringLocked():
 		// The held snapshot is older than finished turns in the buffer. A
 		// viewer that opens fresh would draw the old transcript and then
 		// every event of those turns one by one, with a render and a scroll
 		// each: a warm replica sent megabytes and froze the page. A new
 		// snapshot has the transcript as it is, and the buffer starts over.
+		// The same holds for steers the running turn holds (steeringLocked).
 		// Until it comes the viewer gets the held one to show at once: a
 		// fresh snapshot waits for Hermes, a second on a big chat.
 		if ls.snapshot.Kind == hub.KindSnapshot {
@@ -707,6 +708,26 @@ func (ls *live) attach(sinceSeq int64) (<-chan hub.Event, func()) {
 		ls.idleTimer = nil
 	}
 	return v.ch, func() { ls.detach(v) }
+}
+
+// steeringLocked says whether Hermes holds messages handed to the running
+// turn as steers. The turn stores each one where it reads it, after a tool
+// result, and sends no event then: the held snapshot and the buffered
+// events have no place for them, so a viewer that opens the chat drew them
+// after the held rows and before the turn's events. A fresh snapshot has
+// them where the turn put them. ls.mu is held.
+func (ls *live) steeringLocked() bool {
+	inputs := make([]gateway.PendingAdmission, 0, len(ls.inputs))
+	for _, in := range ls.inputs {
+		inputs = append(inputs, in)
+	}
+	turn := runningAdmission(inputs, ls.turnAdmission)
+	for _, in := range inputs {
+		if steering(in, turn) {
+			return true
+		}
+	}
+	return false
 }
 
 // snapshotWithPrompts is the held snapshot with the prompts the hub holds

@@ -177,31 +177,63 @@ func (g *Gateway) settleTransfersLocked(s *Session, outcome string) {
 		return
 	}
 	if outcome == "steered" {
-		// The turn read its steers as one user row: their texts joined by
-		// newlines in the steer marker (agent/prompt_builder.py
-		// steer_user_row), with no submission ID of its own.
-		var texts []string
-		for _, id := range s.transfers {
-			if i := slices.IndexFunc(s.Pending, func(a gateway.PendingAdmission) bool { return a.AdmissionID == id }); i >= 0 {
-				texts = append(texts, strings.TrimSpace(s.Pending[i].Text))
-			}
-		}
-		row := map[string]any{kRole: roleUser, "display_kind": "steer", kText: SteerOpen + "\n" + strings.Join(texts, "\n") + "\n" + SteerClose}
-		if s.SteerRow != nil {
-			row = s.SteerRow(texts)
-		}
-		if len(texts) > 0 && row != nil {
-			s.Messages = append(s.Messages, row)
-		}
+		// The turn read the steers no tool round read as one user row.
+		g.readSteersLocked(s)
 	}
 	for _, id := range s.transfers {
 		s.Pending = slices.DeleteFunc(s.Pending, func(a gateway.PendingAdmission) bool { return a.AdmissionID == id })
 	}
+	s.read = nil
 	g.publishLocked(s, gateway.InfoEvent, map[string]any{kPending: s.Pending, kRevision: s.Revision, kExecGen: s.Generation})
 	for _, id := range s.transfers {
 		g.publishAdmissionLocked(s, "message.complete", id, map[string]any{kText: "", "content": "", kAdmissionID: id, kOutcome: outcome})
 	}
 	s.transfers = nil
+}
+
+// readSteersLocked stores the steers handed to the turn that it has not
+// read yet as one user row: their texts joined by newlines in the steer
+// marker (agent/prompt_builder.py steer_user_row), with no submission ID of
+// its own. g.mu is held.
+func (g *Gateway) readSteersLocked(s *Session) {
+	var texts []string
+	for _, id := range s.transfers {
+		if s.read[id] {
+			continue
+		}
+		if i := slices.IndexFunc(s.Pending, func(a gateway.PendingAdmission) bool { return a.AdmissionID == id }); i >= 0 {
+			texts = append(texts, strings.TrimSpace(s.Pending[i].Text))
+			if s.read == nil {
+				s.read = map[string]bool{}
+			}
+			s.read[id] = true
+		}
+	}
+	row := map[string]any{kRole: roleUser, "display_kind": "steer", kText: SteerOpen + "\n" + strings.Join(texts, "\n") + "\n" + SteerClose}
+	if s.SteerRow != nil {
+		row = s.SteerRow(texts)
+	}
+	if len(texts) > 0 && row != nil {
+		s.Messages = append(s.Messages, row)
+	}
+}
+
+// ToolRound runs one tool call of the running turn as Hermes does:
+// tool.start and tool.complete, the call and its result stored (the turn
+// stores each tool round as it ends, agent/turn_tool_round.py), then the
+// steers handed to the turn since the last round read after the result and
+// stored there (agent/agent_runtime_helpers.py). Hermes sends no event
+// when it reads a steer: the admission reads "started" until the turn ends.
+func (g *Gateway) ToolRound(sessionID, toolID, name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.sessions[sessionID]
+	g.publishLocked(s, "tool.start", map[string]any{kToolID: toolID, kName: name, kArgs: map[string]any{}})
+	g.publishLocked(s, "tool.complete", map[string]any{kToolID: toolID, kName: name, kResult: `{"ok": true}`, kDuration: 0.1, kIsError: false})
+	s.Messages = append(s.Messages,
+		map[string]any{kRole: kAssistant, kText: "", "tool_calls": []any{map[string]any{"id": toolID, "function": map[string]any{kName: name, "arguments": "{}"}}}},
+		map[string]any{kRole: "tool", "tool_call_id": toolID, kName: name, kText: `{"ok": true}`})
+	g.readSteersLocked(s)
 }
 
 func sourceOf(s *Session) string {

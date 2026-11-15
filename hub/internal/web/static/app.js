@@ -1728,12 +1728,15 @@
         this.agentWaiting = new Map();
         const mine = new Map();
         for (const c of carried) if (c.act === "adopt") mine.set(c.at, c.p);
+        const read = window.HubReconcile.readSteers(s);
         (s.pending || []).forEach((p, i) => {
           if (p.status === "lost") this.lost(p.id, p.text);
           else if (p.status === "steering") {
             // Hermes also hands a background result or another agent's message to the running turn; the
             // sender named in the input ID decides if it is the user's bubble or a card.
             const v = window.HubOrigin.classify(p);
+            // A steer the turn read shows in its row, where the turn read it.
+            if (read(v.text != null ? v.text : p.text)) return;
             if (this.originCard(v, p.text, true)) return;
             const bubble = this.userText(v.text, true);
             const x = this.pending.find((y) => y.bubble === bubble);
@@ -1760,6 +1763,10 @@
           if (!x) continue;
           this.adopt(x, c.p);
           x.id = c.p.id;
+          x.adm = c.p.adm;
+          // A steer the hub handed to the turn that still runs reads as
+          // sent to it, not as a message still sending.
+          if (c.p.steered && s.running) this.steered(x);
         }
         for (const p of s.prompts || []) this.approval(p);
         // A command's bubble and its progress or result line are the page's

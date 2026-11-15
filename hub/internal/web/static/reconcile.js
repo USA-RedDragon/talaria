@@ -69,6 +69,40 @@ window.HubReconcile = (() => {
     return out;
   }
 
+  // readSteers gives take(text), which tells whether the running turn of
+  // the snapshot has read a steer with that text: Hermes lists a steer as
+  // steering until the turn ends, and stores it where the turn read it,
+  // after a tool result, so the row shows it there and it is not drawn
+  // again at the end. Only the open turn's rows count (after its prompt,
+  // the last user row that is not a steer), and each read steer answers
+  // one take.
+  function readSteers(snap) {
+    const msgs = (snap && snap.messages) || [];
+    // Each steer row as its lines, oldest row first.
+    const rows = [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (!m || m.role !== "user") continue;
+      const s = steerText(m);
+      if (s === null) break;
+      rows.unshift(s.split("\n"));
+    }
+    return (text) => {
+      const want = String(text || "").trim().split("\n");
+      if (!snap || !snap.running || want.join("") === "") return false;
+      for (const lines of rows) {
+        for (let i = 0; i + want.length <= lines.length; i++) {
+          if (want.every((w, k) => lines[i + k] === w)) {
+            // Taken: the same words sent twice match the next one.
+            lines.splice(i, want.length);
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+  }
+
   // anchor remembers where a reader who is not at the end of the log is:
   // the message row in view and where it starts (place), and the distance
   // to the end of the log for a page that has no row to name. It is null
@@ -86,5 +120,5 @@ window.HubReconcile = (() => {
     return true;
   }
 
-  return { idOf, carry, anchor, restore };
+  return { idOf, carry, readSteers, anchor, restore };
 })();

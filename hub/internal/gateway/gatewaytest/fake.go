@@ -101,6 +101,8 @@ type Session struct {
 	// inputs prompt.steer_queued handed to it.
 	turn, turnInput string
 	transfers       []string
+	// read are the transfers a ToolRound read and stored mid-turn.
+	read map[string]bool
 	// SteerRow, when set, is the row a finished turn stores for the
 	// steers it read (nil stores none); unset, it is Hermes's steer row.
 	SteerRow func(texts []string) map[string]any
@@ -797,6 +799,7 @@ func (g *Gateway) FinishReply(sessionID, text string) {
 	s.Running = false
 	s.Messages = append(s.Messages, map[string]any{kRole: kAssistant, kText: text})
 	g.publishLocked(s, "message.complete", map[string]any{kText: text, kStatus: kComplete})
+	g.settleTransfersLocked(s, "steered")
 }
 
 func (g *Gateway) login(w http.ResponseWriter, r *http.Request) {
