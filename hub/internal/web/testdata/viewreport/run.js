@@ -115,7 +115,9 @@ const { proc, connect } = driver();
   await until(`location.hash === "#/s/pc/long1" && !document.querySelector("#log .loading") && document.querySelectorAll("#log .msg").length > 5`, "long1 drawn");
   await until(`window.__reports.some((r) => r.kind === "loaded")`, "the page loaded report");
   // Well past the open: the report is not only for the first seconds.
-  await sleep(16500);
+  // The shrink modes are about the reader's own scroll, which ends the
+  // open at once.
+  await sleep(mode.startsWith("shrink") ? 1500 : 16500);
   const gap = () => ev(`(() => { const l = document.getElementById("log"); return Math.round(l.scrollHeight - l.scrollTop - l.clientHeight); })()`);
   assert.ok((await gap()) <= 24, "the chat is not at its newest message before the test moves it");
   const left = () => ev(`window.__reports.filter((r) => r.kind === "left")`);
@@ -155,7 +157,7 @@ const { proc, connect } = driver();
     // drops scrollTop to the shorter log's end. That drop is the page's,
     // not the reader's: the reader stays on what they read.
     await ev(`(() => { const d = document.createElement("div"); d.id = "tall"; d.style.height = "4000px"; d.style.flex = "none"; document.getElementById("log").prepend(d); return 1; })()`);
-    await sleep(800);
+    await sleep(300);
     const box = await ev(`(() => { const r = document.getElementById("log").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + (${mode === "shrink"} ? r.height / 2 : 60) }; })()`);
     const move = (dy) => (mode === "shrink" ? c.wheel(box.x, box.y, -dy) : c.swipe(box.x, box.y, dy));
     await move(400);
