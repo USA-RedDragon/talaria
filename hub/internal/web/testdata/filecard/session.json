@@ -1,0 +1,142 @@
+[
+ {
+  "role": "user",
+  "text": "send me the files"
+ },
+ {
+  "role": "assistant",
+  "text": "Sending them now.",
+  "tool_calls": [
+   {
+    "id": "f1",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"zip\"}"
+    }
+   },
+   {
+    "id": "f2",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"pdf\"}"
+    }
+   },
+   {
+    "id": "f3",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"big\"}"
+    }
+   },
+   {
+    "id": "f4",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"code\"}"
+    }
+   },
+   {
+    "id": "f5",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"img\"}"
+    }
+   },
+   {
+    "id": "f6",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"gone\"}"
+    }
+   },
+   {
+    "id": "f7",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"secret\"}"
+    }
+   },
+   {
+    "id": "f8",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"secret2\"}"
+    }
+   },
+   {
+    "id": "f9",
+    "function": {
+     "name": "send_file",
+     "arguments": "{\"path\": \"server\"}"
+    }
+   }
+  ]
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f1",
+  "name": "send_file",
+  "text": "{\"status\": \"offered\", \"file_offer\": {\"id\": \"o1\", \"machine_kind\": \"device\", \"secret\": false, \"requested\": false, \"note\": \"Gerbers and drill files for rev 3.\", \"lines\": 0, \"name\": \"alice-board-rev3.zip\", \"path\": \"/home/alice/out/alice-board-rev3.zip\", \"size\": 18400000, \"mime\": \"application/zip\", \"kind\": \"archive\", \"type_label\": \"Zip archive\", \"mtime\": 9000000020, \"machine\": \"alice-laptop\"}, \"message\": \"Offered alice-board-rev3.zip\"}",
+  "timestamp": 1763100001
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f2",
+  "name": "send_file",
+  "text": "{\"status\": \"offered\", \"file_offer\": {\"id\": \"o2\", \"machine_kind\": \"sandbox\", \"secret\": false, \"requested\": false, \"note\": \"\", \"lines\": 0, \"name\": \"invoice-2026-11.pdf\", \"path\": \"/tmp/invoice-2026-11.pdf\", \"size\": 212000, \"mime\": \"application/pdf\", \"kind\": \"pdf\", \"type_label\": \"PDF\", \"mtime\": 9000000120, \"machine\": \"the sandbox\"}, \"message\": \"Offered invoice-2026-11.pdf\"}",
+  "timestamp": 1763100002
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f3",
+  "name": "send_file",
+  "text": "{\"status\": \"offered\", \"file_offer\": {\"id\": \"o3\", \"machine_kind\": \"device\", \"secret\": false, \"requested\": false, \"note\": \"\", \"lines\": 0, \"name\": \"bob-disk-image.tar.zst\", \"path\": \"/img/bob-disk-image.tar.zst\", \"size\": 3200000000, \"mime\": \"application/zstd\", \"kind\": \"archive\", \"type_label\": \"Zstandard tar\", \"mtime\": 9000000060, \"machine\": \"bob-desktop\"}, \"message\": \"Offered bob-disk-image.tar.zst\"}",
+  "timestamp": 1763100003
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f4",
+  "name": "send_file",
+  "text": "{\"status\": \"offered\", \"file_offer\": {\"id\": \"o4\", \"machine_kind\": \"device\", \"secret\": false, \"requested\": false, \"note\": \"\", \"lines\": 168, \"name\": \"main.go\", \"path\": \"/src/main.go\", \"size\": 4100, \"mime\": \"text/x-go\", \"kind\": \"code\", \"type_label\": \"Go source\", \"mtime\": 9000000300, \"machine\": \"alice-laptop\"}, \"message\": \"Offered main.go\"}",
+  "timestamp": 1763100004
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f5",
+  "name": "send_file",
+  "text": "{\"status\": \"offered\", \"file_offer\": {\"id\": \"o5\", \"machine_kind\": \"device\", \"secret\": false, \"requested\": false, \"note\": \"\", \"lines\": 0, \"name\": \"plot.png\", \"path\": \"/tmp/plot.png\", \"size\": 52000, \"mime\": \"image/png\", \"kind\": \"image\", \"type_label\": \"PNG image\", \"mtime\": 9000000600, \"machine\": \"alice-laptop\"}, \"message\": \"Offered plot.png\"}",
+  "timestamp": 1763100005
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f6",
+  "name": "send_file",
+  "text": "{\"status\": \"offered\", \"file_offer\": {\"id\": \"o6\", \"machine_kind\": \"device\", \"secret\": false, \"requested\": false, \"note\": \"\", \"lines\": 0, \"name\": \"report-q3.csv\", \"path\": \"/data/report-q3.csv\", \"size\": 86000, \"mime\": \"text/csv\", \"kind\": \"text\", \"type_label\": \"CSV\", \"mtime\": 9000108000, \"machine\": \"alice-laptop\"}, \"message\": \"Offered report-q3.csv\"}",
+  "timestamp": 1763100006
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f7",
+  "name": "send_file",
+  "text": "{\"status\": \"refused\", \"file_offer\": {\"id\": \"o7\", \"name\": \"alice-prod.env\", \"path\": \"/home/alice/alice-prod.env\", \"machine\": \"alice-laptop\", \"machine_kind\": \"device\", \"reason\": \"looks like a secret\", \"secret\": true}, \"message\": \"refused\"}",
+  "timestamp": 1763100007
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f8",
+  "name": "send_file",
+  "text": "{\"status\": \"offered\", \"file_offer\": {\"id\": \"o8\", \"machine_kind\": \"device\", \"secret\": true, \"requested\": true, \"note\": \"\", \"lines\": 0, \"name\": \"alice-prod.env\", \"path\": \"/home/alice/alice-prod2.env\", \"size\": 1200, \"mime\": \"text/plain\", \"kind\": \"text\", \"type_label\": \"Environment file\", \"mtime\": 9000000000, \"machine\": \"alice-laptop\"}, \"message\": \"Offered alice-prod.env\"}",
+  "timestamp": 1763100008
+ },
+ {
+  "role": "tool",
+  "tool_call_id": "f9",
+  "name": "send_file",
+  "text": "{\"status\": \"refused\", \"file_offer\": {\"id\": \"o9\", \"name\": \"id_ed25519\", \"path\": \"/root/.ssh/id_ed25519\", \"machine\": \"\", \"machine_kind\": \"server\", \"reason\": \"private key\", \"secret\": true}, \"message\": \"refused\"}",
+  "timestamp": 1763100009
+ },
+ {
+  "role": "assistant",
+  "text": "All sent. Here is a link too: [Meeting notes](/home/alice/notes.xyz)."
+ }
+]

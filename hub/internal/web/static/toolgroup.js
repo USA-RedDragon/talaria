@@ -20,6 +20,7 @@ window.HubToolGroup = (() => {
     todo: ["updated the to-do list", "updated the to-do list %d times"],
     process_manage: ["managed a background command", "managed background commands %d times"],
     delegate_task: ["used a subagent", "used subagents %d times"],
+    send_file: ["sent a file", "sent %d files"],
     agent_send: ["sent a message", "sent %d messages"],
     agent_peers: ["listed your chats", "listed your chats %d times"],
     agent_set_name: ["named this chat", "named this chat %d times"],

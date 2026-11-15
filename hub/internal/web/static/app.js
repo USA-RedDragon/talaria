@@ -1576,6 +1576,19 @@
       if (card.toolName === "browser_screenshot" && !failed && res && typeof res.path === "string" && mediaPath(res.path)) {
         card.view.body.append(mediaRow(this.base, [res.path], "shot"));
       }
+      if (card.toolName === "send_file" && !failed) this.fileOffer(card, res, at);
+    }
+
+    // fileOffer shows the file card of a send_file result next to its tool
+    // card. The card is no .tool box, so folding the finished cards stops
+    // at it and it stays in view.
+    fileOffer(card, res, at) {
+      const o = res && res.file_offer;
+      if (!o || typeof o.path !== "string" || (res.status !== "offered" && res.status !== "refused")) return;
+      const box = el("div", "file-offer");
+      box.append(fileCard(this.base, Object.assign({}, o, { status: res.status, at: at || 0 })));
+      if (card.parentNode) card.after(box);
+      else card.view.body.append(box);
     }
 
     // groupTools folds each run of finished tool cards into one line that
@@ -2118,11 +2131,14 @@
   const imagePath = (p) => imageExts.has(extOf(p));
   const utf8 = new TextEncoder();
 
-  function mediaPath(p) {
+  // mediaPath says whether p is an absolute path the media route may serve.
+  // A MEDIA directive needs a known extension; a link in a reply (any) does
+  // not, because the hub serves any file the session offered.
+  function mediaPath(p, any) {
     if (typeof p !== "string" || p.length < 2 || p[0] !== "/" || utf8.encode(p).length > 4096) return false;
     if (/[\x00-\x1f\x7f]/.test(p)) return false;
     if (p.slice(1).split("/").some((s) => s === "" || s === "." || s === "..")) return false;
-    return mediaExts.has(extOf(p));
+    return any ? true : mediaExts.has(extOf(p));
   }
 
   // maskMedia blanks fenced code, inline code and quote lines, so examples
@@ -2203,20 +2219,14 @@
   // that downloads the file, a card for an HTML page. It is null for a
   // path the hub would not serve, which shows as its label.
   function markdownMedia(base, p, label, image) {
-    if (!mediaPath(p)) return null;
+    if (!mediaPath(p, true)) return null;
     if (imagePath(p)) {
       const a = mediaImage(base, p);
       if (label) a.querySelector("img").alt = label;
       return a;
     }
     if (pagePath(p)) return pageCard(base, { path: p });
-    if (image) return mediaFile(base, p);
-    const a = el("a", "media-link", label || baseName(p));
-    a.href = mediaURL(base, p) + "&download=1";
-    a.download = baseName(p);
-    a.rel = "noopener";
-    a.title = p;
-    return a;
+    return mediaFile(base, p, false, { link: true });
   }
 
   const mediaURL = (base, p) => base + "/media?path=" + encodeURIComponent(p);
@@ -2301,19 +2311,73 @@
     return a;
   }
 
-  // mediaFile is a chip that downloads a file the agent named, from the
-  // Hermes server or the computer that runs the chat.
-  function mediaFile(base, p, gone) {
-    const chip = el(gone ? "span" : "a", "att media-file" + (gone ? " gone" : ""));
-    chip.title = gone ? "This file is gone, or the computer that has it is offline." : p;
-    if (!gone) {
-      chip.href = mediaURL(base, p) + "&download=1";
-      chip.download = baseName(p);
-      chip.rel = "noopener";
-    }
-    chip.append(el("span", "file", extOf(p) || "file"), el("span", "name", baseName(p)));
-    if (gone) chip.append(el("span", "size", "gone"));
-    return chip;
+  // fileCtx is what a file card needs from the page: the chat it belongs
+  // to (read from the media base), the routes' fetches and the composer.
+  function fileCtx(base) {
+    const m = base.match(/^\/api\/sessions\/([^/]+)\/([^/]+)$/);
+    const dec = (x) => { try { return decodeURIComponent(x); } catch (_) { return x; } };
+    const text = async (url, range) => {
+      const r = await fetch(url, { credentials: "same-origin", headers: range ? { Range: range } : {} });
+      if (!r.ok && r.status !== 206) throw new Error(String(r.status));
+      const buf = await r.arrayBuffer();
+      return new TextDecoder("utf-8", { fatal: false }).decode(buf.slice(0, 65536));
+    };
+    return {
+      el, base, backend: m ? dec(m[1]) : "", session: m ? dec(m[2]) : "", origin: location.origin,
+      api, range: text,
+      preview: async (url) => {
+        const r = await fetch(url, { credentials: "same-origin" });
+        if (!r.ok) return null;
+        const blob = await r.blob();
+        return { src: URL.createObjectURL(blob), pages: parseInt(r.headers.get("X-Talaria-Pages") || "0", 10) || 0 };
+      },
+      draft: (t) => draftToComposer(t),
+      copy: (t) => {
+        const done = () => toast("Link copied");
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => toast("Could not copy the link", { bad: true }));
+        else toast("Could not copy the link", { bad: true });
+      },
+      every: (fn, ms) => { const id = setInterval(fn, ms); return () => clearInterval(id); },
+      observe: (node, fn) => {
+        if (typeof IntersectionObserver !== "function") { fn(); return; }
+        const io = new IntersectionObserver((ents) => { if (ents.some((e) => e.isIntersecting)) { io.disconnect(); fn(); } }, { rootMargin: "200px" });
+        io.observe(node);
+      },
+      zoom: openImage,
+      open: (u) => window.open(u, "_blank", "noopener"),
+      highlight: (code, ext) => {
+        const hl = window.hljs;
+        if (!hl || code.length > 100000) return null;
+        try {
+          if (ext && hl.getLanguage(ext)) return hl.highlight(code, { language: ext, ignoreIllegals: true }).value;
+          return hl.highlightAuto(code).value;
+        } catch (_) { return null; }
+      },
+    };
+  }
+
+  // draftToComposer puts text in the message box of the open chat, after
+  // what is already typed, for the user to edit and send.
+  function draftToComposer(text) {
+    if (!text || !view) return;
+    const input = $("input");
+    const had = input.value.replace(/\s+$/, "");
+    if (had.includes(text)) { focusInput(); return; }
+    input.value = had ? had + "\n\n" + text : text;
+    grow();
+    focusInput();
+  }
+
+  // fileCard is the card of a file the agent offered or linked, from the
+  // Hermes server or the computer that runs the chat. offer is a send_file
+  // file_offer ({ status } added) or { path, link: true } for a link.
+  function fileCard(base, offer) {
+    return window.HubFileCard.create(fileCtx(base), offer).node;
+  }
+
+  // mediaFile is the card of a file named by path, or a gone card.
+  function mediaFile(base, p, gone, extra) {
+    return fileCard(base, Object.assign({ path: p, name: baseName(p), status: gone ? "gone" : "", link: !!(extra && extra.link) }, extra));
   }
 
   // mediaRow shows the files a reply names: images inline, others as chips.
@@ -3729,6 +3793,27 @@
     scheduled.show();
   }
 
+  // fileRoute shows the one card a #/file/<backend>/<session>/<path> link
+  // names, above its chat. The link works after sign-in: the media routes
+  // need the user's session like every other call.
+  const fileRoute = {
+    box: null,
+    show(backend, session, path) {
+      this.hide();
+      const base = "/api/sessions/" + encodeURIComponent(backend) + "/" + encodeURIComponent(session);
+      const box = el("div", "file-route");
+      const back = el("a", "back", "Back to the chat");
+      back.href = chatHash(backend, session);
+      const lead = el("div", "file-route-head", "A file from this chat");
+      box.append(lead, fileCard(base, { path, name: baseName(path), link: true }), back);
+      $("log").before(box);
+      this.box = box;
+    },
+    hide() {
+      if (this.box) { this.box.remove(); this.box = null; }
+    },
+  };
+
   // route shows what the hash names. A page opens over its chat, and going
   // between a chat and its page keeps the chat as it is.
   let lastHash = "";
@@ -3739,6 +3824,7 @@
     const mem = location.hash.match(/^#\/memory(?:\/(.*))?$/);
     const pg = location.hash.match(/^#\/page\/([^/]+)\/([^/]+)\/(.+)$/);
     const fl = location.hash.match(/^#\/files\/([^/]+)\/([^/]+)$/);
+    const fc = location.hash.match(/^#\/file\/([^/]+)\/([^/]+)\/(.+)$/);
     const us = location.hash.match(/^#\/usage(?:\/(.*))?$/);
     const sc = /^#\/scheduled\/?$/.test(location.hash);
     const dec = (x) => { try { return decodeURIComponent(x); } catch (_) { return null; } };
@@ -3749,7 +3835,14 @@
       refreshList();
       return;
     }
-    if (fl && me.files && dec(fl[1]) !== null && dec(fl[2]) !== null) {
+    if (!(fc && dec(fc[1]) !== null && dec(fc[2]) !== null && dec(fc[3]) !== null)) fileRoute.hide();
+    if (fc && dec(fc[1]) !== null && dec(fc[2]) !== null && dec(fc[3]) !== null) {
+      pagesView.hide();
+      files.hide();
+      const b = dec(fc[1]), s = dec(fc[2]);
+      if (!same(b, s)) showChat(b, s);
+      fileRoute.show(b, s, dec(fc[3]));
+    } else if (fl && me.files && dec(fl[1]) !== null && dec(fl[2]) !== null) {
       const b = dec(fl[1]), s = dec(fl[2]);
       pagesView.hide();
       if (!same(b, s)) showChat(b, s);
@@ -3763,7 +3856,7 @@
       pagesView.openedHere = false;
       pagesView.hide();
       files.hide();
-      const under = m && /^#\/(page|files)\//.test(prev) && same(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+      const under = m && /^#\/(page|files|file)\//.test(prev) && same(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
       if (m && !under) showChat(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
       else if (!m && mem && me.memory) showMemory(mem[1] || "");
       else if (!m && us && me.usage) showUsage(us[1] || "");
