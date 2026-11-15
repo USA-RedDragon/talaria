@@ -61,10 +61,21 @@ func questionCards(t *testing.T, bin string) {
 	// Nobody answers the last question: the page asks for it to run out
 	// (GET /__timeout) once it shows the question open, so the timeout
 	// cannot land before the card is drawn.
+	timeout := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-timeout:
+			e.gw.SettleClarify(askID, "cl-5", "timed_out", 1800)
+		case <-t.Context().Done():
+		}
+	}()
 	live := *e.front.h.Load()
 	e.front.to(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/__timeout" {
-			e.gw.SettleClarify(askID, "cl-5", "timed_out", 1800)
+			select {
+			case timeout <- struct{}{}:
+			default:
+			}
 			return
 		}
 		live.ServeHTTP(w, r)
