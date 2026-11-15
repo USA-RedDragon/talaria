@@ -29,6 +29,12 @@ func TestQuestionCardsKeepChoicesAndAnswerFirefox(t *testing.T) {
 	questionCards(t, firefoxPath(t))
 }
 
+// askingTitle is the title of the chat that asks.
+const (
+	askingTitle = "Asking"
+	askID       = "ask"
+)
+
 func questionCards(t *testing.T, bin string) {
 	t.Helper()
 	node, err := exec.LookPath("node")
@@ -42,7 +48,7 @@ func questionCards(t *testing.T, bin string) {
 	prompt := func(id, q string, choices []string, multi bool, subagent *string) gateway.Prompt {
 		return gateway.Prompt{Kind: gateway.PromptClarify, PromptID: id, Question: str(q), Choices: choices, MultiSelect: multi, Subagent: subagent, Timeout: 1800}
 	}
-	e.gw.AddSession(&gatewaytest.Session{ID: "ask", Title: "Asking", Live: true, Running: true, StartedAt: 900,
+	e.gw.AddSession(&gatewaytest.Session{ID: askID, Title: askingTitle, Live: true, Running: true, StartedAt: 900,
 		Messages: []map[string]any{{kRole: roleUser, kText: "plan it"}},
 		Prompts:  []gateway.Prompt{prompt("cl-1", "What should cpus/a64 be renamed to?", []string{"cpus/aarch64", "cpus/arm64", "Keep cpus/a64"}, false, nil)},
 		NextPrompts: []gateway.Prompt{
@@ -51,13 +57,13 @@ func questionCards(t *testing.T, bin string) {
 			prompt("cl-4", "Subagent \""+goal+"\" asks: Switch stick clicks (L3 and R3), which some games use?", []string{"Double-tap the stick", "Separate buttons", "Leave them out"}, false, &goal),
 			prompt("cl-5", "Ship it?", []string{"yes", "no", "later"}, false, nil)}})
 	e.gw.AddSession(&gatewaytest.Session{ID: "away", Title: titleOther, Live: true, StartedAt: 700,
-		Messages: []map[string]any{{kRole: roleUser, kText: "hello"}, {kRole: roleAssistant, kText: "hi"}}})
+		Messages: []map[string]any{{kRole: roleUser, kText: textHello}, {kRole: roleAssistant, kText: "hi"}}})
 	// Nobody answers the last question: it runs out once the fourth is answered.
 	go func() {
 		for range 600 {
 			if len(e.gw.ClarifyAnswers()) >= 4 {
 				time.Sleep(300 * time.Millisecond)
-				e.gw.SettleClarify("ask", "cl-5", "timed_out", 1800)
+				e.gw.SettleClarify(askID, "cl-5", "timed_out", 1800)
 				return
 			}
 			time.Sleep(50 * time.Millisecond)

@@ -26,7 +26,7 @@ func TestKeyboardOfEveryQuestionHasTheOtherRow(t *testing.T) {
 	for name, kb := range map[string]*InlineKeyboard{"choices": with, "multi-select": multi, "many choices": over} {
 		last := kb.InlineKeyboard[len(kb.InlineKeyboard)-1]
 		if !slices.ContainsFunc(last, func(b InlineButton) bool {
-			return b.Text == "Other (type your own)" && strings.HasSuffix(b.CallbackData, ":"+tokOther)
+			return b.Text == otherLabel && strings.HasSuffix(b.CallbackData, ":"+tokOther)
 		}) {
 			t.Errorf("%s: no Other button in %+v", name, last)
 		}
@@ -34,7 +34,6 @@ func TestKeyboardOfEveryQuestionHasTheOtherRow(t *testing.T) {
 	if last := none.InlineKeyboard[len(none.InlineKeyboard)-1]; !strings.HasSuffix(last[0].CallbackData, ":"+tokOther) {
 		t.Errorf("an open question has no way to type: %+v", last)
 	}
-
 }
 
 func TestQuestionCardTimeIsInTheConfiguredZone(t *testing.T) {

@@ -25,6 +25,14 @@ import (
 )
 
 const (
+	// Keys and values of the clarify prompts and their stored results.
+	kPromptIDKey   = "prompt_id"
+	kQuestionKey   = "question"
+	kAnswered      = "answered"
+	kSkipped       = "skipped"
+	kToolCallIDKey = "tool_call_id"
+	kContentKey    = "content"
+
 	kSessionID       = "session_id"
 	kPending         = "pending"
 	kRole            = "role"
@@ -1385,7 +1393,7 @@ func (g *Gateway) hApproval(_ *conn, p map[string]any) (any, string, func()) {
 	if g.StaleApprovals {
 		return nil, gateway.ReasonStaleGeneration, nil
 	}
-	pr, ok := s.prompts[str(p, "prompt_id")]
+	pr, ok := s.prompts[str(p, kPromptIDKey)]
 	if !ok {
 		return map[string]any{kStatus: "already_resolved"}, "", nil
 	}
@@ -1406,7 +1414,7 @@ const deniedResult = `{"output": "", "exit_code": -1, "error": "BLOCKED: Command
 // call that asked for it as Hermes does. g.mu is held.
 func (g *Gateway) resolveApproval(s *Session, pr gateway.Prompt, choice string) {
 	delete(s.prompts, pr.PromptID)
-	g.publishLocked(s, "approval.settled", map[string]any{"prompt_id": pr.PromptID, kExecGen: pr.ExecutionGeneration})
+	g.publishLocked(s, "approval.settled", map[string]any{kPromptIDKey: pr.PromptID, kExecGen: pr.ExecutionGeneration})
 	result := `{"output": "approved: ` + choice + `", "exit_code": 0}`
 	if choice == gateway.ChoiceDeny {
 		result = deniedResult
@@ -1441,24 +1449,24 @@ func (g *Gateway) hClarify(_ *conn, p map[string]any) (any, string, func()) {
 		return nil, errInvalidParams, nil
 	}
 	s := g.sessions[str(p, kSessionID)]
-	pr, ok := s.prompts[str(p, "prompt_id")]
-	if !ok || pr.Kind != "clarify" {
+	pr, ok := s.prompts[str(p, kPromptIDKey)]
+	if !ok || pr.Kind != gateway.PromptClarify {
 		return map[string]any{kStatus: "already_resolved"}, "", nil
 	}
 	delete(s.prompts, pr.PromptID)
-	settled := map[string]any{"prompt_id": pr.PromptID, kExecGen: pr.ExecutionGeneration}
+	settled := map[string]any{kPromptIDKey: pr.PromptID, kExecGen: pr.ExecutionGeneration}
 	if slices.Contains(g.caps, gateway.CapClarifyCard) {
 		// What Hermes with clarify-card-v1 sends: the question as asked and how it ended.
-		settled["question"], settled["choices"], settled["multi_select"] = str0(pr.Question), append([]string{}, pr.Choices...), pr.MultiSelect
+		settled[kQuestionKey], settled["choices"], settled["multi_select"] = str0(pr.Question), append([]string{}, pr.Choices...), pr.MultiSelect
 		if pr.Subagent != nil {
 			settled["subagent"] = *pr.Subagent
 		}
 		now := float64(time.Now().UnixMilli()) / 1000
 		settled["ended_at"] = now
 		if a := str(p, "answer"); a == "" {
-			settled["outcome"] = "skipped"
+			settled[kOutcome] = kSkipped
 		} else {
-			settled["outcome"], settled["answer"], settled["answered_at"] = "answered", a, now
+			settled[kOutcome], settled["answer"], settled["answered_at"] = kAnswered, a, now
 			if via, ok := p["via"].(string); ok && via != "" {
 				settled["answered_via"] = via
 			}
@@ -1487,7 +1495,7 @@ func (g *Gateway) hClarify(_ *conn, p map[string]any) (any, string, func()) {
 // several picks, "ask free" with none.
 func (g *Gateway) clarify(s *Session, text string) bool {
 	q := "Which one?"
-	pr := gateway.Prompt{Kind: "clarify", PromptID: "cl-1", ExecutionGeneration: s.Generation, Question: &q}
+	pr := gateway.Prompt{Kind: gateway.PromptClarify, PromptID: "cl-1", ExecutionGeneration: s.Generation, Question: &q}
 	switch text {
 	case "ask me":
 		pr.Choices = []string{"red", "blue"}
@@ -1542,7 +1550,7 @@ func (g *Gateway) turn(id, admission, submission, text string) {
 	g.publishLocked(s, "message.delta", map[string]any{kText: "echo: "})
 	g.publishLocked(s, "message.delta", map[string]any{kText: text})
 	s.Running = false
-	s.Messages = append(s.Messages, map[string]any{kRole: "assistant", kText: "echo: " + text})
+	s.Messages = append(s.Messages, map[string]any{kRole: kAssistant, kText: "echo: " + text})
 	g.publishLocked(s, "message.complete", map[string]any{kText: "echo: " + text, kStatus: kComplete,
 		"usage": map[string]any{kModel: s.Model, "input": 9000, "output": 120, kReasoning: 0, "prompt": 9000, "completion": 120,
 			kTotal: 9120, "calls": 1, "context_used": 9000, "context_max": 131072, "context_percent": 7,
@@ -1684,11 +1692,11 @@ func (g *Gateway) storeClarifyLocked(s *Session, pr gateway.Prompt, settled map[
 		return
 	}
 	choices := append([]string{}, pr.Choices...)
-	r := map[string]any{"question": str0(pr.Question), "choices_offered": choices, "multi_select": pr.MultiSelect, "status": "unanswered", "user_response": nil}
+	r := map[string]any{kQuestionKey: str0(pr.Question), "choices_offered": choices, "multi_select": pr.MultiSelect, "status": "unanswered", "user_response": nil}
 	outcome := "submitted"
-	switch settled["outcome"] {
-	case "answered":
-		r["status"] = "answered"
+	switch settled[kOutcome] {
+	case kAnswered:
+		r["status"] = kAnswered
 		a, _ := settled["answer"].(string)
 		if pr.MultiSelect {
 			var picks []string
@@ -1704,23 +1712,29 @@ func (g *Gateway) storeClarifyLocked(s *Session, pr gateway.Prompt, settled map[
 		if via, ok := settled["answered_via"]; ok {
 			r["answered_via"] = via
 		}
-	case "skipped":
-		r["status"] = "skipped"
+	case kSkipped:
+		r["status"] = kSkipped
 	case "timed_out":
 		outcome = "timed_out"
 	case "cancelled":
 		outcome = "cancelled"
 	}
-	result := map[string]any{"responses": []any{r}, "outcome": outcome, "ended_at": settled["ended_at"]}
+	result := map[string]any{"responses": []any{r}, kOutcome: outcome, "ended_at": settled["ended_at"]}
 	if t, ok := settled["timeout_s"]; ok {
 		result["timeout_s"] = t
 	}
 	id := "call-" + pr.PromptID
-	args, _ := json.Marshal(map[string]any{"questions": []any{map[string]any{"question": str0(pr.Question), "choices": choices}}})
-	content, _ := json.Marshal(result)
+	args, err := json.Marshal(map[string]any{"questions": []any{map[string]any{kQuestionKey: str0(pr.Question), "choices": choices}}})
+	if err != nil {
+		return
+	}
+	content, err := json.Marshal(result)
+	if err != nil {
+		return
+	}
 	s.Messages = append(s.Messages,
-		map[string]any{"role": "assistant", "text": "", "tool_calls": []map[string]any{{"id": id, "function": map[string]any{"name": "clarify", "arguments": string(args)}}}},
-		map[string]any{"role": "tool", "tool_call_id": id, "name": "clarify", "content": string(content)})
+		map[string]any{kRole: kAssistant, kText: "", "tool_calls": []map[string]any{{"id": id, "function": map[string]any{kName: gateway.PromptClarify, "arguments": string(args)}}}},
+		map[string]any{kRole: "tool", kToolCallIDKey: id, kName: gateway.PromptClarify, kContentKey: string(content)})
 }
 
 // SettleClarify ends a chat's open question the way Hermes does when nobody
@@ -1737,7 +1751,7 @@ func (g *Gateway) SettleClarify(sessionID, promptID, outcome string, timeoutS in
 		return
 	}
 	delete(s.prompts, promptID)
-	settled := map[string]any{"prompt_id": promptID, kExecGen: pr.ExecutionGeneration, "outcome": outcome, "question": str0(pr.Question),
+	settled := map[string]any{kPromptIDKey: promptID, kExecGen: pr.ExecutionGeneration, kOutcome: outcome, kQuestionKey: str0(pr.Question),
 		"choices": append([]string{}, pr.Choices...), "multi_select": pr.MultiSelect, "ended_at": float64(time.Now().UnixMilli()) / 1000}
 	if pr.Subagent != nil {
 		settled["subagent"] = *pr.Subagent

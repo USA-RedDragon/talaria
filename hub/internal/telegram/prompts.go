@@ -286,6 +286,9 @@ func settledOutcome(p hub.PromptInfo, shown, now time.Time, cancelled bool,
 	return answeredElsewhere, "Answered in another app.", false
 }
 
+// verbSkipped is how a skipped question is told.
+const verbSkipped = "Skipped"
+
 // otherLabel is the row every question has to type an answer of one's own.
 const otherLabel = "Other (type your own)"
 
@@ -336,14 +339,15 @@ func questionCardHTML(p hub.PromptInfo, end questionEnd, loc *time.Location) str
 	if status == "" {
 		status = "Answered"
 		if end.skipped {
-			status = "Skipped"
+			status = verbSkipped
 		}
 		if !end.at.IsZero() {
 			status += " at " + clockTime(end.at, loc)
 		}
-		if end.via == hub.AnsweredInTelegram {
+		switch end.via {
+		case hub.AnsweredInTelegram:
 			status += " (on Telegram)"
-		} else if end.via == hub.AnsweredInHub {
+		case hub.AnsweredInHub:
 			status += " (in the hub)"
 		}
 	}
@@ -768,7 +772,7 @@ func (b *Bot) pressPrompt(ctx context.Context, q *CallbackQuery, user string, t 
 		b.askReply(ctx, q, user, t)
 		return
 	case p.Kind == hub.PromptClarify && tok == tokSkip:
-		a, verdict = hub.Answer{Skip: true}, "Skipped"
+		a, verdict = hub.Answer{Skip: true}, verbSkipped
 	case p.Kind == hub.PromptClarify && tok == tokSend && p.Multi:
 		picks := b.picked(t)
 		if len(picks) == 0 {
@@ -1077,7 +1081,7 @@ func (b *Bot) replyAnswer(ctx context.Context, to dest, user string, m *Message)
 	}
 	a, verdict := hub.Answer{Text: m.Text}, "Answered: "+m.Text
 	if cmd, _ := parseCommand(m.Text); cmd == cmdSkip {
-		a, verdict = hub.Answer{Skip: true}, "Skipped"
+		a, verdict = hub.Answer{Skip: true}, verbSkipped
 	} else if t.prompt.Kind == hub.PromptClarify && t.prompt.Multi {
 		// The Other row of a multi-select question goes with the picks.
 		a.Picks = b.picked(t)

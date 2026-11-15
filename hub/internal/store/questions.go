@@ -29,7 +29,8 @@ func (s *Store) Questions(ctx context.Context, backendID, sessionID string) ([]j
 	}
 	var out []json.RawMessage
 	if err := json.Unmarshal([]byte(v), &out); err != nil {
-		return nil, nil
+		// A record that cannot be read is no record.
+		out = nil
 	}
 	return out, nil
 }

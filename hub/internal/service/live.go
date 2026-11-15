@@ -742,7 +742,9 @@ func (ls *live) steeringLocked() bool {
 // answer, for the chat's card after a reload (hub.QuestionLog). A chat's own
 // question is in its transcript. A settled event with no outcome comes from
 // a Hermes that does not say how the question ended: nothing to keep.
-// ls.mu is held.
+// ls.mu is held. The write to the store outlives the event that caused it.
+//
+//nolint:contextcheck // see above
 func (ls *live) keepQuestion(payload json.RawMessage) {
 	var p struct {
 		PromptID string `json:"prompt_id"`
@@ -837,7 +839,10 @@ func (ls *live) snapshotWithPrompts() hub.Event {
 	// the event stream keep what it made of them (see web).
 	var qraw []byte
 	if len(ls.questions) > 0 {
-		qraw, _ = json.Marshal(ls.questions)
+		var err error
+		if qraw, err = json.Marshal(ls.questions); err != nil {
+			qraw = nil
+		}
 	}
 	if c := ls.withPrompts; c.ok && sameBytes(c.src, ev.Data) && bytes.Equal(c.prompts, raw) && bytes.Equal(c.questions, qraw) {
 		ev.Data = c.out

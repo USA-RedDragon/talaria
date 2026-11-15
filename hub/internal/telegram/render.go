@@ -1058,7 +1058,7 @@ type settledPayload struct {
 
 // end is how the question p ended, from what Hermes said of it; false when
 // it said nothing.
-func (s settledPayload) end(p hub.PromptInfo, loc *time.Location) (questionEnd, bool) {
+func (s settledPayload) end(p hub.PromptInfo) (questionEnd, bool) {
 	if s.Outcome == "" {
 		return questionEnd{}, false
 	}
@@ -1109,7 +1109,7 @@ func (r *renderer) settledWith(ctx context.Context, cancelled bool, data settled
 		}
 		if p, ok := r.settle(sp.key); ok && sp.msgID != 0 {
 			if sp.prompt.Kind == hub.PromptClarify {
-				end, known := data.end(sp.prompt, r.loc)
+				end, known := data.end(sp.prompt)
 				if !known {
 					end = elsewhereEnd(sp.prompt, sp.at, r.now(), cancelled)
 				}

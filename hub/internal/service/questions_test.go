@@ -15,6 +15,16 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/store"
 )
 
+const (
+	hubName        = "hub"
+	keyRole        = "role"
+	answerSeparate = "Separate"
+	nameDesktop    = "Desktop"
+	groupAdmins    = "admins"
+	pickRed        = "red"
+	pickGreen      = "green"
+)
+
 // A subagent's question is the child's: the chat's transcript does not say it
 // was asked. Once it is answered the hub keeps what Hermes said of it (the
 // question, the choices, the answer, when and where, the subagent) in its
@@ -23,16 +33,16 @@ import (
 // leaves nothing to keep.
 func TestSubagentQuestionIsKeptAfterItIsAnswered(t *testing.T) {
 	t.Parallel()
-	gw := gatewaytest.New("hub", "pw")
+	gw := gatewaytest.New(hubName, "pw")
 	t.Cleanup(gw.Close)
 	gw.SetCapabilities(gateway.CapClarifyCard)
 	q, goal := "Stick clicks?", "relift lane android-apk"
 	gw.AddSession(&gatewaytest.Session{ID: sLive, Title: liveTitle, Live: true, Running: true, StartedAt: 2000,
-		Messages: []map[string]any{{"role": roleUser, "text": "hi"}},
-		Prompts: []gateway.Prompt{{Kind: gateway.PromptClarify, PromptID: "sq", Question: &q, Choices: []string{"Double-tap", "Separate"},
+		Messages: []map[string]any{{keyRole: roleUser, kText: "hi"}},
+		Prompts: []gateway.Prompt{{Kind: gateway.PromptClarify, PromptID: "sq", Question: &q, Choices: []string{"Double-tap", answerSeparate},
 			Subagent: &goal, Timeout: 1800}}})
 	cfg := &config.Config{LogLevel: "info", Users: []config.User{{Sub: "s1", Name: userAlice}}, Backends: []config.Backend{
-		{ID: backendPC, Name: "Desktop", URL: gw.URL(), Username: "hub", Password: "pw", Users: []string{userAlice}}}}
+		{ID: backendPC, Name: nameDesktop, URL: gw.URL(), Username: hubName, Password: "pw", Users: []string{userAlice}}}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +52,7 @@ func TestSubagentQuestionIsKeptAfterItIsAnswered(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	open := func() *service.Service {
-		svc := service.New(cfg.Backends, groups{userAlice: {"admins"}}, service.Options{Questions: st, IdleDetach: 20 * time.Millisecond})
+		svc := service.New(cfg.Backends, groups{userAlice: {groupAdmins}}, service.Options{Questions: st, IdleDetach: 20 * time.Millisecond})
 		t.Cleanup(svc.Close)
 		return svc
 	}
@@ -53,7 +63,7 @@ func TestSubagentQuestionIsKeptAfterItIsAnswered(t *testing.T) {
 		t.Fatal(err)
 	}
 	next(t, ch)
-	if err := first.AnswerPrompt(hub.WithAnsweredVia(ctx, hub.AnsweredInTelegram), userAlice, backendPC, sLive, "sq", hub.Answer{Picks: []string{"Separate"}}); err != nil {
+	if err := first.AnswerPrompt(hub.WithAnsweredVia(ctx, hub.AnsweredInTelegram), userAlice, backendPC, sLive, "sq", hub.Answer{Picks: []string{answerSeparate}}); err != nil {
 		t.Fatal(err)
 	}
 	until(t, ch, "clarify.settled")
@@ -86,7 +96,7 @@ func TestSubagentQuestionIsKeptAfterItIsAnswered(t *testing.T) {
 		t.Fatalf("snapshot questions = %+v, %v\n%s", snap.Questions, err, ev.Data)
 	}
 	got := snap.Questions[0]
-	if got.PromptID != "sq" || got.Outcome != "answered" || got.Answer != "Separate" || got.AnsweredVia != hub.AnsweredInTelegram ||
+	if got.PromptID != "sq" || got.Outcome != "answered" || got.Answer != answerSeparate || got.AnsweredVia != hub.AnsweredInTelegram ||
 		got.Subagent != goal || got.Question != q || len(got.Choices) != 2 || got.AnsweredAt == 0 {
 		t.Fatalf("question = %+v", got)
 	}
@@ -101,14 +111,14 @@ func TestQuestionCombinesPicksWithTheOtherText(t *testing.T) {
 	next(t, ch)
 	_, _ = e.svc.Prompt(ctx, userAlice, backendPC, sLive, "pick many")
 	until(t, ch, hub.KindClarifyRequest)
-	if err := e.svc.AnswerPrompt(ctx, userAlice, backendPC, sLive, "cl-1", hub.Answer{Picks: []string{"red", "nope"}, Text: "teal"}); err == nil {
+	if err := e.svc.AnswerPrompt(ctx, userAlice, backendPC, sLive, "cl-1", hub.Answer{Picks: []string{pickRed, "nope"}, Text: "teal"}); err == nil {
 		t.Fatal("a pick that is no choice was taken")
 	}
-	if err := e.svc.AnswerPrompt(ctx, userAlice, backendPC, sLive, "cl-1", hub.Answer{Picks: []string{"red", "green"}, Text: " teal "}); err != nil {
+	if err := e.svc.AnswerPrompt(ctx, userAlice, backendPC, sLive, "cl-1", hub.Answer{Picks: []string{pickRed, pickGreen}, Text: " teal "}); err != nil {
 		t.Fatal(err)
 	}
 	evs := until(t, ch, hub.KindMessageComplete)
-	if got := text(t, evs[len(evs)-1]); got != `answered: ["red","green","teal"]` {
+	if got := text(t, evs[len(evs)-1]); got != `answered: ["`+pickRed+`","`+pickGreen+`","teal"]` {
 		t.Fatalf("answer = %q", got)
 	}
 }

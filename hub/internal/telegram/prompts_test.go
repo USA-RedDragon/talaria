@@ -93,7 +93,7 @@ func TestMultiSelectQuestion(t *testing.T) {
 	h := startBot(t, nil)
 	sid := h.startTurn(t)
 	h.hub.emit(t, sid, hub.KindClarifyRequest, map[string]any{kPromptID: "q1", kKind: hub.PromptClarify, kQuestion: "Which <envs>?",
-		kChoices: []string{envStaging, envProd, envDev}, "multi_select": true})
+		kChoices: []string{envStaging, envProd, envDev}, keyMulti: true})
 	req := h.tg.wait(mSend, "Which &lt;envs&gt;?")
 	if got := labels(req); !slices.Equal(got, []string{envStaging, envProd, envDev, "Send", "Other (type your own)", "Skip"}) {
 		t.Fatalf("labels = %v", got)
@@ -506,7 +506,7 @@ func TestGroupMemberWithoutAccessCannotToggle(t *testing.T) {
 	h.tg.say(group, aliceTG, "hello")
 	sid := h.hub.waitPrompt(t, 1)[0].SessionID
 	h.hub.emit(t, sid, hub.KindClarifyRequest, map[string]any{kPromptID: "q5", kKind: hub.PromptClarify, kQuestion: "Which?",
-		kChoices: []string{"a", "b"}, "multi_select": true})
+		kChoices: []string{"a", "b"}, keyMulti: true})
 	req := h.tg.wait(mSend, "Which?")
 	h.tg.press(group, bobTG, req.ResultID, data(req.buttons()[0]))
 	h.tg.waitAnswerText(msgNotYours)
@@ -522,7 +522,7 @@ func TestOtherRowOfEveryQuestion(t *testing.T) {
 	h := startBot(t, nil)
 	sid := h.startTurn(t)
 	h.hub.emit(t, sid, hub.KindClarifyRequest, map[string]any{kPromptID: "qm", kKind: hub.PromptClarify, kQuestion: "Layouts?",
-		kChoices: []string{"Switch", "Game Boy", "NDS"}, "multi_select": true})
+		kChoices: []string{"Switch", "Game Boy", "NDS"}, keyMulti: true})
 	req := h.tg.wait(mSend, "Layouts?")
 	btns := req.buttons()
 	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(btns[0]))
@@ -545,6 +545,12 @@ func TestOtherRowOfEveryQuestion(t *testing.T) {
 // A question that ended where the bot could not see it keeps its choices:
 // Hermes says how it ended with clarify.settled, a timeout or a withdrawal
 // says so, and a subagent's question names the subagent.
+const (
+	keyMulti     = "multi_select"
+	keyOutcome   = "outcome"
+	rowDoubleTap = "☐ Double-tap the stick"
+)
+
 func TestQuestionCardsOfEndedQuestions(t *testing.T) {
 	t.Parallel()
 	choices := []string{"Double-tap the stick", "Separate buttons"}
@@ -553,12 +559,12 @@ func TestQuestionCardsOfEndedQuestions(t *testing.T) {
 		want    []string
 		not     []string
 	}{
-		"answered in the hub": {map[string]any{"outcome": "answered", "answer": "Separate buttons", "answered_at": 1763228160.0, "answered_via": "hub"},
-			[]string{"☐ Double-tap the stick", "☑ Separate buttons", "Answered at ", "(in the hub)", "<b>Subagent:</b> relift lane"}, nil},
-		"typed in the hub": {map[string]any{"outcome": "answered", "answer": "Both", "answered_at": 1763228160.0, "answered_via": "hub"},
-			[]string{"☐ Double-tap the stick", "☑ Other: Both"}, []string{"☑ Separate"}},
-		"timed out": {map[string]any{"outcome": "timed_out"}, []string{"☐ Double-tap the stick", "No answer: timed out after 30m"}, []string{"☑"}},
-		"withdrawn": {map[string]any{"outcome": "cancelled"}, []string{"Withdrawn"}, []string{"☑"}},
+		"answered in the hub": {map[string]any{keyOutcome: "answered", "answer": "Separate buttons", "answered_at": 1763228160.0, "answered_via": "hub"},
+			[]string{rowDoubleTap, "☑ Separate buttons", "Answered at ", "(in the hub)", "<b>Subagent:</b> relift lane"}, nil},
+		"typed in the hub": {map[string]any{keyOutcome: "answered", "answer": "Both", "answered_at": 1763228160.0, "answered_via": "hub"},
+			[]string{rowDoubleTap, "☑ Other: Both"}, []string{"☑ Separate"}},
+		"timed out": {map[string]any{keyOutcome: "timed_out"}, []string{rowDoubleTap, "No answer: timed out after 30m"}, []string{"☑"}},
+		"withdrawn": {map[string]any{keyOutcome: "cancelled"}, []string{"Withdrawn"}, []string{"☑"}},
 		"unknown":   {map[string]any{}, []string{"☐ Separate buttons", "Answered in the hub or another app"}, []string{"☑"}},
 	} {
 		t.Run(name, func(t *testing.T) {
