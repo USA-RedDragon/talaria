@@ -1,0 +1,9 @@
+# New: the whole goal and context on the roster row, the stored session and the child transcript read
+tests/tools/test_delegate_subagent_brief.py
+# The snapshot rows, the child transcript read and the restart handoff it changes
+tests/tui_gateway/test_subagent_snapshot.py
+tests/gateway/test_session_subagent_transcript.py
+tests/tools/test_delegation_restart_handoff.py
+tests/tools/test_delegate_tool_sessions.py
+tests/gateway/test_session_ancillary_reads.py
+tests/tui_gateway/contracts/test_generated.py

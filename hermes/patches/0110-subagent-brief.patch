@@ -1,0 +1,496 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 08:19:22 +0000
+Subject: [PATCH] feat(delegate): subagent.list and session.transcript give a subagent's whole goal and context
+
+A viewer showed a subagent's task from its first transcript row, which the
+viewer has to cut, and had no way to show the context the parent gave it:
+the context lives only in the child's system prompt.
+
+The child now keeps the goal and context it was given, whole: subagent.list
+rows have context (and the goal, never cut), and session.transcript with
+subagent_id returns goal and context. A running child answers from its
+registry record, a finished one, or one read after a gateway restart, from
+the goal and context stamped on its stored session beside its subagent id,
+so they survive compression and a restart handoff (which rebuilds the child
+from the goal and context it recorded). A child stored before this change has
+no stamp and answers null.
+---
+ apps/shared/src/gateway-contract.generated.ts      |  3 +
+ apps/shared/src/gateway-contract.openrpc.json      | 36 +++++++++++
+ gateway/session_ancillary.py                       |  1 +
+ gateway/session_transcript_subagent.py             | 26 ++++++--
+ tests/gateway/fixtures/subagent_transcript_peer.py | 13 +++-
+ tests/gateway/test_session_subagent_transcript.py  | 18 ++++++
+ tests/tools/test_delegate_subagent_brief.py        | 71 ++++++++++++++++++++++
+ tests/tools/test_delegation_restart_handoff.py     | 14 +++++
+ tests/tui_gateway/test_subagent_snapshot.py        | 20 ++++++
+ tools/delegate_tool.py                             |  6 ++
+ tools/delegate_tool_child_run.py                   |  1 +
+ tools/delegate_tool_sessions.py                    | 19 ++++++
+ tui_gateway/contracts/canonical_stored_reads.py    |  5 ++
+ .../profiles_vault_complete_foreign_subagents.py   |  2 +
+ tui_gateway/methods_subagents.py                   |  2 +-
+ 15 files changed, 228 insertions(+), 9 deletions(-)
+ create mode 100644 tests/tools/test_delegate_subagent_brief.py
+
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index e4f63efc42..c7872a1cd1 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -2457,6 +2457,7 @@ export interface SubagentSnapshot {
+   tool_count?: number | null
+   last_tool?: string | null
+   last_preview?: string | null
++  context?: string | null
+   accepting_steer?: boolean | null
+   waiting_on?: string[] | null
+   child_session_id?: string | null
+@@ -5566,6 +5567,8 @@ export interface StoredTranscriptResult {
+   available?: boolean | null
+   running?: boolean | null
+   child_session_id?: string | null
++  goal?: string | null
++  context?: string | null
+ }
+ /** ``row_kind: 'message'`` is a ``session.resume`` ``display_messages`` row. ``row_kind: 'compaction'`` is a compaction handoff at its position: ``role: 'system'``, ``text`` the summary a reader sees (not the parts written for the model), ``compacted_messages``, ``timestamp`` and the stored ``row_id``. */
+ export interface StoredTranscriptRow {
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index 776aaa0dbf..c3042ad99c 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -43809,6 +43809,30 @@
+             ],
+             "default": null,
+             "title": "Child Session Id"
++          },
++          "goal": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Goal"
++          },
++          "context": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Context"
+           }
+         },
+         "required": [
+@@ -44601,6 +44625,18 @@
+             "default": null,
+             "title": "Last Preview"
+           },
++          "context": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Context"
++          },
+           "accepting_steer": {
+             "anyOf": [
+               {
+diff --git a/gateway/session_ancillary.py b/gateway/session_ancillary.py
+index c48e21479b..9f02775909 100644
+--- a/gateway/session_ancillary.py
++++ b/gateway/session_ancillary.py
+@@ -16,6 +16,7 @@ from hermes_state_runtime import RuntimeStoreError
+ _SUBAGENT_FIELDS = (
+     'subagent_id', 'parent_id', 'depth', 'goal', 'delegation_id', 'model',
+     'started_at', 'status', 'tool_count', 'last_tool', 'accepting_steer',
++    'context',
+ )
+ _TAIL_BYTES = 16384
+ _PROCESS_TAIL_CHARS = 32768  # main's dock tail view (cli_process_dock.process_tail)
+diff --git a/gateway/session_transcript_subagent.py b/gateway/session_transcript_subagent.py
+index 5b2139fd6d..eaa4f6df4a 100644
+--- a/gateway/session_transcript_subagent.py
++++ b/gateway/session_transcript_subagent.py
+@@ -30,8 +30,8 @@ async def subagent_transcript(connection, ref, params, binding, held, limit, inl
+ 
+ 
+ def _child(authority, live, ref, subagent_id):
+-    """``(child session id or None, running)``. In a worker thread, like ``subagent.list``: the roster is read
+-    under the session's event lock, which every streamed token takes too."""
++    """``(child session id or None, running, live record or None)``. In a worker thread, like ``subagent.list``: the
++    roster is read under the session's event lock, which every streamed token takes too."""
+     from gateway.session_ancillary import (
+         _compression_lineage, _owner_objects, _require_current_route, locked_projection, physical_target)
+     from tools.delegate_tool_sessions import stored_child_session
+@@ -44,8 +44,21 @@ def _child(authority, live, ref, subagent_id):
+     record = next((r for r in records if r.get('subagent_id') == subagent_id), None)
+     child = getattr(record.get('agent'), 'session_id', None) if record else None
+     if isinstance(child, str) and child:
+-        return child, True
+-    return stored_child_session(authority.db, subagent_id, _compression_lineage(authority.db, target)), record is not None
++        return child, True, record
++    return (stored_child_session(authority.db, subagent_id, _compression_lineage(authority.db, target)),
++            record is not None, record)
++
++
++def _brief(db, child, record):
++    """``(goal, context)`` the child was given, whole: from its live record, else from its stored session."""
++    from tools.delegate_tool_sessions import stored_child_brief
++
++    goal, context = (record or {}).get('goal'), (record or {}).get('context')
++    if not (isinstance(goal, str) and goal) or not (isinstance(context, str) and context):
++        stored_goal, stored_context = stored_child_brief(db, child)
++        goal = goal if isinstance(goal, str) and goal else stored_goal
++        context = context if isinstance(context, str) and context else stored_context
++    return goal, context
+ 
+ 
+ def _read(authority, live, ref, binding, held, limit, inline_images, tool_details=0):
+@@ -54,12 +67,13 @@ def _read(authority, live, ref, binding, held, limit, inline_images, tool_detail
+ 
+     subagent_id = binding[1]
+     with owner_scope(authority):  # every store read goes through the owning authority's own store
+-        child, running = _child(authority, live, ref, subagent_id)
++        child, running, record = _child(authority, live, ref, subagent_id)
+         if child is None:
+             return unavailable(ref.session_id, subagent_id, running)
+         db = authority.db
+         page = read_transcript(db, child, db.transcript_lineage_ids(child), binding, held, limit,
+                                profile_home=authority.profile_id, inline_images=inline_images,
+                                tool_details=tool_details)
++        goal, context = _brief(db, child, record)
+     return {'session_id': ref.session_id, **page, 'subagent_id': subagent_id, 'available': True,
+-            'running': running, 'child_session_id': child}
++            'running': running, 'child_session_id': child, 'goal': goal, 'context': context}
+diff --git a/tests/gateway/fixtures/subagent_transcript_peer.py b/tests/gateway/fixtures/subagent_transcript_peer.py
+index 09bc8e1fd3..e6bd8c700d 100644
+--- a/tests/gateway/fixtures/subagent_transcript_peer.py
++++ b/tests/gateway/fixtures/subagent_transcript_peer.py
+@@ -15,6 +15,13 @@ import traceback
+ import weakref
+ 
+ 
++# A brief longer than any step the hub keeps, with line breaks: it must come back whole.
++DONE_GOAL = 'done goal\n' + 'a detail line of the finished goal\n' * 400
++DONE_CONTEXT = 'done context\n' + 'a line of the finished context\n' * 400
++LIVE_GOAL = 'live goal\n' + 'a detail line of the live goal\n' * 400
++LIVE_CONTEXT = 'live context\n' + 'a line of the live context\n' * 400
++
++
+ def seed(db, target):
+     """The conversation's children as the store holds them; returns the row ids per child."""
+     def child(sid, parent, subagent_id, *, source='subagent', **cfg):
+@@ -32,7 +39,8 @@ def seed(db, target):
+     db.append_message('done-child', role='user', content='done goal')
+     db.end_session('done-child', 'compression')
+     db.create_session('done-child-2', source='subagent', parent_session_id='done-child',
+-                      model_config={'_delegate_from': target, '_subagent_id': 'sa-1-done'})
++                      model_config={'_delegate_from': target, '_subagent_id': 'sa-1-done',
++                                    '_delegate_goal': DONE_GOAL, '_delegate_context': DONE_CONTEXT})
+     # An orchestrator child's own worker, delegated from the child's first segment.
+     child('nested-child', 'done-child', 'sa-0-nested')
+     # A running orchestrator child and its own running worker (the rebuilt-parent case).
+@@ -114,7 +122,8 @@ async def probe():
+             running._subagent_id, running.session_id = 'sa-0-live', 'live-child'
+             running._delegate_parent_ref = weakref.ref(parent)
+             running._parent_session_id = target
+-            _register_child(running, parent, 'live goal', owner_session_id=None,
++            running._delegate_context = LIVE_CONTEXT
++            _register_child(running, parent, LIVE_GOAL, owner_session_id=None,
+                             owner_transport=None, owner_session_record=None)
+             # Queued in the roster, its reserved row parented on a delegator segment that has since rotated.
+             queued = Agent()
+diff --git a/tests/gateway/test_session_subagent_transcript.py b/tests/gateway/test_session_subagent_transcript.py
+index c2bb9cc12b..e429fb088a 100644
+--- a/tests/gateway/test_session_subagent_transcript.py
++++ b/tests/gateway/test_session_subagent_transcript.py
+@@ -49,6 +49,24 @@ def test_running_child_transcript_is_served_in_order_with_its_session(receipt):
+     assert row['subagent_id'] == 'sa-0-live' and row['child_session_id'] == 'live-child', receipt['list']
+ 
+ 
++def test_a_running_child_names_its_whole_goal_and_context(receipt):
++    from tests.gateway.fixtures.subagent_transcript_peer import LIVE_CONTEXT, LIVE_GOAL
++    live = receipt['live']
++    assert live['goal'] == LIVE_GOAL and live['context'] == LIVE_CONTEXT, (len(live['goal']), len(live['context']))
++    assert len(LIVE_GOAL) > 8192 and len(LIVE_CONTEXT) > 8192
++    [row] = [r for r in receipt['list']['subagents'] if r['subagent_id'] == 'sa-0-live']
++    assert row['goal'] == LIVE_GOAL and row['context'] == LIVE_CONTEXT
++
++
++def test_a_finished_child_names_its_brief_from_its_stored_session(receipt):
++    from tests.gateway.fixtures.subagent_transcript_peer import DONE_CONTEXT, DONE_GOAL
++    done = receipt['sa-1-done']
++    assert not done['running'] and done['goal'] == DONE_GOAL and done['context'] == DONE_CONTEXT, done
++    # A stored child that was never stamped, and one that is not available, have no brief to show.
++    assert receipt['empty']['goal'] is None and receipt['empty']['context'] is None
++    assert 'goal' not in receipt['sa-9-unknown'] and 'context' not in receipt['sa-9-unknown']
++
++
+ def test_cursor_returns_only_rows_written_after_it(receipt):
+     after, caught_up = receipt['live_after'], receipt['live_caught_up']
+     assert _texts(after) == [('assistant', 'live step two')], after
+diff --git a/tests/tools/test_delegate_subagent_brief.py b/tests/tools/test_delegate_subagent_brief.py
+new file mode 100644
+index 0000000000..681480a304
+--- /dev/null
++++ b/tests/tools/test_delegate_subagent_brief.py
+@@ -0,0 +1,71 @@
++"""A delegated child keeps the whole brief it was given (goal and context): on its registry record, and on its
++stored session for a viewer that reads it after the live record is gone (a finished child, a gateway restart)."""
++from types import SimpleNamespace
++
++GOAL = "Fix the parser\n" + "check this case too\n" * 1500
++CONTEXT = "Background:\n\n  indented line\n" + "more background " * 3000
++
++
++def _spawn(tmp_path, monkeypatch, goal, context, **extra):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    from hermes_state import SessionDB
++    from run_agent import AIAgent
++    from tools import delegate_tool as dt
++    import tools.delegate_tool_config as dtc
++    cfg = {"max_spawn_depth": 3}
++    monkeypatch.setattr(dt, "_load_config", lambda: cfg)
++    monkeypatch.setattr(dtc, "_load_config", lambda: cfg)
++    db = SessionDB(db_path=tmp_path / "state.db")
++    kw = dict(api_key="k", base_url="https://openrouter.ai/api/v1", provider="openrouter",
++              api_mode="chat_completions", model="anthropic/claude-sonnet-4.6", platform="cli", quiet_mode=True,
++              skip_context_files=True, skip_memory=True, save_trajectories=False, enabled_toolsets=["file"])
++    parent = AIAgent(session_id="parent", session_db=db, **kw)
++    parent._ensure_db_session()
++    child = dt._build_child_agent(task_index=0, goal=goal, context=context, toolsets=["file"], model=None,
++                                  max_iterations=4, task_count=1, parent_agent=parent, **extra)
++    return db, parent, child
++
++
++def test_the_registry_record_and_the_stored_session_carry_the_whole_brief(tmp_path, monkeypatch):
++    from tools.delegate_tool_child_run import _register_child
++    from tools.delegate_tool_registry import _unregister_subagent, list_active_subagents
++    from tools.delegate_tool_sessions import stored_child_brief
++    db, parent, child = _spawn(tmp_path, monkeypatch, GOAL, CONTEXT)
++    try:
++        child._ensure_db_session()
++        _register_child(child, parent, GOAL, owner_session_id=None, owner_transport=None, owner_session_record=None)
++        record = next(r for r in list_active_subagents() if r["subagent_id"] == child._subagent_id)
++        assert record["goal"] == GOAL and record["context"] == CONTEXT
++        assert stored_child_brief(db, child.session_id) == (GOAL, CONTEXT)
++    finally:
++        _unregister_subagent(child._subagent_id, agent=child)
++        child.close()
++        parent.close()
++        db.close()
++
++
++def test_a_child_given_no_context_has_none_and_still_stores_its_goal(tmp_path, monkeypatch):
++    from tools.delegate_tool_sessions import stored_child_brief
++    db, parent, child = _spawn(tmp_path, monkeypatch, "just a goal", None)
++    try:
++        child._ensure_db_session()
++        assert stored_child_brief(db, child.session_id) == ("just a goal", None)
++    finally:
++        child.close()
++        parent.close()
++        db.close()
++
++
++def test_a_session_without_a_stamp_has_no_brief(tmp_path):
++    from hermes_state import SessionDB
++    from tools.delegate_tool_sessions import stored_child_brief
++    db = SessionDB(db_path=tmp_path / "state.db")
++    try:
++        db.create_session("old-child", source="subagent", parent_session_id=None,
++                          model_config={"_delegate_from": "p", "_subagent_id": "sa-0-old"})
++        db.create_session("plain", source="cli")
++        assert stored_child_brief(db, "old-child") == (None, None)
++        assert stored_child_brief(db, "plain") == (None, None)
++        assert stored_child_brief(db, "missing") == (None, None)
++    finally:
++        db.close()
+diff --git a/tests/tools/test_delegation_restart_handoff.py b/tests/tools/test_delegation_restart_handoff.py
+index 5598c292c2..5138813922 100644
+--- a/tests/tools/test_delegation_restart_handoff.py
++++ b/tests/tools/test_delegation_restart_handoff.py
+@@ -357,6 +357,7 @@ def test_child_resumes_its_stored_session_on_its_recorded_route(resume_seams):
+     assert resume_seams["resume_session_id"] == "child-1" and resume_seams["subagent_id"] == "sa-1-abcd"
+     assert resume_seams["model"] == "qwen" and resume_seams["override_base_url"] == "http://ollama.example.com/v1"
+     assert resume_seams["parent_agent"].session_id == PARENT and resume_seams["goal"] == "task 1"
++    assert resume_seams["context"] == "ctx"
+     assert db.get_session("child-1")["ended_at"] is None  # reopened for the continue turn
+     resume = child._delegate_resume
+     assert resume["message"] == handoff.RESUME_MESSAGE and resume["cwd"] == "/work/one"
+@@ -365,6 +366,19 @@ def test_child_resumes_its_stored_session_on_its_recorded_route(resume_seams):
+     assert child._delegation_id == "deleg_call" and child._progress_identity_ref == {"delegation_id": "deleg_call"}
+ 
+ 
++def test_resumed_child_is_built_with_the_whole_goal_and_context_it_was_given(resume_seams):
++    goal = "first line\n" + "a long line of the goal " * 2000
++    context = "context\n\n  indented " + "z" * 40000
++    db = _session_db()
++    _stored_child(db, cut=True)
++    raw = _resume_unit()
++    raw["handoff"]["children"]["1"].update(goal=goal, context=context)
++    unit = handoff._ResumedUnit(raw)
++    parent = handoff._ResumeParent(unit.spec["parent"], db)
++    unit._build(1, unit.spec["children"]["1"], parent, db)
++    assert resume_seams["goal"] == goal and resume_seams["context"] == context
++
++
+ def test_child_without_a_stored_session_is_not_resumed(resume_seams):
+     db = _session_db()
+     unit = handoff._ResumedUnit(_resume_unit())
+diff --git a/tests/tui_gateway/test_subagent_snapshot.py b/tests/tui_gateway/test_subagent_snapshot.py
+index bd340d41b0..99a93d2e71 100644
+--- a/tests/tui_gateway/test_subagent_snapshot.py
++++ b/tests/tui_gateway/test_subagent_snapshot.py
+@@ -327,6 +327,26 @@ def test_list_surfaces_failed_delegations_that_outlived_the_live_roster(runtime)
+         ("d-mine", "d-mine goal", "error")]
+ 
+ 
++def test_snapshot_carries_the_whole_goal_and_context(runtime):
++    from tools.delegate_tool_child_run import _register_child
++    from tools.delegate_tool_registry import _unregister_subagent
++
++    server, owner, transport, call = runtime
++    goal = "first line of the goal\n" + "a long line of the goal " * 2000
++    context = "context line one\n\ncontext line three " + "y" * 30000
++    child = SimpleNamespace(_subagent_id="child", _delegate_depth=1, model="test", _delegate_context=context)
++    bare = SimpleNamespace(_subagent_id="bare", _delegate_depth=1, model="test")
++    for c, g in ((child, goal), (bare, "no context")):
++        _register_child(c, None, g, owner_session_id="ui-owner", owner_transport=transport, owner_session_record=owner)
++    try:
++        rows = {r["subagent_id"]: r for r in call("subagent.list")["result"]["subagents"]}
++        assert rows["child"]["goal"] == goal and rows["child"]["context"] == context
++        assert rows["bare"]["goal"] == "no context" and rows["bare"]["context"] is None
++    finally:
++        _unregister_subagent("child")
++        _unregister_subagent("bare")
++
++
+ def test_snapshot_last_preview_is_cut_and_follows_the_latest_tool(runtime):
+     from tools.delegate_tool_child_run import _register_child
+     from tools.delegate_tool_registry import _unregister_subagent
+diff --git a/tools/delegate_tool.py b/tools/delegate_tool.py
+index a86acbdd8c..63ce816f42 100644
+--- a/tools/delegate_tool.py
++++ b/tools/delegate_tool.py
+@@ -401,6 +401,8 @@ def _build_child_agent(
+     child_session_ref["session_id"] = getattr(child, "session_id", "") or ""
+     child._progress_identity_ref = child_session_ref
+     child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
++    # The brief as it was given, for the roster row and, once the live record is gone, the stored session.
++    child._delegate_goal, child._delegate_context = goal, context
+     _bind_approval_review_root(child, parent_agent, goal)
+     # Plugins see one conversation per delegation tree.
+     from agent.prompt_cache_scope import conversation_id
+@@ -422,6 +424,10 @@ def _build_child_agent(
+         from tools.delegate_tool_sessions import SUBAGENT_ID_KEY
+         child._session_init_model_config["_delegate_from"] = parent_sid
+         child._session_init_model_config[SUBAGENT_ID_KEY] = subagent_id
++        from tools.delegate_tool_sessions import BRIEF_CONTEXT_KEY, BRIEF_GOAL_KEY
++        child._session_init_model_config[BRIEF_GOAL_KEY] = goal
++        if context:
++            child._session_init_model_config[BRIEF_CONTEXT_KEY] = context
+     child._delegate_profile_home = profile_home  # _ChildRun.await_child runs the conversation in this scope
+     if child_pool is not None:
+         child._credential_pool = child_pool
+diff --git a/tools/delegate_tool_child_run.py b/tools/delegate_tool_child_run.py
+index 2eaed640a4..a6899cfbe7 100644
+--- a/tools/delegate_tool_child_run.py
++++ b/tools/delegate_tool_child_run.py
+@@ -499,6 +499,7 @@ def _subagent_record(
+         "parent_id": _str_or_none(getattr(child, "_parent_subagent_id", None)),
+         "depth": max(0, _raw_depth - 1) if isinstance(_raw_depth, int) else 0,
+         "goal": goal,
++        "context": _str_or_none(getattr(child, "_delegate_context", None)),
+         "delegation_id": _str_or_none(getattr(child, "_delegation_id", None)),
+         "model": _str_or_none(getattr(child, "model", None)),
+         "started_at": _resumed_number(child, "_delegate_started_at", float) or time.time(), "status": status,
+diff --git a/tools/delegate_tool_sessions.py b/tools/delegate_tool_sessions.py
+index fb362a421d..f997d96357 100644
+--- a/tools/delegate_tool_sessions.py
++++ b/tools/delegate_tool_sessions.py
+@@ -13,6 +13,25 @@ import json
+ from typing import Any, Iterable, Optional
+ 
+ SUBAGENT_ID_KEY = "_subagent_id"
++# The goal and context the child was given, stamped beside the id so a viewer reads the whole brief after the
++# live record is gone (a finished child, a gateway restart).
++BRIEF_GOAL_KEY = "_delegate_goal"
++BRIEF_CONTEXT_KEY = "_delegate_context"
++
++
++def stored_child_brief(db: Any, session_id: str) -> tuple[Optional[str], Optional[str]]:
++    """``(goal, context)`` stamped on the child's stored session; None for one that was not stamped."""
++    row = db.get_session(session_id) if session_id else None
++    cfg = row.get("model_config") if row else None
++    if isinstance(cfg, str):
++        try:
++            cfg = json.loads(cfg)
++        except ValueError:
++            return None, None
++    if not isinstance(cfg, dict):
++        return None, None
++    goal, context = cfg.get(BRIEF_GOAL_KEY), cfg.get(BRIEF_CONTEXT_KEY)
++    return (goal if isinstance(goal, str) and goal else None), (context if isinstance(context, str) and context else None)
+ 
+ 
+ def stored_child_session(db: Any, subagent_id: str, conversation_ids: Iterable[str]) -> Optional[str]:
+diff --git a/tui_gateway/contracts/canonical_stored_reads.py b/tui_gateway/contracts/canonical_stored_reads.py
+index e4a6d4e076..089940f6bd 100644
+--- a/tui_gateway/contracts/canonical_stored_reads.py
++++ b/tui_gateway/contracts/canonical_stored_reads.py
+@@ -61,6 +61,11 @@ class StoredTranscriptResult(Result):
+     available: bool | None = None
+     running: bool | None = None
+     child_session_id: str | None = None
++    # Only with ``subagent_id``: the goal and the context the child was given, whole and as given to
++    # ``delegate_task`` (a queued or resumed child, and one read after a gateway restart, included). Absent
++    # when the child is unavailable, and null when its stored session carries no brief (a child from before it was stamped).
++    goal: str | None = None
++    context: str | None = None
+ 
+ 
+ canonical_method('session.transcript', params=StoredTranscriptParams, result=StoredTranscriptResult,
+diff --git a/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py b/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py
+index d6ea3ceeb3..326df845c4 100644
+--- a/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py
++++ b/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py
+@@ -672,6 +672,8 @@ class SubagentSnapshot(Result):
+     last_tool: str | None = None
+     #: What the last started tool was given (a terminal's command), as ``subagent.tool`` carries it; cut to 400 characters.
+     last_preview: str | None = None
++    #: The context the child was given with its goal, whole; null when it got none.
++    context: str | None = None
+     accepting_steer: bool | None = None
+     #: Commands of the background processes a ``waiting`` child will be resumed by.
+     waiting_on: list[str] | None = None
+diff --git a/tui_gateway/methods_subagents.py b/tui_gateway/methods_subagents.py
+index 1056a2f9da..b44083e551 100644
+--- a/tui_gateway/methods_subagents.py
++++ b/tui_gateway/methods_subagents.py
+@@ -10,7 +10,7 @@ _registry = HandlerRegistry()
+ method = _registry.method
+ 
+ _SUBAGENT_SNAPSHOT_FIELDS = (
+-    "subagent_id", "parent_id", "depth", "goal", "delegation_id", "model",
++    "subagent_id", "parent_id", "depth", "goal", "context", "delegation_id", "model",
+     "started_at", "status", "tool_count", "last_tool", "last_preview", "accepting_steer", "waiting_on",
+ )
+ _SUBAGENT_TAIL_BYTES = 16384
+-- 
+2.56.0
+
