@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -77,12 +76,8 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 		call("c4", `{"image_url":"`+other+`","question":"Is this device-only image shown?"}`), result("c4"),
 		{kRole: roleAssistant, kText: "done"},
 	}})
-	prof, err := os.MkdirTemp("", "visioncard-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "visioncard", "run.js"), chrome, e.url, prof, seen, gone).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "visioncard", "run.js"), chrome, e.url, prof, seen, gone).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

@@ -86,12 +86,8 @@ func ghostSteer(t *testing.T, bin string) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(poke.Close)
-	prof, err := os.MkdirTemp("", "ghoststeer-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "ghoststeer", "run.js"), bin, e.url, prof, poke.URL).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "ghoststeer", "run.js"), bin, e.url, prof, poke.URL).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

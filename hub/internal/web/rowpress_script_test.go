@@ -2,7 +2,6 @@ package web_test
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -38,12 +37,8 @@ func rowPress(t *testing.T, bin string) {
 		e.gw.AddSession(&gatewaytest.Session{ID: id, Title: "Chat " + id, Live: true, StartedAt: float64(90 - i),
 			Messages: []map[string]any{{kRole: roleUser, kText: "hello " + id}, {kRole: roleAssistant, kText: fmt.Sprintf("reply %s", id)}}})
 	}
-	prof, err := os.MkdirTemp("", "rowpress-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "rowpress", "run.js"), bin, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "rowpress", "run.js"), bin, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

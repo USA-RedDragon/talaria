@@ -29,12 +29,8 @@ func TestTypedRowShowsWithoutHermesNotes(t *testing.T) {
 			{kRole: roleUser, kText: "ping\n\n[Waiting: to wait for something slow, start it with terminal(background=true), then call process_manage(action='wait', session_id=..., timeout=...).]", "submission_id": "web-2"},
 			{kRole: roleAssistant, kText: "pong"},
 		}})
-	prof, err := os.MkdirTemp("", "notebubble-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "notebubble", "run.js"), chrome, e.url, prof)
+	prof := t.TempDir()
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "notebubble", "run.js"), chrome, e.url, prof)
 	cmd.Env = append(os.Environ(), "SHOT_PREFIX="+os.Getenv("NOTEBUBBLE_SHOT"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -73,12 +73,8 @@ func TestRolloutKeepsThePage(t *testing.T) {
 			release()
 		}
 	})
-	prof, err := os.MkdirTemp("", "rollout-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "rollout", "run.js"), chrome, e.url, prof, poke.URL)
+	prof := t.TempDir()
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "rollout", "run.js"), chrome, e.url, prof, poke.URL)
 	cmd.Env = append(os.Environ(), "SHOT_PREFIX="+os.Getenv("ROLLOUT_SHOT"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

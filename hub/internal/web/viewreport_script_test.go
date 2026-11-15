@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -97,12 +96,8 @@ func viewReportRun(t *testing.T, bin, mode string) {
 			map[string]any{kRole: roleAssistant, kText: strings.Repeat("an answer that fills the log. ", 3+i%11)})
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: longOne, Title: vrChat, Live: true, StartedAt: 900, Messages: ms})
-	prof, err := os.MkdirTemp("", "viewreport-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "viewreport", "run.js"), bin, e.url, prof, mode).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "viewreport", "run.js"), bin, e.url, prof, mode).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

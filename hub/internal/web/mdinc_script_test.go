@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -19,12 +18,8 @@ func TestIncrementalMarkdownMatchesFullRenderChrome(t *testing.T) {
 	}
 	chrome := chromePath(t)
 	e := setup(t)
-	prof, err := os.MkdirTemp("", "mdinc-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "mdinc", "run.js"), chrome, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "mdinc", "run.js"), chrome, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

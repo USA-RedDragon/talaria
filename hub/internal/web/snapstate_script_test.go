@@ -49,12 +49,8 @@ func TestOpenStateSurvivesASnapshot(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(poke.Close)
-	prof, err := os.MkdirTemp("", "snapstate-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "snapstate", "run.js"), chrome, e.url, prof, poke.URL)
+	prof := t.TempDir()
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "snapstate", "run.js"), chrome, e.url, prof, poke.URL)
 	cmd.Env = append(os.Environ(), "SHOT_PREFIX="+os.Getenv("SNAPSTATE_SHOT"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

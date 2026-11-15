@@ -41,12 +41,8 @@ func TestCompressShowsProgress(t *testing.T) {
 	e.gw.AddSession(&gatewaytest.Session{ID: "s8", Title: "Busy chat", Live: true, StartedAt: 800, Running: true, Messages: msgs})
 	release := e.gw.HoldCompress()
 	t.Cleanup(release)
-	prof, err := os.MkdirTemp("", "cmdstatus-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "cmdstatus", "page.js"), chrome, e.url, prof)
+	prof := t.TempDir()
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "cmdstatus", "page.js"), chrome, e.url, prof)
 	cmd.Env = append(os.Environ(), "SHOT_PREFIX="+os.Getenv("CMDSTATUS_SHOT"))
 	// The page script cannot call Go: it asks through files in the profile.
 	go func() {

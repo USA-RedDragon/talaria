@@ -10,6 +10,11 @@ const TIMEOUT = Number(process.env.CDP_TIMEOUT_MS) || 30000;
 
 exports.launch = (bin, dir) => {
   const proc = spawn(bin, ["--headless", "--no-remote", "--profile", dir, "--remote-debugging-port=0", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+  // Never outlive this script: kill the browser on exit and on SIGTERM
+  // (the test binary's Pdeathsig, or its cleanup).
+  const reap = () => { try { proc.kill("SIGKILL"); } catch (_) { /* gone */ } };
+  process.on("exit", reap);
+  for (const s of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(s, () => { reap(); process.exit(143); });
   let stderr = "";
   const tail = () => stderr.slice(-1500).trim() || "(empty)";
   const exited = new Promise((res) => proc.on("exit", (code, sig) => res(`firefox exited (code ${code}, signal ${sig})`)));

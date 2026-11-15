@@ -31,11 +31,7 @@ func TestStreamingKeepsViewPinnedChrome(t *testing.T) {
 			map[string]any{kRole: roleAssistant, kText: strings.Repeat(fmt.Sprintf("Answer %d fills the log. ", i), 12)})
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "sp", Title: "Streaming", Live: true, StartedAt: 900, Messages: ms})
-	prof, err := os.MkdirTemp("", "streampin-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
+	prof := t.TempDir()
 	signal := filepath.Join(prof, "go")
 	var full strings.Builder
 	delta := func(i int) string {
@@ -81,7 +77,7 @@ func TestStreamingKeepsViewPinnedChrome(t *testing.T) {
 		e.gw.Publish("sp", hub.KindMessageDelta, map[string]any{kText: " final-end"})
 		e.gw.FinishReply("sp", full.String())
 	}()
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "streampin", "run.js"), chrome, e.url, prof, signal).CombinedOutput()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "streampin", "run.js"), chrome, e.url, prof, signal).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

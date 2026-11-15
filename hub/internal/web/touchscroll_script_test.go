@@ -33,11 +33,7 @@ func TestTouchScrollMovesTheLogChrome(t *testing.T) {
 			map[string]any{kRole: roleAssistant, kText: strings.Repeat(fmt.Sprintf("Answer %d fills the log. ", i), 12)})
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "ts", Title: "Touch", Live: true, StartedAt: 900, Messages: ms})
-	prof, err := os.MkdirTemp("", "touchscroll-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
+	prof := t.TempDir()
 	start := filepath.Join(prof, "go")
 	stop := filepath.Join(prof, "stop")
 	seen := func(p string) bool { _, err := os.Stat(p); return err == nil }
@@ -71,7 +67,7 @@ func TestTouchScrollMovesTheLogChrome(t *testing.T) {
 		e.gw.Publish("ts", hub.KindMessageDelta, map[string]any{kText: " final-end"})
 		e.gw.FinishReply("ts", full.String())
 	}()
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "touchscroll", "run.js"), chrome, e.url, prof, start, stop).CombinedOutput()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "touchscroll", "run.js"), chrome, e.url, prof, start, stop).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

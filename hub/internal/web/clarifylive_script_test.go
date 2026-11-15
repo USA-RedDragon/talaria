@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -45,12 +44,8 @@ func clarifyLive(t *testing.T, bin string) {
 		NextPrompts: []gateway.Prompt{{Kind: gateway.PromptClarify, PromptID: "cl-2", Question: &q2, Choices: []string{}, Subagent: &who}}})
 	e.gw.AddSession(&gatewaytest.Session{ID: "away", Title: titleOther, Live: true, StartedAt: 700,
 		Messages: []map[string]any{{kRole: roleUser, kText: "hello"}, {kRole: roleAssistant, kText: "hi"}}})
-	prof, err := os.MkdirTemp("", "clarifylive-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "clarifylive", "run.js"), bin, e.url, prof, q1, q2).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "clarifylive", "run.js"), bin, e.url, prof, q1, q2).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

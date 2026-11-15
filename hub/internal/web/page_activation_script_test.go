@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -57,12 +56,8 @@ func TestPageSendNeedsUserActivationChrome(t *testing.T) {
 	reply := "Here is the page.\n\n```page\n" + activationPage + "\n```\n"
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Pages to click", Live: true, StartedAt: 900, Messages: []map[string]any{
 		{kRole: roleUser, kText: "make the click page"}, {kRole: roleAssistant, kText: reply}}})
-	prof, err := os.MkdirTemp("", "pageact-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "pageact", "run.js"), bin, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "pageact", "run.js"), bin, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
@@ -79,12 +74,8 @@ func TestPageSendNeedsUserActivationFirefox(t *testing.T) {
 	reply := "Here is the page.\n\n```page\n" + activationPage + "\n```\n"
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Pages to click", Live: true, StartedAt: 900, Messages: []map[string]any{
 		{kRole: roleUser, kText: "make the click page"}, {kRole: roleAssistant, kText: reply}}})
-	prof, err := os.MkdirTemp("", "pageact-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "pageact", "run.js"), bin, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "pageact", "run.js"), bin, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

@@ -98,11 +98,7 @@ func parkJump(t *testing.T, bin string, delay int, throw bool) {
 		}
 		return 0
 	})
-	prof, err := os.MkdirTemp("", "parkjump-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
+	prof := t.TempDir()
 	go func() {
 		for {
 			select {
@@ -120,7 +116,7 @@ func parkJump(t *testing.T, bin string, delay int, throw bool) {
 		slowA.Store(int64(delay))
 		_ = os.WriteFile(filepath.Join(prof, "stored"), nil, 0o600)
 	}()
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "parkjump", "run.js"), bin, e.url, prof, strconv.Itoa(delay))
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "parkjump", "run.js"), bin, e.url, prof, strconv.Itoa(delay))
 	cmd.Env = os.Environ()
 	if throw {
 		// The script throws on purpose and checks the errors itself.

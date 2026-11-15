@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -28,12 +27,8 @@ func TestChipOpensViewer(t *testing.T) {
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: titleWork, Live: true, Running: true, StartedAt: 900,
 		Pending: []gateway.PendingAdmission{{AdmissionID: "a1", Sequence: 1, Status: "queued", Text: "after this\n\n[Image attached at: " + waiting + "]"}}, Messages: []map[string]any{
 			{kRole: roleUser, kText: "start\n\n[Image attached at: " + waiting + "]"}, {kRole: roleAssistant, kText: "working"}}})
-	prof, err := os.MkdirTemp("", "chipview-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "chipview", "run.js"), chrome, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "chipview", "run.js"), chrome, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

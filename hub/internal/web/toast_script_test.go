@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -35,12 +34,8 @@ func TestToastPlacementAndHoverChrome(t *testing.T) {
 		t.Skip("node is not installed")
 	}
 	e := setup(t)
-	prof, err := os.MkdirTemp("", "toast-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "toast", "browser.js"), bin, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "toast", "browser.js"), bin, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

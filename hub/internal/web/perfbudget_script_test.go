@@ -2,7 +2,6 @@ package web_test
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -62,12 +61,8 @@ func TestOpenChatBudgetChrome(t *testing.T) {
 			map[string]any{kRole: roleAssistant, kText: fmt.Sprintf("short answer %d", i)})
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "ps", Title: "Short", Live: true, StartedAt: 900, Messages: short})
-	prof, err := os.MkdirTemp("", "perfbudget-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "perfbudget", "run.js"), chrome, e.url, prof)
+	prof := t.TempDir()
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "perfbudget", "run.js"), chrome, e.url, prof)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)

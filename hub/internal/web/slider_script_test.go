@@ -2,7 +2,6 @@ package web_test
 
 import (
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -64,12 +63,8 @@ func TestSummarizeSlider(t *testing.T) {
 				opts.Logger = slog.New(slog.NewTextHandler(&syncBuf{}, nil))
 			})
 			mu.Unlock()
-			prof, err := os.MkdirTemp("", "slider-profile-")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(prof) })
-			out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "slider", "run.js"), chrome, e.url, prof, mode).CombinedOutput()
+			prof := t.TempDir()
+			out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "slider", "run.js"), chrome, e.url, prof, mode).CombinedOutput()
 			if err != nil {
 				t.Fatalf("%v\n%s", err, out)
 			}

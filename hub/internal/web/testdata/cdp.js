@@ -85,6 +85,11 @@ exports.frames = frames;
 // launch starts Chrome and returns { proc, connect }.
 exports.launch = (bin, dir) => {
   const proc = spawn(bin, ["--headless=new", "--no-sandbox", "--disable-gpu", "--remote-debugging-port=0", "--user-data-dir=" + dir, "--hide-scrollbars", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+  // Never outlive this script: kill the browser on exit and on SIGTERM
+  // (the test binary's Pdeathsig, or its cleanup).
+  const reap = () => { try { proc.kill("SIGKILL"); } catch (_) { /* gone */ } };
+  process.on("exit", reap);
+  for (const s of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(s, () => { reap(); process.exit(143); });
   let stderr = "";
   const tail = () => stderr.slice(-1500).trim() || "(empty)";
   const wsWaiters = [];

@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -35,12 +34,8 @@ func TestToolOutputLoadsWhenACardOpens(t *testing.T) {
 		{kRole: stepTool, kCallID: "a3", fieldName: toolTerminal, kText: `{"output": ` + mustJSON(t, whole+"2") + `, "exit_code": 0}`},
 		{kRole: roleAssistant, kText: "finished"},
 	}})
-	prof, err := os.MkdirTemp("", "toolout-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "toolout", "run.js"), chrome, e.url, prof, tail).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "toolout", "run.js"), chrome, e.url, prof, tail).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

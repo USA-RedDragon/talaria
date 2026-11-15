@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -28,12 +27,8 @@ func TestNoIdsInVisibleText(t *testing.T) {
 		a.Skills = append(a.Skills, map[string]any{fieldName: "weather_brief_daily", keyDesc: "Short forecasts", keyEnabled: true, "provenance": "hub"})
 		a.Servers = append(a.Servers, map[string]any{fieldName: "home_assistant", "transport": "http", keyURL: "https://ha.example/mcp", keyEnabled: true, "source": "config"})
 	})
-	prof, err := os.MkdirTemp("", "ids-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "ids", "run.js"), chrome, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "ids", "run.js"), chrome, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

@@ -30,12 +30,8 @@ func TestScrollNotFromTheReaderStays(t *testing.T) {
 			map[string]any{kRole: roleAssistant, kText: strings.Repeat(fmt.Sprintf("Answer %d fills the log. ", i), 8)})
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Find scroll", Live: true, StartedAt: 900, Messages: ms})
-	prof, err := os.MkdirTemp("", "findscroll-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "findscroll", "run.js"), chrome, e.url, prof)
+	prof := t.TempDir()
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "findscroll", "run.js"), chrome, e.url, prof)
 	cmd.Env = append(os.Environ(), "SHOT_PREFIX="+os.Getenv("FINDSCROLL_SHOT"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

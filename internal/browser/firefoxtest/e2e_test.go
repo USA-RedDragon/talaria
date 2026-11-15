@@ -168,11 +168,7 @@ const (
 // extension as a temporary add-on over BiDi and waits for it to connect.
 func startFirefox(ctx context.Context, t *testing.T) (*broker.Broker, *bidi.Client) {
 	t.Helper()
-	root, err := os.MkdirTemp("", "hbe2e")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root := t.TempDir() // honors TMPDIR; removed after the Firefox cleanup below
 	home := filepath.Join(root, "home")
 	profile := filepath.Join(root, "profile")
 	extDir := filepath.Join(root, "ext")
@@ -256,6 +252,7 @@ func runFirefox(ctx context.Context, t *testing.T, profile string, env []string)
 	var log bytes.Buffer
 	ff.Stdout, ff.Stderr = &log, &log
 	ff.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setPdeathsigKill(ff.SysProcAttr) // dies with the test binary, even on a -timeout panic
 	ff.Cancel = func() error { return syscall.Kill(-ff.Process.Pid, syscall.SIGKILL) }
 	if err := ff.Start(); err != nil {
 		t.Fatal(err)

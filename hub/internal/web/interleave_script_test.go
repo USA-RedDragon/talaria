@@ -75,12 +75,8 @@ func TestThinkingInterleavesWithCards(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(poke.Close)
-	prof, err := os.MkdirTemp("", "interleave-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	cmd := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "interleave", "run.js"), chrome, e.url, prof, poke.URL)
+	prof := t.TempDir()
+	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "interleave", "run.js"), chrome, e.url, prof, poke.URL)
 	cmd.Env = append(os.Environ(), "SHOT_PREFIX="+os.Getenv("INTERLEAVE_SHOT"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

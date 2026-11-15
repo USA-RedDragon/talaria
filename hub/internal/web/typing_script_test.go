@@ -2,7 +2,6 @@ package web_test
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -29,12 +28,8 @@ func TestTypingMovesNothing(t *testing.T) {
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Long", Live: true, StartedAt: 900, Messages: ms})
 	e.gw.AddSession(&gatewaytest.Session{ID: "s8", Title: "Second", Live: true, StartedAt: 800, Messages: ms[:4]})
-	prof, err := os.MkdirTemp("", "typing-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "typing", "run.js"), chrome, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "typing", "run.js"), chrome, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

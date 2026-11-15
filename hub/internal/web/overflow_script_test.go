@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -75,12 +74,8 @@ func TestNoCardOverflowsTheStream(t *testing.T) {
 		},
 		Subagents: []gateway.SubagentRow{{SubagentID: "sa-0-o", Goal: longToken + longToken + " " + longURL, Status: optr(statusRunning), AcceptingSteer: optr(true)}},
 	})
-	prof, err := os.MkdirTemp("", "overflow-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "overflow", "run.js"), chrome, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "overflow", "run.js"), chrome, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, strings.TrimSpace(string(out)))
 	}

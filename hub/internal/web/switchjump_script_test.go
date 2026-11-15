@@ -6,7 +6,6 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -121,12 +120,8 @@ func switchJump(t *testing.T, bin string) {
 			e.gw.FinishReply(id, fmt.Sprintf("%s later reply %d ", id, n)+strings.Repeat("more words ", 40))
 		}
 	}()
-	prof, err := os.MkdirTemp("", "switchjump-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "switchjump", "run.js"), bin, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "switchjump", "run.js"), bin, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

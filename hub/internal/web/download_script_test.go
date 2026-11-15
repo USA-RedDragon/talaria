@@ -143,7 +143,7 @@ func TestDownloadResumesInChrome(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 	defer cancel()
 	u := e.url + "/api/sessions/pc/s-big/media?download=1&path=" + strings.ReplaceAll(devPath, "/", "%2F")
-	out, err := exec.CommandContext(ctx, node, filepath.Join("testdata", "download", "run.js"), chrome, e.url, prof, u, downloads).CombinedOutput()
+	out, err := browserCmd(ctx, t, node, filepath.Join("testdata", "download", "run.js"), chrome, e.url, prof, u, downloads).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s\nmedia requests: %q", err, out, log.list())
 	}

@@ -135,12 +135,8 @@ func restartJump(t *testing.T, bin, mode string, running bool) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(poke.Close)
-	prof, err := os.MkdirTemp("", "restartjump-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "restartjump", "run.js"), bin, e.url, prof, poke.URL, mode).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "restartjump", "run.js"), bin, e.url, prof, poke.URL, mode).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

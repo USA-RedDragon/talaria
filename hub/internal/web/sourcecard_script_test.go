@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -33,12 +32,8 @@ func TestSourceApprovalCardOffersItsSource(t *testing.T) {
 			GrantSource: optr("github.com/AppImage/appimagetool")}},
 		Messages: []map[string]any{{kRole: roleUser, kText: "relift the runtime"}, {kRole: roleAssistant, kText: "on it"}},
 	})
-	prof, err := os.MkdirTemp("", "sourcecard-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "sourcecard", "run.js"), chrome, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "sourcecard", "run.js"), chrome, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, strings.TrimSpace(string(out)))
 	}

@@ -60,12 +60,8 @@ func TestOneReloadReplacesAnOldClient(t *testing.T) {
 	})
 	for _, prefetch := range []string{"reload", "prefetch"} {
 		e.front.to(old)
-		prof, err := os.MkdirTemp("", "swupdate-profile-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.RemoveAll(prof) })
-		out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "swupdate", "run.js"), chrome, e.url, prof, prefetch).CombinedOutput()
+		prof := t.TempDir()
+		out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "swupdate", "run.js"), chrome, e.url, prof, prefetch).CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", prefetch, err, out)
 		}

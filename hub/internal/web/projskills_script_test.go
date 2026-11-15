@@ -2,7 +2,6 @@ package web_test
 
 import (
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -70,12 +69,8 @@ func TestProjectSkillsPages(t *testing.T) {
 		opts.Memory = m
 	})
 	mu.Unlock()
-	prof, err := os.MkdirTemp("", "projskills-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "projskills", "run.js"), chrome, e.url, prof, demo).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "projskills", "run.js"), chrome, e.url, prof, demo).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

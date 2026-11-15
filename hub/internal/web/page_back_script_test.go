@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -25,12 +24,8 @@ func TestPageBackKeepsTaps(t *testing.T) {
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Pages", Live: true, StartedAt: 900, Messages: []map[string]any{
 		{kRole: roleUser, kText: "make a page"}, {kRole: roleAssistant, kText: reply}}})
 	e.gw.AddSession(&gatewaytest.Session{ID: "s8", Title: "Second", Live: true, StartedAt: 800, Messages: []map[string]any{{kRole: roleUser, kText: "hi"}}})
-	prof, err := os.MkdirTemp("", "pageback-profile-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(prof) })
-	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "pageback", "run.js"), chrome, e.url, prof).CombinedOutput()
+	prof := t.TempDir()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "pageback", "run.js"), chrome, e.url, prof).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
