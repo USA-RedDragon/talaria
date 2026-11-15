@@ -1,0 +1,10 @@
+# New: the Code from External card offers its source for downloads and installs; the grant covers the same source only
+tests/tools/test_smart_provenance_source_grants.py
+# New: the source choice on button surfaces (Telegram row, other adapters unchanged, runner hands the source)
+tests/gateway/test_exec_approval_source_choice.py
+# The card choice and grants it extends
+tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_smart_provenance.py
+tests/tools/test_approval.py
+tests/gateway/test_exec_approval_template.py
+tests/gateway/test_telegram_approval_buttons.py
