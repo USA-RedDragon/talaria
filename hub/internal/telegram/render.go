@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"path"
 	"slices"
@@ -159,6 +160,12 @@ type renderer struct {
 	// pageURL is the hub URL that opens a page of the session: a PageID or
 	// the path of an HTML file.
 	pageURL func(ref string) string
+	// openFile opens a file the agent offered with send_file, whole; nil
+	// when the service cannot. fileURL is the hub card link of a path.
+	openFile func(ctx context.Context, path string) (*hub.FileInfo, io.ReadCloser, error)
+	fileURL  func(path string) string
+	// offered are the send_file offers sent already, by offer id or path.
+	offered map[string]bool
 	// deleted reports that the chat of a topic was deleted, so its topic
 	// goes too. Nil outside a topic.
 	deleted func()
@@ -960,6 +967,7 @@ func (r *renderer) toolComplete(ctx context.Context, ev hub.Event) {
 	t.counts[stepKind(p.Name)]++
 	r.refresh(ctx)
 	r.publishedPage(ctx, p)
+	r.offeredFile(ctx, p)
 }
 
 // publishedPage sends the link of a page the agent published with

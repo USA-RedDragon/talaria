@@ -274,9 +274,19 @@ func (c *Client) callBody(ctx context.Context, method string, body []byte, conte
 }
 
 func (c *Client) do(ctx context.Context, method string, body []byte, contentType string, result any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+method, bytes.NewReader(body))
+	return c.doReader(ctx, method, bytes.NewReader(body), int64(len(body)), contentType, result)
+}
+
+// doReader is do with a streamed body of length n (-1: unknown, sent
+// chunked).
+func (c *Client) doReader(ctx context.Context, method string, body io.Reader, n int64, contentType string, result any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+method, body)
 	if err != nil {
 		return fmt.Errorf("failed to build %s request: %w", method, err)
+	}
+	req.ContentLength = n
+	if n == 0 {
+		req.Body = http.NoBody
 	}
 	req.Header.Set("Content-Type", contentType)
 	resp, err := c.http.Do(req)
@@ -548,6 +558,50 @@ func (c *Client) SendPhoto(ctx context.Context, chatID, thread int64, name strin
 // SendDocument sends a file.
 func (c *Client) SendDocument(ctx context.Context, chatID, thread int64, name string, data []byte) error {
 	return c.upload(ctx, "sendDocument", "document", chatID, thread, name, data)
+}
+
+// maxCaption is the longest caption Telegram takes, in characters.
+const maxCaption = 1024
+
+// SendDocumentStream sends a file read from body as a document, without
+// holding it in memory: the multipart body is the form fields, then body,
+// then the closing boundary, written to the connection as it is read. size
+// is the number of bytes body holds (-1 when unknown, which sends the
+// request chunked); a body that ends early fails the request. caption is
+// HTML, at most 1024 characters. A rate limit is not retried, because the
+// body is spent.
+func (c *Client) SendDocumentStream(ctx context.Context, chatID, thread int64, name string, size int64, body io.Reader, caption string) error {
+	var head bytes.Buffer
+	w := multipart.NewWriter(&head)
+	fields := [][2]string{{"chat_id", strconv.FormatInt(chatID, 10)}}
+	if thread != 0 {
+		fields = append(fields, [2]string{"message_thread_id", strconv.FormatInt(thread, 10)})
+	}
+	if caption != "" {
+		fields = append(fields, [2]string{"caption", caption}, [2]string{"parse_mode", parseHTML})
+	}
+	for _, f := range fields {
+		if err := w.WriteField(f[0], f[1]); err != nil {
+			return err
+		}
+	}
+	if _, err := w.CreateFormFile("document", name); err != nil {
+		return err
+	}
+	prefix := bytes.Clone(head.Bytes())
+	head.Reset()
+	if err := w.Close(); err != nil {
+		return err
+	}
+	suffix := head.Bytes()
+	n := int64(-1)
+	file := body
+	if size >= 0 {
+		n = int64(len(prefix)) + size + int64(len(suffix))
+		file = io.LimitReader(body, size)
+	}
+	r := io.MultiReader(bytes.NewReader(prefix), file, bytes.NewReader(suffix))
+	return c.doReader(ctx, "sendDocument", r, n, w.FormDataContentType(), nil)
 }
 
 func (c *Client) upload(ctx context.Context, method, field string, chatID, thread int64, name string, data []byte) error {

@@ -247,6 +247,9 @@ func (f *fakeTelegram) form(r *http.Request) map[string]any {
 			if id, err := strconv.ParseFloat(string(data), 64); (part.FormName() == "chat_id" || part.FormName() == kThread) && err == nil {
 				params[part.FormName()] = id
 			}
+			if part.FormName() == "caption" {
+				params["caption"] = string(data)
+			}
 			if part.FormName() == "media" {
 				params["media"] = string(data)
 			}
@@ -387,6 +390,8 @@ type fakeHub struct {
 	// media are the files Media opens, by path, and mediaCalls its calls.
 	media      map[string]fakeFile
 	mediaCalls []string
+	// fileCalls are the OpenFile calls.
+	fileCalls []string
 	// checks are the sessions SessionExists asked about; checkErr fails it.
 	checks   []string
 	checkErr error
@@ -424,6 +429,30 @@ func (h *fakeHub) Media(_ context.Context, user, backendID, sessionID, p string)
 		return nil, f.err
 	}
 	return &hub.MediaFile{Name: path.Base(p), MIME: f.mime, Size: int64(len(f.data)), Body: io.NopCloser(strings.NewReader(f.data))}, nil
+}
+
+// StatFile is not used by the bot.
+func (h *fakeHub) StatFile(context.Context, string, string, string, string) (*hub.FileInfo, error) {
+	return nil, hub.ErrNoMedia
+}
+
+// OpenFile opens a file of h.media like Media, and records the call in
+// fileCalls.
+func (h *fakeHub) OpenFile(_ context.Context, user, backendID, sessionID, p string, offset, length int64, etag string) (*hub.FileInfo, io.ReadCloser, error) {
+	if err := h.allowed(user, backendID); err != nil {
+		return nil, nil, err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.fileCalls = append(h.fileCalls, fmt.Sprintf("%s %s %s %s %d %d %q", user, backendID, sessionID, p, offset, length, etag))
+	f, ok := h.media[p]
+	if !ok {
+		return nil, nil, hub.ErrNoMedia
+	}
+	if f.err != nil {
+		return nil, nil, f.err
+	}
+	return &hub.FileInfo{Name: path.Base(p), Path: p, Size: int64(len(f.data))}, io.NopCloser(strings.NewReader(f.data)), nil
 }
 
 func newFakeHub() *fakeHub {

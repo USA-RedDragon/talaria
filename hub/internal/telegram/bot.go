@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -1123,6 +1124,14 @@ func (b *Bot) pump(ctx context.Context, a *attachment) {
 		r.media = func(ctx context.Context, p string) (*hub.MediaFile, error) {
 			return m.Media(ctx, a.user, a.backendID, a.sessionID, p)
 		}
+	}
+	if f, ok := b.svc.(hub.Files); ok {
+		r.openFile = func(ctx context.Context, p string) (*hub.FileInfo, io.ReadCloser, error) {
+			return f.OpenFile(ctx, a.user, a.backendID, a.sessionID, p, 0, -1, "")
+		}
+	}
+	r.fileURL = func(p string) string {
+		return b.public + "/#/file/" + url.PathEscape(a.backendID) + "/" + url.PathEscape(a.sessionID) + "/" + url.PathEscape(p)
 	}
 	r.pageURL = func(ref string) string {
 		return b.public + "/#/page/" + url.PathEscape(a.backendID) + "/" + url.PathEscape(a.sessionID) + "/" + url.PathEscape(ref)

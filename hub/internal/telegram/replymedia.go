@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,27 +51,14 @@ func (r *renderer) sendMedia(ctx context.Context, paths []string) {
 			r.notice(ctx, msgMediaFailed, name)
 			continue
 		}
-		data, mime, err := r.readMedia(ctx, p)
-		switch {
-		case errors.Is(err, hub.ErrNoMedia):
-			r.notice(ctx, msgMediaGone, name)
-			continue
-		case errors.Is(err, hub.ErrMediaTooLarge):
-			r.notice(ctx, msgMediaTooLarge, name, MaxDocumentUpload>>20)
-			continue
-		case errors.Is(err, hub.ErrMediaOffline):
-			r.notice(ctx, msgMediaOffline, name)
-			continue
-		case err != nil:
-			r.logger.Warn("Failed to read a file a reply names", "error", err)
-			r.notice(ctx, msgMediaFailed, name)
+		photo, err := r.sendOrRead(ctx, p, name)
+		if err != nil {
+			r.mediaFailed(ctx, name, err)
 			continue
 		}
-		if mime != "" && len(data) <= MaxPhotoUpload {
-			photos = append(photos, Photo{Name: name, Data: data})
-			continue
+		if photo != nil {
+			photos = append(photos, *photo)
 		}
-		r.sent(ctx, name, r.upload(ctx, r.api.SendDocument, name, data))
 	}
 	for len(photos) > 0 {
 		n, size := 0, 0
@@ -130,25 +118,79 @@ func (r *renderer) upload(ctx context.Context, send func(context.Context, int64,
 	return send(cctx, r.to.chat, r.to.thread, name, data)
 }
 
-func (r *renderer) readMedia(ctx context.Context, p string) ([]byte, string, error) {
-	cctx, cancel := context.WithTimeout(ctx, mediaReadTimeout)
+// sendOrRead opens the file a reply names. An image that Telegram takes as
+// a photo is read (it is at most 10 MB) and returned, for the album; any
+// other file is streamed to Telegram as a document, never held whole.
+func (r *renderer) sendOrRead(ctx context.Context, p, name string) (*Photo, error) {
+	cctx, cancel := context.WithTimeout(ctx, mediaReadTimeout+uploadTimeout)
 	defer cancel()
 	f, err := r.media(cctx, p)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer f.Body.Close()
 	if f.Size > MaxDocumentUpload {
-		return nil, "", hub.ErrMediaTooLarge
+		return nil, hub.ErrMediaTooLarge
 	}
-	data, err := io.ReadAll(io.LimitReader(f.Body, MaxDocumentUpload+1))
-	if err != nil {
-		return nil, "", err
+	var body io.Reader = f.Body
+	if f.MIME != "" && f.Size <= MaxPhotoUpload {
+		data, err := io.ReadAll(io.LimitReader(f.Body, MaxPhotoUpload+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(data) <= MaxPhotoUpload {
+			return &Photo{Name: name, Data: data}, nil
+		}
+		// An image of unknown size that turned out larger: a document.
+		body = io.MultiReader(bytes.NewReader(data), f.Body)
 	}
-	if len(data) > MaxDocumentUpload {
-		return nil, "", hub.ErrMediaTooLarge
+	return nil, r.streamDocument(cctx, name, f.Size, body, "")
+}
+
+// streamDocument uploads body as a document of size bytes (-1: unknown)
+// from a reader, and fails with hub.ErrMediaTooLarge when it holds more
+// than Telegram takes.
+func (r *renderer) streamDocument(ctx context.Context, name string, size int64, body io.Reader, caption string) error {
+	defer r.draftLost()
+	defer r.spend()
+	return r.api.SendDocumentStream(ctx, r.to.chat, r.to.thread, name, size, &capReader{r: body, left: MaxDocumentUpload}, caption)
+}
+
+// capReader fails with hub.ErrMediaTooLarge when more than left bytes are
+// read, so a file of unknown size cannot run past Telegram's limit.
+type capReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.left < 0 {
+		return 0, hub.ErrMediaTooLarge
 	}
-	return data, f.MIME, nil
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	if c.left < 0 {
+		return n, hub.ErrMediaTooLarge
+	}
+	return n, err
+}
+
+// mediaFailed tells the chat why a file a reply names was not sent.
+func (r *renderer) mediaFailed(ctx context.Context, name string, err error) {
+	switch {
+	case errors.Is(err, hub.ErrNoMedia):
+		r.notice(ctx, msgMediaGone, name)
+	case errors.Is(err, hub.ErrMediaTooLarge):
+		r.notice(ctx, msgMediaTooLarge, name, MaxDocumentUpload>>20)
+	case errors.Is(err, hub.ErrMediaOffline):
+		r.notice(ctx, msgMediaOffline, name)
+	default:
+		r.logger.Warn("Failed to send a file a reply names", "error", err)
+		r.notice(ctx, msgMediaFailed, name)
+	}
 }
 
 func (r *renderer) sent(ctx context.Context, name string, err error) {
