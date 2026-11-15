@@ -55,7 +55,22 @@ CAPABILITY_BROWSER = "browser"
 CAPABILITY_MCP = "mcp"
 CAPABILITY_DETACH = "detach"
 TYPE_DETACH = "detach"
-CAPABILITIES = frozenset({CAPABILITY_BROWSER, CAPABILITY_MCP, CAPABILITY_DETACH})
+# Chunked binary file reads (section 4.11): file_stat and file_read, answered by file_result and,
+# for a read, binary frames that start with the 32 ASCII bytes of the request id.
+CAPABILITY_FILE_READ = "file_read"
+TYPE_FILE_STAT = "file_stat"
+TYPE_FILE_READ = "file_read"
+TYPE_FILE_RESULT = "file_result"
+FILE_READ_MAX_LENGTH = 16777216
+FILE_FRAME_MAX = 262144
+FILE_ID_LEN = 32
+FILE_NOT_FOUND = "not_found"
+FILE_NOT_REGULAR = "not_regular"
+FILE_REFUSED = "refused"
+FILE_CHANGED = "changed"
+FILE_FAILED = "failed"
+FILE_CANCELLED = "cancelled"
+CAPABILITIES = frozenset({CAPABILITY_BROWSER, CAPABILITY_MCP, CAPABILITY_DETACH, CAPABILITY_FILE_READ})
 
 BROWSER_NOT_CONNECTED = "not_connected"
 BROWSER_REFUSED = "refused"
@@ -592,6 +607,8 @@ class DeviceConn:
     mcp_servers: tuple = ()
     # MCP requests waiting for their mcp_result. They never wait for a resume.
     mcp_calls: dict[str, "BrowserCall"] = field(default_factory=dict)
+    # File stats and reads waiting for their file_result and binary frames (files.py), by id.
+    file_ops: dict = field(default_factory=dict)
     connected_at: float = field(default_factory=time.time)
     conn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     pending: dict[str, DeviceProcess] = field(default_factory=dict)
@@ -872,6 +889,8 @@ class Hub:
         and resume them; otherwise they fail at once with exit 255."""
         grace = grace_seconds() if resumable and conn.version >= RESUME_VERSION else 0.0
         self._fail_browser(conn, f"device {conn.device_id} disconnected during the browser operation")
+        if conn.file_ops:
+            _load_sibling("hermes_device_files", "files.py").fail_all(conn, f"device {conn.name} disconnected")
         with self._lock:
             current = self._devices.get(conn.device_id) is conn
             if current:
@@ -1016,6 +1035,10 @@ class Hub:
         if kind == TYPE_MCP_RESULT:
             if CAPABILITY_MCP in conn.capabilities:
                 self._on_mcp(conn, msg)
+            return
+        if kind == TYPE_FILE_RESULT:
+            if CAPABILITY_FILE_READ in conn.capabilities:
+                _load_sibling("hermes_device_files", "files.py").on_result(conn, msg)
             return
         if kind not in (TYPE_OUTPUT, TYPE_EXIT) or not isinstance(rid, str):
             return
@@ -2213,18 +2236,39 @@ def device_read_denial(conn: DeviceConn, path: str) -> Optional[str]:
     path, case-folded). That is the sensitive home files, credential folders and write denylist
     of section 8.6, Hermes's read denylist under ``<home>/.hermes`` and each of its profiles,
     EXTRA_READ_DENIED_DIRS, project ``.env`` files and key files (READ_DENIED_EXTS) anywhere."""
-    from agent import file_safety
+    path = posixpath.normpath(path)
+    why = device_roots_denial(conn, path)
+    if why:
+        return why
+    if device_secret(conn, path):
+        return f"{path} is a protected credential path"
+    return None
 
+
+def device_roots_denial(conn: DeviceConn, path: str) -> Optional[str]:
+    """Why ``path`` cannot be checked or read at all on the device (outside its roots, or no home to
+    check credential paths against), or None. Not a secret rule."""
     path = posixpath.normpath(path)
     if not conn.within_roots(path):
         return f"{path} is outside the device roots ({', '.join(conn.roots) or 'none'})"
     if not posixpath.isabs(conn.home or ""):
         return "the device did not report its home directory, so its credential paths cannot be checked"
-    base = posixpath.basename(path).lower()
-    if _credential_denial(conn, path, read=True) or base in file_safety._BLOCKED_PROJECT_ENV_BASENAMES \
-            or base.endswith(READ_DENIED_EXTS):
-        return f"{path} is a protected credential path"
     return None
+
+
+def secret_basename(path: str) -> bool:
+    """A project ``.env`` file or a key file, by its last part, anywhere."""
+    from agent import file_safety
+
+    base = posixpath.basename(path).lower()
+    return base in file_safety._BLOCKED_PROJECT_ENV_BASENAMES or base.endswith(READ_DENIED_EXTS)
+
+
+def device_secret(conn: DeviceConn, path: str) -> bool:
+    """Whether the absolute device ``path`` is a credential path by the read rules of
+    :func:`device_read_denial`: the device home rules, ``.env`` files and key files."""
+    path = posixpath.normpath(path)
+    return bool(_credential_denial(conn, path, read=True)) or secret_basename(path)
 
 
 def _clean_device_path(path: Any) -> Optional[str]:
@@ -2243,6 +2287,15 @@ def get_session_file(session_id: str, path: Any, *, max_bytes: Optional[int] = N
     file must be a regular file with one hard link whose last part is not a symbolic link, and at
     most MAX_FILE_READ_BYTES. Error messages never hold the device's output, which may be the
     file's contents, or the real path. Raises :class:`BindError`."""
+    name, raw, _real = shell_read_file(session_id, path, max_bytes=max_bytes)
+    return name, raw
+
+
+def shell_read_file(session_id: str, path: Any, *, max_bytes: Optional[int] = None,
+                    allow_secret: bool = False) -> tuple[str, bytes, str]:
+    """:func:`get_session_file` that also returns the file's real path on the device. With
+    ``allow_secret`` the credential rules are left to the caller (send_file's offers check the path
+    and the real path themselves); the roots rules still apply."""
     import binascii
 
     max_bytes = MAX_FILE_READ_BYTES if max_bytes is None else max_bytes
@@ -2254,7 +2307,8 @@ def get_session_file(session_id: str, path: Any, *, max_bytes: Optional[int] = N
     conn = hub().device(b.device_id)
     if conn is None:
         raise BindError(409, "device_offline", f"device {b.device_id} is not connected")
-    why = device_read_denial(conn, clean)
+    deny = device_roots_denial if allow_secret else device_read_denial
+    why = deny(conn, clean)
     if why:
         raise BindError(422, "read_refused", why)
     folder, name = posixpath.split(clean)
@@ -2270,7 +2324,7 @@ def get_session_file(session_id: str, path: Any, *, max_bytes: Optional[int] = N
     if status == "N" and not real:
         raise BindError(404, "not_found", f"{clean} does not exist on device {conn.name}")
     if not real.startswith("/") or posixpath.normpath(real) != real or "\ufffd" in real \
-            or device_read_denial(conn, posixpath.join(real, name)):
+            or deny(conn, posixpath.join(real, name)):
         raise BindError(422, "read_refused", f"{clean} resolves to a path outside the device roots or to a "
                                              f"protected credential path")
     if status == "N":
@@ -2294,7 +2348,7 @@ def get_session_file(session_id: str, path: Any, *, max_bytes: Optional[int] = N
     del payload
     if raw is None or len(raw) != size:
         raise BindError(422, "read_failed", f"{clean} changed while it was read, or the device dropped output")
-    return name, raw
+    return name, raw, posixpath.join(real, name)
 
 
 # --- folder listing and diff for the hub (section 9) -------------------------------------------

@@ -4,6 +4,7 @@ Speaks the OpenAI chat completions API (plain and streaming) and answers every r
 reply that quotes the last user message. Two words show more of Talaria:
 
   run: <command>   runs the command with the terminal tool (in the sandbox, or on a paired computer)
+  send: <path>     offers that file with the send_file tool (a download card in the hub)
   page:            answers with a small interactive page
   remember: <fact> saves the fact with the memory tool (Notes > About you on the Memory page)
   recall: <word>   quotes what Talaria's memory gave the model about the word, in any chat
@@ -43,6 +44,15 @@ def tool_call_for(body):
     if text.lower().startswith("run:") and "terminal" in names:
         return {"index": 0, "id": "call_demo_%d" % time.time_ns(), "type": "function",
                 "function": {"name": "terminal", "arguments": json.dumps({"command": text[4:].strip()})}}
+    if text.lower().startswith("send:") and ("send_file" in names or "tool_call" in names):
+        args = {"path": text[5:].strip()}
+        if "send_file" not in names:
+            # Hermes defers plugin tools behind its tool_search bridge: call send_file through tool_call
+            return {"index": 0, "id": "call_demo_%d" % time.time_ns(), "type": "function",
+                    "function": {"name": "tool_call",
+                                 "arguments": json.dumps({"calls": [{"name": "send_file", "arguments": args}]})}}
+        return {"index": 0, "id": "call_demo_%d" % time.time_ns(), "type": "function",
+                "function": {"name": "send_file", "arguments": json.dumps(args)}}
     if text.lower().startswith("search:") and "web_search" in names:
         return {"index": 0, "id": "call_demo_%d" % time.time_ns(), "type": "function",
                 "function": {"name": "web_search", "arguments": json.dumps({"query": text[7:].strip()})}}
@@ -51,6 +61,30 @@ def tool_call_for(body):
         return {"index": 0, "id": "call_demo_%d" % time.time_ns(), "type": "function",
                 "function": {"name": "memory", "arguments": json.dumps(args)}}
     return None
+
+
+def send_file_result(out):
+    """The send_file result in a tool message: the result itself, or the first one that the tool_call bridge
+    wraps (a list of results, or an object with a results list)."""
+    try:
+        value = json.loads(out)
+    except ValueError:
+        return {}
+    for _ in range(3):
+        if isinstance(value, dict) and ("status" in value or "error" in value) and "results" not in value:
+            return value
+        if isinstance(value, dict):
+            value = value.get("results") or value.get("result") or value.get("output") or {}
+        elif isinstance(value, list):
+            value = value[0] if value else {}
+        if isinstance(value, dict) and isinstance(value.get("result"), str):
+            value = value["result"]
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return {}
+    return value if isinstance(value, dict) else {}
 
 
 def recall(body, word):
@@ -118,6 +152,16 @@ def reply_for(body):
         if calls and calls[-1].get("function", {}).get("name") == "memory":
             return ("Saved to memory. Start a new chat and send recall: <a word of it> to see it come back. "
                     "The memory tool said: " + out[:300])
+        last = calls[-1].get("function", {}) if calls else {}
+        if last.get("name") == "send_file" or (last.get("name") == "tool_call" and '"send_file"' in (last.get("arguments") or "")):
+            result = send_file_result(out)
+            offer = result.get("file_offer") or {}
+            if result.get("status") == "offered":
+                return "Here is %s. Download it from the card." % offer.get("name", "the file")
+            if result.get("status") == "refused":
+                return "I did not send %s: it looks like a secret. Ask for it by name if you want it anyway." % (
+                    offer.get("name", "the file"))
+            return "The file could not be sent: " + str(result.get("error") or out)[:300]
         what = "The search ran" if calls and calls[-1].get("function", {}).get("name") == "web_search" else "The command ran"
         return what + ". Its result: " + (out if len(out) <= 500 else out[:500] + "...")
     text = last_user_text(msgs)

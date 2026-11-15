@@ -19,7 +19,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, WebSocket
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 router = APIRouter()
 logger = logging.getLogger("hermes_device")
@@ -256,6 +256,94 @@ async def get_file(session_id: str, path: str = ""):
     })
 
 
+# --- file offers (section 9.3) -----------------------------------------------------------------
+
+def _files():
+    return _core()._load_sibling("hermes_device_files", "files.py")
+
+
+def _file_error(core, exc) -> JSONResponse:
+    extra = {"secret": True} if getattr(exc, "secret", False) else {}
+    return _error(exc.status, exc.code, exc.message, **extra)
+
+
+_FILE_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                 "Content-Security-Policy": "default-src 'none'; sandbox"}
+
+
+@router.get("/sessions/{session_id}/files/stat")
+async def file_stat(session_id: str, path: str = "", offer: str = ""):
+    core, files = _core(), _files()
+    try:
+        _target, _facts, info = await asyncio.to_thread(files.checked, session_id, path, offer)
+    except core.BindError as exc:
+        return _file_error(core, exc)
+    return JSONResponse(info, headers={"Cache-Control": "no-store"})
+
+
+def _int_param(value: str, default: int) -> Optional[int]:
+    if value in ("", None):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@router.get("/sessions/{session_id}/files/stream")
+async def file_stream(session_id: str, path: str = "", offset: str = "", length: str = "", offer: str = "",
+                      etag: str = ""):
+    core, files = _core(), _files()
+    start, count = _int_param(offset, 0), _int_param(length, -1)
+    if start is None or count is None or start < 0 or count < -1:
+        return _error(400, "bad_range", "offset must be 0 or more and length -1 or more")
+    if not files.stream_slot():
+        return _error(429, "busy", f"{files.MAX_STREAMS} file streams are running; try again in a moment")
+    handed_off = False
+    try:
+        try:
+            target, facts, info = await asyncio.to_thread(files.checked, session_id, path, offer)
+        except core.BindError as exc:
+            return _file_error(core, exc)
+        if etag and etag != facts.etag:
+            return _error(412, "changed", f"{info['path']} changed since it was offered", etag=facts.etag)
+        if start > facts.size:
+            return _error(416, "bad_range", f"offset {start} is past the end of the file ({facts.size} bytes)",
+                          size=facts.size)
+        end = facts.size if count == -1 else min(facts.size, start + count)
+        body = files.open_stream(target, facts, start, end)
+        # The first chunk comes before the headers, so a file that changed since the stat is still a 412.
+        try:
+            first = await body.__anext__() if end > start else b""
+        except StopAsyncIteration:
+            first = b""
+        except core.BindError as exc:
+            await body.aclose()
+            return _file_error(core, exc)
+
+        async def chunks():
+            try:
+                if first:
+                    yield first
+                if end > start:
+                    async for chunk in body:
+                        yield chunk
+            except core.BindError as exc:
+                # Headers are out: end the response short, so the hub sees fewer bytes than promised.
+                logger.warning("device: file stream of %s ended early: %s", info["path"], exc.message)
+                raise
+            finally:
+                await body.aclose()
+                files.release_stream_slot()
+
+        headers = {**_FILE_HEADERS, "Content-Length": str(end - start), "ETag": facts.etag,
+                   "X-Talaria-File-Size": str(facts.size), "X-Talaria-File-Mtime": repr(facts.mtime)}
+        handed_off = True
+        return StreamingResponse(chunks(), media_type="application/octet-stream", headers=headers)
+    finally:
+        if not handed_off:
+            files.release_stream_slot()
+
 
 async def _browse(fn, *args):
     core = _core()
@@ -411,11 +499,21 @@ class _Gone(Exception):
 
 async def _receive_text(ws: WebSocket, timeout: float) -> str:
     """The next text message, or "" for a binary one. Raises _Gone when the socket closed."""
+    text, _data = await _receive(ws, timeout)
+    return text
+
+
+async def _receive(ws: WebSocket, timeout: float) -> tuple[str, Optional[bytes]]:
+    """``(text, None)`` for the next text message, ``("", bytes)`` for a binary one. Raises _Gone
+    when the socket closed."""
     msg = await asyncio.wait_for(ws.receive(), timeout)
     if msg.get("type") == "websocket.disconnect":
         raise _Gone(msg.get("code"))
     text = msg.get("text")
-    return text if isinstance(text, str) else ""
+    if isinstance(text, str):
+        return text, None
+    data = msg.get("bytes")
+    return "", (data if isinstance(data, (bytes, bytearray)) else None)
 
 
 def _version_range(hello: dict) -> Optional[tuple[int, int]]:
@@ -532,6 +630,7 @@ async def device_socket(ws: WebSocket) -> None:
             conn.capabilities = capabilities
     hub = core.hub()
     handoff = core._load_sibling("hermes_device_handoff", "handoff.py")
+    files = _files()
     welcome = {"type": core.TYPE_WELCOME, "version": version, "device_id": device_id, "name": display,
                "ping_interval": core.PING_INTERVAL_S, "plugin_version": core.PLUGIN_VERSION,
                "hermes_version": core.hermes_version()}
@@ -576,7 +675,7 @@ async def device_socket(ws: WebSocket) -> None:
             try:
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-                text = await _receive_text(ws, remaining)
+                text, data = await _receive(ws, remaining)
             except asyncio.TimeoutError:
                 logger.warning("device: %s silent for %ss; closing", device_id, core.SILENCE_TIMEOUT_S)
                 await _close(ws, core.CLOSE_PING_TIMEOUT, "no message for 60 seconds")
@@ -588,6 +687,11 @@ async def device_socket(ws: WebSocket) -> None:
                     resumable = False
                 break
             last = loop.time()
+            if data is not None:
+                # A binary frame: the 32 id bytes of a file_read, then file bytes (section 4.11).
+                if core.CAPABILITY_FILE_READ in conn.capabilities:
+                    files.on_frame(conn, data)
+                continue
             try:
                 msg = json.loads(text) if text else None
             except ValueError:
@@ -598,7 +702,7 @@ async def device_socket(ws: WebSocket) -> None:
             if kind == core.TYPE_PING:
                 await send_text(json.dumps({"type": core.TYPE_PONG, "seq": msg.get("seq")}))
             elif kind in (core.TYPE_OUTPUT, core.TYPE_EXIT, core.TYPE_BROWSER_RESULT, core.TYPE_BROWSER_STATUS,
-                          core.TYPE_MCP_RESULT):
+                          core.TYPE_MCP_RESULT, core.TYPE_FILE_RESULT):
                 hub.on_message(conn, msg)
     except asyncio.CancelledError:
         resumable = False

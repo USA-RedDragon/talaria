@@ -143,7 +143,7 @@ Blank lines and lines starting with `#` are ignored. Several keys allow rotation
 
 Device to hub: `GET wss://<hub>/api/device/exec` with the device token. Hub to plugin: `GET ws://<backend>:9120/api/plugins/device/ws` (<!-- docgen:const pkg=protocol name=PluginExecPath -->`/api/plugins/device/ws`<!-- /docgen:const -->) with the assertion (`leg` `exec`). The hub MUST NOT send an `Origin` header and MUST send a `Host` header the gateway accepts (the gateway binds 0.0.0.0, which accepts any Host).
 
-Protocol version: <!-- docgen:const pkg=protocol name=Version code=false -->3<!-- /docgen:const -->. The oldest version this release still speaks: <!-- docgen:const pkg=protocol name=MinVersion code=false -->2<!-- /docgen:const -->. Version 3 adds resume (section 4.7) and the output `offset`; everything else is as in version 2. Capabilities (section 4.1) add optional features without a version bump: browser control (section 4.8) and MCP servers on the device (section 4.9).
+Protocol version: <!-- docgen:const pkg=protocol name=Version code=false -->3<!-- /docgen:const -->. The oldest version this release still speaks: <!-- docgen:const pkg=protocol name=MinVersion code=false -->2<!-- /docgen:const -->. Version 3 adds resume (section 4.7) and the output `offset`; everything else is as in version 2. Capabilities (section 4.1) add optional features without a version bump: browser control (section 4.8), MCP servers on the device (section 4.9) and file reads (section 4.11).
 
 ### 4.1 Handshake
 
@@ -151,7 +151,7 @@ Protocol version: <!-- docgen:const pkg=protocol name=Version code=false -->3<!-
 2. The device sends `hello` within <!-- docgen:const pkg=protocol name=HelloTimeout print=config -->`10s`<!-- /docgen:const --> of the upgrade. Otherwise the plugin closes with `1002`.
 3. Version negotiation. `hello.version` is the oldest version the device speaks and `hello.max_version` the newest (absent means equal to `version`). The plugin picks the newest version that both sides speak. A version 2 plugin reads only `version`, so a device that speaks 2 to 3 sends `"version": 2, "max_version": 3` and a version 2 plugin serves it as version 2. When no version is common, the plugin closes with `4426` and a reason that names both ranges and both releases, for example `talaria v0.4.0 speaks protocol 4 to 5; plugin 0.3.0 speaks 2 to 3; upgrade them together`. The hub relays the code and the reason (it cuts reasons to 120 bytes; the plugin keeps them shorter), and the client stops and shows the reason. A device that gets a `welcome.version` outside its own range closes with `4426` and a reason of the same form, and stops.
 4. The plugin answers `welcome` with the chosen version. On version 3 it sends `resume` (section 4.7) right after `welcome`, before any other message. From then on either side may send.
-5. Capabilities. `hello.capabilities` lists the optional features the device serves: `browser` (<!-- docgen:const pkg=protocol name=CapabilityBrowser code=false -->browser<!-- /docgen:const -->, section 4.8), `mcp` (<!-- docgen:const pkg=protocol name=CapabilityMCP code=false -->mcp<!-- /docgen:const -->, section 4.9) and `detach` (<!-- docgen:const pkg=protocol name=CapabilityDetach code=false -->detach<!-- /docgen:const -->, section 4.10). The plugin puts the ones it accepts in `welcome.capabilities` and leaves the field out when it accepts none. Each side uses a feature only when `welcome.capabilities` names it, and ignores unknown names. A plugin that does not know capabilities ignores the field and sends none back, so the device does not use them.
+5. Capabilities. `hello.capabilities` lists the optional features the device serves: `browser` (<!-- docgen:const pkg=protocol name=CapabilityBrowser code=false -->browser<!-- /docgen:const -->, section 4.8), `mcp` (<!-- docgen:const pkg=protocol name=CapabilityMCP code=false -->mcp<!-- /docgen:const -->, section 4.9) `detach` (<!-- docgen:const pkg=protocol name=CapabilityDetach code=false -->detach<!-- /docgen:const -->, section 4.10) and `file_read` (section 4.11). The plugin puts the ones it accepts in `welcome.capabilities` and leaves the field out when it accepts none. Each side uses a feature only when `welcome.capabilities` names it, and ignores unknown names. A plugin that does not know capabilities ignores the field and sends none back, so the device does not use them.
 6. If a connection for the same `device_id` exists, the plugin closes it with `4409`. Newest wins. On version 3 its pending commands move to the new connection and are listed in the `resume`; on version 2 they fail with exit 255.
 
 `hello` (device to plugin):
@@ -374,6 +374,58 @@ On a leg where `welcome.capabilities` names `detach`, the plugin may send:
 ```
 
 The plugin sends it when it moves a running command to the background (section 8.4): the command no longer has a timeout. The device stops its own timeout kill for that command, so the command runs until it exits or gets a `kill`. Nothing else changes: output, `exit`, `kill` and resume work as before, and the device still kills the command when the leg ends for good (section 4.7). A `detach` for an unknown or finished id is ignored. The device sends no answer.
+
+### 4.11 File reads (capability `file_read`)
+
+The capability lets the plugin read a file on the device in windows, as binary frames, without a shell. The device offers `file_read` (<!-- docgen:const pkg=protocol name=CapabilityFileRead code=false -->file_read<!-- /docgen:const -->) in `hello.capabilities` unless the user turned it off, and uses it only when `welcome.capabilities` names it. A leg that did not negotiate it answers a file request with `refused`. Requests and results are JSON text frames; the file bytes are binary frames.
+
+Every request id is <!-- docgen:const pkg=protocol name=FileIDLen code=false -->32<!-- /docgen:const --> lowercase hex characters. Both requests apply the same rules to `path`:
+
+- `path` is absolute and clean (no `..`, no repeated slash, no trailing slash). On Windows it is the bash path of the device shell, as for `cwd` (section 14).
+- The directory part is resolved through symbolic links and must be inside the device roots (the same check as the `cwd` of an exec). The last part is checked on its own: it must not be a symbolic link (the device uses `lstat`, and `O_NOFOLLOW` on Unix; on Windows it compares the opened file with the `lstat`).
+- The path must name a regular file with exactly one hard link. The link count check is skipped where the platform does not tell it.
+
+**`file_stat`** (<!-- docgen:const pkg=protocol name=TypeFileStat code=false -->file_stat<!-- /docgen:const -->, plugin to device):
+
+```json
+{"type": "file_stat", "id": "<32 hex>", "path": "/home/alice/report.pdf"}
+```
+
+The answer is one `file_result` (<!-- docgen:const pkg=protocol name=TypeFileResult code=false -->file_result<!-- /docgen:const -->):
+
+```json
+{"type": "file_result", "id": "...", "ok": true, "result": {"real": "/home/alice/report.pdf", "size": 48213, "mtime_ns": 1763100000000000000, "dev": 2049, "ino": 1311042, "head": "<base64>"}}
+```
+
+`real` is the path after resolving symbolic links (on Windows, as a bash path). `head` is the base64 of the first up to 4096 bytes. `dev` and `ino` are `0` where the platform does not tell them; then a later read compares only `size` and `mtime_ns`.
+
+**`file_read`** (<!-- docgen:const pkg=protocol name=TypeFileRead code=false -->file_read<!-- /docgen:const -->, plugin to device):
+
+```json
+{"type": "file_read", "id": "<32 hex>", "path": "/home/alice/report.pdf", "offset": 0, "length": 4194304,
+ "dev": 2049, "ino": 1311042, "size": 48213, "mtime_ns": 1763100000000000000}
+```
+
+`length` is 1 to <!-- docgen:const pkg=protocol name=FileReadMaxLength code=false -->16777216<!-- /docgen:const -->, and `offset` is 0 or more. `dev`, `ino`, `size` and `mtime_ns` are the ones of the `file_stat`. The device opens the file again and compares them with the open file: if any differs, the read fails with `changed` before any byte. A `dev` and `ino` that are both `0` are not compared. It then reads from `offset` and sends the bytes in order as binary WebSocket frames. Each frame is the 32 ASCII bytes of the id, followed by 1 to <!-- docgen:const pkg=protocol name=FileFrameMax code=false -->262144<!-- /docgen:const --> bytes of the file. After the last frame the device sends one text message:
+
+```json
+{"type": "file_result", "id": "...", "ok": true, "result": {"bytes": 48213}}
+```
+
+`bytes` is the number of file bytes sent. It is less than `length` only at the end of the file. A read that starts at or past the end sends no frame and answers `ok` with `bytes` 0. A file that gets shorter during the read ends it with `changed`.
+
+**Errors.** A failed request answers `{"type": "file_result", "id": "...", "ok": false, "code": "<code>", "error": "<plain words>"}`. For a `file_read` the frames already sent are file bytes the plugin drops. The codes are:
+
+| Code | Meaning |
+|---|---|
+| `not_found` | No such path |
+| `not_regular` | A directory, device, fifo or socket |
+| `refused` | Outside the device roots, a symbolic link as the last part, more than one hard link, a path that is not absolute and clean, a bad `offset`, `length` or id, or a leg without the capability |
+| `changed` | The file is not the one the `file_stat` saw |
+| `failed` | An I/O error, the device is busy, a request id already running, or the device is draining for an update |
+| `cancelled` | A `kill` with the same id stopped it |
+
+**Cancel and limits.** A `kill` (section 4.5) with the id of a file request in flight stops it between two frames; the device answers `cancelled`, or nothing when the request had finished. The device serves at most 4 file requests at once on a leg and answers more with `failed` and an error that says `busy`. Frames go through the leg's normal writer, so other messages interleave between frames, never inside one. File requests are not kept across a drop: the device stops them with the leg.
 
 ## 5. Gateway leg and the chat splice
 
@@ -910,6 +962,8 @@ Mounted by the dashboard under `/api/plugins/device/` on the gateway listener (9
 | `PUT /sessions/{session_id}/browser` | Body `{"device_id"}`. Makes that computer the session's browser device, as `browser_use_device` does (browser.md section 3.3). `200` `{"device_id", "name"}`; `400` `bad_request`; `404` `unknown_device` when the device is not a connected computer with browser control |
 | `POST /sessions/{session_id}/files` | Body `{"name", "content_base64"}`. Writes a file the user attached into the session's device directory (upload rules below). `200` `{"path", "name", "device_id", "bytes"}`: `path` is the absolute device path, `name` the file name the plugin chose |
 | `GET /sessions/{session_id}/files?path=<abs>` | Reads a file of the device that serves the session, for the hub to show the user (read rules below). `200` with the file's bytes as `application/octet-stream`, with `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `Cache-Control: no-store` |
+| `GET /sessions/{session_id}/files/stat?path=<abs>&offer=<id>` | The facts of a file the agent offered with `send_file`, from the machine the session runs on, section 9.3. `200` `{"name", "path", "real", "size", "mtime", "mime", "kind", "type_label", "machine", "machine_kind", "etag", "secret", "requested"}` |
+| `GET /sessions/{session_id}/files/stream?path=<abs>&offset=&length=&offer=&etag=` | The bytes of that file from `offset`, `length` bytes (`-1` or absent: to the end), streamed, section 9.3 |
 | `GET /sessions/{session_id}/tree?path=<abs>` | Lists a folder of the device that serves the session, for the hub's file viewer (listing rules below). `200` `{"path", "dir", "device_id", "entries": [{"name", "kind", "link", "size"}], "truncated"}`. `path` defaults to the session's folder `dir`. `kind` is `dir`, `file` or `other`, `link` is true for a symbolic link (`kind` is its target's), `size` is the size of a regular file that is not a link, else 0. Folders come first, then by name |
 | `GET /sessions/{session_id}/diff` | What git shows as changed in the session's folder (diff rules below). `200` `{"dir", "device_id", "git", "refused", "files": [{"path", "status"}], "untracked": [<path>], "diff", "truncated", "hidden"}` |
 | `GET /sessions/{session_id}/changes` | The files the agent wrote in the chat, section 9.2 |
@@ -1004,6 +1058,26 @@ These routes read Hermes's session store (`state.db`) through its own `SessionDB
 - `GET /search?q=&limit=`: `q` is 1 to 200 characters, Hermes's search syntax (keywords, `"phrases"`, `AND`, `OR`, `NOT`, `prefix*`), else `400` `bad_query`. It runs `SessionDB.search_messages` over user and assistant messages, without the sources that `session_search` hides (`kanban`, `subagent`, `tool`). `200` `{"results": [{"session_id", "title", "source", "started_at", "last_active", "archived", "hits": [{"row_id", "session_id", "role", "snippet", "timestamp"}]}]}`, best match first, at most `limit` chats (1 to 50, default 20) and 3 hits each. A result's `session_id` is the chat to open: the tip of the compression chain that holds the message (`get_compression_tip`). A hit's `session_id` is the part of that chain that holds it, and `row_id` is the message's `messages.id`, the `row_id` of the transcript that `session.history` sends. Snippets come from FTS5 `snippet()` and mark matches with `>>>` and `<<<`; a fallback search returns a plain excerpt. Text is cut to 400 characters, with control characters replaced.
 - `GET /usage?days=`: `days` is 1 to 90 (default 30). `200` `{"since", "sessions": [Session], "models": [Model], "truncated"}`. Session: `{"session_id", "chat_id", "title", "source", "model", "provider", "started_at", "last_active", "input", "output", "cache_read", "cache_write", "reasoning", "calls", "cost_usd"}` for each session row with tokens or API calls whose last activity is in the window, newest first, at most 5000. `chat_id` is the tip of its compression chain. The counters are the session's totals, so a session that ran over several days counts on the day it was last active. Model: `{"model", "provider", "input", "output", "cache_read", "cache_write", "reasoning", "calls", "cost_usd"}`, summed over the `session_model_usage` rows last seen in the window. Hermes stores no per-call times, durations or rate-limit headers, so none are here.
 - `GET /sessions/{session_id}/changes`: `200` `{"session_id", "files": [{"path", "tools", "count", "last_at", "row_id"}], "truncated"}`: every path that a `write_file` or `patch` tool call names in any part of the chat's compression chain, most recent first, at most 500. A V4A patch names its files in `*** Update File:`, `*** Add File:`, `*** Delete File:` and `*** Move to:` lines. Paths are as the agent gave them (absolute, `~/...` or relative to its working folder) and say what it asked for, not whether the write worked. `404` `unknown_session`.
+
+### 9.3 File offers
+
+The plugin registers `send_file(path, name?, note?)` in the toolset `device-agents` (on whenever the plugin has a `backend_id`; unlike `page_publish` it does not need the agent message bus), so an agent in any chat offers the user a file from the machine the chat runs on, and the hub shows it as a file card and streams it on download. No copy is made and none is kept on the hub.
+
+Where the file is: the session resolves as for uploads (its own or an ancestor's binding, or the sandbox with `fallback: device`). A session whose commands run on the Hermes server (`runs_on_pod`) reads the gateway's own file system. `path` is read the way the file tools read it: a relative path starts in the chat's folder, `~` is the home. On a device with the `file_read` capability (4.11) the plugin asks with `file_stat`; on an older device it reads the whole file with the base64 shell read of the `/files` route (at most 32 MiB; a larger file is `413` `too_large`, "update talaria on <computer>"). On the server it opens the file with `O_NOFOLLOW`: a regular file with one hard link whose last part is not a symbolic link.
+
+Secret rules, on the path and on its real path: on a device the credential rules of the read route (`device_read_denial` without the roots rule: sensitive home files, credential folders, the write denylist, the Hermes stores under `<home>/.hermes`, `.env` files and key files); on the server the same home rules for the server's home and for `HERMES_HOME`, Hermes's own read denylist, `.env` and key files, and everything under `/proc`, `/sys`, `/dev`, `/run/secrets` and `/var/run/secrets`. A secret file is offered only when the user asked for that exact file: a user message of the chat that holds the file's absolute path (or real path), its `~/` form, or its name as a whole token, in text that Hermes's `user_authored_text` (`agent.conversation_compression_scaffolding`) says a person wrote. So tool results, assistant text, subagent results and peer-agent messages (`[Agent message ...]`) never count. A subagent uses its root chat's messages, never its goal. The plugin reads the running agent's messages and the session store (the session and its ancestors, without `subagent` sessions); when it can read neither, the file is refused. A Hermes without that module gets a stricter built-in check: a user message that starts with a bracket (other than a steer or a page answer) does not count.
+
+Tool result (a JSON string): `{"status": "offered", "file_offer": {"id", "name", "path", "size", "mime", "kind", "type_label", "mtime", "machine", "machine_kind", "note", "secret", "requested", "lines"}, "message"}`, or for a secret the user did not ask for `{"status": "refused", "file_offer": {"id", "name", "path", "machine", "machine_kind", "reason": "looks like a secret", "secret": true}, "message"}`. `id` is `fo_` and 16 hex digits. `machine` is the device's name, `the sandbox` or `the Hermes server`; `machine_kind` is `device`, `sandbox` or `server`. `kind` is `image`, `pdf`, `text`, `code`, `audio`, `video`, `archive` or `other`, from the name's extension and the first 4096 bytes; `type_label` reads like `Zip archive`, `Go source`, `Zstandard tar` or `Environment file`. `lines` counts the lines of a text or code file that fits in those 4096 bytes, else 0. `requested` is true only for a secret file the user asked for. `mtime` is in seconds. Other failures (missing, a folder, outside the device roots, offline) are ordinary tool errors `{"error", "code"}` with the codes of the routes below, and no card.
+
+Each offered file is recorded in `file_offers.json` next to `bindings.json`, the newest 5000: `{"id", "session", "machine", "path", "real", "name", "size", "mime", "kind", "mtime", "secret", "requested", "created"}` (`machine` is the device id, `sandbox` or `server`).
+
+Routes. The session resolves as above; errors are `{"error", "message"}`.
+
+- `path` must be absolute and clean, as for the read route (`400` `bad_path`). `404` `not_found`; `409` `device_offline`; `409` `fail_closed`; `422` `read_refused` for a folder or other file that is not regular, a symbolic link as last part, more than one hard link, or a path outside the device roots; `422` `read_failed` for an I/O error; `429` `busy`.
+- A secret file is `422` `read_refused` with `"secret": true`, at every stat and every stream, unless `offer` names an offer of this session (or an ancestor) for this `path`, recorded with `requested` true, whose real path is the file's real path now. So a Markdown link without an offer never reads a secret, and a folder swapped for a link into a credential folder after the offer is refused.
+- `etag` is `"<size hex>-<mtime_ns hex>-<inode hex>"` (on an older device `"<size hex>-0-<first 16 hex of the SHA-256>"`, and `mtime` is 0). `requested` in the stat answer is true only for a secret file read through its requested offer.
+- `GET .../files/stream`: `offset` 0 or more and `length` -1 or more, else `400` `bad_range`; an `offset` past the end is `416` `bad_range` with `size`. Before any byte the route runs the stat checks again and answers `412` `changed` (with the current `etag`) when `etag` is given and differs, or when the device reports the file changed before the first window. The answer is `200` with exactly the bytes asked for, `Content-Length`, `X-Talaria-File-Size`, `X-Talaria-File-Mtime` (seconds), a quoted `ETag`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. A file that changes or a device that drops during the stream ends the response short of `Content-Length`.
+- On a device with `file_read` the route reads in `file_read` windows of 4 MiB with at most 2 in flight, so a stream holds at most 8 MiB in the gateway; it retries a window the device refused as busy. When the client goes away it sends `kill` for the windows in flight. At most 8 streams run at once (`429` `busy`). The server's files are read with `pread` in 256 KiB pieces after `fstat` matches the stat (else `412`).
 
 ## 10. Security notes
 
