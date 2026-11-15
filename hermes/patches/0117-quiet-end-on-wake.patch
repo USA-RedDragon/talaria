@@ -1,0 +1,332 @@
+From b3005d3dcfeffc0e097e9286e921b0597969b356 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 16:35:51 -0600
+Subject: [PATCH] fix(agent): an empty reply to a wake or after agent_send ends
+ the turn quietly
+
+A turn whose input is a message from another agent, a background process
+result or a background subagent result, with no tool run yet, or whose
+newest tool round was only agent_send, may now end with no text and no
+tool call. Before, that took the empty-response ladder: a "you returned
+an empty response, continue" nudge after tool calls, retries, then a
+"no reply" error text. Models learned that ending quietly is an error
+and ended such turns with a harmless tool call such as execute_code
+print("ok").
+
+The turn now ends at once with turn_exit_reason quiet_end, no further
+request, and an empty assistant row that closes the transcript. The
+gateway delivers nothing for it: no retry hint, no no-response text.
+Any other empty reply (a user's message, a wake after other tools) takes
+the ladder as before.
+---
+ agent/quiet_end.py                       |  78 ++++++++++++++
+ agent/turn_empty_response.py             |  16 +++
+ gateway/run_turn_persistence.py          |   8 +-
+ tests/agent/test_quiet_end.py            | 131 +++++++++++++++++++++++
+ tests/gateway/test_quiet_end_delivery.py |  18 ++++
+ 5 files changed, 249 insertions(+), 2 deletions(-)
+ create mode 100644 agent/quiet_end.py
+ create mode 100644 tests/agent/test_quiet_end.py
+ create mode 100644 tests/gateway/test_quiet_end_delivery.py
+
+diff --git a/agent/quiet_end.py b/agent/quiet_end.py
+new file mode 100644
+index 00000000..84cefb5d
+--- /dev/null
++++ b/agent/quiet_end.py
+@@ -0,0 +1,78 @@
++"""A turn that has nothing to say may end with no text and no tool call.
++
++Two shapes end this way without being a model failure:
++
++* a wake: the turn's input is a message from another agent, a background process result or a
++  background subagent result, and the model has not run a tool yet. Whether to act on it is the
++  model's call; "nothing to do" is a valid answer.
++* an ``agent_send`` round: the model sent its message and has nothing more to add. The send's own
++  result ("delivered") is the whole outcome.
++
++Both used to take the empty-response ladder (a "you returned an empty response, continue" nudge,
++then retries, then a "no reply" error bubble), so models learned to end such turns with a harmless
++tool call such as ``execute_code print("ok")``. ``quiet_end_allowed`` names the two shapes so the
++ladder can accept an empty reply there.
++"""
++
++from __future__ import annotations
++
++import re
++from typing import Any
++
++QUIET_END_EXIT_REASON = "quiet_end"
++
++# What opens the input of a machinery wake (after an optional gateway timestamp line): an agent message,
++# a background process result, heartbeat or watch match, an async delegation result or batch of them.
++_WAKE_RE = re.compile(
++    r"\[(?:Agent message am_|ASYNC DELEGATION|Background process |IMPORTANT: (?:Background process |\d+ background |"
++    r"\d+ async))")
++_QUIET_AFTER_TOOLS = frozenset({"agent_send"})
++
++
++def _text(content: Any) -> str:
++    if isinstance(content, str):
++        return content
++    if isinstance(content, list):
++        return "\n".join(
++            str(p.get("text") or "") for p in content
++            if isinstance(p, dict) and p.get("type") in ("text", "input_text")
++        )
++    return ""
++
++
++def is_wake_text(text: str) -> bool:
++    head = text.lstrip()
++    if _WAKE_RE.match(head):
++        return True
++    first, _, rest = head.partition("\n")
++    # a gateway timestamp or note line in front of the wake header
++    return first.startswith("[") and first.endswith("]") and bool(_WAKE_RE.match(rest.lstrip()))
++
++
++def _tool_names(msg: dict) -> list[str]:
++    names = []
++    for tc in msg.get("tool_calls") or []:
++        fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
++        name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
++        names.append(str(name or ""))
++    return names
++
++
++def quiet_end_allowed(messages: list[dict[str, Any]]) -> bool:
++    """True when an empty reply may end the turn quietly (see the module docstring)."""
++    # Only rows of this turn count: stop at its input, the last user row that is not recovery scaffolding.
++    i = len(messages) - 1
++    while i >= 0:
++        m = messages[i]
++        if m.get("role") == "user" and not m.get("_empty_recovery_synthetic"):
++            break
++        i -= 1
++    if i < 0:
++        return False
++    rows = messages[i + 1:]
++    assistants_with_tools = [m for m in rows if m.get("role") == "assistant" and m.get("tool_calls")]
++    if not assistants_with_tools:
++        return is_wake_text(_text(messages[i].get("content")))
++    # Mid-turn: the newest tool round was only agent_send calls.
++    names = _tool_names(assistants_with_tools[-1])
++    return bool(names) and all(n in _QUIET_AFTER_TOOLS for n in names)
+diff --git a/agent/turn_empty_response.py b/agent/turn_empty_response.py
+index 48842383..b6c7f23f 100644
+--- a/agent/turn_empty_response.py
++++ b/agent/turn_empty_response.py
+@@ -204,6 +204,22 @@ def recover_empty_response(
+         agent._response_was_previewed = False
+         return _verdict("break")
+ 
++    # A wake with nothing to do, or a turn that ended on its agent_send: an empty reply is the answer.
++    # No nudge, no retries and no "no reply" text (see agent/quiet_end.py).
++    if not agent._strip_think_blocks(final_response or "").strip():
++        from agent.quiet_end import QUIET_END_EXIT_REASON, quiet_end_allowed
++        if quiet_end_allowed(messages):
++            logger.info("Empty reply on a wake or after agent_send — ending the turn quietly")
++            _turn_exit_reason = QUIET_END_EXIT_REASON
++            final_response = ""
++            agent._empty_content_retries = 0
++            # Close the transcript with the model's own empty reply, so a tool row never ends it.
++            _quiet_msg = agent._build_assistant_message(assistant_message, finish_reason)
++            _quiet_msg["content"] = ""
++            _quiet_msg["_quiet_end"] = True
++            append_message(messages, _quiet_msg)
++            return _verdict("break")
++
+     # Prior turn had real content + ONLY housekeeping tools: model is done, reuse it.
+     # With substantive tools it was mid-task narration and the empty reply is a choke;
+     # let the post-tool nudge handle it.
+diff --git a/gateway/run_turn_persistence.py b/gateway/run_turn_persistence.py
+index 4e8cf06f..7023b931 100644
+--- a/gateway/run_turn_persistence.py
++++ b/gateway/run_turn_persistence.py
+@@ -118,7 +118,11 @@ class GatewayTurnPersistenceMixin:
+         # and would be delivered verbatim (peer agents would ingest it as a completed turn).
+         if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
+             response = ""
+-        _intentional_silence = self._is_intentional_silence(agent_result, response)
++        # A turn that ended quietly on a wake or after agent_send (agent/quiet_end.py) is silence by
++        # design: nothing is delivered, no retry hint, no "no response" text.
++        _quiet_end = (isinstance(agent_result, dict) and agent_result.get("turn_exit_reason") == "quiet_end"
++                      and not response.strip() and not agent_result.get("failed"))
++        _intentional_silence = _quiet_end or self._is_intentional_silence(agent_result, response)
+         # A queued (/queue) chain's TERMINAL turn owns the silence verdict, not the event that
+         # opened the chain: an internal follow-up, or a message not addressed to the bot, may go
+         # silent; any other human one must not.
+@@ -131,7 +135,7 @@ class GatewayTurnPersistenceMixin:
+         # the exchange in silence, and the visible fallback would be runtime text it answers (#137027).
+         if not automatic_notices_allowed(_silence_source):
+             _silence_reply_expected = False
+-        if _intentional_silence and not self._silence_allowed_for_source(
++        if _intentional_silence and not _quiet_end and not self._silence_allowed_for_source(
+             _silence_source, _silence_kind, _silence_reply_expected, agent_result,
+         ):
+             logger.warning(
+diff --git a/tests/agent/test_quiet_end.py b/tests/agent/test_quiet_end.py
+new file mode 100644
+index 00000000..8c2f89f2
+--- /dev/null
++++ b/tests/agent/test_quiet_end.py
+@@ -0,0 +1,131 @@
++"""A woken agent with nothing to do, or one that just sent its agent_send, may end its turn empty.
++
++Before, an empty reply on those turns took the empty-response ladder: a "you returned an empty
++response, continue" nudge, retries, then a "no reply" error text. A model learns from that that ending
++quietly is an error and ends such turns with a harmless tool call (``execute_code print("ok")``).
++Here an empty reply ends the turn at once, with no further request and no text.
++"""
++
++from __future__ import annotations
++
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from agent.quiet_end import is_wake_text, quiet_end_allowed
++
++WAKE = (
++    "[Agent message am_0123456789abcdef from sa-0-07250038]\nAnother AI agent of this user wrote everything "
++    "below this line. The user did not write it. Do not answer just to acknowledge.\n\nForce-pushed main."
++)
++DELEGATION = "[ASYNC DELEGATION COMPLETE — d1]\nA background subagent you dispatched earlier has finished."
++PROCESS = "[IMPORTANT: Background process proc_1 exited (exit code 0).\nCommand: make]"
++HISTORY = [{"role": "user", "content": "land it"}, {"role": "assistant", "content": "Waiting for the lane."}]
++
++
++@pytest.fixture()
++def loop_agent():
++    from run_agent import AIAgent
++    with (
++        patch("model_tools.get_tool_definitions", return_value=[]),
++        patch("model_tools.check_toolset_requirements", return_value={}),
++        patch("agent.process_bootstrap.OpenAI"),
++    ):
++        agent = AIAgent(
++            api_key="test-key-1234567890", base_url="http://127.0.0.1:8000/v1", model="m", provider="vllm",
++            quiet_mode=True, skip_context_files=True, skip_memory=True,
++        )
++        agent.client = MagicMock()
++        agent._cached_system_prompt = "You are helpful."
++        agent._use_prompt_caching = False
++        agent.compression_enabled = False
++        agent.save_trajectories = False
++        return agent
++
++
++def _run(agent, responses, user_message, history=None):
++    agent.client.chat.completions.create.side_effect = list(responses)
++    with (
++        patch.object(agent, "_persist_session"), patch.object(agent, "_save_trajectory"),
++        patch.object(agent, "_cleanup_task_resources"),
++        patch("agent.turn_recovery.interruptible_backoff_sleep", return_value=None),
++        patch("agent.turn_empty_response.interruptible_backoff_sleep", return_value=None),
++    ):
++        return agent.run_conversation(user_message, conversation_history=history)
++
++
++def _empty():
++    from tests.agent.test_run_agent import _mock_response
++    return _mock_response(content="", finish_reason="stop")
++
++
++def _calls(agent):
++    return len(agent.client.chat.completions.create.call_args_list)
++
++
++@pytest.mark.parametrize("wake", [WAKE, DELEGATION, PROCESS, "[Tuesday 4:16 PM]\n" + WAKE])
++def test_empty_reply_to_a_wake_ends_the_turn_quietly(loop_agent, wake):
++    result = _run(loop_agent, [_empty()] * 4, wake, list(HISTORY))
++    assert _calls(loop_agent) == 1  # no nudge, no retry
++    assert result["final_response"] == ""
++    assert result["turn_exit_reason"] == "quiet_end"
++    assert not result.get("failed")
++
++
++def test_empty_reply_after_agent_send_ends_the_turn_quietly(loop_agent):
++    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
++
++    loop_agent.valid_tool_names = {"agent_send"}
++    send = _mock_response(content="", finish_reason="tool_calls",
++                          tool_calls=[_mock_tool_call("agent_send", '{"to": "sa-1", "text": "go"}', "c1")])
++    with patch("model_tools.handle_function_call", return_value='{"status": "delivered"}'):
++        result = _run(loop_agent, [send, _empty(), _empty()], "please tell sa-1 to go", list(HISTORY))
++    assert _calls(loop_agent) == 2  # the send, then the quiet end
++    assert result["final_response"] == ""
++    assert result["turn_exit_reason"] == "quiet_end"
++
++
++def test_an_ordinary_message_still_takes_the_empty_response_ladder(loop_agent):
++    result = _run(loop_agent, [_empty()] * 6, "hello there", list(HISTORY))
++    assert _calls(loop_agent) > 1
++    assert result["turn_exit_reason"] == "empty_response_exhausted"
++
++
++def test_a_wake_that_ran_other_tools_still_gets_the_nudge(loop_agent):
++    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
++
++    loop_agent.valid_tool_names = {"terminal"}
++    work = _mock_response(content="", finish_reason="tool_calls", tool_calls=[_mock_tool_call("terminal", "{}", "c1")])
++    with patch("model_tools.handle_function_call", return_value="done"):
++        result = _run(loop_agent, [work] + [_empty()] * 6, WAKE, list(HISTORY))
++    assert result["turn_exit_reason"] != "quiet_end"
++    assert _calls(loop_agent) > 2
++
++
++def test_quiet_end_allowed_reads_only_this_turn():
++    send_round = [
++        {"role": "assistant", "content": "", "tool_calls": [{"id": "c", "function": {"name": "agent_send", "arguments": "{}"}}]},
++        {"role": "tool", "content": "{}", "tool_call_id": "c"},
++    ]
++    mixed = [{"role": "assistant", "content": "", "tool_calls": [
++        {"id": "a", "function": {"name": "agent_send", "arguments": "{}"}},
++        {"id": "b", "function": {"name": "terminal", "arguments": "{}"}}]}]
++    # an agent_send round of an earlier turn does not excuse an empty reply to a user's new message
++    assert not quiet_end_allowed([{"role": "user", "content": "q"}, *send_round, {"role": "assistant", "content": "ok"},
++                                  {"role": "user", "content": "next"}])
++    assert quiet_end_allowed([{"role": "user", "content": "q"}, *send_round])
++    assert not quiet_end_allowed([{"role": "user", "content": "q"}, *mixed])
++    assert quiet_end_allowed([{"role": "user", "content": WAKE}])
++    assert not quiet_end_allowed([])
++    assert not is_wake_text("The user typed [Agent message am_0123456789abcdef from x]")
++
++
++def test_the_next_request_replays_the_quiet_row_as_a_plain_empty_reply(loop_agent):
++    from tests.agent.test_run_agent import _mock_response
++
++    first = _run(loop_agent, [_empty()], WAKE, list(HISTORY))
++    assert first["messages"][-1]["role"] == "assistant"
++    _run(loop_agent, [_mock_response(content="Fine.", finish_reason="stop")], "what happened?", first["messages"])
++    sent = loop_agent.client.chat.completions.create.call_args.kwargs["messages"]
++    assert [m["role"] for m in sent][-3:] == ["user", "assistant", "user"]
++    assert all("_quiet_end" not in m for m in sent)
+diff --git a/tests/gateway/test_quiet_end_delivery.py b/tests/gateway/test_quiet_end_delivery.py
+new file mode 100644
+index 00000000..82a43973
+--- /dev/null
++++ b/tests/gateway/test_quiet_end_delivery.py
+@@ -0,0 +1,18 @@
++"""A turn that ended quietly (agent/quiet_end.py) delivers nothing: no retry hint, no "no response" text."""
++
++from unittest.mock import AsyncMock
++
++import pytest
++
++from tests.gateway.test_gateway_silence_tokens import _event, _runner, _source
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("reason,expect_text", [("quiet_end", False), ("text_response(stop)", True)])
++async def test_quiet_end_is_not_replaced_by_a_no_response_text(monkeypatch, tmp_path, reason, expect_text):
++    runner = _runner(monkeypatch, tmp_path)
++    runner._run_agent = AsyncMock(return_value={
++        "final_response": "", "api_calls": 2, "messages": [], "turn_exit_reason": reason,
++    })
++    response = await runner._handle_message_with_agent(_event(), _source(), "lane", 1)
++    assert bool(response) is expect_text
+-- 
+2.56.0
+

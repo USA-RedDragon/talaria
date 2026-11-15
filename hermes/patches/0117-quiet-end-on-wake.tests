@@ -1,0 +1,12 @@
+# New: an empty reply to a wake or after agent_send ends the turn quietly
+# (tests/agent/test_quiet_end.py, tests/gateway/test_quiet_end_delivery.py)
+# The empty-response ladder, the finalizer and the gateway silence paths it touches
+tests/agent/test_empty_response_recovery_persistence.py
+tests/agent/test_turn_completion_explainer.py
+tests/agent/test_reasoning_only_stop_persistence.py
+tests/agent/test_turn_finalizer_final_response_persistence.py
+tests/agent/test_failed_turn_site_codes.py
+tests/gateway/test_normalize_empty_agent_response.py
+tests/gateway/test_empty_sentinel_rewrite_copy.py
+tests/gateway/test_gateway_silence_tokens.py
+tests/gateway/test_room_allow_silence.py
