@@ -18,6 +18,35 @@ window.HubApprovals = (() => {
     const cards = new Map();
 
     const done = (card) => card.state === "settled";
+    const Q = deps.question || window.HubQuestion;
+    const clock = deps.clock || ((ms) => (window.HubTimes ? window.HubTimes.clock(ms) : ""));
+
+    // answerOf is the answer a card sent, as clarify.respond takes it: the
+    // text the page knows when Hermes says nothing of the answer.
+    function sentRecord(card) {
+      const b = card.body || {};
+      const picks = Array.isArray(b.picks) ? b.picks : [];
+      const text = typeof b.text === "string" ? b.text.trim() : "";
+      const data = { prompt_id: card.id, outcome: b.skip ? "skipped" : "answered", answered_at: Date.now() / 1000, answered_via: "hub" };
+      const all = text ? [...picks, text] : picks;
+      data.answer = card.prompt && card.prompt.multi_select ? JSON.stringify(all) : all[0] || "";
+      return data;
+    }
+
+    // closeQuestion turns a question's card into the card of the answered
+    // question: the question, the choices, the answer checked and when and where
+    // it came, from what Hermes said when it settled (data), else from what
+    // the page sent. note replaces the status line.
+    function closeQuestion(card, data, note) {
+      if (card.timer) clearT(card.timer);
+      card.timer = null;
+      card.state = "settled";
+      const rec = Q.fromSettled(data, card.prompt);
+      const shown = Q.view({ el, clock, note }, rec || { questions: [], outcome: "" });
+      card.box.className = shown.className;
+      card.box.replaceChildren(...shown.children);
+      card.note = null;
+    }
 
     function finish(id, text) {
       const card = cards.get(id);
@@ -83,12 +112,19 @@ window.HubApprovals = (() => {
         if (split) box.append(el("pre", "", split[2]));
         if (p.command && !rule) box.append(el("pre", "", p.command));
         if (rule && !p.description) box.append(el("div", "rule", "An approval rule asks before the " + rule[1].replace(/_/g, " ") + " tool runs."));
-        if (p.subagent && !parted) box.append(el("div", "who", "Asked by a subagent: " + p.subagent));
+        if (p.subagent && !parted && !clarify) box.append(el("div", "who", "Asked by a subagent: " + p.subagent));
       }
-      if (p.question) box.append(el("div", "", p.question));
+      if (clarify && p.subagent) {
+        const by = el("div", "by");
+        const goal = el("span", "goal", p.subagent);
+        goal.title = p.subagent;
+        by.append(el("span", "chip", "Subagent"), goal);
+        box.append(by);
+      }
+      if (p.question) box.append(el("div", clarify ? "q" : "", clarify ? Q.plain(p.question, p.subagent) : p.question));
       const actions = el("div", "actions");
       const buttons = [];
-      const card = { id, box, actions, buttons, state: "open", timer: null, note: null, body: null };
+      const card = { id, box, actions, buttons, state: "open", timer: null, note: null, body: null, clarify, prompt: p };
       cards.set(id, card);
       const enable = (on) => { for (const b of buttons) b.disabled = !on; };
 
@@ -104,7 +140,11 @@ window.HubApprovals = (() => {
           if (done(card)) return;
           // 404: the prompt was settled where this page could not see it (another tab, Telegram, a timeout,
           // a restart of Hermes)
-          if (e && e.status === 404) { finish(id, "No longer waiting: the agent closed this before the answer arrived"); return; }
+          if (e && e.status === 404) {
+            const gone = "No longer waiting: the agent closed this before the answer arrived";
+            if (card.clarify) closeQuestion(card, { outcome: "lost" }, gone); else finish(id, gone);
+            return;
+          }
           card.state = "open";
           enable(true);
           note(card, "Not delivered: " + ((e && e.message) || "the hub did not answer") + ". Press a button to try again.", true);
@@ -139,7 +179,16 @@ window.HubApprovals = (() => {
         // Deny stays the last button; the source choice names what it allows.
         for (const c of [...choices.filter((x) => x !== "deny"), ...choices.filter((x) => x === "deny")]) actions.append(button(c === "deny" ? "danger" : c === "once" ? "primary" : "", names[c] || c, { choice: c }));
       } else {
+        // Every question has an Other row to type an answer in, whatever the
+        // agent offered: the only input of a question with no choices and, for
+        // a multi-select question, an answer that goes with the picks.
+        const input = el("input", "answer");
+        input.type = "text";
+        input.placeholder = choices.length ? "Or type your own answer" : "Type your answer";
+        input.setAttribute("aria-label", Q.OTHER);
+        buttons.push(input);
         const picks = [];
+        let sendBtn = null;
         if (p.multi_select) {
           const list = el("div", "picks");
           for (const c of choices) {
@@ -153,19 +202,31 @@ window.HubApprovals = (() => {
             list.append(row);
           }
           box.append(list);
-          actions.append(button("primary", "Send", () => ({ picks: picks.filter((b) => b.checked).map((b) => b.value) })));
-        } else {
-          for (const c of choices) actions.append(button("", c, { picks: [c] }));
+        } else if (choices.length) {
+          const list = el("div", "choices");
+          for (const c of choices) {
+            const b = button("choice", c, { picks: [c] });
+            list.append(b);
+          }
+          box.append(list);
         }
-        const input = el("input", "answer");
-        input.type = "text";
-        input.placeholder = choices.length ? "Or type an answer" : "Type your answer";
-        input.setAttribute("aria-label", "Answer");
-        buttons.push(input);
-        const sendBtn = button(choices.length ? "" : "primary", "Answer", () => ({ text: input.value }));
-        input.onkeydown = (e) => { if (e.key === "Enter" && input.value.trim()) { e.preventDefault(); sendBtn.click(); } };
         const typed = el("div", "typed");
-        typed.append(input, sendBtn);
+        typed.append(el("div", "otherlabel", Q.OTHER));
+        const field = el("div", "otherfield");
+        field.append(input);
+        if (p.multi_select) {
+          // Send takes the picks and the typed text together.
+          sendBtn = button("primary sendpicks", "Send", () => {
+            const body = { picks: picks.filter((b) => b.checked).map((b) => b.value) };
+            if (input.value.trim()) body.text = input.value;
+            return body;
+          });
+        } else {
+          sendBtn = button(choices.length ? "" : "primary", "Answer", () => ({ text: input.value }));
+        }
+        field.append(sendBtn);
+        input.onkeydown = (e) => { if (e.key === "Enter" && input.value.trim()) { e.preventDefault(); sendBtn.click(); } };
+        typed.append(field);
         box.append(typed);
         actions.append(button("ghost", "Skip", { skip: true }));
       }
@@ -175,9 +236,18 @@ window.HubApprovals = (() => {
 
     // settled is Hermes's approval.settled: the prompt is over. The hub's
     // outcome event that follows says how, when the hub knows.
-    function settled(id) {
+    function settled(id, data) {
       const card = cards.get(id);
       if (!card || done(card)) return;
+      if (card.clarify) {
+        // What Hermes says of the answer; an older Hermes says nothing, and
+        // the card then shows what this page sent, or that it was closed.
+        const sent = card.state === "sent" || card.state === "sending";
+        if (data && data.outcome) closeQuestion(card, data);
+        else if (sent && card.body) closeQuestion(card, sentRecord(card));
+        else closeQuestion(card, { outcome: "lost" }, "Closed by the agent, no answer was seen here");
+        return;
+      }
       finish(id, card.state === "sent" || card.state === "sending" ? "Answered" : "Closed by the agent, no answer was seen here");
     }
 
@@ -193,12 +263,39 @@ window.HubApprovals = (() => {
     function lost(ids) {
       for (const id of ids || []) {
         const card = cards.get(id);
-        if (card && !done(card)) finish(id, "Closed: the agent no longer waits for this. It was answered elsewhere, or the agent restarted and dropped it. Nothing was sent from this page.");
+        if (card && !done(card) && card.clarify) closeQuestion(card, { outcome: "lost" });
+        else if (card && !done(card)) finish(id, "Closed: the agent no longer waits for this. It was answered elsewhere, or the agent restarted and dropped it. Nothing was sent from this page.");
       }
     }
 
     function cancelled(ids) {
-      for (const id of ids || []) finish(id, "Cancelled");
+      for (const id of ids || []) {
+        const card = cards.get(id);
+        if (card && card.clarify && !done(card)) closeQuestion(card, { outcome: "cancelled" });
+        else finish(id, "Cancelled");
+      }
+    }
+
+    // restore shows the card of a question that was over before this page drew
+    // the chat (a subagent's, which the hub kept): data is its clarify.settled
+    // record.
+    function restore(data) {
+      const rec = Q.fromSettled(data);
+      if (!rec || cards.has("done:" + rec.id)) return;
+      const box = Q.view({ el, clock }, rec);
+      cards.set("done:" + rec.id, { id: rec.id, box, state: "settled", clarify: true, prompt: data, restored: true });
+      add(box);
+    }
+
+    // retire takes away the cards of the chat's own questions that are over:
+    // the call that asked them ended, and its stored result draws one card for
+    // all of its questions, as it does after a reload.
+    function retire() {
+      for (const [id, card] of [...cards]) {
+        if (!card.clarify || !done(card) || card.restored || (card.prompt && card.prompt.subagent)) continue;
+        card.box.remove();
+        cards.delete(id);
+      }
     }
 
     function dispose() {
@@ -206,7 +303,7 @@ window.HubApprovals = (() => {
       cards.clear();
     }
 
-    return { offer, settled, outcome, lost, cancelled, dispose, has: (id) => cards.has(id), card: (id) => cards.get(id) };
+    return { offer, settled, outcome, lost, cancelled, restore, retire, dispose, has: (id) => cards.has(id), card: (id) => cards.get(id) };
   }
   return { create };
 })();

@@ -89,7 +89,10 @@ type Options struct {
 	// Prompts lists the saved prompts for /prompts. Optional.
 	Prompts PromptStore
 	// Pins puts each user's pinned chats first in /sessions. Optional.
-	Pins       PinStore
+	Pins PinStore
+	// Location is the zone of the times the bot writes, such as when a
+	// question was answered. Default: UTC.
+	Location   *time.Location
 	Logger     *slog.Logger
 	HTTPClient *http.Client
 	// statusTick replaces the package's statusTick in tests.
@@ -122,6 +125,8 @@ func BotID(token string) int64 {
 
 // Bot is the Telegram bot.
 type Bot struct {
+	// loc is the zone of the times the bot writes.
+	loc       *time.Location
 	cfg       Config
 	link      string
 	public    string
@@ -304,6 +309,7 @@ func New(cfg Config, opts Options) (*Bot, error) {
 		subagents: opts.Subagents,
 		prompts:   opts.Prompts,
 		pins:      opts.Pins,
+		loc:       cmp.Or(opts.Location, time.UTC),
 		botID:     BotID(cfg.Token),
 		logger:    logger,
 		defaults:  defaults,
@@ -1091,6 +1097,7 @@ func (b *Bot) pump(ctx context.Context, a *attachment) {
 			return b.addApproval(a, p, body)
 		})
 	r.now = b.now
+	r.loc = b.loc
 	r.statusTick = b.tick
 	r.budget = b.budget
 	r.drafts = b.cfg.Drafts && a.to.chat > 0

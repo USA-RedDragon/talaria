@@ -536,7 +536,16 @@ type ClarifyParams struct {
 	ExecutionGeneration int64  `json:"execution_generation"`
 	PromptID            string `json:"prompt_id"`
 	Answer              string `json:"answer"`
+	// Via names the client that answers (hub.AnsweredInHub and the like),
+	// which Hermes keeps with the answer for the question's card. Only sent
+	// to a Hermes that lists CapClarifyCard: an older one refuses the key.
+	Via string `json:"via,omitempty"`
 }
+
+// CapClarifyCard is the runtime.describe capability of a Hermes that takes
+// clarify.respond's via, and sends the question, its choices and the answer
+// with clarify.settled (Talaria Hermes patch 0115).
+const CapClarifyCard = "clarify-card-v1"
 
 // ConfigSetParams is config.set's params for a session control.
 type ConfigSetParams struct {

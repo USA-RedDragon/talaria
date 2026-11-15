@@ -29,8 +29,13 @@ type live struct {
 	mu sync.Mutex
 	// withPrompts is the last snapshot with prompts made (ls.mu).
 	withPrompts promptedSnapshot
-	stale       bool
-	retired     bool
+	// questions are the settled questions of subagents, oldest first
+	// (clarify.settled data with the hub's time as at), and
+	// questionsLoaded says the hub's copy of them was read (ls.mu).
+	questions       []json.RawMessage
+	questionsLoaded bool
+	stale           bool
+	retired         bool
 	// gone is closed when a retired session has left the map, after the
 	// gateway was told it is detached; nil when it was not retired by an idle detach.
 	gone       chan struct{}
@@ -553,6 +558,9 @@ func (ls *live) apply(ev gateway.Event) {
 		}
 		if json.Unmarshal(ev.Payload, &p) == nil {
 			ls.settled(p.PromptID)
+			if ev.Type == "clarify.settled" {
+				ls.keepQuestion(ev.Payload)
+			}
 		}
 	case "approval.cancelled":
 		var p struct {
@@ -730,6 +738,75 @@ func (ls *live) steeringLocked() bool {
 	return false
 }
 
+// keepQuestion keeps a subagent's question that Hermes settled, with its
+// answer, for the chat's card after a reload (hub.QuestionLog). A chat's own
+// question is in its transcript. A settled event with no outcome comes from
+// a Hermes that does not say how the question ended: nothing to keep.
+// ls.mu is held.
+func (ls *live) keepQuestion(payload json.RawMessage) {
+	var p struct {
+		PromptID string `json:"prompt_id"`
+		Outcome  string `json:"outcome"`
+		Subagent string `json:"subagent"`
+	}
+	if json.Unmarshal(payload, &p) != nil || p.PromptID == "" || p.Outcome == "" || p.Subagent == "" {
+		return
+	}
+	for _, r := range ls.questions {
+		if hub.QuestionID(r) == p.PromptID {
+			return
+		}
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(payload, &m) != nil {
+		return
+	}
+	m["at"] = json.RawMessage(strconv.FormatInt(time.Now().UnixMilli(), 10))
+	rec, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	ls.questions = append(ls.questions, rec)
+	if len(ls.questions) > hub.MaxQuestionLog {
+		ls.questions = append([]json.RawMessage(nil), ls.questions[len(ls.questions)-hub.MaxQuestionLog:]...)
+	}
+	log := ls.b.svc.opts.Questions
+	if log == nil {
+		return
+	}
+	backend, session := ls.b.cfg.ID, ls.id
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), answerTimeout*2)
+		defer cancel()
+		if err := log.AddQuestion(ctx, backend, session, rec, hub.MaxQuestionLog); err != nil {
+			ls.b.log.Warn("Failed to keep a subagent's question", "session", session, "error", err.Error())
+		}
+	}()
+}
+
+// mergeQuestions adds the questions the hub kept in its store to the ones
+// this process saw, oldest first, once. ls.mu is held.
+func (ls *live) mergeQuestions(saved []json.RawMessage) {
+	if ls.questionsLoaded {
+		return
+	}
+	ls.questionsLoaded = true
+	have := map[string]bool{}
+	for _, r := range ls.questions {
+		have[hub.QuestionID(r)] = true
+	}
+	var merged []json.RawMessage
+	for _, r := range saved {
+		if id := hub.QuestionID(r); id != "" && !have[id] {
+			merged = append(merged, r)
+		}
+	}
+	ls.questions = append(merged, ls.questions...)
+	if len(ls.questions) > hub.MaxQuestionLog {
+		ls.questions = append([]json.RawMessage(nil), ls.questions[len(ls.questions)-hub.MaxQuestionLog:]...)
+	}
+}
+
 // snapshotWithPrompts is the held snapshot with the prompts the hub holds
 // now. The snapshot lists the prompts of when it was taken, and the buffer
 // replays only the turn that runs, so an approval a subagent asked for in a
@@ -758,7 +835,11 @@ func (ls *live) snapshotWithPrompts() hub.Event {
 	// together again once per snapshot and prompt list, not per viewer, so
 	// opening a chat costs the hub no JSON work. The same bytes also let
 	// the event stream keep what it made of them (see web).
-	if c := ls.withPrompts; c.ok && sameBytes(c.src, ev.Data) && bytes.Equal(c.prompts, raw) {
+	var qraw []byte
+	if len(ls.questions) > 0 {
+		qraw, _ = json.Marshal(ls.questions)
+	}
+	if c := ls.withPrompts; c.ok && sameBytes(c.src, ev.Data) && bytes.Equal(c.prompts, raw) && bytes.Equal(c.questions, qraw) {
 		ev.Data = c.out
 		return ev
 	}
@@ -767,11 +848,14 @@ func (ls *live) snapshotWithPrompts() hub.Event {
 		return ev
 	}
 	m["prompts"] = raw
+	if qraw != nil {
+		m["questions"] = qraw
+	}
 	data, err := json.Marshal(m)
 	if err != nil {
 		return ev
 	}
-	ls.withPrompts = promptedSnapshot{ok: true, src: ev.Data, prompts: raw, out: data}
+	ls.withPrompts = promptedSnapshot{ok: true, src: ev.Data, prompts: raw, questions: qraw, out: data}
 	ev.Data = data
 	return ev
 }
@@ -779,9 +863,9 @@ func (ls *live) snapshotWithPrompts() hub.Event {
 // promptedSnapshot is the last snapshotWithPrompts made: from src and the
 // prompts list, out.
 type promptedSnapshot struct {
-	ok           bool
-	src, prompts []byte
-	out          json.RawMessage
+	ok                      bool
+	src, prompts, questions []byte
+	out                     json.RawMessage
 }
 
 // sameBytes is whether a and b are the same slice of memory.

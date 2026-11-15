@@ -1552,6 +1552,7 @@
     toolDone(card, p, at = this.at) {
       if (!card.classList.contains("running") && card.finished) return;
       card.finished = true;
+      if (card.toolName === "clarify" && this.questionCard(card, p)) return;
       card.view.live.replaceChildren();
       if (p.result !== undefined) card.result = p.result;
       card.classList.remove("running");
@@ -1578,6 +1579,25 @@
         card.view.body.append(mediaRow(this.base, [res.path], "shot"));
       }
       if (card.toolName === "send_file" && !failed) this.fileOffer(card, res, at);
+    }
+
+    // questionCard draws the finished clarify call as the card of its
+    // questions, from the stored result: every choice that was offered with the
+    // answer checked, and when and where it was answered. A result stored
+    // before Hermes kept that stays the plain tool card (false).
+    questionCard(card, p) {
+      let res = p.result !== undefined ? p.result : p.result_text;
+      if (typeof res === "string") {
+        try { res = JSON.parse(res); } catch (_) { return false; }
+      }
+      const rec = window.HubQuestion.fromResult(res);
+      if (!rec || !card.parentNode) return false;
+      const node = window.HubQuestion.view({ el, clock: (ms) => window.HubTimes.clock(ms) }, rec);
+      if (card.dataset.ukey) node.dataset.ukey = card.dataset.ukey;
+      card.parentNode.replaceChild(node, card);
+      card.qcard = node;
+      this.cards.retire();
+      return true;
     }
 
     // fileOffer shows the file card of a send_file result next to its tool
@@ -1768,6 +1788,8 @@
           // sent to it, not as a message still sending.
           if (c.p.steered && s.running) this.steered(x);
         }
+        // The questions subagents asked that are over, which the hub kept.
+        for (const q of s.questions || []) this.cards.restore(q);
         for (const p of s.prompts || []) this.approval(p);
         // A command's bubble and its progress or result line are the page's
         // own: the snapshot Hermes sends after the command does not hold them.
@@ -2105,7 +2127,7 @@
         case "input.sent": this.sentEvent(p); break;
         case "input.not_sent": this.notSentEvent(p); break;
         case "approval.request": case "clarify.request": this.approval(p); if (kind === "approval.request") this.waitingNotes(p, true); break;
-        case "approval.settled": case "clarify.settled": this.cards.settled(p.prompt_id); this.waitingNotes(p, false); break;
+        case "approval.settled": case "clarify.settled": this.cards.settled(p.prompt_id, p); this.waitingNotes(p, false); break;
         case "approval.outcome": this.cards.outcome(p.prompt_id, outcomeText(p)); break;
         case "approval.cancelled": this.cards.cancelled(p.request_ids); this.waitingNotes(p, false); break;
         case "prompt.lost": this.cards.lost(p.prompt_ids); this.waitingNotes(p, false); break;

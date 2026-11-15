@@ -329,6 +329,10 @@ type Snapshot struct {
 	Running   bool              `json:"running"`
 	Messages  []json.RawMessage `json:"messages"`
 	Prompts   []json.RawMessage `json:"prompts"`
+	// Questions are the questions subagents asked in the chat that are
+	// over, with how each ended (clarify.settled data and the hub's time as
+	// at): a chat's own questions are in its transcript.
+	Questions []json.RawMessage `json:"questions,omitempty"`
 	Pending   []Pending         `json:"pending"`
 	Info      Info              `json:"info"`
 	// ToolBackground is true when the backend can move a running terminal

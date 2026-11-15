@@ -40,11 +40,139 @@ function harness(over) {
     add: (box) => shown.push(box),
     api: async (method, path, body) => { log.push(JSON.parse(JSON.stringify({ method, path, body }))); },
     setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms), clearTimeout: (id) => globalThis.clearTimeout(id),
+    clock: (ms) => "12:56 PM",
   }, over || {}));
   return { h, tracker, log, shown, banners };
 }
 
 const prompt = (id, cmd) => ({ kind: "approval", prompt_id: id, command: cmd, description: "recursive delete", choices: ["once", "session", "always", "deny"] });
+
+// The card of a question, live and once it is over (Jacob's approved mockup: every choice that was offered, the
+// answer checked, a typed answer in the Other row, when and where it was answered, or how it ended).
+const rows = (card) => { const out = []; card.walk((n) => { if (n.tag === "li") out.push([n.className, n.text().replace(/\s+/g, " ")]); }); return out; };
+const OTHER = "Other (type your own)";
+async function questionCards() {
+  const ask = { kind: "clarify", question: "What should cpus/a64 be renamed to?", choices: ["cpus/aarch64", "cpus/arm64", "Keep cpus/a64"] };
+  // Every question has an Other row with a text box, whatever the agent sent: choices, several picks, or none.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer(Object.assign({ prompt_id: "a" }, ask));
+    tracker.offer({ kind: "clarify", prompt_id: "b", question: "Layouts?", choices: ["Switch", "NDS"], multi_select: true });
+    tracker.offer({ kind: "clarify", prompt_id: "c", question: "What should the release notes call this?" });
+    for (const card of shown) {
+      assert.ok(card.text().includes(OTHER), "Other row: " + card.text());
+      assert.strictEqual(card.querySelectorAll("answer").length, 1, "one text box");
+      assert.ok(card.buttons().some((b) => b.textContent === "Skip"));
+    }
+    // An open question has the Other row as its only input.
+    assert.deepStrictEqual(shown[2].buttons().map((b) => b.textContent), ["Answer", "Skip"]);
+    assert.strictEqual(shown[2].querySelectorAll("pick").length, 0);
+  }
+  // A multi-select answer sends the picks together with the Other text.
+  {
+    const { tracker, shown, log } = harness();
+    tracker.offer({ kind: "clarify", prompt_id: "m", question: "Layouts?", choices: ["Switch", "NDS"], multi_select: true });
+    const boxes = shown[0].querySelectorAll("pick").map((r) => r.children[0]);
+    boxes[1].checked = true;
+    shown[0].querySelector("answer").value = "Game Boy";
+    shown[0].buttons().find((b) => b.textContent === "Send").onclick();
+    await flush();
+    assert.deepStrictEqual(log[0].body, { picks: ["NDS"], text: "Game Boy" });
+  }
+  // A choice that was picked: all the choices stay, the pick is checked, with the time and where.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer(Object.assign({ prompt_id: "a" }, ask));
+    tracker.settled("a", { prompt_id: "a", outcome: "answered", answer: "cpus/aarch64", answered_at: 1, answered_via: "hub", question: ask.question, choices: ask.choices });
+    assert.deepStrictEqual(rows(shown[0]), [["pick", "\u2713 cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["other", OTHER]]);
+    assert.strictEqual(shown[0].querySelector("res").text(), "Answered at 12:56 PM (in the hub)");
+    assert.strictEqual(shown[0].buttons().length, 0);
+    assert.strictEqual(shown[0].className, "approval done qdone");
+  }
+  // A typed answer shows in the Other row, checked.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer(Object.assign({ prompt_id: "a" }, ask));
+    tracker.settled("a", { outcome: "answered", answer: "cpus/armv8, and rename the symbols to rl_armv8_*", answered_at: 1, answered_via: "telegram" });
+    assert.deepStrictEqual(rows(shown[0]), [["", "cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["pick other", "\u2713 Other: cpus/armv8, and rename the symbols to rl_armv8_*"]]);
+    assert.strictEqual(shown[0].querySelector("res").text(), "Answered at 12:56 PM (on Telegram)");
+  }
+  // Several picks and a typed one in a multi-select question; an open question's answer is the Other row, checked.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer({ kind: "clarify", prompt_id: "m", question: "Layouts?", choices: ["Switch", "Game Boy", "NDS"], multi_select: true });
+    tracker.settled("m", { outcome: "answered", answer: JSON.stringify(["Switch", "NDS", "SNES"]), answered_at: 1, answered_via: "hub" });
+    assert.deepStrictEqual(rows(shown[0]), [["pick", "\u2713 Switch"], ["", "Game Boy"], ["pick", "\u2713 NDS"], ["pick other", "\u2713 Other: SNES"]]);
+    tracker.offer({ kind: "clarify", prompt_id: "o", question: "Call it?" });
+    tracker.settled("o", { outcome: "answered", answer: "Pocket mode", answered_at: 1, answered_via: "hub" });
+    assert.deepStrictEqual(rows(shown[1]), [["pick other", "\u2713 Other: Pocket mode"]]);
+  }
+  // A subagent's question: the chip with its goal, the question without Hermes's prefix, then the same card.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer({ kind: "clarify", prompt_id: "s", subagent: "relift lane android-apk: on-screen controller", question: "Subagent \"relift lane android-apk: on-screen controller\" asks: Stick clicks?", choices: ["Double-tap", "Separate"] });
+    assert.deepStrictEqual(shown[0].querySelector("by").children.map((c) => [c.className, c.textContent]), [["chip", "Subagent"], ["goal", "relift lane android-apk: on-screen controller"]]);
+    assert.ok(!shown[0].text().includes("asks:"));
+    tracker.settled("s", { outcome: "answered", answer: "Double-tap", answered_at: 1, answered_via: "telegram" });
+    assert.strictEqual(shown[0].querySelector("by").children[0].textContent, "Subagent");
+    assert.deepStrictEqual(rows(shown[0])[0], ["pick", "\u2713 Double-tap"]);
+  }
+  // No answer: a timeout says how long it waited; a withdrawn question says so; the choices stay.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer(Object.assign({ prompt_id: "t" }, ask, { timeout_s: 1800 }));
+    tracker.settled("t", { outcome: "timed_out", timeout_s: 1800 });
+    assert.strictEqual(shown[0].querySelector("res").text(), "No answer: timed out after 30 minutes");
+    assert.strictEqual(rows(shown[0]).length, 4);
+    assert.ok(rows(shown[0]).every((r) => !r[0].includes("pick")));
+    tracker.offer(Object.assign({ prompt_id: "w" }, ask));
+    tracker.settled("w", { outcome: "cancelled" });
+    assert.ok(shown[1].querySelector("res").text().startsWith("Withdrawn"));
+    tracker.offer(Object.assign({ prompt_id: "l" }, ask));
+    tracker.lost(["l"]);
+    assert.ok(shown[2].querySelector("res").text().startsWith("Withdrawn"));
+  }
+  // A Hermes that says nothing of the answer: a card the page answered shows what it sent; others say they were closed.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer(Object.assign({ prompt_id: "a" }, ask));
+    shown[0].buttons()[1].onclick();
+    await flush();
+    tracker.settled("a", { prompt_id: "a" });
+    assert.deepStrictEqual(rows(shown[0])[1], ["pick", "\u2713 cpus/arm64"]);
+    tracker.offer(Object.assign({ prompt_id: "z" }, ask));
+    tracker.settled("z", { prompt_id: "z" });
+    assert.ok(shown[1].querySelector("res").text().includes("no answer was seen here"));
+  }
+  // A question kept by the hub is drawn when the chat loads, and not twice.
+  {
+    const { tracker, shown } = harness();
+    const rec = { prompt_id: "k", outcome: "answered", answer: "Separate", answered_at: 1763228160, answered_via: "telegram", subagent: "lane", question: "Subagent \"lane\" asks: Stick clicks?", choices: ["Double-tap", "Separate"] };
+    tracker.restore(rec);
+    tracker.restore(rec);
+    assert.strictEqual(shown.length, 1);
+    assert.deepStrictEqual(rows(shown[0])[1], ["pick", "\u2713 Separate"]);
+    assert.strictEqual(shown[0].querySelector("res").text(), "Answered at 12:56 PM (on Telegram)");
+    // Retiring the chat's own cards leaves it alone.
+    let removed = false;
+    shown[0].remove = () => { removed = true; };
+    tracker.retire();
+    assert.ok(!removed);
+  }
+  // The chat's own settled cards go when the call that asked ends: its stored result draws them. A subagent's stay.
+  {
+    const { tracker, shown } = harness();
+    tracker.offer(Object.assign({ prompt_id: "a" }, ask));
+    tracker.offer(Object.assign({ prompt_id: "b" }, ask, { subagent: "lane" }));
+    tracker.offer(Object.assign({ prompt_id: "c" }, ask));
+    tracker.settled("a", { outcome: "answered", answer: "cpus/arm64" });
+    tracker.settled("b", { outcome: "answered", answer: "cpus/arm64" });
+    const removed = [];
+    shown.forEach((box, i) => { box.remove = () => removed.push(i); });
+    tracker.retire();
+    assert.deepStrictEqual(removed, [0], "only the chat's own answered question goes; an open one and a subagent's stay");
+  }
+}
 
 (async () => {
   // Three approvals at once: three cards, each with its own buttons.
@@ -147,8 +275,8 @@ const prompt = (id, cmd) => ({ kind: "approval", prompt_id: id, command: cmd, de
     const { tracker, shown, log } = harness();
     tracker.offer({ kind: "clarify", prompt_id: "q", question: "Which?", choices: ["x", "y"] });
     const names = shown[0].buttons().map((b) => b.textContent);
-    assert.deepStrictEqual(names, ["Answer", "x", "y", "Skip"]);
-    shown[0].buttons()[1].onclick();
+    assert.deepStrictEqual(names, ["x", "y", "Answer", "Skip"]);
+    shown[0].buttons()[0].onclick();
     await flush();
     assert.deepStrictEqual(log[0].body, { picks: ["x"] });
   }
@@ -234,5 +362,6 @@ const prompt = (id, cmd) => ({ kind: "approval", prompt_id: id, command: cmd, de
     assert.ok(old.shown[0].text().includes("Asked by a subagent: relift chunk") && old.shown[0].text().includes("asks: Smart approval rule"));
     assert.strictEqual(old.shown[0].querySelector("parts"), null);
   }
+  await questionCards();
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

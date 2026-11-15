@@ -128,6 +128,8 @@ type renderer struct {
 	interval time.Duration
 	logger   *slog.Logger
 	now      func() time.Time
+	// loc is the zone of the times the renderer writes.
+	loc *time.Location
 	// steps is telegram.steps: how the status line shows the steps.
 	steps   string
 	approve func(p hub.PromptInfo, body string) (string, func(messageID int64))
@@ -262,11 +264,9 @@ func (r *renderer) handle(ctx context.Context, ev hub.Event) {
 			r.showPrompt(ctx, ev.Kind, p)
 		}
 	case "approval.settled", "clarify.settled":
-		var p struct {
-			PromptID string `json:"prompt_id"`
-		}
+		var p settledPayload
 		if r.decode(ev, &p) {
-			r.settled(ctx, false, p.PromptID)
+			r.settledWith(ctx, false, p, p.PromptID)
 		}
 	case "approval.cancelled":
 		var p struct {
@@ -825,6 +825,13 @@ func (r *renderer) expireDue(ctx context.Context) {
 			continue
 		}
 		if p, ok := r.expire(sp.key); ok && sp.msgID != 0 {
+			if sp.prompt.Kind == hub.PromptClarify {
+				r.spend()
+				if err := r.api.EditHTML(ctx, r.to.chat, sp.msgID, questionCardHTML(sp.prompt, questionEnd{note: "No answer: timed out" + afterTimeout(sp.prompt)}, r.loc), nil); err != nil {
+					r.logger.Warn("Failed to show a question's outcome", "error", err)
+				}
+				continue
+			}
 			r.outcome(ctx, sp.msgID, "Expired", p.body, "No answer in "+duration(time.Duration(sp.prompt.Timeout*float64(time.Second)))+".")
 		}
 	}
@@ -1036,6 +1043,61 @@ func (r *renderer) showPrompt(ctx context.Context, kind string, p approvalPayloa
 // settled shows the outcome of shown prompts that got their answer, or
 // were cancelled, elsewhere.
 func (r *renderer) settled(ctx context.Context, cancelled bool, ids ...string) {
+	r.settledWith(ctx, cancelled, settledPayload{}, ids...)
+}
+
+// settledPayload is the data of clarify.settled: what Hermes with
+// clarify-card-v1 says of how the question ended.
+type settledPayload struct {
+	PromptID    string  `json:"prompt_id"`
+	Outcome     string  `json:"outcome"`
+	Answer      string  `json:"answer"`
+	AnsweredAt  float64 `json:"answered_at"`
+	AnsweredVia string  `json:"answered_via"`
+}
+
+// end is how the question p ended, from what Hermes said of it; false when
+// it said nothing.
+func (s settledPayload) end(p hub.PromptInfo, loc *time.Location) (questionEnd, bool) {
+	if s.Outcome == "" {
+		return questionEnd{}, false
+	}
+	switch s.Outcome {
+	case "answered":
+		a := hub.Answer{Text: s.Answer}
+		if p.Multi {
+			var picks []string
+			if json.Unmarshal([]byte(s.Answer), &picks) == nil {
+				a = hub.Answer{Picks: picks}
+			}
+		}
+		end := answerEnd(p, a, time.UnixMilli(int64(s.AnsweredAt*1000)))
+		end.via = s.AnsweredVia
+		if s.AnsweredAt == 0 {
+			end.at = time.Time{}
+		}
+		return end, true
+	case "skipped":
+		end := questionEnd{skipped: true, via: s.AnsweredVia}
+		if s.AnsweredAt > 0 {
+			end.at = time.UnixMilli(int64(s.AnsweredAt * 1000))
+		}
+		return end, true
+	case "timed_out":
+		return questionEnd{note: "No answer: timed out" + afterTimeout(p)}, true
+	}
+	return questionEnd{note: "Withdrawn: the agent stopped waiting for an answer"}, true
+}
+
+// afterTimeout is " after 30m" for a prompt that says how long it waited.
+func afterTimeout(p hub.PromptInfo) string {
+	if p.Timeout > 0 {
+		return " after " + duration(time.Duration(p.Timeout*float64(time.Second)))
+	}
+	return ""
+}
+
+func (r *renderer) settledWith(ctx context.Context, cancelled bool, data settledPayload, ids ...string) {
 	for _, id := range ids {
 		sp, ok := r.prompts[id]
 		if !ok {
@@ -1046,6 +1108,17 @@ func (r *renderer) settled(ctx context.Context, cancelled bool, ids ...string) {
 			continue
 		}
 		if p, ok := r.settle(sp.key); ok && sp.msgID != 0 {
+			if sp.prompt.Kind == hub.PromptClarify {
+				end, known := data.end(sp.prompt, r.loc)
+				if !known {
+					end = elsewhereEnd(sp.prompt, sp.at, r.now(), cancelled)
+				}
+				r.spend()
+				if err := r.api.EditHTML(ctx, r.to.chat, sp.msgID, questionCardHTML(sp.prompt, end, r.loc), nil); err != nil {
+					r.logger.Warn("Failed to show a question's outcome", "error", err)
+				}
+				continue
+			}
 			var answer func() (hub.ApprovalOutcome, bool)
 			if r.recorded != nil {
 				answer = func() (hub.ApprovalOutcome, bool) { return r.recorded(ctx, id) }

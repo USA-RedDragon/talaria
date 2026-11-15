@@ -95,7 +95,7 @@ func TestMultiSelectQuestion(t *testing.T) {
 	h.hub.emit(t, sid, hub.KindClarifyRequest, map[string]any{kPromptID: "q1", kKind: hub.PromptClarify, kQuestion: "Which <envs>?",
 		kChoices: []string{envStaging, envProd, envDev}, "multi_select": true})
 	req := h.tg.wait(mSend, "Which &lt;envs&gt;?")
-	if got := labels(req); !slices.Equal(got, []string{envStaging, envProd, envDev, "Send", "Other answer", "Skip"}) {
+	if got := labels(req); !slices.Equal(got, []string{envStaging, envProd, envDev, "Send", "Other (type your own)", "Skip"}) {
 		t.Fatalf("labels = %v", got)
 	}
 	btns := req.buttons()
@@ -108,7 +108,13 @@ func TestMultiSelectQuestion(t *testing.T) {
 		t.Fatalf("toggled labels = %v", got)
 	}
 	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(btns[3]))
-	h.tg.wait(mEdit, "<b>Answered: staging, dev</b>")
+	// The card keeps every choice with the picks checked, and says when and where.
+	done := h.tg.wait(mEdit, "Answered at ")
+	for _, want := range []string{"☑ staging", "☐ prod", "☑ dev", "☐ Other (type your own)", "(on Telegram)"} {
+		if !strings.Contains(done.text(), want) {
+			t.Fatalf("card %q lacks %q", done.text(), want)
+		}
+	}
 	if got := h.hub.waitAnswer(t); !slices.Equal(got.Answer.Picks, []string{envStaging, "dev"}) {
 		t.Fatalf("answer = %+v", got)
 	}
@@ -127,8 +133,8 @@ func TestReplyAnswersQuestion(t *testing.T) {
 	h.tg.say(dm(aliceTG), aliceTG, "not an answer")
 	h.hub.waitPrompt(t, 2)
 	h.tg.replyTo(dm(aliceTG), aliceTG, req.ResultID, "Bluebird")
-	edit := h.tg.wait(mEdit, "<b>Answered: Bluebird</b>")
-	if edit.messageID() != req.ResultID || !strings.Contains(edit.text(), "Name it") {
+	edit := h.tg.wait(mEdit, "☑ Other: Bluebird")
+	if edit.messageID() != req.ResultID || !strings.Contains(edit.text(), "Name it") || !strings.Contains(edit.text(), "(on Telegram)") {
 		t.Fatalf("edit = %+v", edit)
 	}
 	if got := h.hub.waitAnswer(t); got.Answer.Text != "Bluebird" || got.PromptID != "q2" {
@@ -151,7 +157,7 @@ func TestOtherAnswerAsksForReply(t *testing.T) {
 	h.hub.emit(t, sid, hub.KindClarifyRequest, map[string]any{kPromptID: "q3", kKind: hub.PromptClarify, kQuestion: "Branch?",
 		kChoices: []string{"main", branchFixCI}})
 	req := h.tg.wait(mSend, "Branch?")
-	if got := labels(req); !slices.Equal(got, []string{"main", branchFixCI, "Other answer", "Skip"}) {
+	if got := labels(req); !slices.Equal(got, []string{"main", branchFixCI, "Other (type your own)", "Skip"}) {
 		t.Fatalf("labels = %v", got)
 	}
 	if !strings.Contains(req.text(), "Or reply to this message") {
@@ -165,9 +171,15 @@ func TestOtherAnswerAsksForReply(t *testing.T) {
 	h.tg.replyTo(dm(aliceTG), bobTG, ask.ResultID, "bobs-branch")
 	h.tg.wait(mSend, msgNotYours)
 	h.tg.replyTo(dm(aliceTG), aliceTG, ask.ResultID, "fix-ci-2")
-	edit := h.tg.wait(mEdit, "Answered: fix-ci-2")
+	edit := h.tg.wait(mEdit, "☑ Other: fix-ci-2")
 	if edit.messageID() != req.ResultID {
 		t.Fatalf("edited %d, the question is %d", edit.messageID(), req.ResultID)
+	}
+	// The choices that were offered stay, none of them checked.
+	for _, want := range []string{"☐ main", "☐ " + branchFixCI} {
+		if !strings.Contains(edit.text(), want) {
+			t.Fatalf("card %q lacks %q", edit.text(), want)
+		}
 	}
 	if got := h.hub.waitAnswer(t); got.Answer.Text != "fix-ci-2" {
 		t.Fatalf("answer = %+v", got)
@@ -294,7 +306,7 @@ func TestReplyToStoredNoticeAnswersIt(t *testing.T) {
 	if got := h.hub.waitAnswer(t); got.Answer.Text != branchFixCI || got.PromptID != "q4" || got.SessionID != "s4" {
 		t.Fatalf("answer = %+v", got)
 	}
-	if edit := h.tg.wait(mEdit, "Answered: fix-ci"); edit.messageID() != 4242 {
+	if edit := h.tg.wait(mEdit, "☑ Other: fix-ci"); edit.messageID() != 4242 {
 		t.Fatalf("edit = %+v", edit)
 	}
 	if n := len(h.hub.promptsCopy()); n != 0 {
@@ -500,4 +512,78 @@ func TestGroupMemberWithoutAccessCannotToggle(t *testing.T) {
 	h.tg.waitAnswerText(msgNotYours)
 	h.tg.press(group, bobTG, req.ResultID, data(req.buttons()[3]))
 	h.tg.waitAnswerText(msgNotYours)
+}
+
+// Every question has the Other row, whatever the agent sent: a question with
+// choices has the button, one without has the reply as its only input, and
+// the Other text of a multi-select question goes with the picks.
+func TestOtherRowOfEveryQuestion(t *testing.T) {
+	t.Parallel()
+	h := startBot(t, nil)
+	sid := h.startTurn(t)
+	h.hub.emit(t, sid, hub.KindClarifyRequest, map[string]any{kPromptID: "qm", kKind: hub.PromptClarify, kQuestion: "Layouts?",
+		kChoices: []string{"Switch", "Game Boy", "NDS"}, "multi_select": true})
+	req := h.tg.wait(mSend, "Layouts?")
+	btns := req.buttons()
+	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(btns[0]))
+	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(btns[2]))
+	h.tg.waitN(mMarkup, "", 2)
+	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(btns[4])) // Other (type your own)
+	ask := h.tg.wait(mSend, "Reply to this message with your answer to")
+	h.tg.replyTo(dm(aliceTG), aliceTG, ask.ResultID, "SNES")
+	card := h.tg.wait(mEdit, "☑ Other: SNES")
+	for _, want := range []string{"☑ Switch", "☐ Game Boy", "☑ NDS", "(on Telegram)"} {
+		if !strings.Contains(card.text(), want) {
+			t.Fatalf("card %q lacks %q", card.text(), want)
+		}
+	}
+	if got := h.hub.waitAnswer(t); !slices.Equal(got.Answer.Picks, []string{"Switch", "NDS"}) || got.Answer.Text != "SNES" {
+		t.Fatalf("the Other text did not go with the picks: %+v", got)
+	}
+}
+
+// A question that ended where the bot could not see it keeps its choices:
+// Hermes says how it ended with clarify.settled, a timeout or a withdrawal
+// says so, and a subagent's question names the subagent.
+func TestQuestionCardsOfEndedQuestions(t *testing.T) {
+	t.Parallel()
+	choices := []string{"Double-tap the stick", "Separate buttons"}
+	for name, c := range map[string]struct {
+		settled map[string]any
+		want    []string
+		not     []string
+	}{
+		"answered in the hub": {map[string]any{"outcome": "answered", "answer": "Separate buttons", "answered_at": 1763228160.0, "answered_via": "hub"},
+			[]string{"☐ Double-tap the stick", "☑ Separate buttons", "Answered at ", "(in the hub)", "<b>Subagent:</b> relift lane"}, nil},
+		"typed in the hub": {map[string]any{"outcome": "answered", "answer": "Both", "answered_at": 1763228160.0, "answered_via": "hub"},
+			[]string{"☐ Double-tap the stick", "☑ Other: Both"}, []string{"☑ Separate"}},
+		"timed out": {map[string]any{"outcome": "timed_out"}, []string{"☐ Double-tap the stick", "No answer: timed out after 30m"}, []string{"☑"}},
+		"withdrawn": {map[string]any{"outcome": "cancelled"}, []string{"Withdrawn"}, []string{"☑"}},
+		"unknown":   {map[string]any{}, []string{"☐ Separate buttons", "Answered in the hub or another app"}, []string{"☑"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := startBot(t, nil)
+			sid := h.startTurn(t)
+			h.hub.emit(t, sid, hub.KindClarifyRequest, map[string]any{kPromptID: "qs", kKind: hub.PromptClarify, kQuestion: "Stick clicks?",
+				kChoices: choices, "subagent": "relift lane", "timeout_s": 1800.0})
+			h.tg.wait(mSend, "Stick clicks?")
+			c.settled[kPromptID] = "qs"
+			h.hub.emit(t, sid, "clarify.settled", c.settled)
+			card := h.tg.wait(mEdit, c.want[0])
+			for _, want := range c.want {
+				if !strings.Contains(card.text(), want) {
+					t.Errorf("card %q lacks %q", card.text(), want)
+				}
+			}
+			for _, no := range c.not {
+				if strings.Contains(card.text(), no) {
+					t.Errorf("card %q has %q", card.text(), no)
+				}
+			}
+			if card.Params["reply_markup"] != nil {
+				t.Errorf("the buttons stay: %+v", card.Params["reply_markup"])
+			}
+		})
+	}
 }

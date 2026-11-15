@@ -1429,7 +1429,15 @@ func (g *Gateway) AnswerElsewhere(sessionID, promptID, choice string) {
 }
 
 func (g *Gateway) hClarify(_ *conn, p map[string]any) (any, string, func()) {
-	if fmt.Sprint(keys(p)) != "[answer execution_generation prompt_id session_id]" {
+	// via is optional and only a Hermes that lists clarify-card-v1 takes it.
+	want := "[answer execution_generation prompt_id session_id]"
+	if _, has := p["via"]; has {
+		want = "[answer execution_generation prompt_id session_id via]"
+		if !slices.Contains(g.caps, gateway.CapClarifyCard) {
+			return nil, errInvalidParams, nil
+		}
+	}
+	if fmt.Sprint(keys(p)) != want {
 		return nil, errInvalidParams, nil
 	}
 	s := g.sessions[str(p, kSessionID)]
@@ -1438,7 +1446,26 @@ func (g *Gateway) hClarify(_ *conn, p map[string]any) (any, string, func()) {
 		return map[string]any{kStatus: "already_resolved"}, "", nil
 	}
 	delete(s.prompts, pr.PromptID)
-	g.publishLocked(s, "clarify.settled", map[string]any{"prompt_id": pr.PromptID, kExecGen: pr.ExecutionGeneration})
+	settled := map[string]any{"prompt_id": pr.PromptID, kExecGen: pr.ExecutionGeneration}
+	if slices.Contains(g.caps, gateway.CapClarifyCard) {
+		// What Hermes with clarify-card-v1 sends: the question as asked and how it ended.
+		settled["question"], settled["choices"], settled["multi_select"] = str0(pr.Question), append([]string{}, pr.Choices...), pr.MultiSelect
+		if pr.Subagent != nil {
+			settled["subagent"] = *pr.Subagent
+		}
+		now := float64(time.Now().UnixMilli()) / 1000
+		settled["ended_at"] = now
+		if a := str(p, "answer"); a == "" {
+			settled["outcome"] = "skipped"
+		} else {
+			settled["outcome"], settled["answer"], settled["answered_at"] = "answered", a, now
+			if via, ok := p["via"].(string); ok && via != "" {
+				settled["answered_via"] = via
+			}
+		}
+	}
+	g.publishLocked(s, "clarify.settled", settled)
+	g.storeClarifyLocked(s, pr, settled)
 	g.answers = append(g.answers, str(p, "answer"))
 	if len(s.NextPrompts) > 0 {
 		next := s.NextPrompts[0]
@@ -1638,3 +1665,90 @@ func (g *Gateway) ClarifyAnswers() []string {
 }
 
 const kResolved = "resolved"
+
+// str0 is the text of an optional string.
+func str0(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// storeClarifyLocked stores the clarify tool call of a chat's own question
+// with its result, as Hermes with clarify-card-v1 does (tools/clarify_tool.py):
+// the question, the choices offered, whether it took several picks, the
+// answer, when and where it was given, and how the wait ended. A subagent's
+// question is the child's and is not in the chat's transcript.
+func (g *Gateway) storeClarifyLocked(s *Session, pr gateway.Prompt, settled map[string]any) {
+	if !slices.Contains(g.caps, gateway.CapClarifyCard) || pr.Subagent != nil {
+		return
+	}
+	choices := append([]string{}, pr.Choices...)
+	r := map[string]any{"question": str0(pr.Question), "choices_offered": choices, "multi_select": pr.MultiSelect, "status": "unanswered", "user_response": nil}
+	outcome := "submitted"
+	switch settled["outcome"] {
+	case "answered":
+		r["status"] = "answered"
+		a, _ := settled["answer"].(string)
+		if pr.MultiSelect {
+			var picks []string
+			if json.Unmarshal([]byte(a), &picks) == nil {
+				r["user_response"] = picks
+			} else {
+				r["user_response"] = []string{a}
+			}
+		} else {
+			r["user_response"] = a
+		}
+		r["answered_at"] = settled["answered_at"]
+		if via, ok := settled["answered_via"]; ok {
+			r["answered_via"] = via
+		}
+	case "skipped":
+		r["status"] = "skipped"
+	case "timed_out":
+		outcome = "timed_out"
+	case "cancelled":
+		outcome = "cancelled"
+	}
+	result := map[string]any{"responses": []any{r}, "outcome": outcome, "ended_at": settled["ended_at"]}
+	if t, ok := settled["timeout_s"]; ok {
+		result["timeout_s"] = t
+	}
+	id := "call-" + pr.PromptID
+	args, _ := json.Marshal(map[string]any{"questions": []any{map[string]any{"question": str0(pr.Question), "choices": choices}}})
+	content, _ := json.Marshal(result)
+	s.Messages = append(s.Messages,
+		map[string]any{"role": "assistant", "text": "", "tool_calls": []map[string]any{{"id": id, "function": map[string]any{"name": "clarify", "arguments": string(args)}}}},
+		map[string]any{"role": "tool", "tool_call_id": id, "name": "clarify", "content": string(content)})
+}
+
+// SettleClarify ends a chat's open question the way Hermes does when nobody
+// answers it, or the agent withdraws it: outcome is "timed_out" or
+// "cancelled", and a timed out question says how long it waited
+// (timeoutS seconds). The question's card is the one clarify.settled and
+// the stored result of the call draw.
+func (g *Gateway) SettleClarify(sessionID, promptID, outcome string, timeoutS int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.sessions[sessionID]
+	pr, ok := s.prompts[promptID]
+	if !ok {
+		return
+	}
+	delete(s.prompts, promptID)
+	settled := map[string]any{"prompt_id": promptID, kExecGen: pr.ExecutionGeneration, "outcome": outcome, "question": str0(pr.Question),
+		"choices": append([]string{}, pr.Choices...), "multi_select": pr.MultiSelect, "ended_at": float64(time.Now().UnixMilli()) / 1000}
+	if pr.Subagent != nil {
+		settled["subagent"] = *pr.Subagent
+	}
+	if timeoutS > 0 {
+		settled["timeout_s"] = timeoutS
+	}
+	g.publishLocked(s, "clarify.settled", settled)
+	g.storeClarifyLocked(s, pr, settled)
+	if len(s.prompts) == 0 && len(s.NextPrompts) == 0 {
+		s.Running = false
+		g.publishLocked(s, "message.complete", map[string]any{kText: "no answer", kStatus: kComplete})
+	}
+}

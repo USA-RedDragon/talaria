@@ -59,7 +59,7 @@ func contract() map[string][]string {
 		},
 		"gateway/session_controls.py": {
 			`if set(params) != {"session_id", "execution_generation", "prompt_id", "choice"}:`,
-			`if set(params) != {"session_id", "execution_generation", "prompt_id", "answer"}:`,
+			`if set(params) - {"via"} != {"session_id", "execution_generation", "prompt_id", "answer"}:`,
 			"if set(params) - {'end_reason'} != {'session_id', 'subscription_id'}:",
 			"if ref.session_id not in self.subscriptions:\n            raise RuntimeStoreError('permission_denied')",
 			"request_id = params.get('submission_id') or params.get('input_id')",
@@ -77,7 +77,7 @@ func contract() map[string][]string {
 			"choices = ['" + gateway.ChoiceOnce + "', '" + gateway.ChoiceDeny + "']",
 			"prompt = {'kind': 'approval', 'prompt_id': prompt_id,", "event_type='approval.request'",
 			`prompt = {"kind": "clarify", "prompt_id": entry.clarify_id,`, `"multi_select": entry.multi_select}`,
-			`event_type="clarify.request")`, "event_type=prompt['kind'] + '.settled')",
+			`event_type="clarify.request")`, "event_type=prompt['kind'] + '.settled')", "settled.update(_clarify_record(route, prompt))",
 		},
 		// The hub works out the outcome of an approval answered where it cannot
 		// see the choice from the tool call that asked (internal/service/outcome.go).

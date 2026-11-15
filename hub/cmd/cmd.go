@@ -99,7 +99,7 @@ func run(cmd *cobra.Command, cfg *config.Config) error {
 		return err
 	}
 	opts := service.Options{HoldTimeout: cfg.Hold.Timeout, Dialer: func(b config.Backend) service.Dialer { return dialers[b.ID] },
-		Answers: st, Grants: st, SubagentLog: st, Views: st}
+		Answers: st, Grants: st, SubagentLog: st, Questions: st, Views: st}
 	if st.Postgres() {
 		opts.Relay = st
 	}
@@ -169,7 +169,7 @@ func run(cmd *cobra.Command, cfg *config.Config) error {
 		box = nil
 	}
 	topts := telegram.Options{PublicURL: cfg.HTTP.PublicURL, Service: svc, Links: st, Tokens: st, State: st, Notices: st,
-		Prompts: st, Pins: st, Logger: slog.Default()}
+		Prompts: st, Pins: st, Location: cfg.UI.Location(), Logger: slog.Default()}
 	if devices != nil {
 		topts.Computers = devices
 	}

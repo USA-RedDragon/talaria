@@ -76,6 +76,9 @@ type Options struct {
 	// them. Nil: the hub reads a subagent's steps from Hermes every time,
 	// and they are gone once Hermes cannot read them.
 	SubagentLog hub.SubagentLog
+	// Questions keeps the questions of subagents once they are over, for
+	// the chat's card after a reload. Nil: such a card is gone then.
+	Questions hub.QuestionLog
 	// Grants are the backends admins gave users. Nil: only the config
 	// decides.
 	Grants Grants
@@ -757,7 +760,7 @@ func (s *Service) AnswerPrompt(ctx context.Context, user, backendID, sessionID, 
 			return err
 		}
 		method, params = gateway.MethodClarify, gateway.ClarifyParams{SessionID: ls.id, ExecutionGeneration: p.ExecutionGeneration,
-			PromptID: p.PromptID, Answer: answer}
+			PromptID: p.PromptID, Answer: answer, Via: b.clarifyVia(ctx, ls)}
 	default:
 		return hub.ErrUnknownApproval
 	}
@@ -825,12 +828,40 @@ func (s *Service) forgetAnswer(ctx context.Context, backendID, promptID string, 
 	}
 }
 
+// clarifyVia is where an answer given with ctx comes from, for the Hermes
+// that keeps it with the answer: "" for one that does not take it.
+func (b *backend) clarifyVia(ctx context.Context, ls *live) string {
+	c, err := b.ensure(ctx, ls)
+	if err != nil || !b.capable(ctx, c, gateway.CapClarifyCard) {
+		return ""
+	}
+	return hub.AnsweredVia(ctx)
+}
+
 // clarifyAnswer is the answer clarify.respond takes for a: "" to skip, a
-// JSON array of labels for picks, or the text.
+// JSON array of labels for picks, or the text. A multi-select question also
+// takes typed text with its picks (its Other row): the text is one more
+// entry of the array.
 func clarifyAnswer(p gateway.Prompt, a hub.Answer) (string, error) {
 	switch {
 	case a.Skip:
 		return "", nil
+	case len(a.Picks) > 0 && strings.TrimSpace(a.Text) != "" && p.MultiSelect:
+		picks := append([]string(nil), a.Picks...)
+		for _, pick := range picks {
+			if !slices.Contains(p.Choices, pick) {
+				return "", fmt.Errorf("%w: that is not one of the answers", hub.ErrBadValue)
+			}
+		}
+		text := strings.TrimSpace(a.Text)
+		if len(text) > maxAnswer {
+			return "", fmt.Errorf("%w: the answer is too long", hub.ErrBadValue)
+		}
+		out, err := json.Marshal(append(picks, text))
+		if err != nil {
+			return "", err
+		}
+		return string(out), nil
 	case len(a.Picks) > 0:
 		if !p.MultiSelect && len(a.Picks) > 1 {
 			return "", fmt.Errorf("%w: pick one answer", hub.ErrBadValue)
@@ -1603,6 +1634,12 @@ func (b *backend) subscribed(ctx context.Context, c *gateway.Client, ls *live, s
 	if snap.Info.Title != nil {
 		title = *snap.Info.Title
 	}
+	var saved []json.RawMessage
+	if log := b.svc.opts.Questions; log != nil {
+		qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), answerTimeout)
+		saved, _ = log.Questions(qctx, b.cfg.ID, ls.id)
+		cancel()
+	}
 	prompts := make([]json.RawMessage, 0, len(snap.Prompts))
 	for _, p := range snap.Prompts {
 		raw, err := json.Marshal(p)
@@ -1623,8 +1660,12 @@ func (b *backend) subscribed(ctx context.Context, c *gateway.Client, ls *live, s
 			pending = append(pending, hub.Pending{ID: p.AdmissionID, Status: hub.PendingLost, Text: p.Text, SubmissionID: sub(p)})
 		}
 	}
+	ls.mu.Lock()
+	ls.mergeQuestions(saved)
+	questions := slices.Clone(ls.questions)
+	ls.mu.Unlock()
 	hs := hub.Snapshot{SessionID: snap.SessionID, BackendID: b.cfg.ID, Title: title,
-		Running: snap.Running, Messages: msgs, Prompts: prompts, Pending: pending, Info: info(snap.Info),
+		Running: snap.Running, Messages: msgs, Prompts: prompts, Questions: questions, Pending: pending, Info: info(snap.Info),
 		ToolBackground: b.capable(ctx, c, gateway.CapToolBackground)}
 	b.keepSnapshot(ls.id, hs)
 	data, err := json.Marshal(hs)

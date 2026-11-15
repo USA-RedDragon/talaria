@@ -286,6 +286,113 @@ func settledOutcome(p hub.PromptInfo, shown, now time.Time, cancelled bool,
 	return answeredElsewhere, "Answered in another app.", false
 }
 
+// otherLabel is the row every question has to type an answer of one's own.
+const otherLabel = "Other (type your own)"
+
+// questionEnd is how a question ended, for its card once it is over.
+type questionEnd struct {
+	// picks are the choices that were picked, other the text typed in the
+	// Other row, skipped a skip.
+	picks   []string
+	other   string
+	skipped bool
+	// at and via say when and where it was answered; zero when not known.
+	at  time.Time
+	via string
+	// note replaces the status line: why there is no answer.
+	note string
+}
+
+// questionCardHTML is a question once it is over: the question, every
+// choice that was offered with the answer checked, the Other row (a typed
+// answer shows in it, checked), and when and where it was answered or why
+// it was not.
+func questionCardHTML(p hub.PromptInfo, end questionEnd, loc *time.Location) string {
+	var b strings.Builder
+	b.WriteString("<b>Question</b>")
+	if p.Subagent != "" {
+		b.WriteString("\n<b>Subagent:</b> " + escapeHTML(truncate(oneLine(p.Subagent), 160)))
+	}
+	if p.Question != "" {
+		b.WriteString("\n" + escapeHTML(truncate(p.Question, 2500)))
+	}
+	row := func(on bool, text string) {
+		mark := "\u2610 "
+		if on {
+			mark = "\u2611 "
+		}
+		b.WriteString("\n" + mark + escapeHTML(truncate(text, 300)))
+	}
+	b.WriteString("\n")
+	for _, c := range p.Choices {
+		row(slices.Contains(end.picks, c), c)
+	}
+	if end.other != "" {
+		row(true, "Other: "+end.other)
+	} else {
+		row(false, otherLabel)
+	}
+	status := end.note
+	if status == "" {
+		status = "Answered"
+		if end.skipped {
+			status = "Skipped"
+		}
+		if !end.at.IsZero() {
+			status += " at " + clockTime(end.at, loc)
+		}
+		if end.via == hub.AnsweredInTelegram {
+			status += " (on Telegram)"
+		} else if end.via == hub.AnsweredInHub {
+			status += " (in the hub)"
+		}
+	}
+	b.WriteString("\n\n<i>" + escapeHTML(status) + "</i>")
+	return b.String()
+}
+
+// clockTime is t as "2:14 PM" in loc.
+func clockTime(t time.Time, loc *time.Location) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return t.In(loc).Format("3:04 PM")
+}
+
+// answerEnd is how the answer a is shown on its question's card.
+func answerEnd(p hub.PromptInfo, a hub.Answer, at time.Time) questionEnd {
+	end := questionEnd{at: at, via: hub.AnsweredInTelegram, skipped: a.Skip}
+	for _, pick := range a.Picks {
+		if slices.Contains(p.Choices, pick) {
+			end.picks = append(end.picks, pick)
+		} else {
+			end.other = strings.TrimSpace(pick)
+		}
+	}
+	if t := strings.TrimSpace(a.Text); t != "" && !a.Skip {
+		if i := slices.IndexFunc(p.Choices, func(c string) bool { return strings.EqualFold(c, t) }); i >= 0 && len(a.Picks) == 0 {
+			end.picks = append(end.picks, p.Choices[i])
+		} else {
+			end.other = t
+		}
+	}
+	return end
+}
+
+// elsewhereEnd is how a question ended that the bot did not answer: nobody
+// in time, withdrawn, or answered in the hub or another app (the bot does
+// not see which choice).
+func elsewhereEnd(p hub.PromptInfo, shown, now time.Time, cancelled bool) questionEnd {
+	timeout := time.Duration(p.Timeout * float64(time.Second))
+	switch {
+	case cancelled:
+		return questionEnd{note: "Withdrawn: the agent stopped waiting for an answer"}
+	case timeout > 0 && now.Sub(shown) >= timeout-slack(timeout):
+		return questionEnd{note: "No answer: timed out after " + duration(timeout)}
+	}
+	return questionEnd{note: "Answered in the hub or another app"}
+}
+
 // maxButtons is how many choices get a button of their own.
 const maxButtons = 10
 
@@ -344,9 +451,10 @@ func promptKeyboard(prefix, key string, p hub.PromptInfo, picks []bool) *InlineK
 	if p.Multi {
 		last = append(last, InlineButton{Text: "Send", CallbackData: cb(tokSend)})
 	}
-	other := "Other answer"
+	// Every question has the Other row, whatever the agent offered.
+	other := otherLabel
 	if len(p.Choices) == 0 {
-		other = "Answer"
+		other = "Type your answer"
 	}
 	last = append(last, InlineButton{Text: other, CallbackData: cb(tokOther)}, InlineButton{Text: "Skip", CallbackData: cb(tokSkip)})
 	return &InlineKeyboard{InlineKeyboard: append(rows, last)}
@@ -495,6 +603,12 @@ func (b *Bot) Settled(ctx context.Context, rec hub.NoticeRecord, cancelled bool,
 		}
 		if !ok {
 			sn = shownNotice{body: noticeBody(rec), at: rec.CreatedAt}
+		}
+		if rec.Prompt.Kind == hub.PromptClarify {
+			// Answered elsewhere, expired or withdrawn: the card keeps the choices.
+			b.forgetShown(key)
+			b.editHTML(ctx, m.ChatID, m.MessageID, questionCardHTML(*rec.Prompt, elsewhereEnd(*rec.Prompt, sn.at, b.now(), cancelled), b.loc))
+			continue
 		}
 		head, note, final := settledOutcome(*rec.Prompt, sn.at, b.now(), cancelled, answer)
 		if final {
@@ -683,6 +797,10 @@ func (b *Bot) pressPrompt(ctx context.Context, q *CallbackQuery, user string, t 
 		return
 	}
 	b.answer(ctx, q.ID, truncate(verdict, 180))
+	if p.Kind == hub.PromptClarify {
+		b.editHTML(ctx, t.to.chat, q.Message.MessageID, questionCardHTML(p, answerEnd(p, a, b.now()), b.loc))
+		return
+	}
 	b.editHTML(ctx, t.to.chat, q.Message.MessageID, outcomeHTML(truncate(verdict, 300), t.body, "By "+user+"."))
 }
 
@@ -960,6 +1078,9 @@ func (b *Bot) replyAnswer(ctx context.Context, to dest, user string, m *Message)
 	a, verdict := hub.Answer{Text: m.Text}, "Answered: "+m.Text
 	if cmd, _ := parseCommand(m.Text); cmd == cmdSkip {
 		a, verdict = hub.Answer{Skip: true}, "Skipped"
+	} else if t.prompt.Kind == hub.PromptClarify && t.prompt.Multi {
+		// The Other row of a multi-select question goes with the picks.
+		a.Picks = b.picked(t)
 	}
 	err := b.sendAnswer(ctx, user, t, a)
 	if errors.Is(err, hub.ErrUnknownApproval) || errors.Is(err, hub.ErrUnknownSession) {
@@ -973,6 +1094,10 @@ func (b *Bot) replyAnswer(ctx context.Context, to dest, user string, m *Message)
 	}
 	b.dropPrompt(t)
 	b.answeredHere(ctx, t)
+	if t.prompt.Kind == hub.PromptClarify {
+		b.editHTML(ctx, to.chat, rt.question, questionCardHTML(t.prompt, answerEnd(t.prompt, a, b.now()), b.loc))
+		return true
+	}
 	b.editHTML(ctx, to.chat, rt.question, outcomeHTML(truncate(verdict, 300), t.body, "By "+user+"."))
 	return true
 }
