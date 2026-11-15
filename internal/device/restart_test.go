@@ -24,7 +24,7 @@ import (
 type daemon struct {
 	c      *device.Client
 	cancel context.CancelFunc
-	done   chan error
+	done   chan struct{}
 }
 
 func spoolOptions(t *testing.T, url, root, spoolDir string) device.Options {
@@ -49,7 +49,7 @@ func startDaemon(t *testing.T, opts device.Options) *daemon {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &daemon{c: c, cancel: cancel, done: make(chan error, 1)}
+	d := &daemon{c: c, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		if err := c.Run(ctx); err != nil {
 			t.Logf("Run: %v", err)

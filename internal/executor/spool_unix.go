@@ -52,13 +52,13 @@ const (
 	holderWait = 30 * time.Second
 )
 
-// Poll intervals of a spooled command's output file: the shortest after
-// new output, growing to the longest while it is quiet. liveCheck is how
+// Poll intervals of a spooled command's output file: pollFirst after new
+// output, doubling to pollLongest while it is quiet. liveCheck is how
 // often a quiet command's holder is checked.
 const (
-	pollMin   = 5 * time.Millisecond
-	pollMax   = 100 * time.Millisecond
-	liveCheck = time.Second
+	pollFirst   = 5 * time.Millisecond
+	pollLongest = 100 * time.Millisecond
+	liveCheck   = time.Second
 )
 
 // holdSpec is spec.json.
@@ -480,7 +480,7 @@ func (s *spooled) tail(p *Process, from int64, out func([]byte)) {
 			}
 		}
 	}
-	wait := pollMin
+	wait := pollFirst
 	lastCheck := time.Now()
 	for {
 		if s.isReleased() {
@@ -489,7 +489,7 @@ func (s *spooled) tail(p *Process, from int64, out func([]byte)) {
 		n, _ := f.Read(buf)
 		if n > 0 {
 			out(append([]byte(nil), buf[:n]...))
-			wait = pollMin
+			wait = pollFirst
 			continue
 		}
 		if ex, ok := readExit(s.dir); ok {
@@ -527,7 +527,7 @@ func (s *spooled) tail(p *Process, from int64, out func([]byte)) {
 			return
 		case <-time.After(wait):
 		}
-		wait = min(wait*2, pollMax)
+		wait = min(wait*2, pollLongest)
 	}
 }
 
