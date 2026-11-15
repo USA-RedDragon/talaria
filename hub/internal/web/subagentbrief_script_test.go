@@ -10,13 +10,12 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway/gatewaytest"
 )
 
-// A subagent's row in the Activity panel has a title that opens to the whole
-// goal on a tap (or Enter) and closes on a second, and its small chat opens
+// A subagent's row in the Activity panel opens to a small chat that starts
 // with the task and then the context it was given, each folded after six lines
 // with Show all / Show less. testdata/subagentbrief/run.js drives the real
 // page in headless Chrome at phone and desktop size, light and dark;
 // BRIEF_SHOTS=dir keeps screenshots.
-func TestSubagentBriefTitleExpandsAndChatShowsTaskAndContext(t *testing.T) {
+func TestSubagentBriefChatShowsTaskAndContext(t *testing.T) {
 	t.Parallel()
 	node, err := exec.LookPath("node")
 	if err != nil {

@@ -2,9 +2,7 @@
 // Drives the real hub page in headless Chrome (DevTools protocol).
 // usage: node run.js CHROME_BIN HUB_URL PROFILE_DIR (BRIEF_SHOTS=dir keeps screenshots)
 // A subagent runs with a goal of eight lines and a context of eleven. Asserts:
-// the row's title is one line; a tap on it opens the whole goal (line breaks
-// kept, the row stays closed) and a second tap closes it; Enter and Space do
-// the same from the keyboard; the small chat opens with Task and then Context,
+// the closed row's title is one line; the small chat opens with Task and then Context,
 // each folded after six lines with Show all / Show less and selectable text;
 // at 412 and 1280 px, light and dark.
 const assert = require("assert");
@@ -41,35 +39,10 @@ let chrome;
   await ev(`document.getElementById("actbtn").click()`);
   await until(`document.querySelector(".act .row-head .goal")`, "the subagent row");
 
-  // The title is the goal's first line, on one line.
+  // Closed, the title is the goal's first line, on one line.
   assert.strictEqual(await ev(`${title}.textContent`), "Audit the status bar in the game UI.");
-  assert.strictEqual(await ev(`${title}.getAttribute("role")`), "button");
-  assert.strictEqual(await ev(`${title}.getAttribute("aria-expanded")`), "false");
-  const one = await h(".act .row-head .goal");
-  assert.ok(one < 30, `one line is ${one}px`);
-
-  // A tap opens the whole goal under the same title; the row does not open.
-  await ev(`${title}.click()`);
-  const lines = await ev(`${title}.textContent`);
-  assert.ok(lines.startsWith("Audit the status bar") && lines.endsWith("Then stop.") && lines.split("\n").length === 8, lines);
-  assert.strictEqual(await ev(`${title}.getAttribute("aria-expanded")`), "true");
-  assert.ok((await h(".act .row-head .goal")) > one * 4, "the goal shows all its lines");
-  assert.strictEqual(await ev(`document.querySelectorAll(".act .row.open").length`), 0);
-  assert.strictEqual(await ev(`getComputedStyle(${title}).userSelect`), "text");
-  assert.strictEqual(await ev(`getComputedStyle(${title}).whiteSpace`), "pre-wrap");
-  // A second tap closes it.
-  await ev(`${title}.click()`);
-  assert.strictEqual(await ev(`${title}.textContent`), "Audit the status bar in the game UI.");
+  assert.strictEqual(await ev(`${title}.getAttribute("role")`), null);
   assert.ok((await h(".act .row-head .goal")) < 30);
-  // The keyboard: the title is a tab stop; Enter opens, Space closes.
-  await ev(`${title}.focus()`);
-  assert.strictEqual(await ev(`document.activeElement === ${title}`), true);
-  await key("Enter", "Enter", 13, "\r");
-  assert.strictEqual(await ev(`${title}.getAttribute("aria-expanded")`), "true");
-  assert.strictEqual(await ev(`document.querySelectorAll(".act .row.open").length`), 0);
-  await ev(`${title}.focus()`);
-  await key(" ", "Space", 32, " ");
-  assert.strictEqual(await ev(`${title}.getAttribute("aria-expanded")`), "false");
 
   // Open the row from its header: the chat opens with the task, then the context.
   await ev(`document.querySelector(".act .row-head .meta").click()`);
@@ -106,13 +79,8 @@ let chrome;
   for (const [w, h2, dark, name] of [[412, 915, false, "412-light"], [412, 915, true, "412-dark"], [1280, 800, false, "1280-light"], [1280, 800, true, "1280-dark"]]) {
     await view(w, h2, dark);
     await c.frames(3);
-    // Title open, both folds open on the desktop, closed on the phone's second shot.
+    // The card is open; its title may wrap. Shoot it, folds closed then open.
     await ev(`document.querySelector(".act .mc").scrollTop = 0`);
-    await ev(`(() => { const t = ${title}; if (t.getAttribute("aria-expanded") !== "true") t.click(); return 1; })()`);
-    await c.frames(2);
-    assert.strictEqual(await ev(`getComputedStyle(${title}).whiteSpace`), "pre-wrap", "the open title keeps its line breaks while the row is open");
-    await shot(name + "-title-open");
-    await ev(`${title}.click()`);
     await c.frames(2);
     await shot(name);
     await ev(`${more(0)}.click(); ${more(1)}.click();`);

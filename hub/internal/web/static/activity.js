@@ -26,7 +26,7 @@ window.HubActivity = (ctx) => {
   function fresh(chat) {
     return { chat, subs: new Map(), bgs: new Map(), open: new Set(), tab: "sub", paused: false, turn: null,
       usage: null, running: false, error: "", failingSince: 0, loaded: false, polled: 0, timer: 0, tick: 0,
-      approvals: new Map(), asked: new Set(), minis: new Map(), raw: new Set(), goals: new Set(), nodes: new Map(), heads: new Map(), sumKey: "", fed: 0 };
+      approvals: new Map(), asked: new Set(), minis: new Map(), raw: new Set(), nodes: new Map(), heads: new Map(), sumKey: "", fed: 0 };
   }
 
   // k writes a token count: 812, 1.3k, 41k, 1.2M.
@@ -84,17 +84,12 @@ window.HubActivity = (ctx) => {
   function sub(id, p) {
     let r = S.subs.get(id);
     if (!r) {
-      r = { id, kind: "sub", goal: "", goalFull: "", model: "", state: "queued", startedAt: Date.now(), endedAt: 0, tools: 0,
+      r = { id, kind: "sub", goal: "", model: "", state: "queued", startedAt: Date.now(), endedAt: 0, tools: 0,
         tin: null, tout: null, now: "", tool: null, missed: 0, tail: [], result: "", parentId: "", delegation: "", child: "", steer: true };
       S.subs.set(id, r);
     }
     if (p) {
-      if (p.goal) {
-        r.goal = firstLine(p.goal);
-        // The whole goal, for the title's tap: the longest one seen, since an event may carry it cut.
-        const full = String(p.goal).trim();
-        if (full.length > r.goalFull.length) r.goalFull = full;
-      }
+      if (p.goal) r.goal = firstLine(p.goal);
       if (p.model) r.model = p.model;
       if (p.parent_id) r.parentId = p.parent_id;
       if (p.delegation_id) r.delegation = p.delegation_id;
@@ -495,9 +490,8 @@ window.HubActivity = (ctx) => {
           m.view.add(evs);
           m.seq = evs[evs.length - 1].seq;
           const g = evs.find((e) => e.type === "goal");
-          if (g && g.text && g.text.trim().length > r.goalFull.length) {
-            r.goalFull = g.text.trim();
-            r.goal = r.goal || firstLine(g.text);
+          if (g && g.text && !r.goal) {
+            r.goal = firstLine(g.text);
             draw();
           }
         }
@@ -709,43 +703,7 @@ window.HubActivity = (ctx) => {
       const l = window.HubToolCard.statusLine(r.tool.name, r.tool.preview, m ? m.view.memory() : null);
       line = l.icon + "|" + l.text + "|" + (r.tool.at && ago((Date.now() - r.tool.at) / 1000) ? 1 : 0) + "|" + S.raw.has(r.id) + "|" + r.tool.name + " " + r.tool.preview;
     }
-    return JSON.stringify([child, r.id, r.kind, r.state, r.goal, goalShown(r), S.goals.has(r.id), r.startedAt, r.endedAt, r.model, r.tools, r.tin, r.tout, r.now, line]);
-  }
-
-  // goalLong says whether a row's title has more to show than its first
-  // line: a goal of several lines or one that is long.
-  const goalLong = (r) => r.kind === "sub" && (r.goalFull.includes("\n") || r.goalFull.length > 60);
-  // goalShown is the title's text: the whole goal while the reader opened it.
-  const goalShown = (r) => (goalLong(r) && S.goals.has(r.id) ? r.goalFull : r.goal);
-
-  // goalTitle draws a row's title. When the goal has more than its first line,
-  // a tap (Enter or Space too) opens the whole goal under the same title, and
-  // a second tap closes it. It is a span, not a button, so the text stays
-  // selectable; a tap that ends a selection does not toggle.
-  function goalTitle(r) {
-    const text = goalShown(r) || (r.kind === "sub" ? "Subagent" : "Command");
-    if (!goalLong(r)) return el("span", "goal", text);
-    const open = S.goals.has(r.id);
-    const t = el("span", "goal expandable" + (open ? " full" : ""), text);
-    t.tabIndex = 0;
-    t.setAttribute("role", "button");
-    t.setAttribute("aria-expanded", String(open));
-    t.setAttribute("aria-label", (open ? "Hide the whole goal: " : "Show the whole goal: ") + r.goal);
-    const flip = () => {
-      if (S.goals.has(r.id)) S.goals.delete(r.id); else S.goals.add(r.id);
-      draw();
-    };
-    t.onclick = (e) => {
-      e.stopPropagation();
-      const sel = window.getSelection && window.getSelection();
-      if (sel && !sel.isCollapsed && String(sel).trim()) return;
-      flip();
-    };
-    t.onkeydown = (e) => {
-      e.stopPropagation();
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); }
-    };
-    return t;
+    return JSON.stringify([child, r.id, r.kind, r.state, r.goal, r.startedAt, r.endedAt, r.model, r.tools, r.tin, r.tout, r.now, line]);
   }
 
   // rowNode gives the node for row r: the one drawn before when nothing it
@@ -788,7 +746,7 @@ window.HubActivity = (ctx) => {
     head.setAttribute("aria-expanded", String(S.open.has(r.id)));
     const end = r.endedAt || Date.now();
     const running = !r.endedAt;
-    head.append(el("span", "state " + r.state), goalTitle(r),
+    head.append(el("span", "state " + r.state), el("span", "goal", r.goal || (r.kind === "sub" ? "Subagent" : "Command")),
       el("span", "time", running ? window.HubTimes.counter(end - r.startedAt) : fmt((end - r.startedAt) / 1000)));
     const meta = el("div", "meta");
     meta.append(el("span", "", stateWord[r.state] || "Done"));
@@ -810,7 +768,12 @@ window.HubActivity = (ctx) => {
       draw();
       if (S.open.has(r.id) && r.kind === "sub") soon();
     };
-    head.onclick = flip;
+    // A click that ends a text selection is not a tap: it leaves the card as it is.
+    head.onclick = () => {
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed && String(sel).trim()) return;
+      flip();
+    };
     head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } };
     box.append(head);
     if (S.open.has(r.id)) box.append(body(r));
