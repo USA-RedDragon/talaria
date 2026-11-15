@@ -1,8 +1,0 @@
-# New: a session clone of a pinned release is the operator's own variant
-tests/tools/test_smart_provenance_trusted_pins.py
-# The review and the trusted sources it builds on
-tests/tools/test_smart_provenance.py
-tests/tools/test_smart_provenance_source_paths.py
-tests/tools/test_smart_provenance_source_grants.py
-tests/tools/test_smart_approval_false_positives.py
-tests/tools/test_approval_provenance.py

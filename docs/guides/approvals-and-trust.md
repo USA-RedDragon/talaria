@@ -97,18 +97,6 @@ approvals:
 
 There is no default. A `..` path, a look-alike host, and a clone made with `-c`, `-u` or `--upload-pack` are not trusted, and a dangerous command pattern still skips stage 1. A grant (above) is per chat and is made by you in the chat; `trusted_sources` is per backend and is set in its config.
 
-### Trusted pins
-
-`approvals.trusted_pins` names one ref of an outside repository that is your own variant: a pinned upstream release plus your patches. A session clone of that repository at exactly that branch or tag is not outside code, so applying patches, `uv sync --locked` and the tests in it need no question. Talaria's own Hermes image is such a variant (the release in `hermes/Dockerfile`, plus `hermes/patches`):
-
-```yaml
-approvals:
-  trusted_pins:
-    - https://github.com/NousResearch/hermes-agent@v0.23.1
-```
-
-There is no default. Only a clone made with `--branch <ref>` of that repository (any spelling of its URL, https or ssh) counts. A clone at another tag, at a branch, with no ref, of a fork or look-alike host, with an option that runs code or fetches more (`-c core.fsmonitor=...`, `--reference`, `--recurse-submodules`), or moved afterwards by `git checkout`, `fetch`, `pull`, `reset` or `remote` is outside code as before, and so is anything downloaded into it (a patch you did not take from your repository). A dangerous command pattern still skips stage 1. The pin is written by hand: when Renovate bumps `HERMES_BASE` in `hermes/Dockerfile`, the same pull request must change the ref here (the Flux values of the Hermes app), or the new release's clone asks again. The Flux repository is not visible from this one, so no check here compares the two.
-
 ## What never approves
 
 | Source | Counts as your approval? |
@@ -128,7 +116,6 @@ There is no default. Only a clone made with `--branch <ref>` of that repository 
 | `approvals.smart_fast_model`, `approvals.smart_model` | `config.yaml` | Models of stage 1 and stage 2. A name on the approval task's provider, or `{provider, model, base_url}`. |
 | `approvals.smart_rules` | `config.yaml` | Your hard, soft, allow and environment rules |
 | `approvals.trusted_sources` | `config.yaml` | URL prefixes of repositories you own |
-| `approvals.trusted_pins` | `config.yaml` | `<repo URL>@<ref>` of a pinned release that is your own variant |
 | `approvals.timeout` | `config.yaml` | How long an approval waits for you |
 | `agent.clarify_timeout` | `config.yaml` | How long a question waits for you |
 | "Never ask in this chat" | Settings, in a chat | `/yolo` for one chat |
