@@ -39,7 +39,10 @@ const { until } = require("../cdp.js");
   lap("prefetched");
   await ev(`window.__gone = true; location.reload()`);
   await until(ev, `!window.__gone`, "the page to reload");
-  await until(ev, `document.body.innerText.includes("Pick a chat")`, "the new release to draw after one reload").catch(async (e) => { console.error(await ev(`document.title + " " + document.body.innerText.slice(0, 300) + " " + [...document.scripts].map((s) => s.src).join()`)); throw e; });
+  // "Pick a chat" is also in the static HTML, so it can show before the
+  // deferred scripts have run; wait for the page's load, which comes after
+  // them, and for a script's export.
+  await until(ev, `document.readyState === "complete" && typeof window.hubMarkdown === "object" && document.body.innerText.includes("Pick a chat")`, "the new release to draw and its scripts to run after one reload").catch(async (e) => { console.error(await ev(`document.title + " " + document.body.innerText.slice(0, 300) + " " + [...document.scripts].map((s) => s.src).join()`)); throw e; });
 
   lap("drawn");
   const st = await ev(`({
