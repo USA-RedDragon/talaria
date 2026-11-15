@@ -1,0 +1,7 @@
+# New: send_file is a read-only tool for smart approval; other tools are still reviewed
+tests/tools/test_smart_approval_send_file.py
+# The review and hold it changes
+tests/tools/test_smart_provenance.py
+tests/tools/test_smart_provenance_clarify.py
+tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_approval.py
