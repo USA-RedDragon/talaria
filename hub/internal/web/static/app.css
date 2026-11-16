@@ -215,6 +215,9 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); fon
 .msg.assistant pre { color: var(--fg); }
 .note { color: var(--muted); font-size: .85rem; text-align: center; }
 .note.bad { color: var(--bad); }
+.failline .faildetails { color: var(--muted); margin-top: .25rem; }
+.failline .faildetails summary { cursor: pointer; }
+.failline .faildetails pre { font-size: .78rem; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; margin: .35rem auto 0; }
 details.reasoning { border-left: 3px solid var(--line); padding: .1rem .6rem; color: var(--muted); font-size: .9rem; }
 details.reasoning summary { cursor: pointer; }
 details.reasoning .body { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }

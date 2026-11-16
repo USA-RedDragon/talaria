@@ -33,3 +33,13 @@ assert.strictEqual(P.clean("web_search, web_extract"), "");
 assert.strictEqual(P.clean("approvals.mode is locked"), "");
 assert.strictEqual(P.clean("The model is busy"), "The model is busy");
 assert.strictEqual(P.clean(undefined), "");
+
+// A failed turn's copy becomes one plain line; codes and ids stay in the folded details.
+const copy = "Claude rejected this request as malformed, so the model didn't answer. Start a clean session with /new or switch models with /model; if it keeps happening, run `hermes doctor`.\n\nProvider said: HTTP 400: Incomplete upstream response (first upstream attempt: status 400, capture incomplete, native retries denied: 3, upstream said: messages.554.content.0: Invalid `encrypted_content` in `search_result` block): API Error: 400 HERMES_MODEL_ADMISSION_CONSUMED (request_id=req_011Ch7FeWfTSCk9rTqqUKFTh)";
+const f = P.failure(copy);
+assert.strictEqual(f.line, "The model request failed: Claude rejected this request as malformed.");
+assert.ok(!/HERMES_|req_|HTTP 400|encrypted_content/.test(f.line), f.line);
+assert.strictEqual(f.details, copy);
+// A raw provider error with no plain first sentence shows no codes either.
+assert.strictEqual(P.failure("HTTP 400: API Error: 400 HERMES_MODEL_ADMISSION_CONSUMED (request_id=req_1)").line, "The model request failed.");
+assert.strictEqual(P.failure("").line, "The model request failed.");

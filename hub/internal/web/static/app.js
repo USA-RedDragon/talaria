@@ -2113,10 +2113,21 @@
           if (p.outcome && !p.status && p.admission_id) { this.transferEnded(p); break; }
           this.setStatus("");
           const tn = this.ensureTurn();
-          if (!tn.text && !tn.raw && typeof p.text === "string" && p.text) this.assistantText(p.text);
+          const failed = p.status === "error" || p.status === "failed";
+          let failLine = false;
+          if (failed && !tn.text && !tn.raw && typeof p.text === "string" && p.text) {
+            // A failed turn's text is Hermes' failure copy around the provider's raw answer: one plain line, the rest folded.
+            const f = window.HubPlain.failure(p.text);
+            const note = el("div", "note bad failline", f.line);
+            const more = el("details", "faildetails");
+            more.append(el("summary", "", "Details"), el("pre", "", f.details));
+            note.append(more);
+            this.add(note);
+            failLine = true;
+          } else if (!tn.text && !tn.raw && typeof p.text === "string" && p.text) this.assistantText(p.text);
           else this.endText();
           if (tn.reasoning) ui.closeUnlessKept(tn.reasoning);
-          if (p.status && p.status !== "complete" && p.status !== "completed") {
+          if (!failLine && p.status && p.status !== "complete" && p.status !== "completed") {
             this.add(el("div", "note" + (p.status === "error" || p.status === "failed" ? " bad" : ""), "Turn " + p.status + (p.error ? ": " + p.error : "")));
           }
           for (const card of this.tools.values()) if (card.classList.contains("running")) this.toolDone(card, {}, 0);
