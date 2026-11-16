@@ -27,7 +27,8 @@ func TestCardShotsChrome(t *testing.T) {
 		t.Skip("node is not installed")
 	}
 	chrome := chromePath(t)
-	e := setup(t)
+	e := setupComputers(t)
+	e.svc.SetLoginGrants(e.opts.LoginGrants)
 	msgs := []map[string]any{{kRole: roleUser, kText: "go"}, {kRole: roleAssistant, kText: "on it"}}
 	card := func(id, cmd, desc string, p gateway.Prompt) []gateway.Prompt {
 		p.Kind, p.PromptID, p.Command = gateway.PromptApproval, id, optr(cmd)
@@ -51,11 +52,11 @@ func TestCardShotsChrome(t *testing.T) {
 		Choices: []string{once, deny, keySource}, Rule: optr("Code from External"), Reason: optr("Downloads an AppImage from GitHub and runs it."),
 		GrantSource: optr("github.com/AppImage/appimagetool")}))
 	n := 2
-	grant := func(name string) *gateway.LoginGrant {
-		return &gateway.LoginGrant{DeviceID: "d1", DeviceName: name, Host: "portal.example.com", SavedLogins: &n, Methods: []string{"Password", "Email link"}}
+	grant := func(id, name string) *gateway.LoginGrant {
+		return &gateway.LoginGrant{DeviceID: id, DeviceName: name, Host: "portal.example.com", SavedLogins: &n, Methods: []string{"Password", "Email link"}}
 	}
-	add("c6", "Shot sign-in grant", 850, card("p6", "browser_login", "", gateway.Prompt{Choices: []string{once, "device", deny}, LoginGrant: grant("Jacob's desktop")}))
-	add("c7", "Shot sign-in unknown", 840, card("p7", "browser_login", "", gateway.Prompt{Choices: []string{once, "device", deny}, LoginGrant: grant("")}))
+	add("c6", "Shot sign-in grant", 850, card("p6", "browser_login", "", gateway.Prompt{Choices: []string{once, "device", deny}, LoginGrant: grant(e.id, pcName)}))
+	add("c7", "Shot sign-in unknown", 840, card("p7", "browser_login", "", gateway.Prompt{Choices: []string{once, "device", deny}, LoginGrant: grant("d_not_mine", "")}))
 	e.gw.AddSession(&gatewaytest.Session{ID: "f1", Title: "Shot failed turn", Live: true, StartedAt: 830, Messages: []map[string]any{{kRole: roleUser, kText: "search it"}}})
 	// The failed turn arrives live, after the page has the chat.
 	poke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -32,6 +32,9 @@ const out = process.env.SHOT_DIR || "";
         await c.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile });
         await c.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }] });
         await sleep(300);
+        // The Activity panel covers the chat on a phone; the cards are shot with it closed.
+        if (await ev(`!document.getElementById("app").classList.contains("act-closed")`)) await ev(`document.getElementById("actbtn").click()`);
+        await sleep(300);
         await ev(`${sel}.scrollIntoView({ block: "center" })`);
         await sleep(150);
         const r = await ev(`(() => { const b = ${sel}.getBoundingClientRect(); return { x: Math.max(0, b.x - 8), y: Math.max(0, b.y - 8), width: Math.min(b.width + 16, ${w}), height: Math.min(b.height + 16, ${h}) }; })()`);

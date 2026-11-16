@@ -70,7 +70,7 @@ async function takeShots(c, main, mini) {
         for (const want of ["open", "closed"]) {
           const isOpen = await ev(`${sel(id)}.querySelector(".notice-head").getAttribute("aria-expanded") === "true"`);
           if (isOpen !== (want === "open")) await ev(`${sel(id)}.querySelector(".notice-head").click()`);
-          await ev(`${sel(id)}.scrollIntoView({ block: "start" })`);
+          await ev(`${sel(id)}.scrollIntoView({ block: "center" })`);
           await sleep(150);
           const r = await ev(`(() => { const b = ${sel(id)}.getBoundingClientRect(); return { x: Math.max(0, b.x - 4), y: Math.max(0, b.y - 4), width: Math.min(b.width + 8, ${w}), height: Math.min(b.height + 8, ${h}) }; })()`);
           const png = await c.send("Page.captureScreenshot", { format: "png", clip: Object.assign(r, { scale: 1 }) });
