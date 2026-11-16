@@ -1546,15 +1546,41 @@
       const b = el("button", "", "Run in background");
       b.type = "button";
       b.title = "Keep the command running in the background and let Talaria go on";
+      const back = () => {
+        b.disabled = false;
+        b.textContent = "Run in background";
+      };
       b.onclick = async () => {
         b.disabled = true;
         try {
           await api("POST", this.base + "/tools/" + encodeURIComponent(id) + "/background");
-          b.textContent = "Moving to the background";
         } catch (e) {
-          b.disabled = false;
+          back();
+          if (e.status === 409) {
+            // The turn has no running command: this card's command ended and its result never came.
+            acts.replaceChildren(el("span", "note", "This command is no longer running. Talaria did not get its result."));
+            return;
+          }
           banner("Could not move the command to the background: " + e.message, true);
+          return;
         }
+        const card = this.tools.get(id);
+        if (!card || card.finished) return;
+        b.textContent = "Moving to the background";
+        // The card's own tool.complete ends the wait; when it does not come, read the state.
+        window.HubMoveBg.settle({
+          wait: window.HubMoveBg.wait,
+          finished: () => card.finished || !card.classList.contains("running"),
+          command: card.call && card.call.args ? card.call.args.command : "",
+          call: () => api("GET", this.base + "/tool-output?call=" + encodeURIComponent(id)),
+          processes: () => api("GET", this.base + "/activity"),
+          done: (result) => this.toolDone(card, { result }),
+          moved: (p) => this.toolDone(card, { result: window.HubMoveBg.movedResult(p) }),
+          back: () => {
+            back();
+            toast("The command did not move to the background. It may still be running.", { bad: true });
+          },
+        });
       };
       acts.append(b);
       return acts;
