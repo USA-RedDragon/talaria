@@ -69,9 +69,9 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 	e.gw.SetFile(kept, shotPicture(t))
 	page := func(id, p string) []map[string]any {
 		return []map[string]any{
-			{kRole: roleAssistant, kText: "Looking.", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: "browser_vision", ilArgs: `{"question":"Where is the button?"}`}}}},
-			{kRole: stepTool, kCallID: id, fieldName: "browser_vision", kText: `{"tab_id":7,"title":"Example","screenshot_bytes":1234,"question":"Where is the button?","path":"` + p + `"}`,
-				kTimestamp: 1763000000.0, "display_metadata": map[string]any{"tool_outcome": map[string]any{"duration_ms": 879}}},
+			{kRole: roleAssistant, kText: "", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: toolBrowserVision, ilArgs: `{"question":"Where is the button?"}`}}}},
+			{kRole: stepTool, kCallID: id, fieldName: toolBrowserVision, kText: `{"tab_id":7,"title":"Example","screenshot_bytes":1234,"question":"Where is the button?","path":"` + p + `"}`,
+				kTimestamp: 1763000000.0},
 		}
 	}
 	call := func(id, args string) map[string]any {

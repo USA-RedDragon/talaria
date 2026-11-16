@@ -290,7 +290,7 @@ func rowsOffer(rows []json.RawMessage, p string, o *offer) {
 				name = calls[r.ToolCallID]
 			}
 			switch {
-			case (name == hub.ScreenshotTool || name == "browser_vision") && screenshotNames(content, p):
+			case (name == hub.ScreenshotTool || name == browserVision) && screenshotNames(content, p):
 				o.named = true
 			case name == hub.PagePublishTool:
 				if hub.PublishedPage(r.Content, content) == p {
@@ -347,7 +347,7 @@ func eventsOffer(ring []hub.Event, p string, o *offer) {
 				if hub.PublishedPage(d.Result, d.ResultText) == p {
 					o.named = true
 				}
-			case hub.ScreenshotTool, "browser_vision":
+			case hub.ScreenshotTool, browserVision:
 				var res string
 				if json.Unmarshal(d.Result, &res) != nil {
 					res = string(d.Result)
@@ -378,7 +378,10 @@ func screenshotNames(result, p string) bool {
 
 // isVisionTool is true for the tools that look at an image named by an image_url
 // argument.
-func isVisionTool(name string) bool { return name == "vision_analyze" || name == "browser_vision" }
+// browserVision is the talaria tool that looks at a screenshot of a tab.
+const browserVision = "browser_vision"
+
+func isVisionTool(name string) bool { return name == "vision_analyze" || name == browserVision }
 
 const toolBatch = "tool_call"
 

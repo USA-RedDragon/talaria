@@ -35,6 +35,9 @@ const (
 )
 
 // pdfBytes is the content of a small PDF file.
+const titleElsewhere = "Elsewhere"
+const toolBrowserVision = "browser_vision"
+
 const pdfBytes = "%PDF-1.7"
 
 func mediaURL(e *hubEnv, backend, p string) string {
@@ -402,7 +405,7 @@ func TestMediaNamedByVisionCall(t *testing.T) {
 		call("c4", "vision_analyze", `{"image_url":"`+notImage+`"}`),
 		call("c5", "terminal", `{"command":"cat `+unnamed+`","image_url":"`+unnamed+`"}`),
 	}})
-	e.gw.AddSession(&gatewaytest.Session{ID: "m2", Title: "Elsewhere", Live: true, StartedAt: 100, Messages: []map[string]any{
+	e.gw.AddSession(&gatewaytest.Session{ID: "m2", Title: titleElsewhere, Live: true, StartedAt: 100, Messages: []map[string]any{
 		call("d1", "vision_analyze", `{"image_url":"`+other+`"}`),
 	}})
 	c := client(t)
@@ -437,10 +440,10 @@ func TestMediaNamedByBrowserVisionResult(t *testing.T) {
 		e.gw.SetFile(p, []byte(shotPNG))
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "m1", Title: titleMedia, Live: true, StartedAt: 200, Messages: []map[string]any{
-		{kRole: roleAssistant, kText: "", "tool_calls": []map[string]any{{"id": "v1", "function": map[string]any{"name": "browser_vision", "arguments": `{"question":"where?"}`}}}},
-		{kRole: "tool", "tool_call_id": "v1", "content": `{"tab_id":7,"title":"t","screenshot_bytes":12,"path":"` + seen + `"}`},
+		{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "v1", fnKey: map[string]any{fieldName: toolBrowserVision, ilArgs: `{"question":"where?"}`}}}},
+		{kRole: stepTool, kCallID: "v1", fieldContent: `{"tab_id":7,"title":"t","screenshot_bytes":12,"path":"` + seen + `"}`},
 	}})
-	e.gw.AddSession(&gatewaytest.Session{ID: "m2", Title: "Elsewhere", Live: true, StartedAt: 100, Messages: []map[string]any{
+	e.gw.AddSession(&gatewaytest.Session{ID: "m2", Title: titleElsewhere, Live: true, StartedAt: 100, Messages: []map[string]any{
 		{kRole: roleUser, kText: "hi"},
 	}})
 	c := client(t)

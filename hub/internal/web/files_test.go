@@ -61,7 +61,7 @@ func filesEnv(t *testing.T, fn func(cfg *config.Config, opts *web.Options, st *s
 	dev := &deviceFiles{files: map[string]string{archive: digits, envFile: "TOKEN=x"}, secret: map[string]string{envFile: secretID}}
 	e.svc.SetFiles(dev)
 	e.gw.AddSession(&gatewaytest.Session{ID: "f1", Title: titleFiles, Live: true, StartedAt: 300, Messages: msgs})
-	e.gw.AddSession(&gatewaytest.Session{ID: "f2", Title: "Elsewhere", Live: true, StartedAt: 200})
+	e.gw.AddSession(&gatewaytest.Session{ID: "f2", Title: titleElsewhere, Live: true, StartedAt: 200})
 	c := client(t)
 	m := login(t, e, c)
 	return e, dev, c, m
