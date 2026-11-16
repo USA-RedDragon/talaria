@@ -908,13 +908,10 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
 .act { background: var(--side); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; min-width: 0;
   padding-top: env(safe-area-inset-top); padding-right: env(safe-area-inset-right); }
 .act-head { display: flex; align-items: center; gap: .3rem; padding: .5rem .6rem; border-bottom: 1px solid var(--line); }
-.act .tabs { display: flex; gap: .2rem; flex: 1; }
-.act .tabs button { border: 0; background: transparent; color: var(--muted); padding: .3rem .5rem; border-radius: 7px; font-size: .85rem;
-  white-space: nowrap; }
-.act .tabs button[aria-selected="true"] { background: var(--card); color: var(--fg); box-shadow: 0 0 0 1px var(--line); }
-.act .tabs .c { font-variant-numeric: tabular-nums; margin-left: .25rem; color: var(--muted); font-size: .78rem; }
-.act .tabs .c:empty { display: none; }
+.act-title { flex: 1; font-size: .85rem; padding: .3rem .5rem; }
+.act .sec .c { font-variant-numeric: tabular-nums; margin-left: .35rem; }
 .act-sum { padding: .4rem .7rem; font-size: .78rem; color: var(--muted); border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.act-sum:empty { display: none; }
 .act-sum b { color: var(--fg); }
 .act-sum .warn { color: var(--warn); }
 .act-sum .bad { color: var(--bad); }

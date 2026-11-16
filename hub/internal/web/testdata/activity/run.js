@@ -17,7 +17,7 @@ const ticks = [];
 const tickClock = () => { for (const f of ticks) f(); };
 let tid = 0;
 const ids = {};
-for (const id of ["actbody", "actbtn", "actclose", "actcount", "actsum", "app", "c-bg", "c-sub", "tab-bg", "tab-sub", "todostrip", "tok", "toksub", "tokturn"]) ids[id] = new El("div");
+for (const id of ["actbody", "actbtn", "actclose", "actcount", "actsum", "app", "todostrip", "tok", "toksub", "tokturn"]) ids[id] = new El("div");
 const doc = Object.assign({}, document, { createElementNS: (_ns, t) => new El(t), getElementById: (id) => ids[id], hidden: false, activeElement: null, addEventListener: () => {}, querySelector: () => null, body: new El("body") });
 const copied = [];
 const sandbox = {
@@ -160,9 +160,9 @@ assert.match(body().querySelector("button.now2").textContent, /^Starting a subag
 assert.ok(!text().includes("{...}"));
 
 // The header does not claim 0 tokens when none are counted yet.
-assert.match(sumText(), /Subagents in this chat: tokens appear when each finishes · 1 running, 0 finished/, sumText());
+assert.match(sumText(), /^tokens appear when each finishes · 1 running, 0 finished/, sumText());
 act.event("subagent.complete", { subagent_id: "sa-1", status: "completed", summary: "Fixed it.", input_tokens: 3100, output_tokens: 920, duration_seconds: 400 });
-assert.match(sumText(), /Subagents in this chat: 3\.1k in · 920 out$/, sumText());
+assert.match(sumText(), /^3\.1k in · 920 out$/, sumText());
 assert.ok(!sumText().includes("0 in"));
 
 // Running or finished comes from Hermes. One list without the subagent says nothing.
@@ -309,7 +309,7 @@ assert.ok(wrow.textContent.includes("Waiting on ") && !wrow.textContent.includes
 assert.ok(wrow.textContent.includes("+1 more") || wrow.textContent.includes("1 more"), "a second command is counted: " + wrow.textContent);
 assert.match(wrow.querySelector(".time").textContent, /3\s*h|3:13|193/, "elapsed since start: " + wrow.querySelector(".time").textContent);
 assert.strictEqual(liveCount(), runningBefore + 1, "a waiting subagent counts as running");
-assert.ok(/\d+ running/.test(ids["c-sub"].textContent), ids["c-sub"].textContent);
+assert.ok(/\d+ running/.test(sumText()), sumText());
 // Many polls later, and with the list missing it once, nothing marks it failed or finished.
 for (let i = 0; i < 4; i++) { now += 60000; await round(); }
 assert.ok(!/Failed|Done/.test(rowOf("sa-w").textContent), "still waiting: " + rowOf("sa-w").textContent);
@@ -432,6 +432,38 @@ assert.strictEqual(rowState("sa-w"), "Done");
   assert.ok(!/Could not load/.test(ids.actsum.textContent), "and no error");
   assert.strictEqual(todoReads.filter((q) => q === "old").length - before <= 1, true, "asked once");
 }
+// Subagents and background commands share one list: running first, then finished, each by start
+// time, with the counts of the header and the sections right, no tab bar and no id in any row.
+{
+  const t0 = now / 1000;
+  list = [
+    { id: "sa-late", goal: "Late subagent", status: "running", started_at: t0 - 60 },
+    { id: "sa-old", goal: "Old subagent", status: "completed", started_at: t0 - 500 },
+  ];
+  const procs = [
+    { id: "proc_mid", command: "sleep 600", running: true, started_at: t0 - 300 },
+    { id: "proc_gone", command: "make all", running: false, exit_code: 2, started_at: t0 - 400, exited_at: t0 - 100 },
+    { id: "proc_fine", command: "go test ./...", running: false, exit_code: 0, started_at: t0 - 450, exited_at: t0 - 200 },
+  ];
+  const two = sandbox.window.HubActivity({ api: async (m, path) => (path.endsWith("/activity") ? { subagents: list, processes: procs } : /\/todos/.test(path) ? { supported: true, todos: [], revision: 0 } : { events: [], epoch: 1, more: false, live: true, running: true }), el, banner: () => {}, showText: () => {} });
+  ids.actbody.children.length = 0;
+  two.show({ base: "/api/sessions/b/mix", backend: "b" });
+  for (let i = 0; i < 4; i++) { await round(); await new Promise((r) => setImmediate(r)); }
+  const rows = body().querySelectorAll(".row").map((r) => r.dataset.act);
+  const heads = body().querySelectorAll(".sec").map((h) => h.textContent);
+  assert.deepStrictEqual(heads, ["Running2", "Finished3"], "one Running section with its count, then Finished");
+  assert.strictEqual(ids.actcount.textContent, "2", "the header counts a command and a subagent");
+  assert.match(sumText(), /2 running, 3 finished/, sumText());
+  const head = (id) => rows.indexOf(id);
+  assert.ok(head("proc_mid") < head("sa-late"), "running ones by start time: " + rows);
+  assert.ok(head("sa-late") < head("sa-old"), "running before finished: " + rows);
+  assert.ok(head("sa-old") < head("proc_fine") && head("proc_fine") < head("proc_gone"), "finished ones by start time: " + rows);
+  const mid = rowOf("proc_mid");
+  assert.ok(mid.textContent.includes("sleep 600") && !mid.textContent.includes("proc_mid"), "the command, not its id: " + mid.textContent);
+  assert.match(rowOf("proc_gone").textContent, /Exit 2/);
+  two.show(null);
+}
+
 
 console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -130,7 +130,7 @@ const { connect } = open;
   assert.strictEqual(p.items.length, 11);
   // The Plan is above Subagents.
   const heads = await ev(`Array.from(document.querySelectorAll("#actbody > .sec, #actbody > .plan")).map((n) => n.className.split(" ")[0] + ":" + (n.querySelector(".plan-head") ? "Plan" : n.textContent))`);
-  assert.deepStrictEqual(heads.slice(0, 2), ["plan:Plan", "sec:Subagents"]);
+  assert.deepStrictEqual(heads.slice(0, 2), ["plan:Plan", "sec:Running2"]);
   // Done items show on a tap.
   await tap("#plan .plan-fold");
   await until(`document.querySelectorAll("#plan li.ti").length === 15`, "the done items");

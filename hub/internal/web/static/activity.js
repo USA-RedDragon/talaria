@@ -28,7 +28,7 @@ window.HubActivity = (ctx) => {
   // before a snapshot are not sent again.
   let S = fresh(null);
   function fresh(chat) {
-    return { chat, subs: new Map(), bgs: new Map(), open: new Set(), tab: "sub", paused: false, turn: null,
+    return { chat, subs: new Map(), bgs: new Map(), open: new Set(), paused: false, turn: null,
       usage: null, running: false, error: "", failingSince: 0, loaded: false, polled: 0, timer: 0, tick: 0,
       approvals: new Map(), asked: new Set(), minis: new Map(), raw: new Set(), nodes: new Map(), heads: new Map(), sumKey: "", fed: 0,
       // The chat's list ({ items, rev }, null for none), how many events brought it, whether the
@@ -652,9 +652,8 @@ window.HubActivity = (ctx) => {
     soon();
   }
 
-  // reveal opens the sidebar on a tab, with the rows of ids open.
-  function reveal(tab, ids) {
-    S.tab = tab;
+  // reveal opens the sidebar with the rows of ids open.
+  function reveal(ids) {
     for (const id of ids) S.open.add(id);
     setOpen(true, false);
     draw();
@@ -669,7 +668,7 @@ window.HubActivity = (ctx) => {
     if (name === "terminal") {
       if (typeof res.session_id === "string" && /^proc_/.test(res.session_id)) {
         bg(res.session_id, "command");
-        reveal("bg", [res.session_id]);
+        reveal([res.session_id]);
         soon();
         return true;
       }
@@ -678,7 +677,7 @@ window.HubActivity = (ctx) => {
     if (name !== "delegate_task") return false;
     let ids = [...S.subs.values()].filter((r) => res.delegation_id && r.delegation === res.delegation_id).map((r) => r.id);
     if (!ids.length) ids = [...S.subs.values()].filter((r) => !r.parentId).map((r) => r.id).slice(-((args && Array.isArray(args.tasks) && args.tasks.length) || 1));
-    reveal("sub", ids);
+    reveal(ids);
     return true;
   }
 
@@ -919,12 +918,12 @@ window.HubActivity = (ctx) => {
   // revealPlan opens the sidebar on the Plan.
   function revealPlan() {
     if (!S.chat) return;
-    S.tab = "sub";
     setOpen(true, false);
     draw();
     const body = $("actbody");
     const plan = $("plan");
-    if (plan) body.scrollTop = Math.max(0, plan.offsetTop - body.offsetTop - 4);
+    // The Plan is the first thing in the panel, so opening at it is the top.
+    if (plan) body.scrollTop = 0;
   }
 
   function body(r) {
@@ -1080,6 +1079,8 @@ window.HubActivity = (ctx) => {
     if (!rows.length) return;
     let h = S.heads.get(title);
     if (!h) { h = el("div", "sec", title); S.heads.set(title, h); }
+    // The count is the rows of the section, the children of a subagent too.
+    if (h.count !== rows.length) { h.count = rows.length; h.replaceChildren(title, el("span", "c", String(rows.length))); }
     body.push(h);
     const add = (r, depth) => {
       body.push(rowNode(r, depth > 0));
@@ -1120,24 +1121,17 @@ window.HubActivity = (ctx) => {
     c.hidden = n === 0;
     $("actbtn").title = n ? n + " running beside this chat" : "Subagents and background work of this chat";
     if (!isOpen()) return;
-    $("tab-sub").setAttribute("aria-selected", String(S.tab === "sub"));
-    $("tab-bg").setAttribute("aria-selected", String(S.tab === "bg"));
-    $("c-sub").textContent = liveSub ? liveSub + " running" : "";
-    $("c-bg").textContent = liveBg ? liveBg + " running" : "";
+    const rows = [...subs, ...bgs];
     const sum = $("actsum");
-    const sumKey = JSON.stringify([S.tab, liveSub, liveBg, subs.length, S.paused, S.error, totals(subs), totals(bgs.filter((r) => r.kind === "prompt"))]);
+    const sumKey = JSON.stringify([rows.length - liveSub - liveBg, liveSub + liveBg, S.paused, S.error, totals(rows)]);
     if (sumKey !== S.sumKey) {
-    S.sumKey = sumKey;
-    sum.replaceChildren();
-    if (S.tab === "sub") {
-      const t = totals(subs);
-      sum.append("Subagents in this chat: ", ...tokenText(t, liveSub, subs.length - liveSub));
+      S.sumKey = sumKey;
+      sum.replaceChildren();
+      // The line is the tokens of the subagents and /bg prompts; commands use none, so
+      // a chat with only commands has no line to show.
+      if (rows.some((r) => r.kind !== "command")) sum.append(...tokenText(totals(rows), liveSub + liveBg, rows.length - liveSub - liveBg));
       if (S.paused) sum.append(el("div", "warn", "New subagents are paused on this backend."));
-    } else {
-      const t = totals(bgs.filter((r) => r.kind === "prompt"));
-      sum.append("Background prompts: ", el("b", "", k(t.i)), " in · ", el("b", "", k(t.o)), " out · commands use no tokens");
-    }
-    if (S.error) sum.append(el("div", "bad", "Could not load activity: " + S.error));
+      if (S.error) sum.append(el("div", "bad", "Could not load activity: " + S.error));
     }
     const body = $("actbody");
     const top = body.scrollTop;
@@ -1150,32 +1144,20 @@ window.HubActivity = (ctx) => {
       ? { row: document.activeElement.closest("[data-act]"), value: document.activeElement.value, pos: document.activeElement.selectionStart }
       : null;
     const out = [];
-    const plan = S.tab === "sub" ? planNode() : null;
-    if (plan) {
-      out.push(plan);
-      if (subs.length) {
-        let h = S.heads.get("Subagents");
-        if (!h) { h = el("div", "sec", "Subagents"); S.heads.set("Subagents", h); }
-        out.push(h);
-      }
-    }
-    const rows = S.tab === "sub" ? subs : bgs;
-    const now = rows.filter((r) => live.has(r.state)), done = rows.filter((r) => !live.has(r.state));
-    const tree = S.tab === "sub" ? list(rows) : null;
-    if (tree) {
-      // A child goes with its parent's section, so the tree stays whole.
-      const inNow = new Set(now.map((r) => r.id));
-      const rootOf = (r) => { let x = r; const seen = new Set(); while (x.parentId && S.subs.has(x.parentId) && !seen.has(x.id)) { seen.add(x.id); x = S.subs.get(x.parentId); } return x; };
-      const nowRoots = rows.filter((r) => inNow.has(rootOf(r).id) || [...inNow].some((id) => rootOf(S.subs.get(id)).id === rootOf(r).id));
-      const doneRows = rows.filter((r) => !nowRoots.includes(r));
-      section(out, "Now", nowRoots, tree);
-      section(out, "Finished", doneRows, tree);
-    } else {
-      section(out, "Now", now, null);
-      section(out, "Finished", done, null);
-    }
-    if (!rows.length && !(plan && S.tab === "sub")) {
-      const text = S.tab === "sub" ? "No subagents in this chat yet." : "Nothing running in the background. Start a prompt with /bg in the message box.";
+    const plan = planNode();
+    if (plan) out.push(plan);
+    // Subagents and background commands share one list, by start time: running first, then finished.
+    const now = rows.filter((r) => live.has(r.state));
+    const tree = list(rows);
+    // A child goes with its parent's section, so the tree stays whole.
+    const all = new Map(rows.map((r) => [r.id, r]));
+    const rootOf = (r) => { let x = r; const seen = new Set(); while (x.parentId && all.has(x.parentId) && !seen.has(x.id)) { seen.add(x.id); x = all.get(x.parentId); } return x; };
+    const liveRoots = new Set(now.map((r) => rootOf(r).id));
+    const nowRows = rows.filter((r) => liveRoots.has(rootOf(r).id));
+    section(out, "Running", nowRows, tree);
+    section(out, "Finished", rows.filter((r) => !liveRoots.has(rootOf(r).id)), tree);
+    if (!rows.length && !plan) {
+      const text = "No subagents or background commands in this chat yet.";
       let e = S.heads.get(text);
       if (!e) { e = el("div", "empty", text); S.heads.set(text, e); }
       out.push(e);
@@ -1245,8 +1227,6 @@ window.HubActivity = (ctx) => {
     $("actbtn").onclick = () => setOpen(!isOpen(), true);
     $("actclose").onclick = () => setOpen(false, true);
     $("todostrip").onclick = () => revealPlan();
-    $("tab-sub").onclick = () => { S.tab = "sub"; draw(); };
-    $("tab-bg").onclick = () => { S.tab = "bg"; draw(); };
     document.addEventListener("visibilitychange", () => { if (!document.hidden && S.chat) soon(); });
     show(null);
   }
@@ -1258,15 +1238,14 @@ window.HubActivity = (ctx) => {
     const got = await api("POST", chat.base + "/background", { text });
     if (chat !== S.chat || !got || !got.task_id) return;
     event("background.start", { task_id: got.task_id, text, started_at: Date.now() / 1000 });
-    reveal("bg", [got.task_id]);
+    reveal([got.task_id]);
   }
 
   init();
   // view and restore keep the sidebar as it was across a reload.
-  const view = () => ({ open: isOpen(), tab: S.tab, rows: [...S.open], top: $("actbody").scrollTop });
+  const view = () => ({ open: isOpen(), rows: [...S.open], top: $("actbody").scrollTop });
   function restore(v) {
     if (!v || !S.chat) return;
-    S.tab = v.tab === "bg" ? "bg" : "sub";
     for (const id of v.rows || []) S.open.add(id);
     setOpen(!!v.open, false);
     draw();
