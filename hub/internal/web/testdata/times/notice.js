@@ -24,11 +24,11 @@ const clock = HubTimes.clock(when);
 
 const done = HubNotice.parse("[ASYNC DELEGATION COMPLETE — sa-1]\nOriginal goal: Fix it\nRole: leaf   Model: claude-sonnet-5-5\nStatus: completed   API calls: 64   Duration: 2280.0s\n--- RESULT ---\nok");
 assert.strictEqual(JSON.stringify(done.meta), JSON.stringify(["Completed", "38 min", "Sonnet", "64 calls"]));
-assert.strictEqual(line(done, when), "Completed · " + clock + " · ran 38 min · Sonnet · 64 calls");
+assert.strictEqual(line(done, when), "Completed · ran 38 min · Sonnet · 64 calls · " + clock);
 assert.strictEqual(line(done, 0), "Completed · ran 38 min · Sonnet · 64 calls", "no time, none shown");
 
 const agent = HubNotice.parse("[Agent message am_0123456789abcdef from chat A]\n\nhello there\n");
-assert.strictEqual(line(agent, when), clock + " · hello there");
+assert.strictEqual(line(agent, when), clock + " · \"hello there\"");
 
 const heartbeat = HubNotice.parse("[Background process p1 heartbeat #2 — still running after 12m (cmd)\nCommand: sleep 5\nOutput since last heartbeat:\nx]");
 assert.strictEqual(line(heartbeat, when), "Still running · " + clock + " · after 12m");
@@ -46,4 +46,4 @@ assert.strictEqual(line(counted, when), clock + " · 37 messages before this poi
 
 const meta = HubNotice.metaLine(el, done.meta, done.state, done.kind, when);
 assert.strictEqual(meta.kids[0].cls, "notice-ok");
-assert.strictEqual(meta.kids[2].dataset.at, String(when), "the time carries its full form for hover");
+assert.strictEqual(meta.kids[meta.kids.length - 1].dataset.at, String(when), "the time carries its full form for hover");

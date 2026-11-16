@@ -52,7 +52,7 @@ func TestReconcileScript(t *testing.T) {
 // answer Hermes does not confirm can be sent again.
 func TestApprovalsScript(t *testing.T) {
 	t.Parallel()
-	runStreamScript(t, "approvals.js", "questioncard.js", "approvals.js")
+	runStreamScript(t, "approvals.js", "toolcard.js", filepath.Join("cards", "agents.js"), "questioncard.js", "approvals.js")
 }
 
 // The log stays at its end for a reader at the end through any change of

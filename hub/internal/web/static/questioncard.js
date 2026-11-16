@@ -112,34 +112,73 @@ window.HubQuestion = (() => {
     }
   }
 
-  // view draws a record as a card. deps: el(tag, cls, text), clock(ms), and
-  // note (a line that replaces the status, such as why a send failed).
-  function view(deps, rec) {
-    const { el } = deps;
-    const box = el("div", "approval done qdone");
-    box.append(el("b", "", rec.questions.length > 1 ? "Questions" : "Question"));
-    if (rec.subagent) {
-      const by = el("div", "by");
-      const goal = el("span", "goal", rec.subagent);
-      goal.title = rec.subagent;
-      by.append(el("span", "chip", "Subagent"), goal);
-      box.append(by);
-    }
-    rec.questions.forEach((q, i) => {
-      box.append(el("div", rec.questions.length > 1 ? "sub" : "q", (rec.questions.length > 1 ? i + 1 + ". " : "") + q.text));
-      const list = el("ul", "qchoices");
-      const row = (text, on, cls) => {
-        const li = el("li", on ? "pick" + (cls ? " " + cls : "") : cls || "");
-        li.append(el("span", "m", on ? "\u2713" : ""), el("span", "t", text));
-        list.append(li);
-      };
-      for (const c of q.choices) row(c, q.picks.includes(c));
-      row(q.other ? "Other: " + q.other : OTHER, !!q.other, "other");
-      box.append(list);
-    });
-    box.append(el("div", "res", deps.note || status(rec, deps.clock)));
-    return box;
+  // answerOf is what a question's answer says: the picks and the typed text.
+  function answerOf(q) {
+    const bits = q.picks.slice();
+    if (q.other) bits.push("Other: " + q.other);
+    return bits.join(", ");
   }
 
-  return { OTHER, fromSettled, fromResult, view, status, sort, plain };
+  const cutText = (s, n) => {
+    const r = Array.from(String(s));
+    return r.length <= n ? String(s) : r.slice(0, n).join("").trim() + "\u2026";
+  };
+
+  // statusParts is the status line of a card: what became of the question,
+  // with the first words in the tone of the outcome.
+  function statusParts(rec, clock) {
+    const when = rec.at && clock ? clock(rec.at) : "";
+    const tail = (when ? " at " + when : "") + where(rec.via);
+    switch (rec.outcome) {
+      case "answered": return [{ tone: "ok", text: "Answered" }, tail];
+      case "skipped": return [{ tone: "ok", text: "Skipped" }, tail];
+      case "timed_out": return [{ tone: "warn", text: "Timed out" }, rec.timeoutS ? " after " + minutes(rec.timeoutS) : ""];
+      case "cancelled": return [{ tone: "warn", text: "Withdrawn" }, ", no answer is needed any more"];
+      case "lost": return [{ tone: "warn", text: "Withdrawn" }, ", this question is no longer open: it may have been answered elsewhere, or the agent restarted"];
+      case "undelivered": return [{ tone: "warn", text: "Not shown" }, ", the question could not be shown"];
+      default: return [rec.note || ""];
+    }
+  }
+
+  // model is the card of a record, as HubToolCard draws it (the renderer of
+  // the clarify card in cards/agents.js calls this): the answer in the title,
+  // the question and when and where it was answered closed; every choice with
+  // the answer checked when it is open.
+  function model(rec, clock) {
+    clock = clock || (window.HubTimes && window.HubTimes.clock);
+    const qs = rec.questions || [];
+    const many = qs.length > 1;
+    const answers = qs.map(answerOf).filter(Boolean);
+    const out = { icon: "info", blocks: [], lines: [], statusLast: true };
+    const title = [];
+    if (rec.subagent) title.push({ chip: "Subagent" }, " ");
+    title.push(many ? qs.length + " questions" : "Question");
+    if (answers.length) title.push(": " + cutText(answers[0], 60) + (answers.length > 1 ? ", +" + (answers.length - 1) : ""));
+    out.title = title;
+    if (qs.length && qs[0].text) out.lines.push({ parts: qs[0].text, closed: true });
+    out.more = rec.note ? [rec.note] : statusParts(rec, clock);
+    out.bad = ["timed_out", "cancelled", "lost", "undelivered"].includes(rec.outcome);
+    if (rec.subagent) out.blocks.push({ kind: "kv", rows: [{ k: "Asked by", v: [{ chip: "Subagent" }, " " + rec.subagent] }] });
+    qs.forEach((q, i) => {
+      if (q.text) out.blocks.push({ label: many ? "Question " + (i + 1) : "", text: q.text, plain: true, copy: false });
+      const items = [];
+      for (const c of q.choices) items.push(q.picks.includes(c) ? { parts: ["\u2713 " + c] } : { parts: [c], dim: true });
+      items.push(q.other ? { parts: ["\u2713 Other: " + q.other] } : { parts: [OTHER], dim: true });
+      out.blocks.push({ kind: "list", items });
+    });
+    return out;
+  }
+
+  // view draws a record as a card with the one card component. deps: el,
+  // clock(ms), toast(text) and note (a line that replaces the status, such as
+  // why a send failed).
+  function view(deps, rec) {
+    const T = window.HubToolCard;
+    const r = deps.note ? Object.assign({}, rec, { note: deps.note }) : rec;
+    const ctx = { el: deps.el, toast: deps.toast || (() => {}) };
+    const card = T.create(ctx, { name: "clarify", args: { rec: r, clock: deps.clock }, res: null, out: "", done: true, failed: false, startedAt: 0, endedAt: 0, mem: T.memory() });
+    return card.node;
+  }
+
+  return { OTHER, fromSettled, fromResult, view, model, status, sort, plain };
 })();

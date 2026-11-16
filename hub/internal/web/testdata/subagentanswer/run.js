@@ -63,9 +63,9 @@ const { proc, connect } = driver();
     const b = await ev(`(() => { const e = ${sel}; e.scrollIntoView({ block: "center" }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     await c.tap(b.x, b.y);
   };
-  const card = (q) => `[...document.querySelectorAll("#log .approval")].find((a) => a.textContent.includes(${JSON.stringify(q)}))`;
+  const card = (q) => `[...document.querySelectorAll("#log .approval, #log .settled")].find((a) => a.textContent.includes(${JSON.stringify(q)}))`;
   const answerable = async (q, tag) => {
-    await until(`(() => { const a = ${card(q)}; return a && /Question/.test(a.textContent) && a.querySelector("button:not([disabled])"); })()`, `${tag}: an answerable card for ${q}`);
+    await until(`(() => { const a = ${card(q)}; return a && /Question/.test(a.textContent) && a.querySelector("button:not([disabled]):not(.notice-head)"); })()`, `${tag}: an answerable card for ${q}`);
     await frames(3);
   };
   const choice = (q, text) => `[...${card(q)}.querySelectorAll("button")].find((b) => b.textContent === ${JSON.stringify(text)})`;
@@ -83,7 +83,7 @@ const { proc, connect } = driver();
 
   // Answer the subagent: only its card closes.
   await tapSel(choice(qSub, "lane-a"));
-  await until(`!${card(qSub)}.querySelector("button:not([disabled])") && /Answered/.test(${card(qSub)}.textContent)`, "the subagent's card to close");
+  await until(`!${card(qSub)}.querySelector("button:not([disabled]):not(.notice-head)") && /Answered/.test(${card(qSub)}.textContent)`, "the subagent's card to close");
   await frames(5);
   await answerable(qMain, "chat question after the subagent's answer");
 
@@ -92,7 +92,7 @@ const { proc, connect } = driver();
   await c.reload();
   await until(`!window.__old && document.getElementById("title").textContent === "Asking" && !document.querySelector("#log .loading") && document.querySelectorAll("#log .msg").length > 0`, "the chat after a reload");
   await answerable(qMain, "chat question after a reload");
-  assert.strictEqual(await ev(`[...document.querySelectorAll("#log .approval")].filter((a) => a.querySelector("button:not([disabled])")).length`), 1, kind + ": one open card after a reload");
+  assert.strictEqual(await ev(`[...document.querySelectorAll("#log .approval")].filter((a) => a.querySelector("button:not([disabled]):not(.notice-head)")).length`), 1, kind + ": one open card after a reload");
 
   await tapSel(choice(qMain, "ship"));
   await until(`document.getElementById("log").innerText.includes("answered: ship")`, "the turn to go on after the chat's answer");

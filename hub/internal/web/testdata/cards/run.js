@@ -16,7 +16,8 @@ const assert = require("assert");
 const [dir, casesDir] = process.argv.slice(2);
 const sandbox = { window: {} };
 vm.createContext(sandbox);
-for (const f of ["peer.js", "toolcard.js", ...fs.readdirSync(path.join(dir, "cards")).filter((x) => x.endsWith(".js")).sort().map((x) => "cards/" + x)]) {
+sandbox.window.HubTimes = { clock: () => "12:56 PM", valid: (ms) => typeof ms === "number" && ms > 0 };
+for (const f of ["peer.js", "toolcard.js", "questioncard.js", "approvals.js", ...fs.readdirSync(path.join(dir, "cards")).filter((x) => x.endsWith(".js")).sort().map((x) => "cards/" + x)]) {
   vm.runInContext(fs.readFileSync(path.join(dir, f), "utf8"), sandbox);
 }
 const H = sandbox.window.HubToolCard;

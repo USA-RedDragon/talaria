@@ -399,10 +399,10 @@ window.HubNotice = (() => {
   // first.
   function metaLine(el, meta, state, kind, at) {
     const line = el("div", "notice-meta" + (kind === "agent" ? " quote" : ""));
-    const items = (meta || []).map((m, i) => (i === 0 && state && kind !== "agent" ? el("span", "notice-" + state, m) : kind !== "agent" && durationText.test(m) ? "ran " + m : m));
+    const items = (meta || []).map((m, i) => (i === 0 && state && kind !== "agent" ? el("span", "notice-" + state, m) : kind === "agent" ? "\"" + m + "\"" : durationText.test(m) ? "ran " + m : m));
     if (window.HubTimes.valid(at)) {
       const when = window.HubTimes.stamp(el("span", "notice-when"), at);
-      items.splice(kind === "delegation" || kind === "command" ? 1 : 0, 0, when);
+      items.splice(kind === "delegation" ? items.length : kind === "command" ? 1 : 0, 0, when);
     }
     items.forEach((m, i) => {
       if (i) line.append(" · ");
@@ -449,7 +449,7 @@ window.HubNotice = (() => {
     const pre = n.kind === "command";
     if (n.goal) body.append(section(ctx, pre ? "Command" : "Task", n.goal, { pre, long: false }));
     if (n.result) {
-      const label = n.kind === "delegation" ? "Result" : (pre ? "Output" : "");
+      const label = n.kind === "delegation" ? "Result" : n.kind === "agent" ? "Message" : (pre ? "Output" : "");
       body.append(section(ctx, label, n.result, { pre, long: true, word: n.kind === "compaction" ? "Show full summary" : "" }));
     }
     return body;
@@ -469,13 +469,20 @@ window.HubNotice = (() => {
     return c;
   }
 
+  // cardTitle is a delegation's title on the card: the goal after
+  // "Finished:" or "Failed:" (the notice's own title says "Subagent finished:").
+  function cardTitle(kind, title) {
+    if (kind !== "delegation") return title;
+    return title.replace(/^Subagent finished: /, "Finished: ").replace(/^Subagent failed: /, "Failed: ");
+  }
+
   // commandTitle is the title of a card: the command of a background
   // command in monospace after its words, as on a tool card.
   function commandTitle(el, n) {
     const t = el("span", "notice-title");
     const m = n.kind === "command" && !n.rows ? /^(Background command [a-z]+: )(.+)$/.exec(n.title) : null;
     if (m) t.append(m[1], el("code", "tcode", m[2]));
-    else t.textContent = n.title;
+    else t.textContent = cardTitle(n.kind, n.title);
     return t;
   }
 
@@ -486,6 +493,17 @@ window.HubNotice = (() => {
     return "";
   }
 
+  // gist is the dim line of a finished subagent's card: the first line of its
+  // result, or for several subagents the ones that failed.
+  function gist(n) {
+    if (n.rows) {
+      const bad = n.rows.filter((r) => r.state === "bad").map((r) => cardTitle("delegation", r.title));
+      return cut(bad.join("; "), 140);
+    }
+    for (const l of String(n.result || "").split("\n")) if (l.trim()) return cut(l.trim().replace(/^[-*#>\s]+/, ""), 140);
+    return "";
+  }
+
   function header(ctx, n, nested, at) {
     const { el } = ctx;
     const head = el("button", "notice-head");
@@ -493,7 +511,7 @@ window.HubNotice = (() => {
     head.setAttribute("aria-expanded", "false");
     head.append(window.HubIcons.icon(iconName(n)), commandTitle(el, n), chevron());
     if ((n.meta && n.meta.length) || window.HubTimes.valid(at)) head.append(metaLine(el, n.meta, n.state, n.kind, at));
-    const end = n.kind === "command" && !n.rows && n.result ? lastLine(n.result) : "";
+    const end = n.kind === "command" && !n.rows && n.result ? lastLine(n.result) : n.kind === "delegation" ? gist(n) : "";
     if (end) {
       const box = el("div", "tool-lines");
       box.append(el("div", "tool-line dim", end));
@@ -535,7 +553,7 @@ window.HubNotice = (() => {
       for (const r of n.rows) {
         const row = el("div", "notice-row");
         row.dataset.state = r.state || "";
-        const rh = header(ctx, { kind: n.kind, title: r.title, state: r.state, meta: r.meta }, true);
+        const rh = header(ctx, { kind: n.kind, title: r.title, state: r.state, meta: r.meta, result: r.result }, true);
         const rb = details(ctx, { kind: n.kind, goal: r.goal, result: r.result });
         rb.hidden = true;
         toggle(rh, rb);
@@ -545,13 +563,6 @@ window.HubNotice = (() => {
       body.append(list);
     }
     body.append(details(ctx, n));
-    if (peer) {
-      // The details keep what Hermes called the sender, and the raw id.
-      const rawFrom = n0.title.slice(fromHead.length);
-      const kindName = { sub: "Subagent", cron: "Scheduled job" }[peer.kind] || "Chat";
-      if (peer.id && peer.id !== rawFrom) body.append(section(ctx, kindName, peer.id, { pre: true, long: false }));
-      if (rawFrom) body.append(section(ctx, "Sender", rawFrom, { pre: true, long: false }));
-    }
     const copy = window.HubIcons.button("copy", "Copy the whole notice", "ghost ib notice-copy");
     copy.onclick = async () => {
       try {

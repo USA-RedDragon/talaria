@@ -78,17 +78,27 @@ const { proc, connect } = driver();
     await c.tap(b.x, b.y);
   };
   const typeIn = (sel, text) => ev(`(() => { const i = ${sel}; i.focus(); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
-  const cards = `[...document.querySelectorAll("#log .approval")]`;
+  const cards = `[...document.querySelectorAll("#log .approval, #log .notice[data-tool=clarify]")]`;
   const card = (q) => `${cards}.find((a) => a.textContent.includes(${JSON.stringify(q)}))`;
   const open = async (id, title) => {
     await ev(`location.hash = "#/s/pc/${id}"`);
     await until(`location.hash === "#/s/pc/${id}" && document.getElementById("title").textContent === ${JSON.stringify(title)} && !document.querySelector("#log .loading") && document.querySelectorAll("#log .msg").length > 0`, `${id} to be drawn`);
   };
-  // What a closed card shows: its rows (class and text) and its last line.
-  const shape = (q) => ev(`(() => { const a = ${card(q)}; if (!a) return null; return { head: a.querySelector("b") && a.querySelector("b").textContent, rows: [...a.querySelectorAll("ul.qchoices li")].map((li) => [li.className, [...li.children].map((x) => x.textContent).join(" ").trim()]), res: a.querySelector(".res") && a.querySelector(".res").textContent, chip: a.querySelector(".by .chip") && a.querySelector(".by .chip").textContent, goal: a.querySelector(".by .goal") && a.querySelector(".by .goal").textContent, buttons: a.querySelectorAll("button:not([disabled]), input:not([disabled])").length }; })()`);
-  const waitClosed = (q, tag) => until(`(() => { const a = ${card(q)}; return a && a.classList.contains("qdone"); })()`, `${tag}: the closed card of ${q}`);
+  // What a card shows once opened (it is closed again after): its title (and the chip in it), the rows of its
+  // choices (a picked one is "pick") and its status line.
+  const shape = (q) => ev(`(() => { const a = ${card(q)}; if (!a) return null; const head = a.querySelector(".notice-head");
+    const was = head && head.getAttribute("aria-expanded") === "true";
+    if (head && !was) head.click();
+    const t = (x) => x && x.textContent.trim();
+    const dd = a.querySelector(".tool-kv dd");
+    const out = { title: t(a.querySelector(".notice-title")), rows: [...a.querySelectorAll(".tool-li")].map((li) => [li.classList.contains("dim") ? "" : "pick", t(li)]),
+      res: t(a.querySelector(".notice-meta")), chip: t(a.querySelector(".notice-title .tchip")), goal: dd ? t(dd).replace(/^Subagent\\s*/, "") : null,
+      buttons: a.querySelectorAll("button:not(.notice-head):not([disabled]), input:not([disabled])").length };
+    if (head && !was) head.click();
+    return out; })()`);
+  const waitClosed = (q, tag) => until(`(() => { const a = ${card(q)}; return a && a.dataset.tool === "clarify"; })()`, `${tag}: the closed card of ${q}`);
   const live = async (q, tag) => {
-    await until(`(() => { const a = ${card(q)}; return a && !a.classList.contains("qdone") && a.querySelector("input.answer") && a.querySelector("button:not([disabled])"); })()`, `${tag}: an answerable card for ${q}`);
+    await until(`(() => { const a = ${card(q)}; return a && a.dataset.tool !== "clarify" && a.querySelector("input.answer") && a.querySelector("button:not([disabled])"); })()`, `${tag}: an answerable card for ${q}`);
     await frames(3);
     // Every open question has the Other row with a text box, whatever was offered.
     const other = await ev(`(() => { const a = ${card(q)}; return { label: a.querySelector(".otherlabel") && a.querySelector(".otherlabel").textContent, box: a.querySelectorAll("input.answer").length }; })()`);
@@ -110,7 +120,7 @@ const { proc, connect } = driver();
   await tapSel(`[...${card(q1)}.querySelectorAll("button")].find((b) => b.textContent === "cpus/aarch64")`);
   await waitClosed(q1, "q1");
   let s1 = await shape(q1);
-  assert.deepStrictEqual(s1.rows, [["pick", "\u2713 cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["other", OTHER]], kind + ": a pick keeps every choice");
+  assert.deepStrictEqual(s1.rows, [["pick", "\u2713 cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["", OTHER]], kind + ": a pick keeps every choice");
   assert.ok(clock.test(s1.res), kind + ": when and where: " + s1.res);
   assert.strictEqual(s1.buttons, 0);
 
@@ -124,7 +134,7 @@ const { proc, connect } = driver();
   await tapSel(`[...${card(q2)}.querySelectorAll("button")].find((b) => b.textContent === "Send")`);
   await waitClosed(q2, "q2");
   const s2 = await shape(q2);
-  assert.deepStrictEqual(s2.rows, [["pick", "\u2713 Switch"], ["", "Game Boy"], ["pick", "\u2713 NDS"], ["pick other", "\u2713 Other: SNES"]], kind + ": picks and Other together");
+  assert.deepStrictEqual(s2.rows, [["pick", "\u2713 Switch"], ["", "Game Boy"], ["pick", "\u2713 NDS"], ["pick", "\u2713 Other: SNES"]], kind + ": picks and Other together");
   assert.ok(clock.test(s2.res), s2.res);
 
   // 3. An open question: the Other row is the only input.
@@ -135,7 +145,7 @@ const { proc, connect } = driver();
   await tapSel(`[...${card(q3)}.querySelectorAll("button")].find((b) => b.textContent === "Answer")`);
   await waitClosed(q3, "q3");
   const s3 = await shape(q3);
-  assert.deepStrictEqual(s3.rows, [["pick other", "\u2713 Other: Pocket mode"]], kind + ": an open answer is the Other row, checked");
+  assert.deepStrictEqual(s3.rows, [["pick", "\u2713 Other: Pocket mode"]], kind + ": an open answer is the Other row, checked");
 
   // 4. A subagent's question: the chip with its goal.
   const q4 = "Switch stick clicks (L3 and R3), which some games use?";
@@ -146,6 +156,7 @@ const { proc, connect } = driver();
   const s4 = await shape(q4);
   assert.deepStrictEqual([s4.chip, s4.goal], ["Subagent", "relift lane android-apk: on-screen controller"]);
   assert.deepStrictEqual(s4.rows[0], ["pick", "\u2713 Double-tap the stick"]);
+  assert.ok(/^Subagent 1 question|^Subagent Question/.test(s4.title) || s4.title.startsWith("Subagent"), s4.title);
 
   // 5. Nobody answers: the test times it out in the gateway.
   const q5 = "Ship it?";
@@ -153,8 +164,8 @@ const { proc, connect } = driver();
   await fetch(url + "/__timeout");
   await waitClosed(q5, "q5");
   const s5 = await shape(q5);
-  assert.deepStrictEqual(s5.rows.map((r) => r[0]), ["", "", "", "other"], kind + ": nothing is checked");
-  assert.strictEqual(s5.res, "No answer: timed out after 30 minutes");
+  assert.deepStrictEqual(s5.rows.map((r) => r[0]), ["", "", "", ""], kind + ": nothing is checked");
+  assert.strictEqual(s5.res, "Timed out after 30 minutes");
 
   // The same cards after a reload, and after a switch to another chat and back.
   const all = [q1, q2, q3, q4, q5];
@@ -164,7 +175,7 @@ const { proc, connect } = driver();
   assert.strictEqual(await count(), 5, kind + ": one card for each question");
   const same = async (tag) => {
     for (const q of all) {
-      await until(`(() => { const a = ${card(q)}; return a && a.classList.contains("qdone"); })()`, `${tag}: the card of ${q}`);
+      await until(`(() => { const a = ${card(q)}; return a && a.dataset.tool === "clarify"; })()`, `${tag}: the card of ${q}`);
       assert.deepStrictEqual(await shape(q), before[q], `${kind}: the card of ${q} ${tag}`);
     }
     assert.strictEqual(await count(), 5, `${kind}: five cards ${tag}`);

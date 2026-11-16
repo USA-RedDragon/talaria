@@ -281,16 +281,6 @@ details.toolgroup .group-body { display: flex; flex-direction: column; gap: .5re
 .approval .typed { flex-direction: column; gap: .25rem; }
 .approval .otherlabel { font-size: .75rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
 .approval .otherfield { display: flex; gap: .5rem; }
-/* The card of a question that is over: the choices that were offered, the answer checked, and how it ended. */
-.approval.qdone { border-color: var(--line); }
-.approval.qdone .sub { font-weight: 600; margin: .7rem 0 .35rem; }
-.approval.qdone ul.qchoices { list-style: none; margin: .4rem 0 .6rem; padding: 0; display: grid; gap: .35rem; }
-.approval.qdone ul.qchoices li { display: flex; gap: .6rem; align-items: baseline; border: 1px solid var(--line); border-radius: 8px; padding: .45rem .7rem; color: var(--muted); min-width: 0; }
-.approval.qdone ul.qchoices li .m { flex: none; width: 1rem; text-align: center; }
-.approval.qdone ul.qchoices li .t { min-width: 0; overflow-wrap: anywhere; }
-.approval.qdone ul.qchoices li.pick { border-color: var(--accent); color: var(--fg); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.approval.qdone ul.qchoices li.pick .m { color: var(--accent); }
-.approval.qdone .res { font-style: italic; font-size: .88rem; color: var(--muted); }
 .notify-prefs h3 { font-size: .95rem; margin: 1rem 0 .4rem; }
 .notify-row { display: flex; gap: .6rem; align-items: flex-start; margin: .35rem 0; }
 .notify-row input { margin-top: .25rem; }
@@ -1845,7 +1835,9 @@ pre.code .body { display: block; background: transparent; padding: 0 .75rem 0 0;
 
 
 /* cards/agents.js, approvals.js and questioncard.js */
-
+/* An approval or question that is over takes the place of its open card: the box stays where it was in the chat
+   and the card inside it is the one in the log. */
+.settled { display: contents; }
 /* end cards/agents.js */
 
 

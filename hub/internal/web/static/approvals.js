@@ -5,6 +5,70 @@
 // to Hermes, a settled state when Hermes says the prompt is over, and "Not
 // answered" when Hermes dropped it (a restart) with no answer to it.
 window.HubApprovals = (() => {
+  const closedWords = "The agent closed this, or restarted, before an answer arrived. Nothing was sent from this page.";
+
+  // outcomeOf reads the text of an outcome ("Allowed once (in the hub)",
+  // "Denied (in Telegram)", "Answered", or why a card was closed) into
+  // { allowed, head, where, closed }.
+  function outcomeOf(text) {
+    const m = /^(Allowed once|Allowed for this chat|Allowed always|Allowed|Denied) \((.+)\)$/.exec(String(text || ""));
+    if (m) return { allowed: m[1] !== "Denied", head: m[1], where: m[2] };
+    if (text === "Answered") return { allowed: null, head: "Answered" };
+    return { allowed: null, closed: true, head: "Not answered" };
+  }
+
+  // model is the card of an approval that is over, as HubToolCard draws it
+  // (the approval renderer of cards/agents.js calls this): the outcome, the
+  // action, who asked and why on three lines; every part of the approval
+  // when it is open.
+  function model(rec) {
+    const p = rec.prompt || {};
+    const clock = (window.HubTimes && window.HubTimes.clock) || (() => "");
+    const out = { icon: "lock", title: "Approval:", blocks: [], lines: [], idle: !rec.closed && rec.allowed === null };
+    out.status = rec.head;
+    if (rec.allowed === true) out.tone = "ok";
+    if (rec.allowed === false) {
+      out.tone = "bad";
+      out.bad = true;
+    }
+    const line = (x) => String(x || "").split("\n").map((t) => t.trim()).find(Boolean) || "";
+    // A plugin's description may carry the script it asks to run after "Script:".
+    const split = p.description ? /^([\s\S]*?)\s*\bScript:\s*([\s\S]+)$/.exec(p.description) : null;
+    const words = line(split ? split[1] : p.description);
+    const command = p.command && !/^<[\w.-]+>/.test(p.command) ? p.command : "";
+    const shown = p.command || (split ? split[2] : "");
+    if (rec.closed) {
+      out.lines.push({ parts: closedWords, dim: true, closed: true });
+    } else {
+      const head = [];
+      if (command) {
+        const k = command.search(/\s/);
+        if (k > 0) head.push(command.slice(0, k) + " ", { code: command.slice(k + 1).trim() });
+        else head.push({ code: command });
+      } else if (words) head.push(words);
+      if (p.subagent) head.push(" ", { chip: "Subagent" }, " " + p.subagent);
+      if (head.length) out.lines.push({ parts: head, closed: true });
+      const why = p.rule ? p.rule + (p.reason ? ": " + line(p.reason) : "") : command ? words : "";
+      const dim = [];
+      if (why) dim.push(why);
+      if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) dim.push("source " + p.grant_source);
+      const place = [rec.where, rec.at && clock(rec.at)].filter(Boolean).join(", ");
+      if (place) dim.push(place);
+      if (dim.length) out.lines.push({ parts: dim.join(" \u00b7 "), dim: true, closed: true });
+    }
+    const rows = [];
+    if (p.subagent) rows.push({ k: "Asked by", v: [{ chip: "Subagent" }, " " + p.subagent] });
+    if (p.rule) rows.push({ k: "Rule", v: p.rule });
+    const reason = String(p.reason || "").split("\n").map((t) => t.trim()).filter(Boolean).join(" ");
+    if (reason) rows.push({ k: "Why", v: reason });
+    else if (words && !p.rule) rows.push({ k: "Action", v: words });
+    if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) rows.push({ k: "Source", v: p.grant_source });
+    if (rec.where) rows.push({ k: "Answered", v: rec.where.charAt(0).toUpperCase() + rec.where.slice(1) + (rec.at && clock(rec.at) ? ", " + clock(rec.at) : "") });
+    if (rows.length) out.blocks.push({ kind: "kv", rows });
+    if (shown) out.blocks.push({ label: "Command", text: shown });
+    return out;
+  }
+
   // create makes the cards of one chat. deps:
   //   el(tag, cls, text), api(method, path, body), base (the chat's API path),
   //   words(key) for the fixed texts, banner(text, bad), add(node) to put a
@@ -42,20 +106,32 @@ window.HubApprovals = (() => {
       card.timer = null;
       card.state = "settled";
       const rec = Q.fromSettled(data, card.prompt);
-      const shown = Q.view({ el, clock, note }, rec || { questions: [], outcome: "" });
-      card.box.className = shown.className;
-      card.box.replaceChildren(...shown.children);
+      const shown = Q.view({ el, clock, note, toast }, rec || { questions: [], outcome: "" });
+      replace(card, shown);
       card.note = null;
     }
 
+    const toast = (text, o) => banner(text, !!(o && o.bad));
+
+    // replace puts a card's answered form in its box, which stays where it is in the chat.
+    function replace(card, shown) {
+      card.box.className = "settled";
+      card.box.replaceChildren(shown);
+    }
+
+    // finish turns the card of an approval that is over into the card of its
+    // outcome: the answer, the action, who asked and why. text is what the
+    // page knows of it.
     function finish(id, text) {
       const card = cards.get(id);
       if (!card) return;
       if (card.timer) clearT(card.timer);
       card.timer = null;
       card.state = "settled";
-      for (const extra of card.box.querySelectorAll(".picks, .typed, .sendnote")) extra.remove();
-      card.actions.replaceChildren(el("span", "status", text));
+      const rec = Object.assign({ prompt: card.prompt, at: Date.now() }, outcomeOf(text));
+      const shown = window.HubToolCard.create({ el, toast }, { name: "approval", args: { rec, clock }, res: null, out: "", done: true, failed: false, startedAt: 0, endedAt: 0, mem: window.HubToolCard.memory() }).node;
+      replace(card, shown);
+      card.note = null;
     }
 
     // note shows a line under the buttons, such as why an answer was not
@@ -305,5 +381,5 @@ window.HubApprovals = (() => {
 
     return { offer, settled, outcome, lost, cancelled, restore, retire, dispose, has: (id) => cards.has(id), card: (id) => cards.get(id) };
   }
-  return { create };
+  return { create, model, outcomeOf };
 })();

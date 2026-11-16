@@ -26,12 +26,22 @@ class Node {
 }
 const el = (tag, cls, text) => { const n = new Node(tag, cls); if (text !== undefined && text !== null) n.textContent = text; return n; };
 
+const textOf = (parts) => parts.map((p) => (typeof p === "string" ? p : p.code || p.chip || p.text || "")).join("");
 const words = (k) => ({ approval: "Approval needed: run this command", allow: "Allow", deny: "Deny" })[k];
 
 const flush = () => new Promise((r) => setImmediate(r));
 
 function harness(over) {
   const h = load(process.argv.slice(2));
+  // The card component draws into the fake DOM as its model, as text.
+  const T = h.win.HubToolCard;
+  T.create = (ctx, c) => {
+    const d = T.derive(c);
+    const node = ctx.el("div", "tool notice");
+    node.derived = d;
+    node.append(ctx.el("span", "", [d.title, d.status, textOf(d.more), ...d.lines.map((l) => textOf(l.parts))].filter(Boolean).join(" ")));
+    return { node };
+  };
   const log = [];
   const shown = [];
   const banners = [];
@@ -49,7 +59,9 @@ const prompt = (id, cmd) => ({ kind: "approval", prompt_id: id, command: cmd, de
 
 // The card of a question, live and once it is over (Jacob's approved mockup: every choice that was offered, the
 // answer checked, a typed answer in the Other row, when and where it was answered, or how it ended).
-const rows = (card) => { const out = []; card.walk((n) => { if (n.tag === "li") out.push([n.className, n.text().replace(/\s+/g, " ")]); }); return out; };
+const dv = (card) => card.derived || card.children[0].derived;
+const rows = (card) => JSON.parse(JSON.stringify(dv(card).blocks.filter((b) => b.kind === "list").flatMap((b) => b.items.map((i) => [i.dim ? "" : "pick", textOf(i.parts)]))));
+const res = (card) => textOf(dv(card).more);
 const OTHER = "Other (type your own)";
 async function questionCards() {
   const ask = { kind: "clarify", question: "What should cpus/a64 be renamed to?", choices: ["cpus/aarch64", "cpus/arm64", "Keep cpus/a64"] };
@@ -84,28 +96,28 @@ async function questionCards() {
     const { tracker, shown } = harness();
     tracker.offer(Object.assign({ prompt_id: "a" }, ask));
     tracker.settled("a", { prompt_id: "a", outcome: "answered", answer: "cpus/aarch64", answered_at: 1, answered_via: "hub", question: ask.question, choices: ask.choices });
-    assert.deepStrictEqual(rows(shown[0]), [["pick", "\u2713 cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["other", OTHER]]);
-    assert.strictEqual(shown[0].querySelector("res").text(), "Answered at 12:56 PM (in the hub)");
+    assert.deepStrictEqual(rows(shown[0]), [["pick", "\u2713 cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["", OTHER]]);
+    assert.strictEqual(res(shown[0]), "Answered at 12:56 PM (in the hub)");
     assert.strictEqual(shown[0].buttons().length, 0);
-    assert.strictEqual(shown[0].className, "approval done qdone");
+    assert.strictEqual(dv(shown[0]).title, "Question: cpus/aarch64");
   }
   // A typed answer shows in the Other row, checked.
   {
     const { tracker, shown } = harness();
     tracker.offer(Object.assign({ prompt_id: "a" }, ask));
     tracker.settled("a", { outcome: "answered", answer: "cpus/armv8, and rename the symbols to rl_armv8_*", answered_at: 1, answered_via: "telegram" });
-    assert.deepStrictEqual(rows(shown[0]), [["", "cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["pick other", "\u2713 Other: cpus/armv8, and rename the symbols to rl_armv8_*"]]);
-    assert.strictEqual(shown[0].querySelector("res").text(), "Answered at 12:56 PM (on Telegram)");
+    assert.deepStrictEqual(rows(shown[0]), [["", "cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["pick", "\u2713 Other: cpus/armv8, and rename the symbols to rl_armv8_*"]]);
+    assert.strictEqual(res(shown[0]), "Answered at 12:56 PM (on Telegram)");
   }
   // Several picks and a typed one in a multi-select question; an open question's answer is the Other row, checked.
   {
     const { tracker, shown } = harness();
     tracker.offer({ kind: "clarify", prompt_id: "m", question: "Layouts?", choices: ["Switch", "Game Boy", "NDS"], multi_select: true });
     tracker.settled("m", { outcome: "answered", answer: JSON.stringify(["Switch", "NDS", "SNES"]), answered_at: 1, answered_via: "hub" });
-    assert.deepStrictEqual(rows(shown[0]), [["pick", "\u2713 Switch"], ["", "Game Boy"], ["pick", "\u2713 NDS"], ["pick other", "\u2713 Other: SNES"]]);
+    assert.deepStrictEqual(rows(shown[0]), [["pick", "\u2713 Switch"], ["", "Game Boy"], ["pick", "\u2713 NDS"], ["pick", "\u2713 Other: SNES"]]);
     tracker.offer({ kind: "clarify", prompt_id: "o", question: "Call it?" });
     tracker.settled("o", { outcome: "answered", answer: "Pocket mode", answered_at: 1, answered_via: "hub" });
-    assert.deepStrictEqual(rows(shown[1]), [["pick other", "\u2713 Other: Pocket mode"]]);
+    assert.deepStrictEqual(rows(shown[1]), [["pick", "\u2713 Other: Pocket mode"]]);
   }
   // A subagent's question: the chip with its goal, the question without Hermes's prefix, then the same card.
   {
@@ -114,7 +126,8 @@ async function questionCards() {
     assert.deepStrictEqual(shown[0].querySelector("by").children.map((c) => [c.className, c.textContent]), [["chip", "Subagent"], ["goal", "relift lane android-apk: on-screen controller"]]);
     assert.ok(!shown[0].text().includes("asks:"));
     tracker.settled("s", { outcome: "answered", answer: "Double-tap", answered_at: 1, answered_via: "telegram" });
-    assert.strictEqual(shown[0].querySelector("by").children[0].textContent, "Subagent");
+    assert.strictEqual(dv(shown[0]).titleParts[0].chip, "Subagent");
+    assert.ok(dv(shown[0]).blocks[0].rows[0].v.join("").includes("relift lane android-apk: on-screen controller") || textOf(dv(shown[0]).blocks[0].rows[0].v).includes("relift lane android-apk: on-screen controller"));
     assert.deepStrictEqual(rows(shown[0])[0], ["pick", "\u2713 Double-tap"]);
   }
   // No answer: a timeout says how long it waited; a withdrawn question says so; the choices stay.
@@ -122,15 +135,16 @@ async function questionCards() {
     const { tracker, shown } = harness();
     tracker.offer(Object.assign({ prompt_id: "t" }, ask, { timeout_s: 1800 }));
     tracker.settled("t", { outcome: "timed_out", timeout_s: 1800 });
-    assert.strictEqual(shown[0].querySelector("res").text(), "No answer: timed out after 30 minutes");
+    assert.strictEqual(res(shown[0]), "Timed out after 30 minutes");
     assert.strictEqual(rows(shown[0]).length, 4);
     assert.ok(rows(shown[0]).every((r) => !r[0].includes("pick")));
+    assert.strictEqual(dv(shown[0]).title, "Question");
     tracker.offer(Object.assign({ prompt_id: "w" }, ask));
     tracker.settled("w", { outcome: "cancelled" });
-    assert.ok(shown[1].querySelector("res").text().startsWith("Withdrawn"));
+    assert.ok(res(shown[1]).startsWith("Withdrawn"));
     tracker.offer(Object.assign({ prompt_id: "l" }, ask));
     tracker.lost(["l"]);
-    assert.ok(shown[2].querySelector("res").text().startsWith("Withdrawn"));
+    assert.ok(res(shown[2]).startsWith("Withdrawn"));
   }
   // A Hermes that says nothing of the answer: a card the page answered shows what it sent; others say they were closed.
   {
@@ -142,7 +156,7 @@ async function questionCards() {
     assert.deepStrictEqual(rows(shown[0])[1], ["pick", "\u2713 cpus/arm64"]);
     tracker.offer(Object.assign({ prompt_id: "z" }, ask));
     tracker.settled("z", { prompt_id: "z" });
-    assert.ok(shown[1].querySelector("res").text().includes("no answer was seen here"));
+    assert.ok(res(shown[1]).includes("no answer was seen here"));
   }
   // A question kept by the hub is drawn when the chat loads, and not twice.
   {
@@ -152,7 +166,7 @@ async function questionCards() {
     tracker.restore(rec);
     assert.strictEqual(shown.length, 1);
     assert.deepStrictEqual(rows(shown[0])[1], ["pick", "\u2713 Separate"]);
-    assert.strictEqual(shown[0].querySelector("res").text(), "Answered at 12:56 PM (on Telegram)");
+    assert.strictEqual(res(shown[0]), "Answered at 12:56 PM (on Telegram)");
     // Retiring the chat's own cards leaves it alone.
     let removed = false;
     shown[0].remove = () => { removed = true; };
@@ -202,7 +216,7 @@ async function questionCards() {
     assert.ok(shown[0].text().includes("Answered"));
     assert.strictEqual(shown[0].buttons().length, 0);
     tracker.outcome("a", "Allowed once (in the hub)");
-    assert.ok(shown[0].text().includes("Allowed once (in the hub)"));
+    assert.ok(shown[0].text().includes("Allowed once") && shown[0].text().includes("in the hub"), shown[0].text());
   }
 
   // A prompt Hermes closed that this page did not answer is not "Answered".
@@ -212,7 +226,7 @@ async function questionCards() {
     tracker.settled("a");
     const t = shown[0].text();
     assert.ok(!t.includes("Answered"), t);
-    assert.ok(t.includes("Closed by the agent"), t);
+    assert.ok(t.includes("Not answered") && t.includes("closed this, or restarted"), t);
   }
 
   // An answer Hermes does not confirm re-offers the buttons with a note.
@@ -253,7 +267,7 @@ async function questionCards() {
     fail = { status: 404, message: "gone" };
     shown[0].buttons()[0].onclick();
     await flush();
-    assert.ok(shown[0].text().includes("No longer waiting"));
+    assert.ok(shown[0].text().includes("Not answered"));
     assert.strictEqual(shown[0].buttons().length, 0);
   }
 
@@ -262,12 +276,12 @@ async function questionCards() {
     const { tracker, shown } = harness();
     for (const id of ["a", "b", "c"]) tracker.offer(prompt(id, "cleanup " + id));
     tracker.lost(["a", "c"]);
-    assert.ok(shown[0].text().includes("this is no longer open"));
-    assert.ok(shown[2].text().includes("this is no longer open"));
+    assert.ok(shown[0].text().includes("closed this, or restarted"));
+    assert.ok(shown[2].text().includes("closed this, or restarted"));
     assert.strictEqual(shown[0].buttons().length, 0);
     assert.strictEqual(shown[1].buttons().length, 4);
     tracker.cancelled(["b"]);
-    assert.ok(shown[1].text().includes("Cancelled"));
+    assert.ok(shown[1].text().includes("Not answered"));
   }
 
   // Questions keep their answer box and Skip.

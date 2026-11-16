@@ -62,7 +62,7 @@ const titleOf = (raw) => {
 const msg = (from) => "[Agent message am_0123456789abcdef from " + from + "]\n\nhello there\n";
 let got = titleOf(msg("chat sa-0-edd20c0e"));
 assert.strictEqual(got.title, "Message from " + want);
-assert.ok(got.text.includes("sa-0-edd20c0e"), "the id stays in the details");
+assert.ok(!got.text.includes("sa-0-edd20c0e"), "an id is never shown");
 assert.strictEqual(got.n.title, "Message from chat sa-0-edd20c0e", "the parsed notice is as it was");
 assert.strictEqual(titleOf(msg("sa-0-ffff0000")).title, "Message from a subagent");
 assert.strictEqual(titleOf(msg("parent")).title, "Message from the parent");
@@ -99,11 +99,11 @@ for (const [from, title] of cases) {
   const g = titleOf(msg(from));
   assert.strictEqual(g.title, "Message from " + title, from);
   assert.ok(!/sa-\d|\(goal:|subagent subagent/.test(g.title), "no id or wrapper in the title: " + g.title);
-  assert.ok(g.text.includes(from), "the raw label stays in the details: " + from);
+  assert.ok(!/sa-0-|session 2026/.test(g.text), "no id in the card: " + from);
 }
 // The real header from the report.
 got = titleOf(msg(full));
-assert.ok(got.text.includes("sa-0-edd20c0e"));
+assert.ok(!got.text.includes("sa-0-edd20c0e"));
 assert.strictEqual(HubPeer.who(full, names).id, "sa-0-edd20c0e");
 assert.strictEqual(HubPeer.who(full, {}).name, "relift lane fpcr-const: build the FPC...");
 assert.strictEqual(HubPeer.who(full, names).kind, "sub");
@@ -112,3 +112,13 @@ assert.strictEqual(say("your parent agent sa-0-edd20c0e"), want);
 assert.strictEqual(say("cron job 'nightly' (id abc)", {}), 'the scheduled job "nightly"');
 // A chat whose title mentions a subagent id is still a chat.
 assert.strictEqual(say("chat 'about sa-0-edd20c0e' (session 20261112_103549_47fb42)", {}), 'the chat "about sa-0-edd20c0e"');
+
+// A finished subagent's card (Jacob's mockup): "Finished: <goal>" or "Failed: <goal>", its answer's first line
+// under the status, and a batch names what failed. No "Subagent finished" prefix, no id.
+{
+  const done = titleOf("[ASYNC DELEGATION COMPLETE — sa-1]\nOriginal goal: Fix it\nRole: leaf   Model: claude-sonnet-5-5\nStatus: completed   API calls: 64   Duration: 2280.0s\n--- RESULT ---\nBuilt it.\n- one\nAll pass.");
+  assert.strictEqual(done.title, "Finished: Fix it");
+  assert.ok(done.text.includes("Built it.") && !done.text.includes("sa-1"), done.text);
+  const failed = titleOf("[ASYNC DELEGATION TASK FAILED — sa-2]\nTask: Migrate the notes tables\nStatus: error   Duration: 120.0s\nError: Rate limit reached");
+  assert.strictEqual(failed.title, "Failed: Migrate the notes tables");
+}

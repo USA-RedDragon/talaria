@@ -65,9 +65,9 @@ const { proc, connect } = driver();
     await c.tap(b.x, b.y);
   };
   // The open card of a question: the card with a form, not a closed one.
-  const card = (q) => `[...document.querySelectorAll("#log .approval")].find((a) => a.textContent.includes(${JSON.stringify(q)}))`;
+  const card = (q) => `[...document.querySelectorAll("#log .approval, #log .settled")].find((a) => a.textContent.includes(${JSON.stringify(q)}))`;
   const answerable = async (q, tag) => {
-    await until(`(() => { const a = ${card(q)}; return a && /Question/.test(a.textContent) && a.querySelector("button:not([disabled])"); })()`, `${tag}: an answerable card for ${q}`);
+    await until(`(() => { const a = ${card(q)}; return a && /Question/.test(a.textContent) && a.querySelector("button:not([disabled]):not(.notice-head)"); })()`, `${tag}: an answerable card for ${q}`);
     await frames(3);
   };
   const open = async (id, title) => {
@@ -104,7 +104,7 @@ const { proc, connect } = driver();
   // 4. The next question comes live, with the subagent that asks.
   await answerable(q2, "next question");
   assert.ok(await ev(`${card(q2)}.textContent.includes("check the mapping")`), kind + ": the card names the subagent");
-  await until(`!${card(q1)}.querySelector("button:not([disabled])")`, "the first card closed");
+  await until(`!${card(q1)}.querySelector("button:not([disabled]):not(.notice-head)")`, "the first card closed");
   await ev(`(() => { const i = ${card(q2)}.querySelector("input.answer"); i.focus(); i.value = "keep defaults"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
   await tapSel(`[...${card(q2)}.querySelectorAll("button")].find((b) => b.textContent === "Answer")`);
   await until(`document.getElementById("log").innerText.includes("answered: keep defaults")`, "the turn to go on after the last answer");
