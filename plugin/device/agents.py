@@ -402,14 +402,16 @@ SCHEMAS = {
             "user's words. An idle chat starts a turn; a busy chat gets it after its current turn; a running "
             "subagent, or your running parent, gets it with its next tool result. Use it to coordinate work, "
             "not to chat: do not send thanks or acknowledgements, and do not answer a message that needs no "
-            "answer. Messages are rate limited and a back-and-forth chain is cut off after a few hops."),
+            "answer. Messages are rate limited and a back-and-forth chain is cut off after a few hops. "
+            "Write the message straight into text, not in execute_code, a file or a print first. A reply "
+            "comes on its own; never make a stub or no-op call to receive one."),
         "parameters": {
             "type": "object",
             "properties": {
                 "to": {"type": "string", "description": (
                     "The target: a session id or chat name from agent_peers, an exact chat title, a subagent id "
                     "(sa-...), or parent")},
-                "text": {"type": "string", "description": f"The message, at most {MAX_TEXT} characters"},
+                "text": {"type": "string", "description": f"The message, written here directly, at most {MAX_TEXT} characters"},
                 "reply_to": {"type": "string", "description": "The id (am_...) of the message you answer, if any"},
             },
             "required": ["to", "text"],

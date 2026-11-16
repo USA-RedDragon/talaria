@@ -396,6 +396,16 @@ class ToolTest(unittest.TestCase):
             agents.INBOX.put("s9", "m1", "hello", running_only=False)
             self.assertIn("hello", agents.transform_tool_result("cronjob_manage", "r", "s9", args={}))
 
+    def test_send_says_write_the_text_in_the_call(self):
+        # Agents drafted a message in execute_code (or opened it on a print("x") stub) before the
+        # real agent_send, and made no-op calls to pick up a reply.
+        schema = agents.SCHEMAS["agent_send"]
+        desc = schema["description"]
+        self.assertIn("Write the message straight into text", desc)
+        self.assertIn("not in execute_code, a file or a print first", desc)
+        self.assertIn("never make a stub or no-op call to receive one", desc)
+        self.assertIn("written here directly", schema["parameters"]["properties"]["text"]["description"])
+
     def test_offered_needs_hub(self):
         bus = agents.Bus()
         with mock.patch.object(agents, "BUS", bus):

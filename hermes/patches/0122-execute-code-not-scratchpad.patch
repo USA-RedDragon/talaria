@@ -1,0 +1,67 @@
+From 328b63b4276dc519fead173f2fd2469ba7b878a2 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 00:21:31 -0600
+Subject: [PATCH] fix(execute_code): say it is not a scratchpad for text or a
+ no-op
+
+Agents used execute_code as a scratchpad: a print("x") stub run before
+the real agent_send, delegate_task or steer call, or a message built and
+printed as a string and then pasted into agent_send's text. Nothing in
+the description said what the tool is not for.
+
+The description now says it runs code and is not a scratchpad: text to
+send or save goes straight into the call that uses it (agent_send's
+text, write_file's content), and no call is a no-op or test call.
+---
+ tests/tools/test_code_execution.py | 9 +++++++++
+ tools/code_execution_tool.py       | 7 +++++--
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/tests/tools/test_code_execution.py b/tests/tools/test_code_execution.py
+index cd58d8d4..ed600dc8 100644
+--- a/tests/tools/test_code_execution.py
++++ b/tests/tools/test_code_execution.py
+@@ -597,6 +597,15 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
+             self.assertIn("plugin or MCP tool", desc)
+             self.assertIn("put them all in one message as normal tool calls", desc)
+ 
++    def test_not_a_scratchpad_for_text_or_a_no_op(self):
++        # Agents built a message for agent_send as a printed string, or ran print("x") as a no-op,
++        # before the real call. Say what the tool is for instead of banning print.
++        for enabled in (None, {"terminal"}):
++            desc = build_execute_code_schema(enabled)["description"]
++            self.assertIn("It runs code; it is not a scratchpad", desc)
++            self.assertIn("write the text straight into the call that uses it", desc)
++            self.assertIn("never make a no-op or test call", desc)
++
+     def test_says_a_started_call_runs(self):
+         desc = build_execute_code_schema()["description"]
+         self.assertIn("Every execute_code call runs as written, even a stub", desc)
+diff --git a/tools/code_execution_tool.py b/tools/code_execution_tool.py
+index 070d89f3..525f4f54 100644
+--- a/tools/code_execution_tool.py
++++ b/tools/code_execution_tool.py
+@@ -916,7 +916,8 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
+     # A model about to fan out calls to tools the code cannot reach (delegate_task, plugin and MCP
+     # tools) read "3+ tool calls" as its cue, opened an execute_code call, and closed it on a stub
+     # (``import json``, ``print("ok")``) that still ran before the real calls. Name the reach and the
+-    # alternative, and say a started call always runs.
++    # alternative, and say a started call always runs. Agents also built a message as a printed string
++    # before the real agent_send, or ran ``print("x")`` as a no-op: say what the tool is for.
+     description = (
+         "Run Python that calls the Hermes tools listed below programmatically. Use when you "
+         "need 3+ calls to those tools with logic between them: filtering/reducing "
+@@ -926,7 +927,9 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
+         "No other tool can be called from the code (not delegate_task, clarify, or any plugin or MCP "
+         "tool): for several independent calls to those, put them all in one message as normal tool "
+         "calls. Every execute_code call runs as written, even a stub, so never start one you do not "
+-        "mean to finish.\n\n"
++        "mean to finish. It runs code; it is not a scratchpad: to send or save text, write the text "
++        "straight into the call that uses it (agent_send's text, write_file's content), and never make "
++        "a no-op or test call.\n\n"
+         "Calls run in a persistent session kernel: variables, imports, and "
+         "loaded data survive across execute_code calls, so build on earlier "
+         "work instead of re-loading it. A timed-out or interrupted call loses that state.\n\n"
+-- 
+2.56.0
+
