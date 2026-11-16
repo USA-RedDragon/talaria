@@ -1,0 +1,6 @@
+# Upstream tests of the stream accumulator and the transcript projection the patch changes
+tests/agent/test_streamed_reasoning_details.py
+tests/agent/test_reasoning_only_stop_persistence.py
+tests/tui_gateway/test_image_history_display.py
+tests/tui_gateway/test_history_inline_images.py
+tests/tui_gateway/test_composite_carrier_rewind.py

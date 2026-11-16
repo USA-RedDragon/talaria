@@ -1,0 +1,395 @@
+From 1141962f4e396c81dba7eb7b2f5ef69636e1fdde Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 07:40:42 +0000
+Subject: [PATCH] feat(display): show provider-side tool calls as tool cards
+
+A provider that runs a tool inside its own request (Anthropic's web
+search through a subscription connector) can report each call in its
+stream as delta.server_tool_events: a start with the call's arguments
+and a completion with its result. Hermes never runs or replays these
+calls. While the reply streams, each one fires the same tool start and
+complete callbacks a Hermes tool does, so viewers show a tool card
+(web_search: 'Searched the web for ...' with its results). The calls
+are stored in the assistant row's display_metadata (never sent to a
+model), and the transcript projection shows them as tool rows before
+that reply, so a reload shows the same cards. A call whose result came
+in a later reply shows once, with that result; one that no reply
+answered (the provider dropped a search deferred past a client tool
+call) closes as not run.
+---
+ agent/chat_completion_helpers.py       |   6 +
+ agent/server_tool_events.py            | 138 ++++++++++++++++++++++
+ tests/agent/test_server_tool_events.py | 155 +++++++++++++++++++++++++
+ tui_gateway/session_history.py         |   7 +-
+ 4 files changed, 305 insertions(+), 1 deletion(-)
+ create mode 100644 agent/server_tool_events.py
+ create mode 100644 tests/agent/test_server_tool_events.py
+
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+index 3647bf5aa9..e611238009 100644
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -1634,6 +1634,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
+     msg = stamp_message_timestamp({"role": "assistant",
+         "content": _assistant_content_for_storage(agent, assistant_message), "reasoning": reasoning_text,
+         "finish_reason": finish_reason})
++    from agent.server_tool_events import attach as attach_server_tools
++    attach_server_tools(agent, msg)
+ 
+     raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
+     if raw_reasoning_content is None:
+@@ -3026,6 +3028,8 @@ class _StreamingCall(StreamingWaitMonitor):
+         tool_calls_acc = tool_calls.acc
+         from agent.reasoning_carriers import StreamCarriers
+         carriers = StreamCarriers()
++        from agent.server_tool_events import ServerToolEvents
++        server_tools = ServerToolEvents(self.agent)
+         finish_reason = model_name = usage_obj = None
+         response_id = upstream_provider = None  # the provider's own id / serving upstream, from the chunks
+         role = "assistant"
+@@ -3110,6 +3114,7 @@ class _StreamingCall(StreamingWaitMonitor):
+                 reasoning_text = delta.model_extra.get("reasoning_content") or delta.model_extra.get("reasoning")
+             # A profile-declared text carrier doubles as the readable reasoning.
+             reasoning_text = carriers.feed(delta, reasoning_text)
++            server_tools.feed(delta)
+             if reasoning_text:
+                 # Summary-part models omit the separator between markdown blocks; re-insert it.
+                 reasoning_text = separate_glued_reasoning_blocks(
+@@ -3200,6 +3205,7 @@ class _StreamingCall(StreamingWaitMonitor):
+             response_id=response_id, upstream_provider=upstream_provider, reasoning_details=reasoning_details,
+             refusal_parts=refusal_parts)
+         carriers.apply(response)
++        self.agent._server_tool_records = server_tools.take(client_tool_calls=bool(tool_calls_acc))
+         if runaway:
+             # Cut, not finished: the length path ends the turn on this mark instead of continuing.
+             response._runaway_repetition = True
+diff --git a/agent/server_tool_events.py b/agent/server_tool_events.py
+new file mode 100644
+index 0000000000..d98c076b5a
+--- /dev/null
++++ b/agent/server_tool_events.py
+@@ -0,0 +1,138 @@
++"""Tool calls a provider ran on its own side, inside the model request (Anthropic's web search through a
++subscription connector).
++
++A provider stream may carry ``delta.server_tool_events``: a list of ``{"phase": "start", "id", "name", "args"}``
++and ``{"phase": "complete", "id", "name", "result", "is_error"}`` items. Hermes never runs these calls and never
++sends them back as tool calls (the provider replays its own blocks); it shows each one as a tool card while the
++reply streams, and keeps them in the assistant row's ``display_metadata`` so a transcript read shows the same
++cards.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++from typing import Any
++
++logger = logging.getLogger(__name__)
++
++# The assistant row's ``display_metadata`` key: the server-side calls of that reply, in order.
++SERVER_TOOLS = "server_tools"
++# The result of a call the provider never ran. Anthropic defers a search the model starts next to a client tool
++# call, and has been seen to drop it and search again in the next reply instead.
++NOT_RUN = json.dumps({"success": False, "error": "Not run"})
++
++
++def _events(delta: Any) -> list:
++    events = getattr(delta, "server_tool_events", None)
++    if events is None and isinstance(getattr(delta, "model_extra", None), dict):
++        events = delta.model_extra.get("server_tool_events")
++    return events if isinstance(events, list) else []
++
++
++def _call(callback, label: str, *args, **kwargs) -> None:
++    if not callback:
++        return
++    try:
++        callback(*args, **kwargs)
++    except Exception as error:  # a display hook must never end the stream
++        logger.debug("%s callback error: %s", label, error)
++
++
++class ServerToolEvents:
++    """The server-side tool calls of one streamed reply: cards as they happen, records for the stored row."""
++
++    def __init__(self, agent):
++        self.agent = agent
++        self.records: dict[str, dict] = {}
++        # Calls of earlier replies still waiting for a result.
++        self.pending: dict[str, dict] = dict(getattr(agent, "_server_tool_pending", None) or {})
++
++    def feed(self, delta: Any) -> None:
++        for event in _events(delta):
++            if not isinstance(event, dict) or not isinstance(event.get("id"), str) or not event["id"]:
++                continue
++            call_id, name = event["id"], str(event.get("name") or "server_tool")
++            if event.get("phase") == "start":
++                args = event.get("args") if isinstance(event.get("args"), dict) else {}
++                self.records[call_id] = {"id": call_id, "name": name, "args": args}
++                from agent.display import build_tool_preview
++                try:
++                    preview = build_tool_preview(name, args)
++                except Exception:
++                    preview = None
++                _call(self.agent.tool_progress_callback, "Tool progress", "tool.started", name, preview, args)
++                _call(getattr(self.agent, "tool_start_callback", None), "Tool start", call_id, name, args)
++            elif event.get("phase") == "complete":
++                result = event.get("result") if isinstance(event.get("result"), str) else ""
++                self._complete(call_id, name, result, bool(event.get("is_error")))
++
++    def _complete(self, call_id: str, name: str, result: str, is_error: bool) -> None:
++        earlier = self.pending.pop(call_id, None)
++        record = self.records.setdefault(call_id, {"id": call_id, "name": (earlier or {}).get("name") or name})
++        record.update(result=result, is_error=is_error)
++        args = record.get("args") or (earlier or {}).get("args") or {}
++        _call(self.agent.tool_progress_callback, "Tool progress", "tool.completed", record["name"], None, None,
++              duration=None, is_error=is_error, result=result)
++        _call(getattr(self.agent, "tool_complete_callback", None), "Tool complete", call_id, record["name"],
++              args, result)
++
++    def take(self, *, client_tool_calls: bool = False) -> list[dict]:
++        """This reply's records. A call of an earlier reply that this one did not answer never ran; one of this
++        reply waits for the next reply only when this one ends in client tool calls."""
++        for call_id, record in list(self.pending.items()):
++            self._complete(call_id, record["name"], NOT_RUN, True)
++        waiting = {}
++        for call_id, record in list(self.records.items()):
++            if "result" not in record:
++                if client_tool_calls:
++                    waiting[call_id] = record
++                else:
++                    self._complete(call_id, record["name"], NOT_RUN, True)
++        self.agent._server_tool_pending = waiting
++        return list(self.records.values())
++
++
++def attach(agent, msg: dict) -> dict:
++    """Move the server-side calls of the reply just streamed onto its assistant row."""
++    records = getattr(agent, "_server_tool_records", None)
++    agent._server_tool_records = None
++    if records:
++        metadata = msg.get("display_metadata")
++        msg["display_metadata"] = {**(metadata if isinstance(metadata, dict) else {}), SERVER_TOOLS: records}
++    return msg
++
++
++def display_rows(history: list) -> dict[int, list[dict]]:
++    """Tool rows to show before each stored row that holds server-side calls, keyed by its index in *history*.
++
++    A call whose result came in a later reply (the provider ran it after a client tool) is shown once, where it
++    started, with that result."""
++    results: dict[str, dict] = {}
++    for row in history:
++        for record in _records(row):
++            if "result" in record:
++                results[record["id"]] = record
++    started = {r["id"] for row in history for r in _records(row) if "args" in r}
++    shown: set[str] = set()
++    rows: dict[int, list[dict]] = {}
++    for index, row in enumerate(history):
++        for record in _records(row):
++            call_id = record["id"]
++            if call_id in shown or ("args" not in record and call_id in started):
++                continue
++            shown.add(call_id)
++            done = results.get(call_id, record)
++            item = {"role": "tool", "name": record.get("name") or "server_tool", "tool_call_id": call_id,
++                    "args": record.get("args") or {}, "display_metadata": {"server_tool": True},
++                    "content": done.get("result", NOT_RUN)}
++            if isinstance(row.get("timestamp"), (int, float)):
++                item["timestamp"] = float(row["timestamp"])
++            rows.setdefault(index, []).append(item)
++    return rows
++
++
++def _records(row: Any) -> list[dict]:
++    metadata = row.get("display_metadata") if isinstance(row, dict) and row.get("role") == "assistant" else None
++    records = metadata.get(SERVER_TOOLS) if isinstance(metadata, dict) else None
++    return [r for r in records if isinstance(r, dict) and isinstance(r.get("id"), str)] if isinstance(records, list) else []
+diff --git a/tests/agent/test_server_tool_events.py b/tests/agent/test_server_tool_events.py
+new file mode 100644
+index 0000000000..644d98f699
+--- /dev/null
++++ b/tests/agent/test_server_tool_events.py
+@@ -0,0 +1,155 @@
++"""Server-side tool calls a provider ran inside its request (web search) become tool cards and stored
++display records, and are never run or replayed by Hermes."""
++
++import json
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++from agent.server_tool_events import SERVER_TOOLS, display_rows
++
++RESULT = json.dumps({"success": True, "data": {"web": [{"title": "Release notes", "url": "https://example.com/r"}]}})
++
++
++def _chunk(content=None, finish_reason=None, events=None):
++    delta = SimpleNamespace(content=content, tool_calls=None, reasoning_content=None, reasoning=None)
++    if events is not None:
++        delta.server_tool_events = events
++    return SimpleNamespace(choices=[SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)],
++                           model="test-model", usage=None)
++
++
++def _agent():
++    from run_agent import AIAgent
++    agent = AIAgent(api_key="test-key", base_url="https://openrouter.ai/api/v1", model="test/model",
++                    quiet_mode=True, skip_context_files=True, skip_memory=True)
++    agent.api_mode = "chat_completions"
++    agent._interrupt_requested = False
++    return agent
++
++
++@patch("run_agent.AIAgent._create_request_openai_client")
++@patch("run_agent.AIAgent._close_request_openai_client")
++def test_streamed_server_search_is_a_card_and_a_stored_record_not_a_tool_call(_mock_close, mock_create):
++    chunks = [
++        _chunk(events=[{"phase": "start", "id": "srvtoolu_1", "name": "web_search", "args": {"query": "hermes release"}}]),
++        _chunk(events=[{"phase": "complete", "id": "srvtoolu_1", "name": "web_search", "result": RESULT, "is_error": False}]),
++        _chunk(content="It is v1.2.", finish_reason="stop"),
++    ]
++    client = MagicMock()
++    client.chat.completions.create.return_value = iter(chunks)
++    mock_create.return_value = client
++    agent = _agent()
++    agent.stream_delta_callback = lambda text: None
++    started, completed, progress = [], [], []
++    agent.tool_start_callback = lambda *a: started.append(a)
++    agent.tool_complete_callback = lambda *a: completed.append(a)
++    agent.tool_progress_callback = lambda event, *a, **kw: progress.append(event)
++
++    response = agent._interruptible_streaming_api_call({})
++
++    msg = response.choices[0].message
++    assert msg.content == "It is v1.2."
++    assert not msg.tool_calls
++    assert response.choices[0].finish_reason == "stop"
++    assert started == [("srvtoolu_1", "web_search", {"query": "hermes release"})]
++    assert completed == [("srvtoolu_1", "web_search", {"query": "hermes release"}, RESULT)]
++    assert progress == ["tool.started", "tool.completed"]
++    stored = agent._build_assistant_message(msg, "stop")
++    assert stored["display_metadata"][SERVER_TOOLS] == [
++        {"id": "srvtoolu_1", "name": "web_search", "args": {"query": "hermes release"}, "result": RESULT, "is_error": False}]
++    assert "tool_calls" not in stored or not stored["tool_calls"]
++    # The records belong to that one reply.
++    assert SERVER_TOOLS not in (agent._build_assistant_message(msg, "stop").get("display_metadata") or {})
++
++
++def test_display_metadata_never_reaches_the_wire():
++    from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS
++    assert "display_metadata" in PERSISTENCE_ONLY_MESSAGE_FIELDS
++
++
++def test_transcript_shows_each_search_as_a_web_search_card_before_the_reply():
++    from tui_gateway import server
++    history = [
++        {"role": "user", "content": "What is new?"},
++        {"role": "assistant", "content": "It is v1.2.", "timestamp": 10.0, "display_metadata": {SERVER_TOOLS: [
++            {"id": "srvtoolu_1", "name": "web_search", "args": {"query": "hermes release"}, "result": RESULT,
++             "is_error": False}]}},
++    ]
++    shown = server._history_to_messages(history)
++    assert [m["role"] for m in shown] == ["user", "tool", "assistant"]
++    card = shown[1]
++    assert card["name"] == "web_search" and card["tool_call_id"] == "srvtoolu_1"
++    assert card["args"] == {"query": "hermes release"} and card["content"] == RESULT
++    assert shown[2]["text"] == "It is v1.2."
++
++
++def test_a_search_answered_in_a_later_reply_shows_once_with_its_result():
++    first = {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function",
++             "function": {"name": "terminal", "arguments": "{}"}}],
++             "display_metadata": {SERVER_TOOLS: [{"id": "srvtoolu_2", "name": "web_search", "args": {"query": "q"}}]}}
++    later = {"role": "assistant", "content": "Done.",
++             "display_metadata": {SERVER_TOOLS: [{"id": "srvtoolu_2", "name": "web_search", "result": RESULT,
++                                                  "is_error": False}]}}
++    rows = display_rows([first, {"role": "tool", "tool_call_id": "call_1", "content": "ok"}, later])
++    assert list(rows) == [0]
++    assert rows[0][0]["content"] == RESULT and rows[0][0]["args"] == {"query": "q"}
++
++
++@patch("run_agent.AIAgent._create_request_openai_client")
++@patch("run_agent.AIAgent._close_request_openai_client")
++def test_a_turn_with_a_server_search_runs_no_tool_and_asks_no_approval(_mock_close, mock_create):
++    """The search ran on the provider's side and only read the web: nothing reaches Hermes' tool executor, so
++    neither the approval guard nor the smart approval reviewer sees it."""
++    chunks = [
++        _chunk(events=[{"phase": "start", "id": "srvtoolu_1", "name": "web_search", "args": {"query": "q"}}]),
++        _chunk(events=[{"phase": "complete", "id": "srvtoolu_1", "name": "web_search", "result": RESULT}]),
++        _chunk(content="Answer.", finish_reason="stop"),
++    ]
++    client = MagicMock()
++    client.chat.completions.create.side_effect = lambda *a, **kw: iter(chunks)
++    mock_create.return_value = client
++    agent = _agent()
++    agent.client = client
++    agent.stream_delta_callback = lambda text: None
++    refuse = MagicMock(side_effect=AssertionError("no tool may run"))
++    with (
++        patch("agent.tool_executor.execute_tool_calls_concurrent", refuse),
++        patch("agent.tool_executor.execute_tool_calls_sequential", refuse),
++        patch("tools.approval.check_all_command_guards", refuse),
++        patch.object(agent, "_persist_session"),
++        patch.object(agent, "_save_trajectory"),
++        patch.object(agent, "_cleanup_task_resources"),
++    ):
++        result = agent.run_conversation("what is new?")
++    assert result["final_response"] == "Answer."
++    refuse.assert_not_called()
++    stored = [m for m in result["messages"] if m.get("role") == "assistant"]
++    assert stored[-1]["display_metadata"][SERVER_TOOLS][0]["id"] == "srvtoolu_1"
++    assert not any(m.get("role") == "tool" for m in result["messages"])
++
++
++def test_a_search_deferred_past_a_client_tool_call_and_never_answered_closes_as_not_run():
++    """Seen live: a search started next to a client tool call got no result; the next reply searched again."""
++    from agent.server_tool_events import NOT_RUN, ServerToolEvents
++    agent = SimpleNamespace(tool_progress_callback=None, tool_start_callback=None, completed=[])
++    agent.tool_complete_callback = lambda *a: agent.completed.append(a)
++    first = ServerToolEvents(agent)
++    first.feed(SimpleNamespace(server_tool_events=[{"phase": "start", "id": "srvtoolu_a", "name": "web_search",
++                                                    "args": {"query": "q"}}]))
++    assert first.take(client_tool_calls=True) == [{"id": "srvtoolu_a", "name": "web_search", "args": {"query": "q"}}]
++    assert agent.completed == []
++    second = ServerToolEvents(agent)
++    second.feed(SimpleNamespace(server_tool_events=[
++        {"phase": "start", "id": "srvtoolu_b", "name": "web_search", "args": {"query": "q"}},
++        {"phase": "complete", "id": "srvtoolu_b", "name": "web_search", "result": RESULT}]))
++    records = second.take()
++    assert agent.completed == [("srvtoolu_b", "web_search", {"query": "q"}, RESULT),
++                               ("srvtoolu_a", "web_search", {"query": "q"}, NOT_RUN)]
++    assert {r["id"]: r["result"] for r in records} == {"srvtoolu_b": RESULT, "srvtoolu_a": NOT_RUN}
++    assert agent._server_tool_pending == {}
++    # The transcript shows the first search once, where it started, as not run.
++    rows = display_rows([{"role": "assistant", "content": "", "display_metadata": {SERVER_TOOLS: first.records and
++                          [{"id": "srvtoolu_a", "name": "web_search", "args": {"query": "q"}}]}},
++                         {"role": "assistant", "content": "Done.", "display_metadata": {SERVER_TOOLS: records}}])
++    assert [(i, [r["tool_call_id"] for r in v]) for i, v in rows.items()] == [(0, ["srvtoolu_a"]), (1, ["srvtoolu_b"])]
++    assert rows[0][0]["content"] == NOT_RUN
+diff --git a/tui_gateway/session_history.py b/tui_gateway/session_history.py
+index 7996c23f4d..5b8c8a2565 100644
+--- a/tui_gateway/session_history.py
++++ b/tui_gateway/session_history.py
+@@ -335,11 +335,16 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls:
+     from agent.history_commentary import project_history_commentary
+     from agent.message_metadata import withheld_prompt_text
+ 
++    from agent.server_tool_events import display_rows as server_tool_rows
++
+     messages = []
+     tool_call_args = {}
+-    for m in history:
++    server_rows = server_tool_rows(history)
++    for index, m in enumerate(history):
+         if not isinstance(m, dict):
+             continue
++        # Calls the provider ran on its own side (web search): a card each, before the reply that made them.
++        messages.extend(server_rows.get(index, ()))
+         m = project_compaction_message_for_display(m)
+         if m is None:
+             continue
+-- 
+2.56.0
+
