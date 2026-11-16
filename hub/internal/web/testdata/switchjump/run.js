@@ -236,6 +236,8 @@ const { proc, connect } = driver();
   // The page reports a chat that left its end with no reader input; none
   // of these switches may.
   const reports = await ev(`window.__reports`);
+  // node cuts the diff of a long report; the whole report is what shows why.
+  for (const r of reports) console.log("REPORT " + r);
   assert.deepStrictEqual(reports, [], "the page reported views that left the newest message");
   if (fails.length) {
     for (const x of fails.slice(0, 4)) {

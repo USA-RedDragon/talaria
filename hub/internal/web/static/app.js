@@ -951,6 +951,7 @@
     // park takes the chat's log out of the page as it is, for unpark to
     // put back.
     park(nodes) {
+      this.releasePlace();
       const log = this.log;
       this.parkedView = { title: $("title").textContent, doc: document.title };
       const frag = document.createDocumentFragment();
@@ -1812,14 +1813,34 @@
         // and go to the place when they are here.
         this.afterOlder = kept;
         this.bottom();
+        // A reader who was away from the end must not see the log at its end
+        // for the moment the older rows take: hide it until they place the
+        // reader, and say the page moved the view.
+        if (kept !== null) this.holdPlace();
       } else this.placeReader(kept);
       if (this.onLoad) this.onLoad();
       this.onLoad = null;
     }
 
+    // holdPlace hides the log while the page shows its end for the older
+    // rows to come; releasePlace shows it again (at the latest after 2.5 s,
+    // should the rows never come).
+    holdPlace() {
+      vreport.excuse(3000, "restore");
+      this.log.classList.add("placing");
+      clearTimeout(this.placeTimer);
+      this.placeTimer = setTimeout(() => this.releasePlace(), 2500);
+    }
+
+    releasePlace() {
+      clearTimeout(this.placeTimer);
+      this.log.classList.remove("placing");
+    }
+
     // placeReader puts the reader where the snapshot found them (kept), at the
     // message a search opened, or where a reload left them; else at the end.
     placeReader(kept) {
+      this.releasePlace();
       if (kept !== null || window.HubRestore.state()) this.showOlder(() => true);
       if (window.HubReconcile.restore(this.log, kept, (p) => rowTop(this.log, p.row))) {
         // Back to where the reader was before the snapshot.

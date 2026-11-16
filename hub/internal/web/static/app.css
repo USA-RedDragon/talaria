@@ -1182,6 +1182,7 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7
 }
 /* A reload for a new release keeps the view: the list and the chat stay hidden until they are back in place. */
 .restoring #sessions, .restoring #log { visibility: hidden; }
+#log.placing { visibility: hidden; }
 
 /* Page chat: this page in the Talaria Firefox extension's toolbar popup and sidebar (/pagechat, pagechat.js). */
 html.pagechat, .pagechat body { font-size: 14px; }
