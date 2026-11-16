@@ -1,0 +1,84 @@
+From 81010bf7d3b79988ac004ae01bc9f2c9f3ba33e5 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 21:46:08 -0600
+Subject: [PATCH] fix(execute_code): name what the code can call, so no stub
+ runs
+
+execute_code's description said "Use when you need 3+ tool calls", but
+the code can call only the tools it lists. A model about to fan out
+calls to other tools (agent_send, delegate_task, a plugin's or MCP
+server's tools) took that as its cue, opened an execute_code call,
+found it could not make them there, and closed the call on a one-line
+stub (`import json,subprocess`, `print("ok")`) that still ran before
+the real calls in its next message.
+
+The description now says the 3+ cue is about the listed tools, that no
+other tool can be called from the code and several independent calls
+to those go in one message as normal tool calls, and that every
+execute_code call runs as written, even a stub.
+---
+ tests/tools/test_code_execution.py | 20 ++++++++++++++++++++
+ tools/code_execution_tool.py       | 12 ++++++++++--
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/tests/tools/test_code_execution.py b/tests/tools/test_code_execution.py
+index 14e07578..cd58d8d4 100644
+--- a/tests/tools/test_code_execution.py
++++ b/tests/tools/test_code_execution.py
+@@ -581,6 +581,26 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
+         schema_all = build_execute_code_schema(SANDBOX_ALLOWED_TOOLS)
+         self.assertEqual(schema_none["description"], schema_all["description"])
+ 
++    def test_fan_out_cue_names_only_the_listed_tools(self):
++        # "Use when you need 3+ tool calls" sent a model about to fan out delegate_task or a plugin's
++        # tool into execute_code, where it closed the call on a stub (`import json`) that still ran.
++        desc = build_execute_code_schema()["description"]
++        self.assertNotIn("need 3+ tool calls", desc)
++        self.assertIn("3+ calls to those tools", desc)
++        self.assertIn("calls the Hermes tools listed below", desc)
++
++    def test_other_tools_go_in_one_message_as_normal_calls(self):
++        for enabled in (None, {"terminal"}):
++            desc = build_execute_code_schema(enabled)["description"]
++            self.assertIn("No other tool can be called from the code", desc)
++            self.assertIn("delegate_task", desc)
++            self.assertIn("plugin or MCP tool", desc)
++            self.assertIn("put them all in one message as normal tool calls", desc)
++
++    def test_says_a_started_call_runs(self):
++        desc = build_execute_code_schema()["description"]
++        self.assertIn("Every execute_code call runs as written, even a stub", desc)
++
+ 
+ # ---------------------------------------------------------------------------
+ # Environment variable filtering (security critical)
+diff --git a/tools/code_execution_tool.py b/tools/code_execution_tool.py
+index 7ec0cca2..070d89f3 100644
+--- a/tools/code_execution_tool.py
++++ b/tools/code_execution_tool.py
+@@ -913,12 +913,20 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
+     # `kernel` field tells the truth per call.
+     # Session kernels are always on (kernel_mode retired in #96787): persistence is part of the tool's one
+     # description, not a bolt-on paragraph behind a dead conditional.
++    # A model about to fan out calls to tools the code cannot reach (delegate_task, plugin and MCP
++    # tools) read "3+ tool calls" as its cue, opened an execute_code call, and closed it on a stub
++    # (``import json``, ``print("ok")``) that still ran before the real calls. Name the reach and the
++    # alternative, and say a started call always runs.
+     description = (
+-        "Run Python that calls Hermes tools programmatically. Use when you "
+-        "need 3+ tool calls with logic between them: filtering/reducing "
++        "Run Python that calls the Hermes tools listed below programmatically. Use when you "
++        "need 3+ calls to those tools with logic between them: filtering/reducing "
+         "large outputs before they enter context, branching, or loops "
+         "(N pages/files, retry on failure). Use normal tool calls for "
+         "single calls, results you must reason over in full, or anything needing user interaction.\n\n"
++        "No other tool can be called from the code (not delegate_task, clarify, or any plugin or MCP "
++        "tool): for several independent calls to those, put them all in one message as normal tool "
++        "calls. Every execute_code call runs as written, even a stub, so never start one you do not "
++        "mean to finish.\n\n"
+         "Calls run in a persistent session kernel: variables, imports, and "
+         "loaded data survive across execute_code calls, so build on earlier "
+         "work instead of re-loading it. A timed-out or interrupted call loses that state.\n\n"
+-- 
+2.56.0
+
