@@ -1,0 +1,445 @@
+From 03fa9e8b5b7ff5062b5be046795b84a0fbc886c9 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 12:43:09 -0600
+Subject: [PATCH] fix(delegate): a chat message never stops its subagents'
+ waits
+
+A user's message to a chat interrupted the chat's whole spawn tree. A
+subagent's process_manage wait was released with a note that promised a
+notification on exit, which is false for a subagent's job, its model call was
+cut, and its turn ended with the job still running and nobody watching it. The
+subagent then sat as waiting for hours after the job had finished.
+
+- A new-message interrupt (the reason a gateway names when the user sends a
+  message to a busy chat) stops the chat's own turn only. Its subagents are
+  steered explicitly; Stop and every other interrupt still reach them, and a
+  child attached late no longer inherits a new-message interrupt.
+- A yield for a parent's message is never aimed at a thread that runs one of
+  its subagents.
+- A subagent whose wait was released gets the job watched (as handoff with
+  resume_on_exit does) and its note says so. A top-level agent keeps the
+  notification promise.
+- A subagent whose turn was cut short while a job of its own still runs has
+  that job watched, so it is woken with the exit and shows as waiting only
+  while the job runs. A job it keeps past its lifecycle is left alone.
+---
+ agent/interrupt_control.py             |  41 ++++-
+ tests/tools/test_subagent_job_watch.py | 225 +++++++++++++++++++++++++
+ tools/delegate_tool_child_run.py       |  20 +++
+ tools/process_registry.py              |  29 +++-
+ 4 files changed, 311 insertions(+), 4 deletions(-)
+ create mode 100644 tests/tools/test_subagent_job_watch.py
+
+diff --git a/agent/interrupt_control.py b/agent/interrupt_control.py
+index c016468f..9a7560f2 100644
+--- a/agent/interrupt_control.py
++++ b/agent/interrupt_control.py
+@@ -164,6 +164,26 @@ def _ic_signal_tool_workers(agent, active: bool, **kw) -> None:
+             pass
+ 
+ 
++def _ic_child_tids(agent) -> set:
++    """Thread ids that run this agent's live subagents: their execution threads and tool workers."""
++    lock = getattr(agent, "_active_children_lock", None)
++    children = getattr(agent, "_active_children", None)
++    if lock is None or not isinstance(children, (list, tuple, set)):
++        return set()
++    with lock:
++        snapshot = list(children)
++    tids: set = set()
++    for child in snapshot:
++        tid = getattr(child, "_execution_thread_id", None)
++        if isinstance(tid, int):
++            tids.add(tid)
++        tracker, tracker_lock = getattr(child, "_tool_worker_threads", None), getattr(child, "_tool_worker_threads_lock", None)
++        if isinstance(tracker, set) and tracker_lock is not None:
++            with tracker_lock:
++                tids.update(tracker)
++    return tids
++
++
+ class InterruptControlMixin:
+     """interrupt()/hard_interrupt()/clear_interrupt()/steer()/redirect() (see module docstring)."""
+ 
+@@ -196,6 +216,8 @@ class InterruptControlMixin:
+             else (tool_reason or (_REASON_NEW_MESSAGE if message else _REASON_USER_INTERRUPT))
+         )
+ 
++        spares_children = not hard_cancel and tool_reason == NEW_MESSAGE_INTERRUPT_REASON
++
+         def _publish_interrupt_state() -> None:
+             # A shutdown stop never relabels a user Stop already pending (the user's Stop wins): the turn
+             # records the first cause, so it is not announced as interrupted by the restart. A pending
+@@ -208,6 +230,7 @@ class InterruptControlMixin:
+                 # closer runs); run_conversation resets it once the turn is closed.
+                 self._turn_user_cancelled = tool_interrupt_reason in USER_CANCEL_REASONS
+             self._interrupt_requested = True
++            self._interrupt_spares_children = spares_children
+             self._turn_user_intervened = True
+             # The turn record and the log must agree on WHO asked for the stop (#112647).
+             logger.info("Interrupt requested (%s): %s", "hard" if hard_cancel else "soft", tool_interrupt_reason)
+@@ -264,9 +287,16 @@ class InterruptControlMixin:
+             # signal instead of targeting the caller thread.
+             self._interrupt_thread_signal_pending = True
+         _ic_signal_tool_workers(self, True, reason=tool_interrupt_reason)
+-        # Propagate interrupt to any running child agents (subagent delegation)
+-        with self._active_children_lock:
+-            children_copy = list(self._active_children)
++        # A host that interrupts for a user's new message names it (``NEW_MESSAGE_INTERRUPT_REASON``). That
++        # message is for this chat's own turn: its subagents are separate agents that the user steers
++        # explicitly. Stopping them here released their process waits and cut their model calls, so a child
++        # whose job was still running ended its turn with nobody watching the job.
++        if spares_children:
++            children_copy = []
++        else:
++            # Propagate interrupt to any running child agents (subagent delegation)
++            with self._active_children_lock:
++                children_copy = list(self._active_children)
+         for child in children_copy:
+             try:
+                 if hard_cancel:
+@@ -298,6 +328,7 @@ class InterruptControlMixin:
+             if preserve_redirect and not _ic_slot(self, "_pending_redirect_lock", "_pending_redirect"):
+                 return False
+             self._interrupt_requested = False
++            self._interrupt_spares_children = False
+             self._interrupt_message = self._tool_interrupt_reason = None
+             getattr(self, "_hard_interrupt_requested", threading.Event()).clear()
+             if not preserve_redirect:
+@@ -348,6 +379,10 @@ class InterruptControlMixin:
+                 call_ids = getattr(self, "_tool_worker_call_ids", None)
+                 call_ids = call_ids if isinstance(call_ids, dict) else {}
+                 worker_tids = [tid for tid in tracker if call_ids.get(tid) == tool_call_id]
++        # A yield is aimed at this agent's own tools. A subagent that runs on one of these threads (it
++        # shares the thread, so its process wait would take the request) is not released by its parent's
++        # message; it is steered explicitly instead.
++        worker_tids = [tid for tid in worker_tids if tid not in _ic_child_tids(self)]
+         for tid in worker_tids:
+             _request_yield(tid)
+         return len(worker_tids)
+diff --git a/tests/tools/test_subagent_job_watch.py b/tests/tools/test_subagent_job_watch.py
+new file mode 100644
+index 00000000..a6b15c18
+--- /dev/null
++++ b/tests/tools/test_subagent_job_watch.py
+@@ -0,0 +1,225 @@
++"""A user message to a chat never stops its subagents, and a subagent's running job is never left unwatched.
++
++A message to the parent chat interrupted the parent's whole spawn tree: a subagent's ``process_manage wait`` was
++released with a note that promised a notification on exit (false for a subagent job), its model call was cut, and its
++turn ended with the job still running and nobody watching it. The subagent then showed as waiting for hours.
++"""
++
++import json
++import threading
++import time
++
++import pytest
++
++from agent.interrupt_control import NEW_MESSAGE_INTERRUPT_REASON, InterruptControlMixin
++from tests.tools.test_delegate_resume_action import (  # noqa: F401  (fixtures)
++    PARENT, SID, _Parent, _call, _clean_state, _completions, _db, _fake_child, _finished_child, seams,
++)
++from tests.waiting import wait_until
++from tools import delegate_tool_wait as wait
++from tools import interrupt as interrupt_mod
++from tools.delegate_tool_registry import _active_subagents
++from tools.process_registry import _handle_process, process_registry
++
++pytestmark = pytest.mark.platforms("linux")
++
++
++class _Agent(InterruptControlMixin):
++    _executing_tools = False
++    _interrupt_requested = False
++    _pending_steer = None
++    _pending_redirect = None
++    api_mode = "chat_completions"
++
++    def __init__(self):
++        self.session_id = "job-watch"
++        self._pending_steer_lock = threading.Lock()
++        self._pending_redirect_lock = threading.Lock()
++        self._tool_worker_threads = set()
++        self._tool_worker_threads_lock = threading.Lock()
++        self._execution_thread_id = None
++        self._active_children = []
++        self._active_children_lock = threading.Lock()
++        self._hard_interrupt_requested = threading.Event()
++        self.quiet_mode = True
++
++
++@pytest.fixture
++def waiting_child(monkeypatch, tmp_path):
++    """A child agent whose tool worker sits in ``process_registry.wait`` on a running job."""
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    parent, child = _Agent(), _Agent()
++    parent._active_children.append(child)
++    session = process_registry.spawn_local("sleep 30", task_id="child-task", owner_task_id="child-task")
++    out = {}
++
++    def worker():
++        tid = threading.current_thread().ident
++        with child._tool_worker_threads_lock:
++            child._tool_worker_threads.add(tid)
++        out["tid"] = tid
++        out["result"] = process_registry.wait(session.id, timeout=6)
++
++    thread = threading.Thread(target=worker, daemon=True)
++    thread.start()
++    wait_until(lambda: "tid" in out, what="the child's wait to start")
++    time.sleep(0.5)
++    yield parent, child, thread, out
++    process_registry.kill_process(session.id)
++    thread.join(timeout=10)
++
++
++def test_user_message_interrupt_of_the_parent_does_not_release_a_childs_wait(waiting_child):
++    parent, child, thread, out = waiting_child
++    from tui_gateway.session_auto_continue import _interrupt_for_new_message
++
++    _interrupt_for_new_message(parent)  # what the gateway does when a user sends a message to a busy chat
++    time.sleep(1.5)
++    assert parent._interrupt_requested is True
++    assert thread.is_alive() and "result" not in out, out.get("result")
++    assert child._interrupt_requested is False
++    assert not interrupt_mod.is_thread_interrupted(out["tid"])
++
++
++def test_new_message_reason_interrupt_does_not_stop_a_child_either(waiting_child):
++    parent, child, thread, out = waiting_child
++    parent.interrupt("are you there?", tool_reason=NEW_MESSAGE_INTERRUPT_REASON)
++    time.sleep(1.5)
++    assert thread.is_alive() and "result" not in out, out.get("result")
++    assert child._interrupt_requested is False
++
++
++def test_parent_redirect_during_its_tools_does_not_yield_a_childs_wait(waiting_child):
++    parent, child, thread, out = waiting_child
++    parent._executing_tools = True
++    # The child's tool worker also appears among the parent's workers (a child run on the parent's thread).
++    with parent._tool_worker_threads_lock:
++        parent._tool_worker_threads.add(out["tid"])
++    assert parent.redirect("are you there?") is True
++    time.sleep(1.5)
++    assert thread.is_alive() and "result" not in out, out.get("result")
++    assert not interrupt_mod.is_thread_yield_requested(out["tid"])
++
++
++def test_explicit_stop_of_the_parent_still_stops_its_children(waiting_child):
++    parent, child, thread, out = waiting_child
++    parent.hard_interrupt("stop")
++    thread.join(timeout=5)
++    assert not thread.is_alive()
++    assert out["result"]["status"] == "interrupted"
++    assert child._interrupt_requested is True
++
++
++# ── a subagent's job is always watched ─────────────────────────────────────────
++
++
++def _job_child(command, *, interrupted, release_wait=False, persist=False):
++    """First round starts ``command`` as its own job and ends its turn (optionally cut short, optionally after a
++    released wait); every later round records its input and ends."""
++    child = _fake_child()
++    child._interrupt_requested = False
++    child.interrupt.side_effect = lambda *a, **k: setattr(child, "_interrupt_requested", True)
++    seen = {}
++
++    def converse(**kwargs):
++        child.conversations.append(kwargs)
++        if len(child.conversations) == 1:
++            session = process_registry.spawn_local(command, task_id=SID, owner_task_id=SID, persist_on_release=persist)
++            seen["session"] = session
++            if release_wait:
++                interrupt_mod.request_yield(threading.current_thread().ident)
++                seen["wait"] = json.loads(_handle_process({"action": "wait", "session_id": session.id, "timeout": 5},
++                                                          task_id=SID))
++            if interrupted:
++                return {"final_response": "Operation interrupted: waiting for model response (0.0s elapsed).",
++                        "completed": False, "interrupted": True, "api_calls": 1, "messages": []}
++        return {"final_response": "done", "completed": True, "interrupted": False, "api_calls": 1, "messages": []}
++
++    child.run_conversation.side_effect = converse
++    child.seen = seen
++    return child
++
++
++def _run(seams, child):
++    db = _db()
++    _finished_child(db)
++    seams(child)
++    return _call(_Parent(db), subagent_id=SID, message="go")["run_id"]
++
++
++def _waiting() -> bool:
++    return any(r.get("status") == "waiting" for r in _active_subagents.values())
++
++
++def _stop(child):
++    session = child.seen.get("session")
++    if session is not None and not session.exited:
++        process_registry.kill_process(session.id)
++
++
++def test_child_whose_turn_was_cut_short_with_a_job_running_is_woken_on_its_exit(seams):
++    child = _job_child("sleep 2; echo job-output", interrupted=True)
++    run_id = _run(seams, child)
++    try:
++        wait_until(_waiting, what="the child waiting on its job")
++        assert len(child.conversations) == 1 and not child.seen["session"].exited
++        wait_until(lambda: len(child.conversations) == 2, timeout=20, what="the wake-up round")
++        message = child.conversations[1]["user_message"]
++        assert "finished" in message and "exited with code 0" in message and "job-output" in message
++        wait_until(lambda: _completions(run_id), timeout=20, what="completion")
++        assert not _waiting()
++    finally:
++        _stop(child)
++
++
++def test_child_waits_only_while_its_job_runs(seams):
++    child = _job_child("sleep 60", interrupted=True)
++    run_id = _run(seams, child)
++    try:
++        wait_until(_waiting, what="waiting")
++        time.sleep(1.2)
++        assert _waiting() and _completions(run_id) == []
++        process_registry.kill_process(child.seen["session"].id)
++        wait_until(lambda: len(child.conversations) == 2, timeout=20, what="the wake-up round")
++        wait_until(lambda: _completions(run_id), timeout=20, what="completion")
++        assert not _waiting()
++    finally:
++        _stop(child)
++
++
++def test_released_wait_of_a_child_keeps_the_job_watched_and_tells_the_truth(seams):
++    child = _job_child("sleep 2; echo released-output", interrupted=False, release_wait=True)
++    run_id = _run(seams, child)
++    try:
++        wait_until(lambda: "wait" in child.seen, what="the released wait")
++        released = child.seen["wait"]
++        assert released["status"] == "interrupted" and released["process_running"] is True
++        assert "Hermes watches it" in released["note"] and "woken" in released["note"]
++        # The turn ended normally with the job running: the child is woken with the exit, not finished.
++        wait_until(lambda: len(child.conversations) == 2, timeout=20, what="the wake-up round")
++        assert "released-output" in child.conversations[1]["user_message"]
++        wait_until(lambda: _completions(run_id), timeout=20, what="completion")
++    finally:
++        _stop(child)
++
++
++def test_released_wait_of_a_top_level_agent_keeps_the_promise_of_a_notification(tmp_path, monkeypatch):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    session = process_registry.spawn_local("sleep 30", task_id="top-task", owner_task_id="top-task")
++    try:
++        interrupt_mod.request_yield(threading.current_thread().ident)
++        result = json.loads(_handle_process({"action": "wait", "session_id": session.id, "timeout": 5},
++                                            task_id="top-task"))
++        assert result["status"] == "interrupted" and "you will be notified on exit" in result["note"]
++    finally:
++        process_registry.kill_process(session.id)
++
++
++def test_child_that_finishes_with_a_job_it_kept_is_not_held_back(seams):
++    child = _job_child("sleep 60", interrupted=False, persist=True)
++    run_id = _run(seams, child)
++    try:
++        wait_until(lambda: _completions(run_id), timeout=20, what="completion")
++        assert wait.waits_of(child) == [] and len(child.conversations) == 1
++    finally:
++        _stop(child)
+diff --git a/tools/delegate_tool_child_run.py b/tools/delegate_tool_child_run.py
+index da6230d9..aaffde58 100644
+--- a/tools/delegate_tool_child_run.py
++++ b/tools/delegate_tool_child_run.py
+@@ -173,6 +173,8 @@ def _attach_child(parent_agent: Any, child: Any) -> None:
+     if hard is None or hard.is_set():
+         _signal_child_stop(child, message or "parent agent interrupted",
+                            tool_reason=getattr(parent_agent, "_tool_interrupt_reason", None) or "parent agent interrupted")
++    elif getattr(parent_agent, "_interrupt_spares_children", False) is True:
++        return  # a user's new message stops the parent's own turn, never its subagents
+     else:
+         with _quiet("Failed to propagate interrupt to late child: %s"):
+             child.interrupt(message)
+@@ -962,6 +964,8 @@ class _ChildRun:
+             return (getattr(child, "_interrupt_requested", False) is True
+                     or getattr(child, "_delegate_restart_handoff", False) is True)
+ 
++        if failure_entry is None and not stopped() and isinstance(result, dict) and result.get("interrupted"):
++            self.watch_running_jobs()
+         while failure_entry is None and waits_of(child):
+             message = await_exit(child, self.subagent_id, stopped)
+             if message is None:
+@@ -972,6 +976,22 @@ class _ChildRun:
+                 message=message, history=(result or {}).get("messages"))
+         return result, failure_entry, close_deferred
+ 
++    def watch_running_jobs(self) -> None:
++        """A child whose turn was cut short (an interrupted model call) while a background job of its own still runs
++        would end with nobody watching the job, and its result would be lost. Watch each such job as a
++        ``resume_on_exit`` handoff does, so the child is woken with the exit. A job it chose to keep past its
++        own lifecycle (``persist_on_release``) is left alone."""
++        from tools.delegate_tool_config import _get_max_wait_hours
++        from tools.delegate_tool_wait import watch
++        from tools.process_registry import process_registry
++        if not self.subagent_id:
++            return
++        for session in process_registry.running_owned_by(self.subagent_id):
++            if session.persist_on_release or session.handed_off:
++                continue
++            with _quiet("Failed to watch a running job of a child: %s"):
++                watch(self.child, session, "turn ended while the job was running", _get_max_wait_hours())
++
+     def close_steering(self) -> Optional[str]:
+         """Close steer acceptance (see ``_merge_late_steer``); returns late steer text, if any."""
+         return _close_subagent_steering(self.subagent_id, self.child) if self.subagent_id else None
+diff --git a/tools/process_registry.py b/tools/process_registry.py
+index c7981535..d1a2213e 100644
+--- a/tools/process_registry.py
++++ b/tools/process_registry.py
+@@ -2867,6 +2867,30 @@ def _watch_process(session_id: str, args: dict, task_id: str, child: Any) -> dic
+             "command": entry["command"], "max_wait_hours": _get_max_wait_hours(), "note": WAIT_NOTE}
+ 
+ 
++def _watch_released_wait(session_id: str, result: dict, task_id: Optional[str]) -> dict:
++    """A released ``wait`` promises "you will be notified on exit", which holds only for a process of a top-level
++    chat. A subagent's job is watched only through ``handoff`` with ``resume_on_exit``, so a subagent whose wait was
++    released gets that watch here: the job it was waiting on is then watched when its turn ends, and the subagent is
++    woken with the exit."""
++    if not (isinstance(result, dict) and result.get("status") == "interrupted" and result.get("process_running")):
++        return result
++    from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
++    with _active_subagents_lock:
++        record = _active_subagents.get(str(task_id or ""))
++    child = record.get("agent") if record else None
++    if child is None:
++        return result
++    watched = _watch_process(session_id, {"data": "released wait"}, str(task_id), child)
++    if watched.get("error"):
++        result["note"] = ("User sent a new message -- wait released; the process is still running. Respond to the "
++                          "user now, and check the process again with process_manage before you finish.")
++        return result
++    result["note"] = ("User sent a new message -- wait released; the process is still running and Hermes watches it "
++                      "for you. Respond to the user now; when you end your turn you are woken with its exit code "
++                      "and output.")
++    return result
++
++
+ def _handle_process(args, **kw):
+     action = args.get("action", "")
+     # Coerce to string — some models send session_id as an integer
+@@ -2882,7 +2906,10 @@ def _handle_process(args, **kw):
+             return tool_error(f"session_id is required for {action}")
+         handler, redact = _SESSION_ACTIONS[action]
+         from tools.process_registry_wait_policy import apply_wait_poll_policy
+-        result = apply_wait_poll_policy(action, session_id, handler(session_id, args))
++        result = handler(session_id, args)
++        if action == "wait":
++            result = _watch_released_wait(session_id, result, kw.get("task_id"))
++        result = apply_wait_poll_policy(action, session_id, result)
+         return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
+     return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff")
+ 
+-- 
+2.56.0
+

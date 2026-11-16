@@ -1,0 +1,12 @@
+# New: a chat message spares its subagents; a subagent's job is always watched (tests/tools/test_subagent_job_watch.py)
+# The interrupt fan-out, the wait and handoff of a subagent's jobs, and the child run it changes
+tests/agent/test_interrupt_propagation.py
+tests/agent/test_cascading_interrupt.py
+tests/agent/test_interrupt_issuer_attribution.py
+tests/tools/test_delegate_child_wait.py
+tests/tools/test_delegate_wait_wake.py
+tests/tools/test_delegate_capacity_interrupt.py
+tests/tools/test_delegate_late_child_inherits_stop.py
+tests/tools/test_terminal_yield_to_background.py
+tests/tools/test_delegation_restart_handoff.py
+tests/tui_gateway/test_busy_interrupt_keeps_message.py
