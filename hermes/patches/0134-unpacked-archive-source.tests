@@ -1,0 +1,10 @@
+# New: a tree unpacked from a downloaded forge archive offers and is covered by the repo's source grant
+tests/tools/test_smart_provenance_unpacked_source.py
+# The review and the source grants it extends
+tests/tools/test_smart_provenance.py
+tests/tools/test_smart_provenance_source_grants.py
+tests/tools/test_smart_provenance_source_paths.py
+tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_smart_provenance_judge_source.py
+tests/tools/test_smart_provenance_local_judge.py
+tests/tools/test_approval_provenance.py

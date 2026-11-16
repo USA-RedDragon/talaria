@@ -1,0 +1,415 @@
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Subject: [PATCH] fix(approval): a tree unpacked from a downloaded forge archive is that repo's code
+
+A subagent downloaded a repo's tarball (github.com/o/r/archive/x.tar.gz), unpacked it into a folder and built there (clang++, cmake, make). The Code from External card had only Allow and Deny: the unpack was noted as fetched code but with no source, so no "Allow code from <source> in this chat" button was offered, and a grant could not cover later builds in the tree.
+
+A tar, bsdtar or unzip that extracts an archive the session downloaded (or a download piped into tar) into a folder (-C, --directory, -d, or after a cd into a folder under where the command works) now records that folder with the forge repo the archive came from, the same way a clone is recorded. Only a known forge URL (GitHub, GitLab, Codeberg and the like, an archive, codeload, API tarball or release asset URL) gives a source; an archive from another host, one never downloaded, two origins in one folder, listing or creating an archive give none. The card offers that repo and the grant covers later builds in the tree and a download of the same repo, never another unpacked repo, a look-alike host or a command that also names another source.
+
+When the review model names a source as owner/repo without a host, it counts as the forge repo the session cloned or downloaded with that owner and repo, only when exactly one such repo exists; it is never guessed onto a host.
+---
+ .../tools/test_smart_provenance_unpacked_source.py | 188 +++++++++++++++++++++
+ tools/approval_automode.py                         | 103 ++++++++++-
+ tools/approval_chat_grants.py                      |  34 ++++
+ 3 files changed, 324 insertions(+), 1 deletion(-)
+
+diff --git a/tests/tools/test_smart_provenance_unpacked_source.py b/tests/tools/test_smart_provenance_unpacked_source.py
+new file mode 100644
+index 00000000..14e56ef9
+--- /dev/null
++++ b/tests/tools/test_smart_provenance_unpacked_source.py
+@@ -0,0 +1,188 @@
++"""Smart approval: a Code from External card for a build in a tree unpacked from a tarball or zip the session
++downloaded from a known forge offers that repo as the source.
++
++Invariants:
++  1. A command that builds or runs in (or names) a folder the session unpacked from an archive it downloaded from a
++     forge repo (``github.com/owner/repo``: an archive, codeload, API tarball or release asset URL) gets the repo's
++     source on its card, as a clone of the repo does. The unpack is ``tar -x``/``bsdtar -x``/``unzip`` into a folder
++     (``-C``, ``-d`` or after ``cd``), of the downloaded file or of the download piped into it.
++  2. The grant then covers later builds in that tree (clang++, cmake, make) and an unpack of the same repo; never a
++     folder unpacked from another repo, from an archive of an unknown or non-forge origin, or from a look-alike host.
++  3. The source the review model names without a host (``owner/repo``) counts as the forge the session downloaded
++     that repo from, never as a guess: no download of that repo from a known forge, or two forges, offers nothing.
++"""
++
++from __future__ import annotations
++
++import json
++
++import pytest
++
++from hermes_state import SessionDB
++from tools import approval_automode as A
++from tools import approval_chat_grants as G
++from tools.delegate_tool import _bind_approval_review_root
++
++SOURCE = "github.com/Themaister/parallel-rdp-standalone"
++ARCHIVE = "https://github.com/Themaister/parallel-rdp-standalone/archive/refs/heads/master.tar.gz"
++CODELOAD = "https://codeload.github.com/Themaister/parallel-rdp-standalone/tar.gz/refs/heads/master"
++ZIP = "https://codeload.github.com/Themaister/parallel-rdp-standalone/zip/refs/heads/master"
++API = "https://api.github.com/repos/Themaister/parallel-rdp-standalone/tarball/master"
++RELEASE = "https://github.com/Themaister/parallel-rdp-standalone/releases/download/v1/src.tar.gz"
++
++# What the card in the report ran, in the unpacked folder.
++BUILD = ("cd {d}/x && mkdir -p out && time (for f in parallel-rdp/*.cpp vulkan/*.cpp; do echo $f; done | "
++         "xargs -P 16 -I{{}} sh -c 'clang++ -std=c++17 -c {{}} -o out/$(echo {{}} | tr / _).o')")
++
++
++class _Agent:
++    def __init__(self, session_id, db=None, messages=None):
++        self.session_id = session_id
++        self._session_db = db
++        self._approval_review_messages = messages
++
++
++@pytest.fixture()
++def db(tmp_path):
++    database = SessionDB(db_path=tmp_path / "state.db")
++    database.create_session("root", source="cli")
++    database.append_message("root", "user", "Relift the N64 RDP")
++    database.append_message("root", "assistant", "Starting a subagent for it.")
++    yield database
++    database.close()
++
++
++def _judge(source=None):
++    def complete(stage, system, user, max_tokens):
++        if stage == 1:
++            return "<block>yes</block>"
++        tail = f"<source>{source}</source>" if source else ""
++        return ("<block>yes</block><category>Code from External</category>"
++                f"<reason>builds a tarball downloaded this session</reason>{tail}")
++    return complete
++
++
++@pytest.fixture()
++def strict_judge():
++    A.set_complete_override(_judge())
++    yield
++    A.set_complete_override(None)
++
++
++def _calls(*commands):
++    out = [{"role": "user", "content": "go"}]
++    for i, command in enumerate(commands):
++        out.append({"role": "assistant", "content": "", "tool_calls": [
++            {"id": f"t{i}", "type": "function", "function": {"name": "terminal", "arguments": json.dumps({"command": command})}}]})
++        out.append({"role": "tool", "tool_call_id": f"t{i}", "content": json.dumps({"output": "ok"})})
++    return out
++
++
++def _child(db, messages):
++    root = _Agent("root", db, db.get_messages_as_conversation("root"))
++    child = _Agent("root-child", db, messages)
++    _bind_approval_review_root(child, root, "build the RDP")
++    child._delegate_depth = 1
++    return child
++
++
++def _review(child, command, cwd):
++    return A.review("terminal", {"command": command}, agent=child, cwd=str(cwd), messages=child._approval_review_messages)
++
++
++@pytest.mark.parametrize("fetch", [
++    "cd {d} && curl -fsSL -o a.tgz " + ARCHIVE + " && mkdir x && tar -xzf a.tgz -C x --strip-components=1",
++    "cd {d} && mkdir x && curl -fsSL " + CODELOAD + " | tar -xz -C x --strip-components=1",
++    "cd {d} && mkdir x && wget -qO- " + API + " | tar xz -C x --strip-components=1",
++    "cd {d} && curl -fsSLO " + RELEASE + " && mkdir x && tar xzf src.tar.gz -C x",
++    "cd {d} && curl -fsSL -o a.tgz " + ARCHIVE + "; mkdir -p x; cd x && tar xzf ../a.tgz --strip-components=1",
++    "cd {d} && wget -q -O a.zip " + ZIP + " && unzip -q a.zip -d x",
++    "cd {d} && curl -fsSL -o a.tgz " + ARCHIVE + " && mkdir x && bsdtar -xf a.tgz -C x",
++    "cd {d} && curl -fsSL -o a.tgz " + ARCHIVE + " && mkdir x && tar --extract --file=a.tgz --directory=x",
++    "cd {d} && curl -fsSL -o a.tgz " + ARCHIVE + " && mkdir x && tar -x -z -f a.tgz -C x",
++    "cd {d} && curl -fsSL -o a.tgz " + ARCHIVE + " && mkdir x && cd x && unzip ../a.tgz",
++])
++def test_build_in_an_unpacked_archive_offers_the_repo_source(db, strict_judge, tmp_path, fetch):
++    child = _child(db, _calls(fetch.format(d=tmp_path)))
++    verdict = _review(child, BUILD.format(d=tmp_path), tmp_path)
++    assert verdict.decision == "block", fetch
++    assert verdict.detail["grant_sources"] == [SOURCE], fetch
++
++
++def test_download_and_unpack_in_separate_calls(db, strict_judge, tmp_path):
++    child = _child(db, _calls(f"cd {tmp_path} && curl -fsSL -o a.tgz {ARCHIVE}",
++                              f"cd {tmp_path} && mkdir x && tar -xzf a.tgz -C x --strip-components=1"))
++    assert _review(child, BUILD.format(d=tmp_path), tmp_path).detail["grant_sources"] == [SOURCE]
++
++
++def test_root_chat_download_and_subagent_unpack(db, strict_judge, tmp_path):
++    db.append_message("root", "assistant", "", tool_calls=[
++        {"id": "r0", "type": "function", "function": {"name": "terminal", "arguments": json.dumps(
++            {"command": f"cd {tmp_path} && curl -fsSL -o a.tgz {ARCHIVE}"})}}])
++    db.append_message("root", "tool", json.dumps({"output": "ok"}), tool_call_id="r0")
++    child = _child(db, _calls(f"cd {tmp_path} && mkdir x && tar -xzf a.tgz -C x"))
++    assert _review(child, BUILD.format(d=tmp_path), tmp_path).detail["grant_sources"] == [SOURCE]
++
++
++def test_grant_covers_later_builds_in_that_tree_only(db, strict_judge, tmp_path):
++    child = _child(db, _calls(
++        f"cd {tmp_path} && curl -fsSL -o a.tgz {ARCHIVE} && mkdir x && tar -xzf a.tgz -C x --strip-components=1",
++        f"cd {tmp_path} && curl -fsSL -o b.tgz https://github.com/other/repo/archive/refs/heads/main.tar.gz && mkdir y && tar -xzf b.tgz -C y",
++        f"cd {tmp_path} && curl -fsSL -o c.tgz https://dl.example.com/c.tgz && mkdir z && tar -xzf c.tgz -C z",
++        f"cd {tmp_path} && curl -fsSL -o d.tgz https://github.com.evil.example/Themaister/parallel-rdp-standalone/archive/m.tar.gz && mkdir w && tar -xzf d.tgz -C w",
++        f"cd {tmp_path} && mkdir v && tar -xzf unknown.tgz -C v",
++        f"cd {tmp_path} && curl -fsSL -o e.tgz {CODELOAD} && mkdir u && tar -xzf e.tgz -C u"))
++    G.record_card_grant(db, "root", SOURCE)
++    for command in (f"cd {tmp_path}/x && cmake -S . -B build -G Ninja", f"cd {tmp_path}/x/build && make -j8",
++                    f"cd {tmp_path}/x && clang++ -std=c++17 -c vulkan/a.cpp -o a.o",
++                    f"cd {tmp_path} && cmake -S x -B x/build && cmake --build x/build",
++                    f"cd {tmp_path}/u && make", BUILD.format(d=tmp_path)):
++        assert _review(child, command, tmp_path).decision == "allow", command
++    for folder in ("y", "z", "w", "v"):  # another repo, another host, a look-alike host, a file never downloaded
++        for command in (f"cd {tmp_path}/{folder} && cmake -S . -B build", f"cd {tmp_path}/{folder} && make",
++                        f"cd {tmp_path}/x && make && cd ../{folder} && make"):
++            assert _review(child, command, tmp_path).decision == "block", command
++
++
++@pytest.mark.parametrize("fetch", [
++    "cd {d} && curl -fsSL -o a.zip https://dl.example.com/a.zip && unzip a.zip -d x",
++    "cd {d} && curl -fsSL https://dl.example.com/a.tgz | tar xz -C x",
++    "cd {d} && mkdir x && tar -xzf nothing.tgz -C x",
++    "cd {d} && curl -fsSL -o a.tgz https://github.com/Themaister/parallel-rdp-standalone/archive/m.tar.gz && tar -tzf a.tgz",
++    "cd {d} && curl -fsSL -o a.tgz https://github.com/Themaister/parallel-rdp-standalone/archive/m.tar.gz && mkdir x && tar -czf b.tgz x",
++    "cd {d} && curl -fsSL -o a.tgz https://github.com/Themaister/parallel-rdp-standalone/archive/m.tar.gz && mkdir x && tar -xzf a.tgz -C x2",
++    "cd {d} && curl -fsSL https://pypi.org/simple/x/ -o a.tgz && mkdir x && tar xzf a.tgz -C x",
++    "cd {d} && curl -fsSL -o a.tgz https://github.com/Themaister/parallel-rdp-standalone/archive/m.tar.gz; curl -fsSL -o a.tgz https://dl.example.com/b.tgz; mkdir x; tar xzf a.tgz -C x",
++])
++def test_unpack_without_a_forge_source_offers_nothing(db, strict_judge, tmp_path, fetch):
++    child = _child(db, _calls(fetch.format(d=tmp_path)))
++    verdict = _review(child, BUILD.format(d=tmp_path), tmp_path)
++    assert "grant_sources" not in verdict.detail, fetch
++
++
++def test_the_source_named_without_a_host_follows_the_session_download(db, tmp_path):
++    # The unpack is not one the harness reads (python zipfile), so only the review model's field can name it.
++    child = _child(db, _calls(f"cd {tmp_path} && curl -fsSL -o a.tgz {ARCHIVE} && python3 -c 'import tarfile;tarfile.open(\"a.tgz\").extractall(\"x\")'",
++                              f"cd {tmp_path} && git clone https://gitlab.com/g/other-repo && curl -fsSL -o o.tgz https://gitlab.com/ns/dup/-/archive/m/dup-m.tar.gz"))
++    other = f"cd {tmp_path}/elsewhere && make"
++    for named, want in (("Themaister/parallel-rdp-standalone", [SOURCE]), ("themaister/PARALLEL-rdp-standalone", [SOURCE]),
++                        ("github.com/Themaister/parallel-rdp-standalone", [SOURCE]),
++                        ("Themaister/other-repo", None), ("g/other-repo", ["gitlab.com/g/other-repo"]),
++                        ("ns/dup", ["gitlab.com/ns/dup"]), ("Themaister/*", None), ("Themaister/parallel-rdp-standalone, o/r", None),
++                        ("evil.example/Themaister/parallel-rdp-standalone", None), ("Themaister", None)):
++        A.set_complete_override(_judge(named))
++        try:
++            verdict = _review(child, other, tmp_path)
++        finally:
++            A.set_complete_override(None)
++        assert verdict.detail.get("grant_sources") == want, named
++
++
++def test_a_bare_name_is_not_a_source_without_any_download(db, tmp_path):
++    child = _child(db, _calls(f"cd {tmp_path} && ls"))
++    A.set_complete_override(_judge("Themaister/parallel-rdp-standalone"))
++    try:
++        verdict = _review(child, f"cd {tmp_path}/elsewhere && make", tmp_path)
++    finally:
++        A.set_complete_override(None)
++    assert "grant_sources" not in verdict.detail
+diff --git a/tools/approval_automode.py b/tools/approval_automode.py
+index e464539f..67dff52f 100644
+--- a/tools/approval_automode.py
++++ b/tools/approval_automode.py
+@@ -365,6 +365,65 @@ def _clone_runs_code(words: list[str]) -> bool:
+     return False
+ 
+ 
++_TAR_PROGS = frozenset({"tar", "bsdtar", "gtar"})
++
++
++def _tar_unpack(args: list[str]) -> tuple[str | None, str | None, bool] | None:
++    """``(archive, directory, extracts_stdin)`` of a tar or bsdtar call that extracts (``-x``, ``--extract``,
++    ``xzf`` and the like); ``archive`` is ``None`` when it reads standard input. ``None`` for a call that lists or
++    creates."""
++    extract, archive, directory = False, None, None
++    i = 0
++    while i < len(args):
++        word = args[i]
++        nxt = args[i + 1] if i + 1 < len(args) else None
++        if word in ("--extract", "--get"):
++            extract = True
++        elif word.startswith("--file="):
++            archive = word.split("=", 1)[1]
++        elif word == "--file" and nxt:
++            archive, i = nxt, i + 1
++        elif word.startswith("--directory="):
++            directory = word.split("=", 1)[1]
++        elif word == "--directory" and nxt:
++            directory, i = nxt, i + 1
++        elif word == "-C" and nxt:
++            directory, i = nxt, i + 1
++        elif word.startswith("--"):
++            pass
++        elif word.startswith("-") or (i == 0 and re.fullmatch(r"[A-Za-z]+", word)):
++            letters = word.lstrip("-")
++            if "x" in letters:
++                extract = True
++            if "f" in letters and nxt and not letters.endswith(("C",)):
++                archive, i = nxt, i + 1
++            elif letters.endswith("C") and nxt:
++                directory, i = nxt, i + 1
++        i += 1
++    if not extract:
++        return None
++    return (None if archive in (None, "-") else archive), directory, archive in (None, "-")
++
++
++def _unzip_args(args: list[str]) -> tuple[str | None, str | None]:
++    """``(archive, directory)`` of an unzip call that extracts (not ``-l``, ``-t`` or ``-p``)."""
++    archive, directory, skip = None, None, False
++    for i, word in enumerate(args):
++        if skip:
++            skip = False
++        elif word == "-d" and i + 1 < len(args):
++            directory, skip = args[i + 1], True
++        elif word.startswith("-d") and len(word) > 2:
++            directory = word[2:]
++        elif word.startswith("-"):
++            if re.fullmatch(r"-[A-Za-z]*[ltpvz][A-Za-z]*", word):
++                return None, None
++            skip = word == "-x"
++        elif archive is None:
++            archive = word
++    return archive, directory
++
++
+ def _fetched_paths(command: str, base: str | None, sources: dict[str, str] | None = None,
+                    downloads: set[str] | None = None) -> list[str]:
+     """Directories and files a shell command clones, unpacks or downloads from outside the machine.
+@@ -372,12 +431,38 @@ def _fetched_paths(command: str, base: str | None, sources: dict[str, str] | Non
+     for each curl or wget download; ``downloads`` receives the paths of the downloads."""
+     found: list[str] = []
+     cwd = base
++    streamed = ""  # the URL the last curl or wget wrote to standard output, for a tar that reads it
++    anchor = base  # the folder the command starts working in: its first cd, else where it runs
++    entered = False
+     for words in _segments(command):
+         prog = os.path.basename(words[0])
+         if prog == "cd" and len(words) > 1:
+             cwd = _abs_path(words[1], cwd)
++            if not entered:
++                anchor, entered = cwd, True
+             continue
+         args = words[1:]
++        piped, streamed = streamed, ""
++        unpacked = None
++        if prog in _TAR_PROGS:
++            unpacked = _tar_unpack(args)
++        elif prog == "unzip":
++            archive, directory = _unzip_args(args)
++            unpacked = (archive, directory, False) if archive else None
++        if unpacked is not None and sources is not None:
++            # The folder an archive is unpacked into is that archive's source when the archive came from a forge
++            # repo. A tree unpacked without ``-C`` or ``-d`` counts only after a ``cd`` into a folder under the
++            # run directory, never the run directory itself or anything above it.
++            archive, directory, from_stdin = unpacked
++            where = _abs_path(directory, cwd) if directory else (cwd if anchor and cwd != anchor and _inside(cwd, [anchor]) else None)
++            arc = _abs_path(archive, cwd) if archive else ""
++            url = piped if from_stdin else (sources.get(arc, "") if arc in (downloads or ()) else "")
++            if where and where not in ("/", os.path.expanduser("~"), base, anchor):
++                from tools.approval_chat_grants import forge_repo
++                found.append(where)
++                new = url if forge_repo(url) else ""  # two origins in one folder: unknown
++                old = sources.get(where, new)
++                sources[where] = new if forge_repo(old) == forge_repo(new) else ""
+         if prog == "git" and "clone" in args:
+             rest = args[args.index("clone") + 1:]
+         elif prog == "gh" and args[:2] == ["repo", "clone"]:
+@@ -422,6 +507,12 @@ def _fetched_paths(command: str, base: str | None, sources: dict[str, str] | Non
+                     target = args[i + 1]
+         elif prog in ("curl", "wget"):
+             urls = [w for w in args if re.match(r"(?:https?|ftp)://", w, re.I)]
++            to_stdout = any(w in ("-O-", "--output=-", "--output-document=-") or re.fullmatch(r"-[A-Za-z]*O-", w)
++                            for w in args) or any(w in ("-O", "--output", "--output-document") and i + 1 < len(args)
++                                                  and args[i + 1] == "-" for i, w in enumerate(args)) \
++                or (prog == "curl" and not any(re.fullmatch(r"-[A-Za-z]*[oO]|--output|--remote-name(?:-all)?|-[A-Za-z]*[oO][^\s]+", w) or
++                                               w.startswith("--output") for w in args))
++            streamed = urls[0] if to_stdout and urls else ""
+             for i, word in enumerate(args):
+                 if word in ("-o", "--output", "-O", "--output-document") and i + 1 < len(args) \
+                         and not (prog == "curl" and word == "-O"):
+@@ -899,6 +990,7 @@ class ReviewInput:
+     command_sources: list = field(default_factory=list)  # (reference, identity) of each remote source the action's command names
+     display: dict = field(default_factory=dict)          # identity -> the same with the owner's and repo's own case
+     script_sources: list = field(default_factory=list)  # (reference, identity) of the downloads in the scripts the command runs
++    fetch_urls: list = field(default_factory=list)       # every clone and download URL of the session, for a source named without its host
+ 
+ 
+ def build_input(tool_name: str, args: dict, *, messages: list | None, root_messages: list | None = None,
+@@ -966,7 +1058,8 @@ def build_input(tool_name: str, args: dict, *, messages: list | None, root_messa
+     return ReviewInput(lines=lines, action=_call_line(tool_name, args, None, _ACTION_ARG_CHARS, facts),
+                        instruction_files=_instruction_files_block(cwd), skip_stage1=skip, session_fetch=fetched,
+                        fetch_source=fetch_source, hit_sources=hit_sources, command_sources=command_sources,
+-                       script_sources=script_srcs, display=display)
++                       script_sources=script_srcs, display=display,
++                       fetch_urls=sorted({u for u in sources.values() if u}))
+ 
+ 
+ def _grant_lines(grants: dict, messages: list | None) -> list[str]:
+@@ -1282,6 +1375,8 @@ def parse_stage2(text: str) -> Verdict:
+         found = judge_source(named[-1])
+         if found:
+             detail["judge_source"], detail["judge_source_display"] = found
++        else:  # ``owner/repo`` without a host: the review resolves it against what the session fetched
++            detail["judge_source_bare"] = named[-1].strip()
+     return Verdict("block", rule=name, reason=why, tier=tier, stage=2, detail=detail)
+ 
+ 
+@@ -2134,6 +2229,12 @@ def review(tool_name: str, args: dict, *, agent=None, messages: list | None = No
+                        facts={**write_facts(tool_name, args), **({"job": job.fact} if job is not None else {})},
+                        grants=grants)
+     verdict = review_input(data)
++    bare = verdict.detail.pop("judge_source_bare", "") if verdict.detail else ""
++    if bare and not verdict.detail.get("judge_source") and tool_name == "terminal":
++        from tools.approval_chat_grants import bare_repo_source
++        found = bare_repo_source(bare, data.fetch_urls)  # the forge the session fetched that repo from, never a guess
++        if found:
++            verdict.detail["judge_source"], verdict.detail["judge_source_display"] = found
+     if verdict.decision == "block" and _norm(verdict.rule) == _norm("Code from External") and grants:
+         granted = _granted_sources(tool_name, args, data, grants, verdict.detail.get("judge_source") or "")
+         if granted:
+diff --git a/tools/approval_chat_grants.py b/tools/approval_chat_grants.py
+index 5a0c5224..6b14c0c6 100644
+--- a/tools/approval_chat_grants.py
++++ b/tools/approval_chat_grants.py
+@@ -201,6 +201,40 @@ def judge_source(text: str) -> tuple[str, str] | None:
+     return ident, shown
+ 
+ 
++def forge_repo(url: str) -> str | None:
++    """The ``host/owner/repo`` identity of a URL on a known forge (GitHub, GitLab, Codeberg, ...: an archive, a
++    release asset, a clone URL), or ``None`` for every other host, a package host included. A tree unpacked from
++    an archive is that repo's code only when the archive came from there."""
++    ident = url_source(url) if isinstance(url, str) else None
++    parts = (ident or "").split("/")
++    if len(parts) >= 3 and parts[0] in _GITHUB_HOSTS | _FORGE_HOSTS and all(parts):
++        return ident
++    return None
++
++
++_BARE_REPO = re.compile(r"[\w.-]+/[\w.-]+")
++
++
++def bare_repo_source(text: str, fetched: list[str]) -> tuple[str, str] | None:
++    """``(identity, display)`` for a source the review model named as ``owner/repo`` without a host, when exactly
++    one forge repo the session fetched (``fetched``: clone and download URLs) has that owner and repo; never a
++    guess: no match, two forges, or a wildcard give ``None``."""
++    ref = text.strip() if isinstance(text, str) else ""
++    if not _BARE_REPO.fullmatch(ref) or ".." in ref.split("/"):
++        return None
++    want = ref.lower()
++    found: dict[str, str] = {}
++    for url in fetched:
++        ident = forge_repo(url)
++        if ident and ident.split("/", 1)[1] == want:
++            found[ident] = forge_repo_display(url) or ident
++    return next(iter(found.items())) if len(found) == 1 else None
++
++
++def forge_repo_display(url: str) -> str | None:
++    return url_source(url, display=True) if forge_repo(url) else None
++
++
+ def fetch_identity(ref: str) -> str | None:
+     """The identity of a source a command or a clone names (see ``url_source``)."""
+     return url_source(ref)
