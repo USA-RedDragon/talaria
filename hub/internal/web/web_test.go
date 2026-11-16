@@ -373,6 +373,23 @@ type sse struct {
 	kind string
 	data json.RawMessage
 	at   int64
+	// prov is the hub's held copy of a chat, sent while the fresh snapshot
+	// is on its way.
+	prov bool
+}
+
+// readFreshSnapshot reads to the chat's own snapshot. The hub's held copy
+// (provisional) may come before it when Hermes is slow to answer, as on a
+// loaded machine; it is the newest rows of an older transcript, not the
+// snapshot a test about a fresh one means.
+func readFreshSnapshot(t *testing.T, r *bufio.Reader) []sse {
+	t.Helper()
+	for {
+		evs := readEvents(t, r, "snapshot")
+		if !evs[len(evs)-1].prov {
+			return evs
+		}
+	}
 }
 
 func readEvents(t *testing.T, r *bufio.Reader, until string) []sse {
@@ -393,9 +410,10 @@ func readEvents(t *testing.T, r *bufio.Reader, until string) []sse {
 				Kind string          `json:"kind"`
 				Data json.RawMessage `json:"data"`
 				At   int64           `json:"at"`
+				Prov bool            `json:"provisional"`
 			}
 			_ = json.Unmarshal([]byte(line[6:]), &d)
-			cur.kind, cur.data, cur.at = d.Kind, d.Data, d.At
+			cur.kind, cur.data, cur.at, cur.prov = d.Kind, d.Data, d.At, d.Prov
 		case line == "" && cur.kind != "":
 			out = append(out, cur)
 			if cur.kind == until {

@@ -15,7 +15,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const { until } = require("../cdp.js");
 // The viewer is up with an image, or gone with nothing left of it.
 const shown = (ev) => until(ev, `!!document.querySelector(".lightbox img") && document.querySelector(".lightbox img").src`, "the viewer to open");
-const gone = (ev, how) => until(ev, `document.querySelectorAll(".lightbox").length === 0`, how + ": the viewer to close");
+// Closing removes the viewer at once but pops its history entry a moment later
+// (history.back() is asynchronous): the next open must wait for that, or the
+// late pop lands on the new viewer's entry and closes it.
+const gone = (ev, how) => until(ev, `document.querySelectorAll(".lightbox").length === 0 && !(history.state && history.state.lightbox)`, how + ": the viewer to close and its history entry to go");
 
 
 

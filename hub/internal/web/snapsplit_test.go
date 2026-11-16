@@ -26,7 +26,7 @@ func TestBigChatOpensWithNewestTurnsFirst(t *testing.T) {
 	start := time.Now()
 	r, stop := stream(t, c, e.url+"/api/sessions/pc/bigchat/events", "")
 	defer stop()
-	first := readEvents(t, r, "snapshot")
+	first := readFreshSnapshot(t, r)
 	took := time.Since(start)
 	var head struct {
 		Older    int               `json:"older"`
@@ -56,7 +56,7 @@ func TestBigChatOpensWithNewestTurnsFirst(t *testing.T) {
 	// A reconnect after only the first part gets the whole snapshot.
 	r2, stop2 := stream(t, c, e.url+"/api/sessions/pc/bigchat/events", first[len(first)-1].id)
 	defer stop2()
-	again := readEvents(t, r2, "snapshot")
+	again := readFreshSnapshot(t, r2)
 	var whole struct {
 		Older    int               `json:"older"`
 		Messages []json.RawMessage `json:"messages"`
