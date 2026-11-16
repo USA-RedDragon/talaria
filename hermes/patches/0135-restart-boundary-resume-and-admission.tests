@@ -1,0 +1,19 @@
+# The boundary handoff (0131) this patch fixes: its resume, the boundary wait and the takeover
+tests/gateway/test_restart_turn_boundary.py
+tests/agent/test_turn_boundary_handoff.py
+tests/gateway/test_restart_turn_handoff.py
+tests/gateway/test_sigterm_restart_wait.py
+tests/gateway/test_restart_drain.py
+tests/gateway/test_gateway_shutdown.py
+tests/gateway/test_runtime_lock_wait.py
+tests/gateway/test_standby_marker_stale.py
+# The transcript load and the replay cleanup the resume now bypasses for the turn's own rows
+tests/gateway/test_message_timestamps.py
+tests/agent/test_in_place_preflight_rewind.py
+tests/hermes_state/test_repaired_history_commit_coverage.py
+tests/agent/test_tool_call_incremental_persistence.py
+# The claim path and the API server's drain refusal
+tests/gateway/test_preclaim_conflict_settles_head.py
+tests/gateway/test_execute_claimed_cancel_stamp.py
+tests/gateway/test_prompt_queued_transfer.py
+tests/gateway/test_api_server_active_work_drain.py
