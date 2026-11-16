@@ -1,5 +1,5 @@
 cmd/auth.go	15	0
-cmd/cmd.go	271	0
+cmd/cmd.go	269	0
 cmd/telegram.go	132	7
 internal/agentcfg/agentcfg.go	442	259
 internal/agentcfg/agentcfgtest/agentcfgtest.go	125	109
@@ -19,7 +19,7 @@ internal/claude/service.go	355	323
 internal/claudecode/claudecode.go	261	224
 internal/claudecode/pricing.go	31	25
 internal/config/auth.go	62	56
-internal/config/config.go	206	195
+internal/config/config.go	204	193
 internal/config/device.go	63	52
 internal/config/load.go	3	0
 internal/config/notify.go	30	28
@@ -77,10 +77,10 @@ internal/hub/subagents.go	4	3
 internal/hub/turnstart.go	63	61
 internal/hub/viewcache.go	28	27
 internal/insights/gpu.go	57	53
-internal/insights/insights.go	146	127
+internal/insights/insights.go	136	119
 internal/leader/leader.go	32	29
-internal/memory/memory.go	344	292
-internal/memory/memorytest/memorytest.go	383	336
+internal/memory/memory.go	168	138
+internal/memory/memorytest/memorytest.go	259	226
 internal/memory/notes.go	118	102
 internal/models/connected.go	48	45
 internal/models/models.go	350	291
@@ -98,7 +98,7 @@ internal/scheduled/scheduledtest/scheduledtest.go	183	171
 internal/scheduled/service.go	480	418
 internal/secretbox/secretbox.go	37	31
 internal/server/server.go	40	0
-internal/service/activity.go	144	122
+internal/service/activity.go	144	121
 internal/service/agents.go	31	26
 internal/service/attach.go	100	85
 internal/service/claude.go	41	33
@@ -113,7 +113,7 @@ internal/service/outcome.go	95	90
 internal/service/page.go	63	57
 internal/service/pdf.go	74	56
 internal/service/rows.go	22	21
-internal/service/service.go	980	905
+internal/service/service.go	980	904
 internal/service/stopsend.go	93	77
 internal/service/subagentlog.go	186	154
 internal/service/toolout.go	39	32
@@ -122,7 +122,7 @@ internal/service/views.go	145	127
 internal/store/accounts.go	187	157
 internal/store/agents.go	87	74
 internal/store/answers.go	22	20
-internal/store/chats.go	86	71
+internal/store/chats.go	86	72
 internal/store/claudecode.go	97	79
 internal/store/device.go	200	166
 internal/store/import.go	74	61
@@ -146,7 +146,7 @@ internal/telegram/claude.go	107	89
 internal/telegram/commands.go	245	203
 internal/telegram/computers.go	186	146
 internal/telegram/config.go	18	18
-internal/telegram/dmtopics.go	105	88
+internal/telegram/dmtopics.go	105	86
 internal/telegram/draft.go	78	63
 internal/telegram/echo.go	133	112
 internal/telegram/format.go	126	123
@@ -165,7 +165,7 @@ internal/web/accounts.go	255	192
 internal/web/activity.go	135	93
 internal/web/admin.go	119	81
 internal/web/agent.go	263	169
-internal/web/api.go	345	267
+internal/web/api.go	345	265
 internal/web/assets.go	40	36
 internal/web/auth.go	145	112
 internal/web/authpages.go	44	40
@@ -180,7 +180,7 @@ internal/web/lastanswer.go	86	83
 internal/web/link.go	38	29
 internal/web/listpush.go	37	36
 internal/web/media.go	222	203
-internal/web/memory.go	206	145
+internal/web/memory.go	144	103
 internal/web/models.go	71	69
 internal/web/notify.go	138	98
 internal/web/page.go	79	72
