@@ -386,8 +386,8 @@ func Catalog() map[string]any {
 	return map[string]any{
 		"categories": []map[string]any{
 			{kName: "Session", kPairs: [][]string{{"/title", "Set the title (usage: /title [name])"},
-				{"/model", "Switch model (usage: /model [name])"}, {"/usage", "Show token usage"}, {"/diff", "Show the git diff"},
-				{pathCompress, "Compress context (usage: /compress [focus topic | --preview])"}}},
+				{"/model", "Switch model (usage: /model [model|reset] [--provider name] [--reasoning level] [--global|--session] [--refresh])"}, {"/usage", "Show token usage"}, {"/diff", "Show the git diff"},
+				{pathCompress, "Compress conversation context (usage: /compress [here [N] | focus topic | --preview|--dry-run])"}}},
 			{kName: "Tools", kPairs: [][]string{{"/plan", "Plan first (usage: /plan <task>)"}}},
 			{kName: "User commands", kPairs: [][]string{{"/deploy", "exec: make deploy"}}},
 		},

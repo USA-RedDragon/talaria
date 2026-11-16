@@ -1,7 +1,8 @@
 "use strict";
 // HubComposer runs the message box: the one send button (send, stop, or
 // send to the running turn), the box that grows with its text, the "/"
-// command, "/prompt:" saved prompt and "@" file suggestions, and the draft
+// command, "/prompt:" saved prompt and "@" file suggestions (after a
+// command and a space, the command's own arguments and options), and the draft
 // that the hub keeps for each chat so it follows the user to other devices.
 // ctx: api, el, chat() (the open chat or null), canFiles(chat), submit(),
 // stop(), editLast(), busy() (attachments still uploading), hasFiles(),
@@ -151,11 +152,12 @@ window.HubComposer = (ctx) => {
 
   // Suggestions: commands and saved prompts after a leading "/", only
   // prompts after "/prompt:", files after "@".
-  const sug = { kind: null, items: [], sel: 0, q: "" };
+  const sug = { kind: null, items: [], hints: [], sel: 0, q: "", touched: false };
   const commands = new Map();
   const folders = new Map();
   const saved = { at: 0, p: null };
   const promptTag = "prompt:";
+  const modelLists = new Map();
 
   function loadPrompts() {
     if (!ctx.prompts()) return Promise.resolve([]);
@@ -190,6 +192,15 @@ window.HubComposer = (ctx) => {
     return p;
   }
 
+  // loadModels is the chat's model list, the one the model menu shows.
+  function loadModels(chat) {
+    const hit = modelLists.get(chat.base);
+    if (hit && Date.now() - hit.at < 30000) return hit.p;
+    const p = api("GET", chat.base + "/models").catch(() => null);
+    modelLists.set(chat.base, { at: Date.now(), p });
+    return p;
+  }
+
   function loadFolder(chat, path) {
     const key = chat.base + "\n" + path;
     const hit = folders.get(key);
@@ -205,6 +216,7 @@ window.HubComposer = (ctx) => {
     pop.replaceChildren();
     sug.kind = null;
     sug.items = [];
+    sug.hints = [];
     input.removeAttribute("aria-activedescendant");
   }
 
@@ -222,7 +234,9 @@ window.HubComposer = (ctx) => {
     const before = input.value.slice(0, input.selectionStart);
     const slash = before.match(/^\/(\S*)$/);
     const at = before.match(/(?:^|\s)@([^\s@]*)$/);
+    const args = !slash && !at && before.match(/^\/([^\s/.]+)[ \t]([^\n]*)$/);
     const my = ++seq;
+    if (args && chat) { await suggestArgs(chat, my, args[1], args[2]); return; }
     if (!slash && !at) { closePop(); return; }
     if (slash) {
       const q = slash[1].toLowerCase();
@@ -264,12 +278,87 @@ window.HubComposer = (ctx) => {
     show("file", items, q, "Files on " + where);
   }
 
+  // modelChoices are the models (and, after --provider or --reasoning,
+  // the providers and efforts) that /model takes, from the model menu's list.
+  async function modelChoices(chat, words, q) {
+    const m = await loadModels(chat);
+    if (!m) return null;
+    const providers = Array.isArray(m.providers) ? m.providers : [];
+    const prev = (words[words.length - 1] || "").toLowerCase();
+    const has = (t, d) => !q || t.toLowerCase().includes(q) || String(d || "").toLowerCase().includes(q);
+    if (prev === "--provider") {
+      return providers.filter((p) => has(p.id, p.name)).map((p) => ({ kind: "arg", text: p.id, desc: p.name && p.name !== p.id ? p.name : "A provider" }));
+    }
+    if (prev === "--reasoning") {
+      return (m.efforts || []).filter((e) => e && has(e)).map((e) => ({ kind: "arg", text: e, desc: "Reasoning effort" }));
+    }
+    if (words.some((w) => !w.startsWith("-")) || (q && q.startsWith("-"))) return [];
+    const out = [];
+    for (const p of providers) {
+      for (const x of p.models || []) {
+        if (!has(x.id, x.label)) continue;
+        out.push({ kind: "arg", text: x.id, desc: (x.label && x.label !== x.id ? x.label + " · " : "") + (p.name || p.id) });
+      }
+    }
+    out.sort((a, b) => (a.text.toLowerCase().startsWith(q) ? 0 : 1) - (b.text.toLowerCase().startsWith(q) ? 0 : 1));
+    return out.slice(0, 40);
+  }
+
+  // suggestArgs helps with what follows "/command ": the options in the
+  // command's usage, then the next ones as each is chosen, with a hint
+  // for a value the user types. It never changes what is sent.
+  async function suggestArgs(chat, my, name, rest) {
+    const list = await loadCommands(chat);
+    if (my !== seq) return;
+    const c = window.HubSlash.find(list, name);
+    if (!c) {
+      if (name.startsWith(promptTag)) { closePop(); return; }
+      if (name.toLowerCase() === "model") {
+        // Hermes does not run /model from here; the menu changes the model. The list is the menu's.
+        const m = await loadModels(chat);
+        if (my !== seq) return;
+        const rows = [];
+        for (const p of (m && m.providers) || []) for (const x of p.models || []) rows.push({ kind: "hint", text: x.id, desc: p.name || p.id });
+        show("arg", [], "", "/model", "Switch models from the model menu above the message box. It offers:", rows.slice(0, 12));
+        return;
+      }
+      show("arg", [], "", "/" + name, "Talaria does not list /" + name + " here; it is sent as typed.");
+      return;
+    }
+    const head = c.args ? c.name + " " + c.args : c.name;
+    const words = rest.split(/\s+/).filter(Boolean);
+    const partial = /\s$/.test(rest) || !words.length ? "" : words.pop();
+    const free = c.skill && !c.args;
+    const opts = c.args ? window.HubSlash.options(window.HubSlash.parse(c.args), words, partial) : { choices: [], hints: [], end: true, lost: false };
+    let items = opts.choices.map((o) => ({ kind: "arg", text: o.text, desc: o.desc }));
+    let hints = opts.hints.map((h) => ({ kind: "hint", text: h.text, desc: h.desc, file: /^(path|file|filename)$/.test(h.name) && ctx.canFiles(chat) }));
+    if (window.HubSlash.bare(c.name) === "model") {
+      const dyn = await modelChoices(chat, words, partial.toLowerCase());
+      if (my !== seq) return;
+      if (dyn) {
+        items = dyn.concat(items.filter((i) => !dyn.some((d) => d.text === i.text)));
+        if (dyn.length) hints = hints.filter((h) => !/^(model|name|level)$/i.test(h.text));
+      }
+    }
+    // A value only the user knows: say what goes there.
+    if (free) hints = [{ kind: "hint", text: "text", desc: "Tell the skill what to do, in your own words (optional)" }];
+    let empty = "";
+    if (!items.length && !hints.length) {
+      if (!c.args && !free) empty = c.name + " takes no arguments. Press Enter to send.";
+      else if (opts.lost) empty = "That is not in the usage above; it is sent as typed.";
+      else if (partial) empty = "Nothing in the usage starts with " + partial + "; it is sent as typed.";
+      else empty = "Nothing more to add. Press Enter to send.";
+    }
+    show("arg", items, partial, head, empty, hints);
+  }
+
   // show draws the suggestions; with none it closes, unless empty says
   // why there are none.
-  function show(kind, items, q, head, empty) {
-    if (!items.length && !empty) { closePop(); return; }
+  function show(kind, items, q, head, empty, hints) {
+    if (!items.length && !empty && !(hints && hints.length)) { closePop(); return; }
     sug.empty = empty || "";
-    if (sug.kind !== kind || sug.q !== q) sug.sel = 0;
+    sug.hints = hints || [];
+    if (sug.kind !== kind || sug.q !== q) { sug.sel = 0; sug.touched = false; }
     sug.kind = kind;
     sug.items = items;
     sug.q = q;
@@ -283,10 +372,10 @@ window.HubComposer = (ctx) => {
     pop.replaceChildren();
     const foot = sug.kind === "prompt" || sug.items.some((it) => it.kind === "prompt");
     const ph = el("div", "ph");
-    ph.append(el("span", "grow", lastHead));
+    ph.append(el("span", sug.kind === "arg" ? "grow usage" : "grow", lastHead));
     if (!foot) ph.append(el("span", "keyonly", "↑↓ Tab"));
     pop.append(ph);
-    if (!sug.items.length) pop.append(el("div", "none", sug.empty));
+    if (!sug.items.length && sug.empty) pop.append(el("div", "none", sug.empty));
     sug.items.forEach((it, i) => {
       const o = el("div", "opt" + (i === sug.sel ? " sel" : ""));
       o.id = "opt-" + i;
@@ -299,6 +388,9 @@ window.HubComposer = (ctx) => {
         d = it.c.description || "";
         if (it.c.args) c.append(el("span", "dir", " " + it.c.args));
         if (it.alias) c.append(el("span", "dir", " (alias "), mark(it.alias, sug.q ? "/" + sug.q : ""), el("span", "dir", ")"));
+      } else if (it.kind === "arg") {
+        c.append(mark(it.text, sug.q));
+        d = it.desc || "";
       } else if (it.kind === "prompt") {
         o.classList.add("saved");
         c.append(mark("/" + promptTag + it.p.name, sug.q ? "/" + sug.q : ""));
@@ -309,6 +401,26 @@ window.HubComposer = (ctx) => {
       }
       o.append(c, el("span", "d", d));
       o.onmousedown = (e) => { e.preventDefault(); sug.sel = i; pick(); };
+      pop.append(o);
+    });
+    sug.hints.forEach((h) => {
+      const o = el("div", "opt hintrow");
+      o.append(el("span", "c", h.text), el("span", "d", h.desc));
+      if (h.file) {
+        o.classList.add("clickable");
+        o.title = "Pick a file";
+        o.onmousedown = (e) => {
+          e.preventDefault();
+          const v = input.value;
+          const pos = input.selectionStart;
+          const ins = (/\s$/.test(v.slice(0, pos)) ? "" : " ") + "@";
+          input.value = v.slice(0, pos) + ins + v.slice(pos);
+          input.selectionStart = input.selectionEnd = pos + ins.length;
+          input.focus();
+          changed();
+          suggest();
+        };
+      }
       pop.append(o);
     });
     if (foot) pop.append(promptFoot());
@@ -355,6 +467,21 @@ window.HubComposer = (ctx) => {
       changed();
       return;
     }
+    if (it.kind === "arg") {
+      // The word being typed becomes the choice; help goes on for the next.
+      const word = v.slice(0, pos).match(/\S*$/)[0];
+      start = pos - word.length;
+      const end = pos + v.slice(pos).match(/^\S*/)[0].length;
+      ins = it.text + " ";
+      input.value = v.slice(0, start) + ins + v.slice(end).replace(/^ /, "");
+      input.selectionStart = input.selectionEnd = start + ins.length;
+      input.focus();
+      grow();
+      update();
+      changed();
+      suggest();
+      return;
+    }
     if (it.kind === "cmd") {
       start = 0;
       ins = it.c.name + " ";
@@ -379,14 +506,20 @@ window.HubComposer = (ctx) => {
         e.preventDefault();
         const n = sug.items.length;
         sug.sel = (sug.sel + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+        sug.touched = true;
         draw();
         return;
       }
-      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); pick(); return; }
+      // After "/command ", Enter still sends unless a choice was moved to
+      // or a part of one is typed: the message is what the user wrote.
+      const typing = sug.kind !== "arg" || sug.touched || (sug.q && sug.items[sug.sel].text.toLowerCase() !== sug.q.toLowerCase());
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && typing)) { e.preventDefault(); pick(); return; }
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePop(); return; }
     }
     if (!pop.hidden && sug.kind === "prompt") {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); return; }
+    }
+    if (!pop.hidden && (sug.kind === "prompt" || sug.kind === "arg")) {
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePop(); return; }
     }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !coarse()) {

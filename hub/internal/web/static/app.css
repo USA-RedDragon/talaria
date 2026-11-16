@@ -1102,6 +1102,7 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7
   max-height: 17rem; overflow-y: auto; z-index: 5; }
 .pop .ph { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: .25rem .5rem; display: flex; gap: .5rem; }
 .pop .ph .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop .ph .usage { text-transform: none; letter-spacing: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; white-space: normal; overflow-wrap: anywhere; }
 .pop .opt { display: grid; grid-template-columns: auto 1fr; gap: 0 .6rem; padding: .35rem .5rem; border-radius: 7px; cursor: pointer; align-items: baseline; }
 .pop .opt.sel, .pop .opt:hover { background: var(--hover); }
 .pop .opt.sel { box-shadow: inset 2px 0 0 var(--accent); }
@@ -1109,6 +1110,11 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7
 .pop .opt .d { color: var(--muted); font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .pop .opt .dir { color: var(--muted); font-weight: 400; }
 .pop .opt mark { background: none; color: var(--accent); }
+.pop .opt.hintrow { cursor: default; }
+.pop .opt.hintrow:hover { background: none; }
+.pop .opt.hintrow.clickable { cursor: pointer; }
+.pop .opt.hintrow.clickable:hover { background: var(--hover); }
+.pop .opt.hintrow .c { font-weight: 400; font-style: italic; color: var(--muted); }
 .pop .none { color: var(--muted); font-size: .85rem; padding: .35rem .5rem; }
 .pop .pf { position: sticky; bottom: -.3rem; display: flex; flex-wrap: wrap; align-items: center; gap: .3rem 1rem; margin: .3rem -.3rem -.3rem;
   padding: .35rem .8rem; border-top: 1px solid var(--line); background: var(--card); color: var(--muted); font-size: .75rem; }

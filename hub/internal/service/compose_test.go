@@ -273,7 +273,7 @@ func TestCommandsCatalog(t *testing.T) {
 	want := []hub.Command{
 		{Name: "/title", Description: "Set the title", Args: "[name]"},
 		{Name: cmdUsage, Description: "Show token usage"},
-		{Name: "/compress", Description: "Compress context", Args: "[focus topic | --preview]", Aliases: []string{"/compact"}},
+		{Name: "/compress", Description: "Compress conversation context", Args: "[here [N] | focus topic | --preview|--dry-run]", Aliases: []string{"/compact"}},
 		{Name: "/plan", Description: "Plan first", Args: "<task>"},
 		{Name: "/deploy", Description: "exec: make deploy"},
 		{Name: "/my-skill", Description: "A skill", Skill: true},
