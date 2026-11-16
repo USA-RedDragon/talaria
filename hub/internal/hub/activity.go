@@ -100,6 +100,54 @@ type Subagent struct {
 	// WaitingOn are the commands of the background processes a subagent with
 	// status "waiting" ended its turn on; Hermes resumes it when one exits.
 	WaitingOn []string `json:"waiting_on,omitempty"`
+	// Todo is the subagent's own to-do list at a glance; nil while it keeps none.
+	Todo *TodoBrief `json:"todo,omitempty"`
+}
+
+// TodoBrief is a subagent's to-do list at a glance: its in-progress items
+// and the count of each status.
+type TodoBrief struct {
+	Current  []TodoCurrent  `json:"current"`
+	Counts   map[string]int `json:"counts"`
+	Revision int64          `json:"revision"`
+}
+
+// TodoCurrent is one in-progress item of a TodoBrief.
+type TodoCurrent struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+}
+
+// TodoItem is one item of a to-do list.
+type TodoItem struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	// Status is pending, in_progress, completed, cancelled or blocked.
+	Status string `json:"status"`
+	// Parent is the item this one is a subtask of, "" at the top.
+	Parent string `json:"parent,omitempty"`
+	Notes  string `json:"notes,omitempty"`
+	// Owner is the subagent the item is assigned to.
+	Owner string `json:"owner,omitempty"`
+}
+
+// TodoList is a chat's stored to-do list, or one subagent's. Supported is
+// false when the agent server predates stored lists; Todos is then empty.
+type TodoList struct {
+	Todos     []TodoItem `json:"todos"`
+	Revision  int64      `json:"revision"`
+	Supported bool       `json:"supported"`
+	// Running is whether the subagent still runs; only for a subagent's list.
+	Running bool `json:"running,omitempty"`
+}
+
+// Todos reads the stored to-do list of a chat or one of its subagents. The
+// changes of a chat's own list come as todo.updated events.
+type Todos interface {
+	// Todos reads the chat's list, or with subagentID that subagent's. A
+	// chat with no list, and a backend that cannot read lists, give an
+	// empty list and no error.
+	Todos(ctx context.Context, user, backendID, sessionID, subagentID string) (TodoList, error)
 }
 
 // Process is one background command of a session, running or ended.

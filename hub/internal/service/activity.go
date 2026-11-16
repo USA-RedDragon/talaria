@@ -14,6 +14,7 @@ import (
 var (
 	_ hub.Activity  = (*Service)(nil)
 	_ hub.ToolMover = (*Service)(nil)
+	_ hub.Todos     = (*Service)(nil)
 )
 
 // maxSteer bounds a message to a subagent, maxBackground a /bg prompt.
@@ -110,6 +111,21 @@ func deref[T any](p *T) T {
 }
 
 func subagent(r gateway.SubagentRow) hub.Subagent {
+	sa := subagentRow(r)
+	if t := r.Todo; t != nil {
+		b := &hub.TodoBrief{Current: make([]hub.TodoCurrent, 0, len(t.Current)), Counts: t.Counts, Revision: t.Revision}
+		for _, c := range t.Current {
+			b.Current = append(b.Current, hub.TodoCurrent{ID: c.ID, Content: c.Content})
+		}
+		if b.Counts == nil {
+			b.Counts = map[string]int{}
+		}
+		sa.Todo = b
+	}
+	return sa
+}
+
+func subagentRow(r gateway.SubagentRow) hub.Subagent {
 	return hub.Subagent{ID: r.SubagentID, ParentID: deref(r.ParentID), Depth: deref(r.Depth), Goal: r.Goal,
 		Model: deref(r.Model), StartedAt: deref(r.StartedAt), Status: deref(r.Status), ToolCount: deref(r.ToolCount),
 		LastTool: deref(r.LastTool), LastPreview: deref(r.LastPreview), AcceptingSteer: deref(r.AcceptingSteer), ChildSessionID: deref(r.ChildSessionID), WaitingOn: r.WaitingOn}
@@ -296,4 +312,48 @@ func (b *backend) capable(ctx context.Context, c *gateway.Client, capability str
 		b.capsOf, b.caps = c, d.Capabilities
 	}
 	return slices.Contains(b.caps, capability)
+}
+
+// Todos reads the stored to-do list of the session, or of one of its
+// subagents (session.todos). A backend that does not know the method, or a
+// subagent with no stored list, reads as an empty list, never an error.
+func (s *Service) Todos(ctx context.Context, user, backendID, sessionID, subagentID string) (hub.TodoList, error) {
+	out := hub.TodoList{Todos: []hub.TodoItem{}}
+	err := s.withSession(ctx, user, backendID, sessionID, func(b *backend, ls *live) error {
+		var res gateway.SessionTodos
+		err := b.read(ctx, ls, gateway.MethodSessionTodos, gateway.SessionTodosParams{SessionID: ls.id, SubagentID: subagentID}, &res)
+		if err != nil {
+			if noTodos(err, subagentID != "") {
+				return nil
+			}
+			return refusal(err)
+		}
+		out.Supported = true
+		out.Running = deref(res.Running)
+		if st := res.TodoState; st != nil {
+			out.Revision = st.Revision
+			for _, it := range st.Todos {
+				out.Todos = append(out.Todos, hub.TodoItem{ID: it.ID, Content: it.Content, Status: it.Status, Parent: it.Parent, Notes: it.Notes, Owner: it.Owner})
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// noTodos says whether a session.todos refusal means there is no list to
+// show: the backend predates the method, or the named subagent is not one
+// the chat knows.
+func noTodos(err error, sub bool) bool {
+	var rerr *gateway.RPCError
+	if !errors.As(err, &rerr) {
+		return false
+	}
+	switch {
+	case rerr.Code == gateway.CodeMethodNotFound, strings.Contains(rerr.Message, "unknown method"), rerr.Message == "method_not_found":
+		return true
+	case sub && rerr.Message == gateway.ReasonNotFound:
+		return true
+	}
+	return false
 }

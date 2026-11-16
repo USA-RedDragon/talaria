@@ -9,6 +9,10 @@
 // open Chat or null), showText (a dialog with a long text), words, and the
 // chat's toast, highlight, diff and page (the card of a published page)
 // for the tool cards of a subagent's steps.
+// The chat's to-do list (Hermes patch 0126, todo.js) is the Plan section above
+// the subagents, a line above the message box, and, for a subagent, the list
+// of its own in its row: from GET .../todos, from each todo.updated event and
+// from the todo tool's own results.
 // An open subagent row shows its steps as a small chat (minichat.js), read
 // from GET .../subagents/{id}/events after the last seq it holds.
 window.HubActivity = (ctx) => {
@@ -26,7 +30,11 @@ window.HubActivity = (ctx) => {
   function fresh(chat) {
     return { chat, subs: new Map(), bgs: new Map(), open: new Set(), tab: "sub", paused: false, turn: null,
       usage: null, running: false, error: "", failingSince: 0, loaded: false, polled: 0, timer: 0, tick: 0,
-      approvals: new Map(), asked: new Set(), minis: new Map(), raw: new Set(), nodes: new Map(), heads: new Map(), sumKey: "", fed: 0 };
+      approvals: new Map(), asked: new Set(), minis: new Map(), raw: new Set(), nodes: new Map(), heads: new Map(), sumKey: "", fed: 0,
+      // The chat's list ({ items, rev }, null for none), how many events brought it, whether the
+      // server cannot read lists, what is open (notes, a subagent's list, the folded done items), the
+      // lists read of subagents and the Plan node as drawn.
+      plan: null, planSeq: 0, todoOff: false, noteOpen: new Set(), subOpen: new Set(), planAll: false, subTodo: new Map(), planDrawn: null, stripKey: "" };
   }
 
   // k writes a token count: 812, 1.3k, 41k, 1.2M.
@@ -85,7 +93,7 @@ window.HubActivity = (ctx) => {
     let r = S.subs.get(id);
     if (!r) {
       r = { id, kind: "sub", goal: "", model: "", state: "queued", startedAt: Date.now(), endedAt: 0, tools: 0,
-        tin: null, tout: null, now: "", tool: null, missed: 0, tail: [], result: "", parentId: "", delegation: "", child: "", steer: true };
+        tin: null, tout: null, now: "", tool: null, missed: 0, tail: [], result: "", parentId: "", delegation: "", child: "", steer: true, todo: null };
       S.subs.set(id, r);
     }
     if (p) {
@@ -154,9 +162,62 @@ window.HubActivity = (ctx) => {
         for (const id of p.request_ids || []) any = settle(id) || any;
         return any;
       }
-      case "tool.complete": return toolDone(p);
+      case "tool.complete": return todoDone(p) || toolDone(p);
+      case "todo.updated": return setPlan(p);
     }
     return false;
+  }
+
+  // setPlan takes a whole list, as a todo.updated event or a todo tool result
+  // carries it. An event that comes while a read is out wins over the read.
+  function setPlan(state) {
+    if (!state || !Array.isArray(state.todos)) return false;
+    S.planSeq++;
+    S.todoOff = false;
+    S.plan = { items: window.HubTodo.clean(state), rev: Number.isFinite(state.revision) ? state.revision : 0 };
+    return true;
+  }
+
+  // todoDone follows the chat's own todo tool: a result that carries the list
+  // sets it, any other reads it again at once.
+  function todoDone(p) {
+    if (p.name !== "todo" && p.name !== "todo_list") return false;
+    if (setPlan(p.todo_state)) return true;
+    setTimeout(async () => {
+      const chat = S.chat;
+      await loadPlan();
+      if (chat === S.chat) draw();
+    }, 300);
+    return false;
+  }
+
+  // loadPlan reads the chat's stored list. An agent server that predates
+  // stored lists answers "not supported": the chat shows no plan and is not asked again.
+  async function loadPlan() {
+    const chat = S.chat;
+    if (!chat || S.todoOff) return;
+    const since = S.planSeq;
+    try {
+      const got = await api("GET", chat.base + "/todos");
+      if (chat !== S.chat) return;
+      if (!got || !got.supported) { S.todoOff = true; S.plan = null; return; }
+      if (S.planSeq !== since) return;
+      S.plan = { items: window.HubTodo.clean(got), rev: Number.isFinite(got.revision) ? got.revision : 0 };
+    } catch (_) { /* the plan stays as it was; the next poll reads it again */ }
+  }
+
+  // loadSubTodos reads the list of each subagent whose list is open, when it
+  // changed since it was read.
+  async function loadSubTodos() {
+    const chat = S.chat;
+    const want = [...S.subOpen].map((id) => S.subs.get(id)).filter((r) => r && r.todo && (!S.subTodo.has(r.id) || S.subTodo.get(r.id).rev < r.todo.revision));
+    await Promise.all(want.map(async (r) => {
+      try {
+        const got = await api("GET", chat.base + "/todos?subagent=" + encodeURIComponent(r.id));
+        if (chat !== S.chat) return;
+        S.subTodo.set(r.id, { items: window.HubTodo.clean(got), rev: Number.isFinite(got.revision) ? got.revision : r.todo.revision });
+      } catch (_) { /* tried again on the next poll */ }
+    }));
   }
 
   function subEvent(kind, p) {
@@ -181,6 +242,7 @@ window.HubActivity = (ctx) => {
         const P = window.HubToolCard.plain;
         const line = P((P(p.tool_name) || "tool") + "  " + (p.tool_preview || text));
         push(r, "t", line);
+        if (/^todo(_list)?$/.test(p.tool_name || "")) soon();
         r.now = line;
         r.tool = { name: P(p.tool_name) || "tool", preview: P(p.tool_preview || text || ""), at: Date.now() };
         r.lastTool = p.tool_name || "";
@@ -292,6 +354,7 @@ window.HubActivity = (ctx) => {
       // A start never moves later: a restart may hand the subagent to a Hermes that lists its own start.
       if (s.started_at) r.startedAt = Math.min(r.startedAt, s.started_at * 1000);
       r.steer = s.accepting_steer !== false;
+      r.todo = window.HubTodo.brief(s.todo);
       r.missed = 0;
       // The status Hermes lists is the truth, a subagent.complete event too:
       // a subagent is finished when one of them says so, and not because it
@@ -386,6 +449,9 @@ window.HubActivity = (ctx) => {
         if (!S.loaded || Date.now() - S.failingSince >= ACTIVITY_GAP_MS) S.error = e.message;
       }
       S.polled = Date.now();
+      await loadPlan();
+      if (chat !== S.chat) return;
+      await loadSubTodos();
       await verify();
       await refreshMinis();
       if (chat !== S.chat) return;
@@ -571,6 +637,10 @@ window.HubActivity = (ctx) => {
     S = fresh(chat);
     $("actbtn").hidden = !chat;
     $("tok").hidden = true;
+    $("todostrip").hidden = true;
+    // The last chat's plan must not stay in a panel that is closed and not drawn again until it opens.
+    const stale = $("plan");
+    if (stale) stale.remove();
     if (!chat) {
       $("app").classList.add("act-closed", "act-none");
       return;
@@ -710,7 +780,8 @@ window.HubActivity = (ctx) => {
       const l = window.HubToolCard.statusLine(r.tool.name, r.tool.preview, m ? m.view.memory() : null);
       line = l.icon + "|" + l.text + "|" + (r.tool.at && ago((Date.now() - r.tool.at) / 1000) ? 1 : 0) + "|" + S.raw.has(r.id) + "|" + r.tool.name + " " + r.tool.preview;
     }
-    return JSON.stringify([child, r.id, r.kind, r.state, r.goal, r.startedAt, r.endedAt, r.model, r.tools, r.tin, r.tout, r.now, line]);
+    return JSON.stringify([child, r.id, r.kind, r.state, r.goal, r.startedAt, r.endedAt, r.model, r.tools, r.tin, r.tout, r.now, line,
+      r.todo, S.subOpen.has(r.id), (S.subTodo.get(r.id) || {}).rev, subNotes(r.id)]);
   }
 
   // rowNode gives the node for row r: the one drawn before when nothing it
@@ -783,8 +854,77 @@ window.HubActivity = (ctx) => {
     };
     head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } };
     box.append(head);
+    if (r.kind === "sub" && r.todo) box.append(subPlan(r));
     if (S.open.has(r.id)) box.append(body(r));
     return box;
+  }
+
+  // The notes of a subagent's own list that are open: its keys in S.noteOpen start with "s:ID:".
+  const subNotes = (id) => [...S.noteOpen].filter((k) => k.startsWith("s:" + id + ":"));
+
+  // subPlan is a subagent's own list in its row: collapsed to its counts and
+  // current item, open to the whole tree.
+  function subPlan(r) {
+    const expanded = S.subOpen.has(r.id);
+    const mine = S.subTodo.get(r.id);
+    const pre = "s:" + r.id + ":";
+    return window.HubTodo.line(r.todo, { el, expanded, items: mine ? mine.items : null, names: window.HubPeer.names,
+      open: { has: (id) => S.noteOpen.has(pre + id) },
+      flip: (id) => { toggle(S.noteOpen, pre + id); draw(); },
+      toggle: () => { toggle(S.subOpen, r.id); draw(); if (S.subOpen.has(r.id)) soon(); } });
+  }
+
+  function toggle(set, v) {
+    if (set.has(v)) set.delete(v); else set.add(v);
+  }
+
+  // planNode is the Plan section: the node drawn before while nothing it
+  // shows changed (the list, the names of the subagents it names, what is
+  // open), else a new one. null when the chat has no list.
+  function planNode() {
+    if (!S.plan || !S.plan.items.length) return null;
+    const items = S.plan.items;
+    const names = items.map((i) => i.owner && window.HubTodo.ownerName(i.owner, window.HubPeer.names));
+    const key = JSON.stringify([items, names, S.planAll, [...S.noteOpen].filter((k) => k.startsWith("p:"))]);
+    if (S.planDrawn && S.planDrawn.key === key) return S.planDrawn.node;
+    const node = window.HubTodo.plan(items, { el, names: window.HubPeer.names, all: S.planAll,
+      open: { has: (id) => S.noteOpen.has("p:" + id) },
+      flip: (id) => { toggle(S.noteOpen, "p:" + id); draw(); },
+      flipAll: () => { S.planAll = !S.planAll; draw(); } });
+    S.planDrawn = { key, node };
+    return node;
+  }
+
+  // drawStrip paints the line above the message box: the item in progress, how far
+  // the plan is and a tap that opens it. Nothing shows without a list, or when every item is done or cancelled.
+  function drawStrip() {
+    const b = $("todostrip");
+    const info = S.chat && S.plan ? window.HubTodo.stripInfo(S.plan.items) : null;
+    if (!info) { b.hidden = true; S.stripKey = ""; return; }
+    const key = JSON.stringify(info);
+    b.hidden = false;
+    if (key === S.stripKey) return;
+    S.stripKey = key;
+    const bar = el("span", "pbar");
+    const fill = el("i");
+    fill.style.width = info.pct + "%";
+    bar.append(fill);
+    const chev = window.HubIcons.icon("chev");
+    chev.classList.add("go");
+    b.replaceChildren(window.HubTodo.icon(info.status), el("span", "cur", info.text), bar, el("span", "cnt", info.count), chev);
+    b.title = "Open the plan in Activity";
+    b.setAttribute("aria-label", "Plan: " + info.text + ", " + info.count + " done. Open the plan");
+  }
+
+  // revealPlan opens the sidebar on the Plan.
+  function revealPlan() {
+    if (!S.chat) return;
+    S.tab = "sub";
+    setOpen(true, false);
+    draw();
+    const body = $("actbody");
+    const plan = $("plan");
+    if (plan) body.scrollTop = Math.max(0, plan.offsetTop - body.offsetTop - 4);
   }
 
   function body(r) {
@@ -970,6 +1110,7 @@ window.HubActivity = (ctx) => {
   function draw() {
     if (!S.chat) return;
     drawTokens();
+    drawStrip();
     if (ctx.drawn) ctx.drawn();
     const subs = [...S.subs.values()], bgs = [...S.bgs.values()];
     const liveSub = subs.filter((r) => live.has(r.state)).length, liveBg = bgs.filter((r) => live.has(r.state)).length;
@@ -1009,6 +1150,15 @@ window.HubActivity = (ctx) => {
       ? { row: document.activeElement.closest("[data-act]"), value: document.activeElement.value, pos: document.activeElement.selectionStart }
       : null;
     const out = [];
+    const plan = S.tab === "sub" ? planNode() : null;
+    if (plan) {
+      out.push(plan);
+      if (subs.length) {
+        let h = S.heads.get("Subagents");
+        if (!h) { h = el("div", "sec", "Subagents"); S.heads.set("Subagents", h); }
+        out.push(h);
+      }
+    }
     const rows = S.tab === "sub" ? subs : bgs;
     const now = rows.filter((r) => live.has(r.state)), done = rows.filter((r) => !live.has(r.state));
     const tree = S.tab === "sub" ? list(rows) : null;
@@ -1024,7 +1174,7 @@ window.HubActivity = (ctx) => {
       section(out, "Now", now, null);
       section(out, "Finished", done, null);
     }
-    if (!rows.length) {
+    if (!rows.length && !(plan && S.tab === "sub")) {
       const text = S.tab === "sub" ? "No subagents in this chat yet." : "Nothing running in the background. Start a prompt with /bg in the message box.";
       let e = S.heads.get(text);
       if (!e) { e = el("div", "empty", text); S.heads.set(text, e); }
@@ -1094,6 +1244,7 @@ window.HubActivity = (ctx) => {
   function init() {
     $("actbtn").onclick = () => setOpen(!isOpen(), true);
     $("actclose").onclick = () => setOpen(false, true);
+    $("todostrip").onclick = () => revealPlan();
     $("tab-sub").onclick = () => { S.tab = "sub"; draw(); };
     $("tab-bg").onclick = () => { S.tab = "bg"; draw(); };
     document.addEventListener("visibilitychange", () => { if (!document.hidden && S.chat) soon(); });
@@ -1138,6 +1289,6 @@ window.HubActivity = (ctx) => {
     return [...S.subs.values()].filter((r) => r.kind === "sub" && r.goal).map((r) => r.id);
   }
 
-  return { goalOf, goalIds, view, restore, show, event: (kind, p) => { if (S.chat && event(kind, p)) draw(); }, opens, fromTool, background, liveModels,
+  return { revealPlan, goalOf, goalIds, view, restore, show, event: (kind, p) => { if (S.chat && event(kind, p)) draw(); }, opens, fromTool, background, liveModels,
     running: (on) => { S.running = !!on; draw(); }, usage: (u) => { if (u) { S.usage = u; draw(); } } };
 };

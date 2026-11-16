@@ -17,8 +17,8 @@ const ticks = [];
 const tickClock = () => { for (const f of ticks) f(); };
 let tid = 0;
 const ids = {};
-for (const id of ["actbody", "actbtn", "actclose", "actcount", "actsum", "app", "c-bg", "c-sub", "tab-bg", "tab-sub", "tok", "toksub", "tokturn"]) ids[id] = new El("div");
-const doc = Object.assign({}, document, { getElementById: (id) => ids[id], hidden: false, activeElement: null, addEventListener: () => {}, querySelector: () => null, body: new El("body") });
+for (const id of ["actbody", "actbtn", "actclose", "actcount", "actsum", "app", "c-bg", "c-sub", "tab-bg", "tab-sub", "todostrip", "tok", "toksub", "tokturn"]) ids[id] = new El("div");
+const doc = Object.assign({}, document, { createElementNS: (_ns, t) => new El(t), getElementById: (id) => ids[id], hidden: false, activeElement: null, addEventListener: () => {}, querySelector: () => null, body: new El("body") });
 const copied = [];
 const sandbox = {
   window: {}, document: doc, Date: D, Math, JSON, Intl, Promise, Array, Set, Map,
@@ -34,17 +34,28 @@ const toasts = [];
 sandbox.window.HubToast = { show: (text, opts) => { toasts.push([text, opts]); } };
 sandbox.window.HubBackoff = () => ({ next: () => 3000, reset: () => {} });
 sandbox.window.HubIcons = { icon: (name) => el("svg", "ico i-" + name), button: (name, label, cls) => { const b = el("button", cls); b.title = label; return b; } };
+// The names of the page's subagents, as app.js sets them: the Activity list's goals.
+sandbox.window.HubPeer = { names: { sub: () => "" }, who(ref, names) { return { name: names.sub(ref) }; } };
 vm.createContext(sandbox);
 const dir = process.argv[2];
-for (const f of ["times.js", "toolcard.js", "toolgroup.js", "minichat.js", "activity.js"]) vm.runInContext(fs.readFileSync(dir + "/" + f, "utf8"), sandbox);
+for (const f of ["times.js", "toolcard.js", "toolgroup.js", "minichat.js", "todo.js", "activity.js"]) vm.runInContext(fs.readFileSync(dir + "/" + f, "utf8"), sandbox);
 
 // What the hub answers to the sidebar's reads.
 let list = [];
 let verdict = { live: true, running: true };
 let verdictFails = false;
 const reads = [];
+// What the hub answers to .../todos: the chat's list (supported false: a Hermes without stored lists) and each subagent's.
+let plan = { supported: true, todos: [], revision: 0 };
+const subPlans = {};
+const todoReads = [];
 async function api(method, path) {
   reads.push(path);
+  if (/\/todos(\?|$)/.test(path)) {
+    todoReads.push(path);
+    const m = /subagent=([^&]+)/.exec(path);
+    return m ? subPlans[decodeURIComponent(m[1])] || { supported: true, todos: [], revision: 0 } : plan;
+  }
   if (path.endsWith("/activity")) return { subagents: list, processes: [] };
   if (/\/subagents\/[^/]+\/events/.test(path)) {
     if (verdictFails) throw new Error("no answer");
@@ -319,6 +330,107 @@ await round();
 assert.ok(rowOf("sa-w").querySelector(".state.ok"), "done");
 assert.strictEqual(liveCount(), runningBefore);
 assert.strictEqual(rowState("sa-w"), "Done");
+
+// The plan: the chat's own to-do list as a section above the subagents, a line above the message box, and
+// a subagent's own list in its row.
+{
+  const todo = (id, content, status, extra) => Object.assign({ id, content, status }, extra || {});
+  const planEl = () => body().querySelector("section.plan");
+  const strip = ids.todostrip;
+  // A chat with no list shows nothing of it.
+  assert.ok(!planEl(), "no plan without a list");
+  assert.strictEqual(strip.hidden, true, "no strip without a list");
+  // The list is read with the activity poll, and shows when it comes.
+  plan = { supported: true, revision: 3, todos: [
+    todo("1", "Android build installs", "completed"),
+    todo("2", "Title screen on the Thor", "in_progress"),
+    todo("3", "Thor touch: confirm touch reaches the guest", "in_progress", { parent: "2", owner: "sa-pl", notes: "Checking with the libnx touch test" }),
+    todo("4", "Launcher icon", "pending", { parent: "2" }),
+    todo("5", "APK size", "blocked", { parent: "2" }),
+  ] };
+  list = [{ id: "sa-pl", goal: "android-rezero", status: "running", started_at: now / 1000 - 60 }];
+  sandbox.window.HubPeer.names.sub = (id) => (act.goalOf(id));
+  await round();
+  assert.ok(planEl(), "the plan shows");
+  assert.strictEqual(body().children[0], planEl(), "the plan is above the subagents");
+  assert.match(planEl().querySelector(".plan-count").textContent, /^1 of 5 done$/);
+  assert.strictEqual(planEl().querySelector(".plan-sum").textContent, "2 in progress · 1 blocked · 1 to do");
+  assert.ok(planEl().querySelectorAll("li.ti").length === 5, "five items");
+  assert.ok(planEl().querySelector("li.ti.done"), "a done item");
+  const chip = planEl().querySelector(".own");
+  assert.strictEqual(chip.textContent, "android-rezero", "the owner is named by its goal");
+  assert.ok(!/sa-pl/.test(planEl().textContent + chip.title), "no raw subagent id");
+  assert.strictEqual(planEl().querySelector(".tn").textContent, "Checking with the libnx touch test");
+  assert.strictEqual(planEl().querySelector(".tn").getAttribute("aria-expanded"), "false");
+  planEl().querySelector(".tn").onclick();
+  assert.strictEqual(planEl().querySelector(".tn").getAttribute("aria-expanded"), "true", "a tap opens the note");
+  // The strip: the item in progress, how far, and a tap that opens the panel on the plan.
+  assert.strictEqual(strip.hidden, false);
+  assert.strictEqual(strip.querySelector(".cur").textContent, "Thor touch: confirm touch reaches the guest", "the most specific item in progress");
+  assert.strictEqual(strip.querySelector(".cnt").textContent, "1 of 5");
+  assert.strictEqual(strip.querySelector(".pbar i").style.width, "20%");
+  // An unknown owner is "a subagent", not an id.
+  act.event("todo.updated", { revision: 4, todos: [todo("1", "Only item", "in_progress", { owner: "sa-gone" })] });
+  assert.strictEqual(planEl().querySelector(".own").textContent, "a subagent");
+  // A todo.updated event replaces the list at once, with no read.
+  const reads0 = todoReads.length;
+  act.event("todo.updated", { revision: 5, todos: [todo("1", "Done one", "completed"), todo("2", "Next", "in_progress"), todo("3", "After", "pending")] });
+  assert.strictEqual(todoReads.length, reads0, "the event is the list");
+  assert.match(planEl().querySelector(".plan-count").textContent, /^1 of 3 done$/);
+  assert.strictEqual(strip.querySelector(".cur").textContent, "Next");
+  // The chat's own todo tool without the list in its result reads it again.
+  plan = { supported: true, revision: 6, todos: [todo("1", "Done one", "completed"), todo("2", "Next", "completed"), todo("3", "After", "in_progress")] };
+  act.event("tool.complete", { name: "todo_list", tool_id: "t1", result: "{}" });
+  await round();
+  assert.strictEqual(strip.querySelector(".cur").textContent, "After", "the tool result refreshed the list: " + strip.textContent);
+  // Done and cancelled folded after the first few; a tap shows them.
+  act.event("todo.updated", { revision: 7, todos: [1, 2, 3, 4, 5].map((n) => todo("d" + n, "Finished " + n, "completed")).concat([todo("x", "Open", "pending")]) });
+  assert.strictEqual(planEl().querySelectorAll("li.ti").length, 4);
+  assert.strictEqual(planEl().querySelector(".plan-fold").textContent, "Show 2 done");
+  planEl().querySelector(".plan-fold").onclick();
+  assert.strictEqual(planEl().querySelectorAll("li.ti").length, 6);
+  assert.strictEqual(planEl().querySelector(".plan-fold").textContent, "Hide done");
+  // Every item done or cancelled: the strip goes, the plan stays.
+  act.event("todo.updated", { revision: 8, todos: [todo("1", "a", "completed"), todo("2", "b", "cancelled")] });
+  assert.strictEqual(strip.hidden, true, "no strip when nothing is left");
+  assert.ok(planEl(), "the plan stays with its history");
+  // An empty list shows nothing.
+  act.event("todo.updated", { revision: 9, todos: [] });
+  assert.ok(!planEl() && strip.hidden);
+
+  // A subagent's own list: counts and its current item in its row, the whole tree after a tap.
+  list = [{ id: "sa-pl", goal: "android-rezero", status: "running", started_at: now / 1000 - 60,
+    todo: { current: [{ id: "b", content: "Read the touch test" }], counts: { total: 4, completed: 1, in_progress: 1, pending: 2 }, revision: 2 } }];
+  subPlans["sa-pl"] = { supported: true, revision: 2, todos: [todo("a", "Find the test", "completed"), todo("b", "Read the touch test", "in_progress", { notes: "line 40" }), todo("c", "Report", "pending"), todo("d", "Cleanup", "pending")] };
+  await round();
+  const card = rowOf("sa-pl");
+  assert.match(card.querySelector(".sp-cur").textContent, /Read the touch test/);
+  assert.strictEqual(card.querySelector(".sp-cnt").textContent, "1 of 4");
+  assert.ok(!card.querySelector(".tl"), "collapsed: counts and the current item only");
+  const readsBefore = todoReads.length;
+  card.querySelector(".sp-line").onclick({ stopPropagation() {} });
+  await round();
+  for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+  await round();
+  assert.ok(todoReads.some((q) => q.includes("?subagent=sa-pl")), "the subagent's list is read when opened: " + todoReads.slice(readsBefore));
+  const open = rowOf("sa-pl");
+  assert.strictEqual(open.querySelectorAll("li.ti").length, 4, "the whole list shows: " + open.textContent);
+  assert.ok(!open.querySelector(".own"), "no owner chips in a subagent's own list");
+  // A subagent that keeps no list shows no list line.
+  list = [{ id: "sa-pl", goal: "android-rezero", status: "running", started_at: now / 1000 - 60 }];
+  await round();
+  assert.ok(!rowOf("sa-pl").querySelector(".subplan"), "no list, no line");
+}
+// A Hermes without stored lists: nothing shows, no error, and it is not asked again.
+{
+  const old = sandbox.window.HubActivity({ api: async (m, p) => { if (/\/todos/.test(p)) { todoReads.push("old"); return { todos: [], revision: 0, supported: false }; } return { subagents: [], processes: [] }; }, el, banner: () => {}, showText: () => {} });
+  old.show({ base: "/api/sessions/b/old", backend: "b" });
+  const before = todoReads.filter((q) => q === "old").length;
+  for (let i = 0; i < 3; i++) { await round(); await new Promise((r) => setImmediate(r)); }
+  assert.ok(!body().querySelector("section.plan") && ids.todostrip.hidden, "an older Hermes shows no plan");
+  assert.ok(!/Could not load/.test(ids.actsum.textContent), "and no error");
+  assert.strictEqual(todoReads.filter((q) => q === "old").length - before <= 1, true, "asked once");
+}
 
 console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

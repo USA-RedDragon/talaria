@@ -144,6 +144,13 @@ type Session struct {
 	Subagents []gateway.SubagentRow
 	// children are the stored transcripts of its subagents, by id.
 	children map[string]*child
+	// todos is the stored to-do list of the session, and childTodos the
+	// lists of its subagents by id, as session.todos reads them; nil when
+	// none is stored.
+	todos      *gateway.TodoState
+	childTodos map[string]*gateway.TodoState
+	// NoTodos makes session.todos an unknown method for this session, as on a Hermes from before patch 0126.
+	NoTodos bool
 	// Processes are the session's background processes, as process.list
 	// lists them.
 	Processes []gateway.ProcessRow
@@ -173,6 +180,9 @@ type Gateway struct {
 	Server   *httptest.Server
 	Username string
 	Password string
+
+	// noTodos makes session.todos an unknown method, as on a Hermes from before patch 0126.
+	noTodos bool
 
 	mux      *http.ServeMux
 	mu       sync.Mutex
@@ -1142,6 +1152,11 @@ func (g *Gateway) dispatch(c *conn, method string, p map[string]any) (any, strin
 		h = g.hAttachBytes
 	case gateway.MethodFileAttach:
 		h = g.hFileAttach
+	case gateway.MethodSessionTodos:
+		if g.noTodos {
+			return nil, "unknown method: " + method, nil
+		}
+		h = g.hSessionTodos
 	case gateway.MethodSubagentList:
 		h = g.hSubagentList
 	case gateway.MethodSubagentTail:

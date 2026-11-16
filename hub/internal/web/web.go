@@ -467,6 +467,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/sessions/{backend}/{session}/move", s.api(s.handleMove))
 	mux.Handle("POST /api/sessions/{backend}/{session}/release", s.api(s.handleRelease))
 	mux.Handle("GET /api/sessions/{backend}/{session}/activity", s.api(s.lastAnswer(s.handleActivity)))
+	mux.Handle("GET /api/sessions/{backend}/{session}/todos", s.api(s.handleTodos))
 	mux.Handle("GET /api/sessions/{backend}/{session}/subagents/{subagent}/tail", s.api(s.handleSubagentTail))
 	mux.Handle("GET /api/sessions/{backend}/{session}/subagents/{subagent}/events", s.api(s.handleSubagentEvents))
 	mux.Handle("POST /api/sessions/{backend}/{session}/subagents/{subagent}/steer", s.api(s.handleSteerSubagent))

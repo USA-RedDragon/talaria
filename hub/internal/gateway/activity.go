@@ -15,7 +15,18 @@ const (
 	MethodDelegationStatus  = "delegation.status"
 	MethodDelegationPause   = "delegation.pause"
 	MethodPromptBackground  = "prompt.background"
+	// MethodSessionTodos reads a session's stored to-do list, or a
+	// child's with subagent_id (Hermes patch 0126).
+	MethodSessionTodos = "session.todos"
 )
+
+// CodeMethodNotFound is the JSON-RPC code of a method the server does not
+// have, such as session.todos on a Hermes from before patch 0126.
+const CodeMethodNotFound = -32601
+
+// TodoUpdatedEvent carries the whole to-do list after it changed:
+// {"todos", "revision"}.
+const TodoUpdatedEvent = "todo.updated"
 
 // BackgroundCompleteEvent ends a /bg prompt: {"task_id", "text"}.
 const BackgroundCompleteEvent = "background.complete"
@@ -57,6 +68,56 @@ type SubagentRow struct {
 	ChildSessionID *string  `json:"child_session_id"`
 	// WaitingOn are the commands of the background processes a "waiting" subagent will be resumed by.
 	WaitingOn []string `json:"waiting_on"`
+	// Todo is the child's to-do list at a glance (Hermes patch 0126); nil while it keeps none.
+	Todo *TodoBrief `json:"todo"`
+}
+
+// TodoBrief is a child's to-do list at a glance: its in-progress items and
+// the count of each status (and "total").
+type TodoBrief struct {
+	Current  []TodoCurrent  `json:"current"`
+	Counts   map[string]int `json:"counts"`
+	Revision int64          `json:"revision"`
+}
+
+// TodoCurrent is one in-progress item of a TodoBrief.
+type TodoCurrent struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+}
+
+// TodoItem is one item of a to-do list (tools/todo_tool.py): Status is
+// pending, in_progress, completed, cancelled or blocked; Parent nests it
+// under another item to any depth; Owner is the subagent it is assigned to.
+type TodoItem struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	Status  string `json:"status"`
+	Parent  string `json:"parent,omitempty"`
+	Notes   string `json:"notes,omitempty"`
+	Owner   string `json:"owner,omitempty"`
+}
+
+// TodoState is a whole to-do list with its revision.
+type TodoState struct {
+	Todos    []TodoItem `json:"todos"`
+	Revision int64      `json:"revision"`
+}
+
+// SessionTodosParams is session.todos' params; SubagentID reads that
+// child's list instead of the session's.
+type SessionTodosParams struct {
+	SessionID  string `json:"session_id"`
+	SubagentID string `json:"subagent_id,omitempty"`
+}
+
+// SessionTodos is session.todos' result. TodoState is nil when no list was
+// ever stored.
+type SessionTodos struct {
+	SessionID  string     `json:"session_id"`
+	SubagentID string     `json:"subagent_id"`
+	Running    *bool      `json:"running"`
+	TodoState  *TodoState `json:"todo_state"`
 }
 
 // SubagentList is subagent.list's result.

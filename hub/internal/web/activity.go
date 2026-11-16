@@ -56,6 +56,23 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// handleTodos answers with the chat's stored to-do list, or with
+// ?subagent=ID that subagent's. A chat with no list, and a backend that
+// cannot read lists, answer an empty list.
+func (s *Server) handleTodos(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.svc.(hub.Todos)
+	if !ok {
+		writeJSON(w, http.StatusOK, hub.TodoList{Todos: []hub.TodoItem{}})
+		return
+	}
+	out, err := t.Todos(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("session"), r.URL.Query().Get("subagent"))
+	if err != nil {
+		s.activityFail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleSubagentTail(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.activity(w)
 	if !ok {

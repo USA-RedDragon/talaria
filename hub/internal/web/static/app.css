@@ -1738,3 +1738,48 @@ pre.code .body { display: block; background: transparent; padding: 0 .75rem 0 0;
 .jobruns .item .name { font-size: .88rem; }
 .jobruns-all { display: block; padding: .3rem .5rem; font-size: .8rem; color: var(--accent); text-decoration: none; border-radius: 8px; }
 .jobruns-all:hover, .jobruns-all:focus-visible { background: var(--hover); }
+
+/* The to-do list (todo.js): the Plan section of the Activity panel, a subagent's own list in its row,
+   and the strip above the message box. */
+.tic { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); }
+.tic .fill { fill: currentColor; stroke: none; }
+.tic.completed { color: var(--ok); }
+.tic.in_progress { color: var(--accent); }
+.tic.blocked { color: var(--warn); }
+.tic.cancelled { color: var(--muted); }
+.todostrip { flex: none; display: flex; align-items: center; gap: .6rem; margin: .45rem var(--gutter) 0; padding: .45rem .7rem; min-height: 2.4rem; width: auto;
+  text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 10px; font-size: .88rem; }
+.todostrip:hover { background: var(--hover); }
+.todostrip .cur { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.todostrip .pbar { flex: none; width: 4.5rem; height: .4rem; background: var(--line); border-radius: 4px; overflow: hidden; }
+.todostrip .pbar i { display: block; height: 100%; background: var(--ok); }
+.todostrip .cnt { flex: none; color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.todostrip .go { flex: none; width: .9rem; height: .9rem; color: var(--muted); transform: rotate(-90deg); }
+@media (max-width: 420px) { .todostrip .pbar { width: 3rem; } }
+.act .plan { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: .45rem .5rem .55rem; flex: none; }
+.act .plan-head { display: flex; justify-content: space-between; gap: .5rem; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; padding: 0 .25rem .2rem; }
+.act .plan-count { text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.act .plan-sum { padding: 0 .25rem .35rem; font-size: .8rem; color: var(--fg); }
+.tl { list-style: none; margin: 0; padding: 0; }
+.tl.sub { margin: .1rem 0 0 .75rem; padding-left: .35rem; border-left: 1px solid var(--line); }
+.ti { padding: .2rem .25rem; border-radius: 6px; }
+.ti.prog > .tl-line { background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 6px; }
+.ti .tl-line { display: flex; gap: .45rem; align-items: baseline; min-width: 0; padding: .1rem .15rem; }
+.ti .tl-line .tic { align-self: flex-start; margin-top: .22rem; }
+.ti .tt { flex: 1; min-width: 0; font-size: .86rem; overflow-wrap: anywhere; }
+.ti.done > .tl-line .tt, .ti.cx > .tl-line .tt { color: var(--muted); text-decoration: line-through; }
+.ti .own { flex: none; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .72rem; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 999px; padding: 0 .45rem; }
+.ti .tn { margin: .1rem 0 0 1.5rem; font-size: .78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; border-radius: 4px; }
+.ti .tn.open { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ti .tn:focus-visible, .plan-fold:focus-visible, .sp-line:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.act .plan-fold { border: 0; background: none; color: var(--accent); font-size: .82rem; padding: .35rem .25rem 0; }
+.act .subplan { border-top: 1px solid var(--line); }
+.act .sp-line { display: flex; align-items: center; gap: .45rem; width: 100%; border: 0; border-radius: 0 0 10px 10px; background: none; padding: .4rem .6rem; min-height: 2.2rem; text-align: left; font-size: .8rem; }
+.act .sp-line:hover { background: var(--hover); }
+.act .sp-cur { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act .sp-cnt { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.act .sp-line .chev { flex: none; width: .8rem; height: .8rem; color: var(--muted); transform: rotate(-90deg); transition: transform .12s; }
+.act .subplan.open .sp-line .chev { transform: none; }
+.act .sp-body { padding: 0 .5rem .5rem; }
+.act .sp-wait { font-size: .78rem; color: var(--muted); padding: .2rem .35rem; }

@@ -37,6 +37,7 @@
 <script src="/static/pageblocks.js" defer></script>
 <script src="/static/slashmatch.js" defer></script>
 <script src="/static/eventstream.js" defer></script>
+<script src="/static/todo.js" defer></script>
 <script src="/static/activity.js" defer></script>
 <script src="/static/authrules.js" defer></script>
 <script src="/static/users.js" defer></script>
@@ -91,7 +92,7 @@
       <div id="tok" class="tok" title="Tokens of this chat's own turns. Subagents and background prompts count apart, in Activity." hidden><span id="tokturn"></span><span id="toksub" class="tsub"></span></div>
       <button id="filesbtn" class="ghost ib" type="button" hidden title="Files: this chat's folder and what Talaria changed" aria-label="Files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
       <button id="exportbtn" class="ghost ib" type="button" hidden title="Export as Markdown (Ctrl+Shift+E)" aria-label="Export as Markdown"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button>
-      <button id="actbtn" class="ghost ib actbtn" type="button" aria-expanded="false" aria-controls="act" aria-label="Activity" title="Activity: subagents and background tasks (Ctrl+.)" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span id="actcount" class="count" hidden>0</span></button>
+      <button id="actbtn" class="ghost ib actbtn" type="button" aria-expanded="false" aria-controls="act" aria-label="Activity" title="Activity: plan, subagents and background tasks (Ctrl+.)" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span id="actcount" class="count" hidden>0</span></button>
     </header>
     <details id="info" class="info" hidden>
       <summary id="infoline" title="Show model and thinking settings"></summary>
@@ -118,6 +119,7 @@
     <div class="tbhold"><button id="tobottom" class="tobottom" type="button" title="Jump to latest" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7"/></svg><span class="lbl">Jump to latest</span></button></div>
     <div id="qpscrim" class="qpscrim" hidden></div>
     <div class="qanchor"><div id="qpanel" class="qpanel" role="dialog" aria-labelledby="qp-title" hidden></div></div>
+    <button id="todostrip" class="todostrip" type="button" aria-controls="act" hidden></button>
     <form id="composer" class="composer" hidden>
       <div id="pop" class="pop" role="listbox" aria-label="Suggestions" hidden></div>
       <div id="chips" class="chips" aria-label="Attachments" hidden></div>
