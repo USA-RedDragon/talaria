@@ -1,0 +1,489 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 07:09:20 +0000
+Subject: [PATCH] fix(session_search): find the chat's finished subagents and
+ match long queries
+
+A finished delegate_task child's transcript never reached its parent,
+only the summary did, yet discovery hid it as the same lineage. Only a
+running child is live context. A child with an end stamp (any reason),
+or an unended one with no write for 30 minutes (its gateway died), is now
+discoverable from its parent, siblings and grandchildren. Other chats'
+subagents stay hidden.
+
+FTS5 ANDs every word, so a long query whose words were spread over
+several messages found nothing. When fewer sessions than the limit
+contain every word, sessions matching any word (bm25 order) fill the
+rest after the exact matches. Results carry match=all_terms/any_terms,
+and the payload has match_mode and a note.
+
+An empty result now says how many matches were in the chat's live
+context and were not shown.
+---
+ hermes_state_search.py                    |  11 +-
+ tests/tools/test_session_search_recall.py | 151 ++++++++++++++++
+ tools/session_search_tool.py              | 200 ++++++++++++++++------
+ 3 files changed, 306 insertions(+), 56 deletions(-)
+ create mode 100644 tests/tools/test_session_search_recall.py
+
+diff --git a/hermes_state_search.py b/hermes_state_search.py
+index 8a402385e2..470104587c 100644
+--- a/hermes_state_search.py
++++ b/hermes_state_search.py
+@@ -1157,7 +1157,7 @@ class SessionSearchMixin:
+         self, query: str, source_filter: list[str] | None = None, exclude_sources: list[str] | None = None,
+         role_filter: list[str] | None = None, limit: int = 20, offset: int = 0, sort: str | None = None,
+         include_inactive: bool = False, fields: Optional[Collection[str]] = None,
+-        after_ts: Optional[int] = None, before_ts: Optional[int] = None,
++        after_ts: Optional[int] = None, before_ts: Optional[int] = None, or_relax: bool = True,
+     ) -> list[dict[str, Any]]:
+         """:meth:`_search_messages_impl` plus one log line per slow search with the routing
+         path taken. Threshold HERMES_SEARCH_SLOW_MS (default 1000; 0 logs every call)."""
+@@ -1167,7 +1167,7 @@ class SessionSearchMixin:
+             rows = self._search_messages_impl(
+                 query, source_filter=source_filter, exclude_sources=exclude_sources, role_filter=role_filter,
+                 limit=limit, offset=offset, sort=sort, include_inactive=include_inactive, fields=fields,
+-                after_ts=after_ts, before_ts=before_ts)
++                after_ts=after_ts, before_ts=before_ts, or_relax=or_relax)
+             return rows
+         finally:
+             elapsed_ms = (time.time() - started) * 1000.0
+@@ -1180,7 +1180,7 @@ class SessionSearchMixin:
+         self, query: str, source_filter: list[str] | None = None, exclude_sources: list[str] | None = None,
+         role_filter: list[str] | None = None, limit: int = 20, offset: int = 0, sort: str | None = None,
+         include_inactive: bool = False, fields: Optional[Collection[str]] = None,
+-        after_ts: Optional[int] = None, before_ts: Optional[int] = None,
++        after_ts: Optional[int] = None, before_ts: Optional[int] = None, or_relax: bool = True,
+     ) -> list[dict[str, Any]]:
+         """FTS5 search across session messages (keywords, ``"phrases"``, AND/OR/NOT, ``prefix*``).
+         Returns snippet + session metadata + 1-message context per hit; ``fields`` selects a
+@@ -1188,7 +1188,8 @@ class SessionSearchMixin:
+         CJK LIKE fallback ignores it). Rewound rows (``active=0, compacted=0``) are excluded
+         by default; compaction-archived rows ARE included; ``include_inactive`` = every row.
+         ``after_ts``/``before_ts`` bound ``sessions.started_at`` on every route (FTS5, CJK,
+-        trigram, LIKE fallback, unindexed-gap supplement)."""
++        trigram, LIKE fallback, unindexed-gap supplement). ``or_relax=False`` turns off the any-term
++        retry after a zero-result miss, for a caller that runs its own relaxed pass."""
+         result_fields = self._search_message_fields(fields)
+         if not query or not query.strip():
+             return []
+@@ -1264,7 +1265,7 @@ class SessionSearchMixin:
+         # puts rows covering more terms first, newest/oldest keep their timestamp order. Gated on a
+         # zero-result miss so hits keep exact-match semantics; explicit OR/NOT, single-term and
+         # CJK-routed queries are left alone.
+-        if not matches and not is_cjk and not self._fts_stale:
++        if or_relax and not matches and not is_cjk and not self._fts_stale:
+             relaxed = self._or_relaxed_query(query)
+             if relaxed is not None:
+                 matches = self._match_rows("messages_fts", relaxed, fail_open="OR-relaxed",
+diff --git a/tests/tools/test_session_search_recall.py b/tests/tools/test_session_search_recall.py
+new file mode 100644
+index 0000000000..90341c4101
+--- /dev/null
++++ b/tests/tools/test_session_search_recall.py
+@@ -0,0 +1,151 @@
++"""session_search recall: a chat finds its own finished subagents' work, and a long query whose
++words are spread across messages is not empty."""
++import json
++import time
++
++import pytest
++
++from hermes_state import SessionDB
++from tools.session_search_tool import session_search
++
++
++@pytest.fixture
++def db(tmp_path):
++    return SessionDB(tmp_path / "state.db")
++
++
++def _search(db, query, current="parent", **kw):
++    return json.loads(session_search(query=query, db=db, current_session_id=current, **kw))
++
++
++def _child(db, sid, parent, text, *, end=None, source="subagent"):
++    db.create_session(sid, source=source, parent_session_id=parent)
++    db.append_message(sid, role="user", content=f"task for {sid}")
++    db.append_message(sid, role="assistant", content=text)
++    if end:
++        db.end_session(sid, end)
++
++
++def _parent_with_compacted_history(db):
++    db.create_session("parent", source="local")
++    db.append_message("parent", role="user", content="old plan: adrenotools driver zebra notes")
++    db.append_message("parent", role="assistant", content="old answer about adrenotools driver zebra")
++    db.archive_and_compact("parent", [
++        {"role": "user", "content": "Summary of earlier work"},
++        {"role": "assistant", "content": "Acknowledged"},
++    ])
++    db.append_message("parent", role="user", content="live message about quokka routing")
++
++
++class TestFinishedSubagents:
++    def test_finished_child_found_from_parent(self, db):
++        _parent_with_compacted_history(db)
++        _child(db, "kid", "parent", "turnip findings: the vulkan icd needs patching", end="agent_close")
++        res = _search(db, "turnip vulkan")
++        assert [r["session_id"] for r in res["results"]] == ["kid"]
++        assert res["results"][0]["parent_session_id"] == "parent"
++        assert res["results"][0]["subagent"] is True
++
++    def test_grandchild_and_sibling_see_finished_child(self, db):
++        db.create_session("parent", source="local")
++        db.append_message("parent", role="user", content="hello")
++        _child(db, "kid", "parent", "ibuprofen cadence analysis", end="agent_close")
++        _child(db, "grand", "kid", "grandchild found mandrake ledger", end="agent_close")
++        db.create_session("sib", source="subagent", parent_session_id="parent")
++        db.append_message("sib", role="user", content="sibling task")
++        assert [r["session_id"] for r in _search(db, "mandrake ledger", current="sib")["results"]] == ["grand"]
++        assert [r["session_id"] for r in _search(db, "ibuprofen cadence", current="sib")["results"]] == ["kid"]
++
++    @pytest.mark.parametrize("reason", ["agent_close", "gateway_restart", "shutdown", "session_reset"])
++    def test_any_end_reason_means_finished(self, db, reason):
++        db.create_session("parent", source="local")
++        db.append_message("parent", role="user", content="hello")
++        _child(db, "kid", "parent", "pelican manifest results", end=reason)
++        assert [r["session_id"] for r in _search(db, "pelican manifest")["results"]] == ["kid"]
++
++    def test_running_child_stays_hidden(self, db):
++        db.create_session("parent", source="local")
++        db.append_message("parent", role="user", content="hello")
++        _child(db, "kid", "parent", "walrus telemetry draft")
++        res = _search(db, "walrus telemetry")
++        assert res["count"] == 0
++        assert res["skipped_live_context"] == 1
++        assert "live context" in res["message"]
++
++    def test_unended_child_with_no_recent_writes_is_finished(self, db):
++        db.create_session("parent", source="local")
++        db.append_message("parent", role="user", content="hello")
++        _child(db, "kid", "parent", "heron schema review")
++        old = time.time() - 7200
++        db._execute_write(lambda c: c.execute("UPDATE messages SET timestamp = ? WHERE session_id = 'kid'", (old,)))
++        assert [r["session_id"] for r in _search(db, "heron schema")["results"]] == ["kid"]
++
++    def test_current_active_rows_stay_hidden_with_a_reason(self, db):
++        _parent_with_compacted_history(db)
++        res = _search(db, "quokka routing")
++        assert res["count"] == 0
++        assert res["skipped_live_context"] == 1
++        assert "live context" in res["message"]
++
++    def test_other_chats_subagents_stay_hidden(self, db):
++        db.create_session("parent", source="local")
++        db.append_message("parent", role="user", content="hello")
++        db.create_session("other", source="local")
++        db.append_message("other", role="user", content="hi")
++        _child(db, "okid", "other", "falcon dossier contents", end="agent_close")
++        assert _search(db, "falcon dossier")["count"] == 0
++
++    def test_no_current_session_hides_subagents(self, db):
++        db.create_session("parent", source="local")
++        _child(db, "kid", "parent", "badger registry notes", end="agent_close")
++        assert json.loads(session_search(query="badger registry", db=db))["count"] == 0
++
++    def test_compacted_rows_of_current_chat_found(self, db):
++        _parent_with_compacted_history(db)
++        res = _search(db, "adrenotools zebra")
++        assert [r["session_id"] for r in res["results"]] == ["parent"]
++
++
++class TestLongQueries:
++    def _seed(self, db):
++        db.create_session("a", source="local")
++        db.append_message("a", role="user", content="Thor save editor and Turnip drivers")
++        db.create_session("b", source="local")
++        db.append_message("b", role="user", content="adrenotools gpu_driver packaging for the zebra title screen")
++        db.create_session("c", source="local")
++        db.append_message("c", role="user", content="Re:Zero walkthrough")
++        db.create_session("cur", source="local")
++        db.append_message("cur", role="user", content="unrelated")
++
++    def test_words_spread_across_messages_fall_back_to_any_word(self, db):
++        self._seed(db)
++        res = _search(db, "Thor Re:Zero title screen Turnip adrenotools gpu_driver", current="cur")
++        assert res["count"] >= 2
++        assert {r["session_id"] for r in res["results"]} >= {"a", "b"}
++        assert res["match_mode"] == "all_terms_then_any_terms" or res["match_mode"] == "any_terms"
++        assert all(r["match"] == "any_terms" for r in res["results"])
++        assert "ANY of its words" in res["match_note"]
++
++    def test_exact_hits_come_first_and_are_labeled(self, db):
++        self._seed(db)
++        db.create_session("full", source="local")
++        db.append_message("full", role="user", content="Turnip adrenotools driver walkthrough")
++        res = _search(db, "Turnip adrenotools", current="cur")
++        modes = [r["match"] for r in res["results"]]
++        assert modes[0] == "all_terms"
++        res = _search(db, "Turnip adrenotools walkthrough", current="cur")
++        assert res["results"][0]["session_id"] == "full"
++        assert res["results"][0]["match"] == "all_terms"
++        assert res["match_mode"] == "all_terms_then_any_terms"
++
++    def test_all_terms_mode_reported_when_enough_match(self, db):
++        db.create_session("one", source="local")
++        db.append_message("one", role="user", content="solo gryphon query")
++        res = _search(db, "gryphon query", current="cur")
++        assert res["match_mode"] == "all_terms"
++        assert "match_note" not in res
++
++    def test_explicit_operators_are_not_relaxed(self, db):
++        self._seed(db)
++        res = _search(db, "Thor AND adrenotools", current="cur")
++        assert res["count"] == 0
+diff --git a/tools/session_search_tool.py b/tools/session_search_tool.py
+index b8b21a4efa..014fa7396b 100644
+--- a/tools/session_search_tool.py
++++ b/tools/session_search_tool.py
+@@ -21,6 +21,12 @@ from hermes_time import safe_strftime
+ # Hidden from browsing/searching — integrations (HERMES_SESSION_SOURCE=tool), delegate
+ # subagent runs, kanban workers are not the user's history.
+ _HIDDEN_SESSION_SOURCES = ("kanban", "subagent", "tool")
++# A delegate_task child's own session row. Other chats' subagent runs stay hidden; the current chat's
++# finished ones are discoverable (its transcript never reached the parent, only the summary did).
++_SUBAGENT_SOURCE = "subagent"
++# A child row with no end stamp and no write for this long is a run that died (gateway restart, crash),
++# not a running one, so its transcript is history.
++_RUNNING_CHILD_STALE_SECONDS = 1800
+ # Searchable but DEMOTED below interactive sessions: cron vocabulary dominates bare
+ # BM25 and starves out the user's own sessions ("recall blindness").
+ # Automation sources that are kept searchable but DEMOTED below interactive sessions in discover ranking.
+@@ -203,13 +209,36 @@ def _same_lineage(db, a: str, b: str) -> bool:
+     return bool(a_root and a_root == _resolve_lineage(db, b))
+ 
+ 
++def _delegation_child_finished(db, session_id: str, meta: dict[str, Any]) -> bool:
++    """True for a ``delegate_task`` child whose run is over, so its transcript is not in any live
++    context (the parent only received its summary). Finished = the row has an end stamp (any
++    reason, e.g. ``agent_close`` or a restart's), or has none but nothing was written for
++    ``_RUNNING_CHILD_STALE_SECONDS`` (the run died with its gateway). A running child stays live."""
++    if meta.get("source") != _SUBAGENT_SOURCE:
++        return False
++    if meta.get("ended_at") or meta.get("end_reason"):
++        return True
++
++    def _last_write():
++        with db._lock:
++            row = db._conn.execute("SELECT MAX(timestamp) FROM messages WHERE session_id = ?", (session_id,)).fetchone()
++        return row[0] if row else None
++    last = _coerce_started_ts(_quiet(_last_write, None, "last-write lookup failed for %s", session_id))
++    last = last if last is not None else _coerce_started_ts(meta.get("started_at"))
++    return last is not None and time.time() - last > _RUNNING_CHILD_STALE_SECONDS
++
++
+ def _session_left_live_context(db, session_id: str) -> bool:
+     """True when the transcript left everyone's live context: ``compression``
+-    (summarised into the child) or a fresh reset (child starts empty). Live delegation
+-    children (``end_reason is None``) and ``branched`` parents (copied verbatim into
+-    the branch) ARE the current context, so they stay excluded from recall."""
+-    end_reason = (session_id and _get_session_meta(db, session_id).get("end_reason")) or None
+-    return end_reason == "compression" or end_reason in _FRESH_RESET_END_REASONS
++    (summarised into the child), a fresh reset (child starts empty), or a finished
++    delegation child (the parent kept only its summary). Running delegation children
++    and ``branched`` parents (copied verbatim into the branch) ARE the current
++    context, so they stay excluded from recall."""
++    meta = _get_session_meta(db, session_id) if session_id else {}
++    end_reason = meta.get("end_reason") or None
++    if end_reason == "compression" or end_reason in _FRESH_RESET_END_REASONS:
++        return True
++    return _delegation_child_finished(db, session_id, meta)
+ 
+ 
+ def _get_message_storage_state(db, message_id) -> Optional[dict[str, Any]]:
+@@ -335,7 +364,8 @@ def _hydrate_hit(db, lineage_root: str, match_info: dict[str, Any], result_detai
+     except Exception as e:
+         logging.warning("get_anchored_view failed for %s/%s: %s", hit_sid, msg_id, e, exc_info=True)
+         return None
+-    session_meta, full = _get_session_meta(db, lineage_root), result_detail == "full"
++    session_meta = _get_session_meta(db, match_info.get("_meta_sid") or lineage_root)
++    full = result_detail == "full"
+     return _discovery_entry(
+         lineage_root, session_id=hit_sid,
+         when=_format_timestamp(session_meta.get("started_at") or match_info.get("session_started")),
+@@ -366,64 +396,114 @@ def _discover(db, query: str, role_filter: Optional[list[str]], limit: int, sort
+         title_started = _coerce_started_ts((_get_session_meta(db, title_root) or _get_session_meta(db, title_sid)).get("started_at"))
+         if {title_sid, title_root} & excluded_roots or not _in_time_window(title_started, after_ts, before_ts):
+             title_result = None
+-    raw_results, err = _loud(lambda: db.search_messages(
+-        query=query, role_filter=role_filter or ["user", "assistant"],
+-        exclude_sources=list(_HIDDEN_SESSION_SOURCES), limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort,
+-        fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts), "FTS5 search failed: %s", "Search failed")
++    # The current chat's own finished subagents are history (see _SUBAGENT_SOURCE); with no current
++    # session there is no chat to scope them to, so they stay hidden.
++    hidden_sources = [src for src in _HIDDEN_SESSION_SOURCES if src != _SUBAGENT_SOURCE or not current_lineage_root]
++    roles = role_filter or ["user", "assistant"]
++
++    def _scan(match_query: str, *, or_relax: bool):
++        kwargs = dict(query=match_query, role_filter=roles, exclude_sources=hidden_sources, limit=_DISCOVER_SCAN_LIMIT,
++                      offset=0, sort=sort, fields=_DISCOVER_SEARCH_FIELDS, after_ts=after_ts, before_ts=before_ts)
++        rows, err = _loud(lambda: db.search_messages(**kwargs, or_relax=or_relax), "FTS5 search failed: %s", "Search failed")
++        # Demote cron rows below interactive ones BEFORE dedup so a high-volume cron corpus
++        # can't starve the user's own sessions out of the top `limit`; stable sort keeps BM25
++        # order within each class. See #19434.
++        return (sorted(rows, key=lambda r: (r.get("source") or "") in _DEMOTED_SESSION_SOURCES) if rows else []), err
++
++    raw_results, err = _scan(query, or_relax=False)
+     if err:
+         return err
+-    # Demote cron rows below interactive ones BEFORE dedup so a high-volume cron corpus
+-    # can't starve the user's own sessions out of the top `limit`; stable sort keeps BM25
+-    # order within each class.
+-    raw_results = sorted(raw_results, key=lambda r: (r.get("source") or "") in _DEMOTED_SESSION_SOURCES)
+-    # See #19434.
+-    if not raw_results and not title_result:
+-        return _discover_payload(db, query, detail, [], message=(
+-            "No matching sessions found. FTS5 ANDs all terms by default — "
+-            "broaden with OR (`alpha OR beta`), exact-match with quoted "
+-            "phrases, exclude with NOT, or prefix-match with `deploy*`."))
+     seen_sessions: dict[str, dict[str, Any]] = {}
+     results = [title_result] if title_result else []
+     if title_result and (title_lineage := title_result.pop("_lineage_root", None)):
+         seen_sessions[title_lineage] = {"_title_only": True}
+-    # Dedupe by lineage (lineage_root -> first surviving FTS row) up to `limit`. The raw
+-    # owning session_id stays on the row — only it pairs validly with the FTS match id.
+-    # Current-lineage hits are skipped UNLESS the transcript left live context
+-    # (compression-ended, /new-reset predecessor, or an in-place compacted row on the
+-    # SAME session); a live delegation child (end_reason=None) stays excluded.
+-    for r in raw_results:
+-        if len(seen_sessions) >= limit:
+-            break
+-        raw_sid, resolved_sid = r["session_id"], _resolve_lineage(db, r["session_id"])
+-        if raw_sid in excluded_roots or resolved_sid in excluded_roots:
+-            continue
+-        # Skip the current session lineage — UNLESS the hit's transcript has left live context. Three
+-        # sub-cases: Legacy compression rotation: the FTS hit lives in a session that itself ended with
+-        # end_reason='compression'. That session's content has been replaced by a summary in the
+-        # continuation child, so it must stay discoverable. /new-reset (and idle/daily/CLI new_session): the
+-        # predecessor was ended without carrying any transcript into the child. Same lineage root, but the
+-        # prior conversation is NOT in the active context — hiding it made gateway recall go blind after
+-        # every /new (#85756). A live delegation child has end_reason=None, so it stays excluded. In-place
+-        # compaction: the FTS hit lives on the SAME session_id as the current session, but the matched
+-        # message row is an archived (active=0, compacted=1) row. The live-context load filters active=1, so
+-        # that content is no longer in context — let it through.
+-        is_compacted_hit = _is_compacted_message(db, r.get("id"))
+-        if current_lineage_root and resolved_sid == current_lineage_root and not (
+-                _session_left_live_context(db, raw_sid) or is_compacted_hit):
+-            continue
+-        if current_session_id and raw_sid == current_session_id and not is_compacted_hit:
+-            continue
+-        seen_sessions.setdefault(resolved_sid, {**r, "_lineage_root": resolved_sid})
+-    for lineage_root, match_info in seen_sessions.items():
++    live_skipped_ids: set[Any] = set()
++
++    def _collect(rows: list[dict[str, Any]], match: str) -> None:
++        """Dedupe by lineage (lineage_root -> first surviving FTS row) up to `limit`. The raw
++        owning session_id stays on the row — only it pairs validly with the FTS match id.
++        Current-lineage hits are skipped UNLESS the transcript left live context
++        (compression-ended, /new-reset predecessor, a finished delegation child, or an in-place
++        compacted row on the SAME session); a running delegation child stays excluded."""
++        for r in rows:
++            if len(seen_sessions) >= limit:
++                break
++            raw_sid, resolved_sid = r["session_id"], _resolve_lineage(db, r["session_id"])
++            if raw_sid in excluded_roots or resolved_sid in excluded_roots:
++                continue
++            # Skip the current session lineage — UNLESS the hit's transcript has left live context. Sub-cases:
++            # Legacy compression rotation: the FTS hit lives in a session that itself ended with
++            # end_reason='compression'. That session's content has been replaced by a summary in the
++            # continuation child, so it must stay discoverable. /new-reset (and idle/daily/CLI new_session): the
++            # predecessor was ended without carrying any transcript into the child. Same lineage root, but the
++            # prior conversation is NOT in the active context — hiding it made gateway recall go blind after
++            # every /new (#85756). Finished delegation child: the parent got only its summary, never the
++            # transcript, so it is history for the parent and its siblings; a running child
++            # (no end stamp, recent writes) is still being produced and stays excluded. In-place
++            # compaction: the FTS hit lives on the SAME session_id as the current session, but the matched
++            # message row is an archived (active=0, compacted=1) row. The live-context load filters active=1, so
++            # that content is no longer in context — let it through.
++            is_subagent = r.get("source") == _SUBAGENT_SOURCE
++            if is_subagent and (not current_lineage_root or resolved_sid != current_lineage_root):
++                continue
++            is_compacted_hit = _is_compacted_message(db, r.get("id"))
++            if current_lineage_root and resolved_sid == current_lineage_root and not (
++                    _session_left_live_context(db, raw_sid) or is_compacted_hit):
++                live_skipped_ids.add(r.get("id"))
++                continue
++            if current_session_id and raw_sid == current_session_id and not is_compacted_hit:
++                live_skipped_ids.add(r.get("id"))
++                continue
++            key = raw_sid if is_subagent else resolved_sid
++            if key in seen_sessions:
++                continue
++            seen_sessions[key] = {**r, "_lineage_root": resolved_sid, "_match": match,
++                                  **({"_meta_sid": raw_sid, "_subagent": True} if is_subagent else {})}
++
++    _collect(raw_results, "all_terms")
++    or_query = None
++    if len(seen_sessions) < limit:
++        or_query = _or_relaxed_query(db, query)
++    if or_query:
++        # FTS5 ANDs every word, so a long query fails when its words are spread over several
++        # messages. Fill the remaining slots with sessions matching ANY word, best BM25 first;
++        # sessions that matched every word keep their place at the front.
++        or_rows, or_err = _scan(or_query, or_relax=False)
++        if not or_err:
++            _collect(or_rows, "any_terms")
++    live_skipped = len(live_skipped_ids)
++    if not raw_results and not seen_sessions and not title_result:
++        return _discover_payload(db, query, detail, [], **_skipped_note(live_skipped), message=(
++            "No matching sessions found. FTS5 ANDs all terms by default — "
++            "broaden with OR (`alpha OR beta`), exact-match with quoted "
++            "phrases, exclude with NOT, or prefix-match with `deploy*`."
++            + (f" {_live_skipped_text(live_skipped)}" if live_skipped else "")))
++    for match_info in seen_sessions.values():
+         if match_info.get("_title_only"):
+             continue
+         # Adaptive: only the top-ranked result is fully hydrated.
+-        entry = _hydrate_hit(db, lineage_root, match_info, "full" if detail == "full" or not results else "compact")
++        entry = _hydrate_hit(db, match_info["_lineage_root"], match_info, "full" if detail == "full" or not results else "compact")
+         if entry is not None:
++            entry["match"] = match_info["_match"]
++            if match_info.get("_subagent"):
++                entry["subagent"] = True
+             results.append(entry)
+     for entry in results:
+         entry["link"] = _session_link(entry["session_id"], link_profile)
+-    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=(
++    extra: dict[str, Any] = _skipped_note(live_skipped)
++    modes = {e["match"] for e in results if e.get("match")}
++    if "any_terms" in modes:
++        extra["match_mode"] = "any_terms" if modes == {"any_terms"} else "all_terms_then_any_terms"
++        extra["match_note"] = (
++            "Fewer than the requested sessions contained every word of the query, so sessions matching "
++            "ANY of its words were added after the all-words matches (best match first). Results with "
++            "match=any_terms do not contain every word; shorten the query to a few distinctive words "
++            "for exact matches.")
++    else:
++        extra["match_mode"] = "all_terms"
++    if not results and live_skipped:
++        extra["message"] = _live_skipped_text(live_skipped)
++    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), **extra, link_hint=(
+         "When referring the user to a session, write its `link` value "
+         "verbatim inline mid-sentence (it renders as a titled link) — never "
+         "as markdown, in backticks, on its own line, or next to the "
+@@ -431,6 +511,24 @@ def _discover(db, query: str, role_filter: Optional[list[str]], limit: int, sort
+         "session_search(session_id=..., around_message_id=match_message_id)."))
+ 
+ 
++def _or_relaxed_query(db, query: str) -> Optional[str]:
++    """The query as an any-word OR query via the store's own helper; None when it cannot relax
++    (one word, explicit OR/NOT) or the store has no such helper."""
++    relax = getattr(db, "_or_relaxed_query", None)
++    if re.search(r"\b(?:AND|OR|NOT)\b", query):
++        return None
++    return _quiet(lambda: relax(query), None, "OR relaxation failed") if callable(relax) else None
++
++
++def _live_skipped_text(count: int) -> str:
++    return (f"{count} matching message{'s were' if count != 1 else ' was'} in this chat's live context "
++            "(the current conversation or a still-running subagent) and not shown.")
++
++
++def _skipped_note(count: int) -> dict[str, Any]:
++    return {"skipped_live_context": count} if count else {}
++
++
+ def _resolve_profile_db(profile: str):
+     """Another profile's ``state.db`` opened read-only (safe on a live DB); None = current."""
+     if profile is None or not str(profile).strip():

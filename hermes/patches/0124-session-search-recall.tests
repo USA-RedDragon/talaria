@@ -1,0 +1,6 @@
+# Upstream tests of session_search and the store's search the patch changes
+tests/tools/test_session_search.py
+tests/tools/test_session_search_readonly.py
+tests/tools/test_session_search_worker_store.py
+tests/hermes_state/test_search_or_relaxed_fallback.py
+tests/hermes_cli/test_session_search_context_batch.py
