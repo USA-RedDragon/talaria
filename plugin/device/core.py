@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -730,6 +731,8 @@ class Hub:
         self._parents: dict[str, str] = {}
         self._orphans: dict[str, str] = {}
         self._cwds: dict[str, str] = {}
+        # session -> (generation, cwd of its parent when it was spawned)
+        self._cwd_seeds: dict[str, tuple[str, str]] = {}
         self._state_error = ""
         self._bindings: dict[str, Binding] = {}
         self._ever_bound: set[str] = set()
@@ -1427,21 +1430,52 @@ class Hub:
         logger.info("device: session %s unbound", session_id)
         return True
 
-    def device_cwd(self, binding: Binding) -> str:
+    def device_cwd(self, binding: Binding, session_id: str = "") -> str:
+        """The working directory of ``session_id`` (default: the binding's own session). Every
+        session has its own: a subagent starts in the directory its parent was in when the
+        subagent was spawned, and neither moves the other afterwards."""
+        sid = session_id or binding.session_id
         with self._lock:
-            return self._cwds.get(f"{binding.session_id}:{binding.generation}", binding.dir)
+            found = self._cwds.get(f"{sid}:{binding.generation}")
+            if found is not None:
+                return found
+            seed = self._cwd_seeds.get(sid)
+            if seed is not None and seed[0] == binding.generation:
+                return seed[1]
+            return binding.dir
 
-    def set_device_cwd(self, binding: Binding, cwd: str) -> None:
+    def set_device_cwd(self, binding: Binding, cwd: str, session_id: str = "") -> None:
         if cwd and posixpath.isabs(cwd):
             with self._lock:
-                self._cwds[f"{binding.session_id}:{binding.generation}"] = cwd
+                self._cwds[f"{session_id or binding.session_id}:{binding.generation}"] = cwd
 
     # lineage (section 8.3)
     def note_parent(self, session_id: str, parent_id: Optional[str]) -> None:
         """Record a parent link learned in process (a delegate child before its row exists)."""
         if session_id and parent_id and session_id != parent_id:
             with self._lock:
+                fresh = session_id not in self._parents
                 self._parents.setdefault(session_id, parent_id)
+            if fresh:
+                self._seed_cwd(session_id, parent_id)
+
+    def _seed_cwd(self, session_id: str, parent_id: str) -> None:
+        """A new child session starts in the directory its parent is in now (Hermes seeds a
+        subagent's cwd the same way); it never shares the parent's cwd after that."""
+        try:
+            res = self.resolve(parent_id)
+        except Exception:
+            return
+        b = res.binding if res.state == STATE_BOUND else None
+        if b is None:
+            return
+        with self._lock:
+            cwd = self._cwds.get(f"{parent_id}:{b.generation}")
+            if cwd is None:
+                seed = self._cwd_seeds.get(parent_id)
+                cwd = seed[1] if seed is not None and seed[0] == b.generation else None
+            if cwd and session_id not in self._cwd_seeds:
+                self._cwd_seeds[session_id] = (b.generation, cwd)
 
     def note_orphan(self, session_id: str, reason: str) -> None:
         """Mark a side agent whose starting session could not be found: it fails closed."""
@@ -1946,7 +1980,7 @@ def device_abs_path(res: Resolution, path: str, *, cwd: Optional[str] = None) ->
     elif path.startswith("~"):
         raise DeviceError(f"{path}: ~user paths are not supported on devices")
     if not posixpath.isabs(path):
-        path = posixpath.join(cwd or hub().device_cwd(res.binding), path)
+        path = posixpath.join(cwd or hub().device_cwd(res.binding, res.session_id), path)
     return posixpath.normpath(path)
 
 
@@ -2773,12 +2807,18 @@ def runs_powershell(device_id: str) -> bool:
 class DeviceShell(BaseEnvironment):
     """Runs commands for one binding on its device, with Hermes's snapshot and cwd tracking."""
 
-    def __init__(self, binding: Binding, conn: DeviceConn, timeout: int, pod_cwd: str = ""):
+    def __init__(self, binding: Binding, conn: DeviceConn, timeout: int, pod_cwd: str = "",
+                 session_id: str = ""):
         self._binding = binding
+        # The agent session this shell belongs to: its snapshot file (env, shell options) and its
+        # cwd are its own. binding.session_id is only the session the binding lives on, which
+        # every subagent below it shares.
+        self._owner = session_id or binding.session_id
+        self.last_used = time.monotonic()
         self._device_tmp = conn.tmp_dir if posixpath.isabs(conn.tmp_dir or "") else "/tmp"  # no-tmp: ok — device-side
         self._conn_id = conn.conn_id
         self._pod_cwd = pod_cwd
-        super().__init__(cwd=hub().device_cwd(binding), timeout=timeout)
+        super().__init__(cwd=hub().device_cwd(binding, self._owner), timeout=timeout)
         self.init_session()
 
     @property
@@ -2827,7 +2867,8 @@ class DeviceShell(BaseEnvironment):
             self.cwd = self._binding.dir
             result = self._refusal_result(result, proc, effective)
         self.cwd = self._safe_cwd()
-        hub().set_device_cwd(self._binding, self.cwd)
+        hub().set_device_cwd(self._binding, self.cwd, self._owner)
+        self.last_used = time.monotonic()
         return result
 
     def _refusal_result(self, result: dict, proc: Any, cwd: str) -> dict:
@@ -2844,6 +2885,7 @@ class DeviceShell(BaseEnvironment):
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: Optional[str] = None, note: str = ""):
+        self.last_used = time.monotonic()
         state = _EXEC_STATE.get()
         cwd = state["cwd"] if state else self._safe_cwd()
         proc = hub().start(self._binding.device_id, cmd=cmd_string, cwd=cwd, login=login,
@@ -2873,6 +2915,36 @@ def _default_local_factory(cwd: str, timeout: int):
     return LocalEnvironment(cwd=cwd, timeout=timeout, persistent=persistent)
 
 
+# A shell of a session that is not the binding's own (a subagent, a cron run) is dropped when it
+# has not run a command for this long; subagent_stop drops it sooner.
+IDLE_SHELL_SECONDS = 6 * 3600.0
+_ROUTERS: "weakref.WeakSet[DeviceRouterEnvironment]" = weakref.WeakSet()
+_ROUTERS_LOCK = threading.Lock()
+
+
+def forget_session_shells(session_id: str) -> None:
+    with _ROUTERS_LOCK:
+        routers = list(_ROUTERS)
+    for router in routers:
+        try:
+            router.forget_session(session_id)
+        except Exception:
+            logger.debug("device: could not drop the shell of session %s", session_id, exc_info=True)
+
+
+def subagent_stop(child_session_id: Optional[str] = None, **_kwargs) -> None:
+    """Hook: a subagent finished, so its shell and snapshot files go. Its cwd is kept, so that a
+    subagent that is woken again continues where it was (its exported variables are not)."""
+    if child_session_id:
+        forget_session_shells(str(child_session_id))
+
+
+def session_finalize(session_id: Optional[str] = None, **_kwargs) -> None:
+    """Hook: a session was reset or expired, so its shell and snapshot files go."""
+    if session_id:
+        forget_session_shells(str(session_id))
+
+
 class DeviceRouterEnvironment(BaseEnvironment):
     """The ``device`` terminal backend (section 8.4). Each command goes to the child that the
     session's binding resolution picks: a device shell for a bound session, a lazily created
@@ -2888,8 +2960,12 @@ class DeviceRouterEnvironment(BaseEnvironment):
         self._pod_cwd = cwd
         self._local = None
         self._local_lock = threading.Lock()
+        # (agent session, binding generation) -> shell. One per agent session, never per binding:
+        # a chat and its subagents share a binding but not a shell.
         self._shells: dict[tuple[str, str], DeviceShell] = {}
         self._shells_lock = threading.Lock()
+        with _ROUTERS_LOCK:
+            _ROUTERS.add(self)
         self._local_factory = local_factory or _default_local_factory
         self.task_id = task_id
         super().__init__(cwd=cwd, timeout=timeout)
@@ -2914,17 +2990,31 @@ class DeviceRouterEnvironment(BaseEnvironment):
                                   f"server.]", "returncode": EXIT_LOST}
             return {"output": f"[device {b.device_id} is not connected; session {res.session_id} is bound to it "
                               f"({b.dir}), so the command did not run]", "returncode": EXIT_LOST}
-        key = (b.session_id, b.generation)
+        key = (res.session_id, b.generation)
+        stale: list[DeviceShell] = []
         with self._shells_lock:
             shell = self._shells.get(key)
             if shell is None:
-                for k in [k for k in self._shells if k[0] == b.session_id]:
-                    self._shells.pop(k).cleanup()
-                shell = DeviceShell(b, conn, self.timeout, pod_cwd=self._pod_cwd)
+                for k in [k for k in self._shells if k[0] == res.session_id]:
+                    stale.append(self._shells.pop(k))
+                shell = DeviceShell(b, conn, self.timeout, pod_cwd=self._pod_cwd, session_id=res.session_id)
                 self._shells[key] = shell
             else:
                 shell.refresh(conn)
+            now = time.monotonic()
+            for k in [k for k, v in self._shells.items()
+                      if k[0] not in (res.session_id, b.session_id) and now - v.last_used > IDLE_SHELL_SECONDS]:
+                stale.append(self._shells.pop(k))
+        for old in stale:
+            old.cleanup()
         return shell
+
+    def forget_session(self, session_id: str) -> None:
+        """A session has finished: drop its shell and remove its snapshot files from the device."""
+        with self._shells_lock:
+            gone = [self._shells.pop(k) for k in [k for k in self._shells if k[0] == session_id]]
+        for shell in gone:
+            shell.cleanup()
 
     @property
     def cwd(self) -> str:
@@ -2932,7 +3022,7 @@ class DeviceRouterEnvironment(BaseEnvironment):
             return getattr(self, "_pod_cwd", "")
         res = self._resolve()
         if res.state == STATE_BOUND:
-            return hub().device_cwd(res.binding)
+            return hub().device_cwd(res.binding, res.session_id)
         if runs_on_pod(res) and self._local is not None:
             return self._local.cwd
         return self._pod_cwd
@@ -2945,7 +3035,7 @@ class DeviceRouterEnvironment(BaseEnvironment):
         res = self._resolve()
         if res.state == STATE_BOUND:
             if isinstance(value, str) and posixpath.isabs(value) and not is_pod_path(value, [self._pod_cwd]):
-                hub().set_device_cwd(res.binding, posixpath.normpath(value))
+                hub().set_device_cwd(res.binding, posixpath.normpath(value), res.session_id)
         elif runs_on_pod(res) and self._local is not None:
             self._local.cwd = value
         else:
@@ -3130,7 +3220,7 @@ _GIT = r"""
 
 def _expand_device_git(res: Resolution, raw: str, args: list[str], label: str) -> tuple[Optional[str], Optional[str]]:
     from hermes_cli._subprocess_compat import harden_git_argv
-    cwd = hub().device_cwd(res.binding)
+    cwd = hub().device_cwd(res.binding, res.session_id)
     code, body, err = run_script(res.binding.device_id, _GIT, harden_git_argv(args), cwd=cwd, timeout=30)
     if code != 0 and "__RC__" not in body:
         return f"{raw}: {err or 'git command failed on the device'}", None
@@ -3538,7 +3628,7 @@ def _guard(tool_name: str, args: dict, task_id: str) -> Optional[dict]:
         return _block(f"talaria: session {res.session_id} {where(res)}, but its terminal "
                       f"backend is {env_type!r}, not {PLUGIN_ID!r}, so tools would run on the server. Start a new "
                       f"session with terminal.backend: {PLUGIN_ID}.")
-    cwd = hub().device_cwd(b)
+    cwd = hub().device_cwd(b, res.session_id)
     _record_cwd(task_id, cwd)
     if tool_name not in FILE_PATH_TOOLS:
         return None

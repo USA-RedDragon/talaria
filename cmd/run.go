@@ -135,16 +135,40 @@ func runToken(cfg *config.Config) (token, deviceID, stateDir string, err error) 
 	return rec.Token, rec.DeviceID, dir, nil
 }
 
-// deviceTempDir is device.tmp-dir, or the system temp directory, created.
-func deviceTempDir(cfg *config.Config) (string, error) {
+// deviceTempDir is device.tmp-dir. Without it, it is the tmp folder of the state directory (mode
+// 0700, so the shell snapshot files in it, which hold the sessions' exported variables, are
+// private), or the system temp directory when the daemon has no state directory. It is created.
+// In the default folder the snapshot files that an earlier daemon left behind are removed: the
+// hub takes new ones when a device reconnects.
+func deviceTempDir(cfg *config.Config, stateDir string) (string, error) {
 	dir := cfg.Device.TempDir
+	own := false
+	if dir == "" && stateDir != "" {
+		dir, own = filepath.Join(stateDir, "tmp"), true
+	}
 	if dir == "" {
 		dir = os.TempDir()
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create device.tmp-dir %s: %w", dir, err)
 	}
+	if own {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return "", fmt.Errorf("device.tmp-dir %s: %w", dir, err)
+		}
+		sweepSnapshots(dir)
+	}
 	return dir, nil
+}
+
+// sweepSnapshots removes the shell snapshot and cwd files of Hermes sessions from dir.
+func sweepSnapshots(dir string) {
+	for _, pat := range []string{"hermes-snap-*.sh", "hermes-cwd-*.txt"} {
+		old, _ := filepath.Glob(filepath.Join(dir, pat))
+		for _, f := range old {
+			_ = os.Remove(f)
+		}
+	}
 }
 
 // spliceServer is what the daemon needs of *splice.Server.
@@ -179,7 +203,7 @@ func runDaemon(ctx context.Context, cfg *config.Config, version, userAgent strin
 	if err != nil {
 		return err
 	}
-	tempDir, err := deviceTempDir(cfg)
+	tempDir, err := deviceTempDir(cfg, stateDir)
 	if err != nil {
 		return err
 	}

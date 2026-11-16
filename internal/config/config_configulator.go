@@ -904,7 +904,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.String(names[6], "", "File (mode 0600) for the device token when the keyring is off or unavailable. Defaults to token in the state directory")
 	fs.String(names[7], "", "Directory for the token file and the daemon's state file. Defaults to talaria in the user config directory")
 	fs.StringSlice(names[8], nil, "Absolute directories commands may run in. A command whose working directory is outside all of them is refused. Defaults to the home directory")
-	fs.String(names[9], "", "Directory the agent uses on this device for its shell snapshot files. Defaults to the system temp directory")
+	fs.String(names[9], "", "Directory the agent uses on this device for its shell snapshot files. Defaults to the tmp folder of the state directory")
 	fs.String(names[10], "bash", "Shell used to run commands. On Windows: git-bash (Git for Windows' bash), powershell (pwsh when installed, else Windows PowerShell; needs Git Bash too, for the file tools) or wsl (bash in a WSL distribution); bash there picks Git Bash, else WSL")
 	fs.String(names[11], "", "WSL distribution for device.shell wsl on Windows. Defaults to WSL's default distribution")
 	fs.Var(impl.NewInt(1048576), names[12], "Most output bytes per command that run keeps for a resume of the exec leg until the plugin confirms them. Older output of a command is dropped, and the plugin shows the gap")

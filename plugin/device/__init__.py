@@ -176,6 +176,10 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", core.pre_tool_call)
     if "pre_llm_call" in core.valid_hooks():
         ctx.register_hook("pre_llm_call", core.pre_llm_call)
+    if "subagent_stop" in core.valid_hooks():
+        ctx.register_hook("subagent_stop", core.subagent_stop)
+    if "on_session_finalize" in core.valid_hooks():
+        ctx.register_hook("on_session_finalize", core.session_finalize)
     if "filter_session_list" in core.valid_hooks():
         ctx.register_hook("filter_session_list", core.filter_session_list)
     ctx.register_command("device", device_command, description="Bind this session to a device directory",
