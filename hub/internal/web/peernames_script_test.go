@@ -49,8 +49,10 @@ func TestPeerNamesInAgentCards(t *testing.T) {
  {"role":"tool","tool_call_id":"l4","name":"ledger","text":"{\"ok\": true}"},
  {"role":"assistant","text":"Once more.","timestamp":1763000000,"tool_calls":[{"id":"l5","function":{"name":"ledger","arguments":"{\"action\":\"close\",\"id\":\"L9\"}"}}]},
  {"role":"tool","tool_call_id":"l5","name":"ledger","text":"{\"error\": \"no such entry L9\"}"},
- {"role":"user","text":"[Agent message am_00000000000000cc from chat sa-0-edd20c0e]\n\nHalf done: the APK builds.","timestamp":1763000001},
- {"role":"user","text":"[Agent message am_00000000000000cd from parent]\n\nStop and report.","timestamp":1763000002}]`
+ {"role":"user","text":"[Agent message am_00000000000000cc from subagent sa-0-edd20c0e (goal: relift lane android-apk: rebuild the APK and sign it with the...) of chat 'Names' (session s9)]\n\nHalf done: the APK builds.","timestamp":1763000001},
+ {"role":"user","text":"[Agent message am_00000000000000ce from chat sa-0-edd20c0e]\n\nOld style label.","timestamp":1763000002},
+ {"role":"user","text":"[Agent message am_00000000000000cf from subagent sa-0-ffff0000 (goal: measure the antenna) of chat 'Other chat' (session 20261112_103549_47fb42)]\n\nA subagent of another chat.","timestamp":1763000003},
+ {"role":"user","text":"[Agent message am_00000000000000cd from parent]\n\nStop and report.","timestamp":1763000004}]`
 	var msgs []map[string]any
 	if err := json.Unmarshal([]byte(sessionJSON), &msgs); err != nil {
 		t.Fatal(err)

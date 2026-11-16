@@ -26,22 +26,27 @@ const openChat = (c, name) => c.ev(`[...document.querySelectorAll("#sessions *")
 
 async function titles(c, tag) {
   const { ev } = c;
-  await until(ev, `${sends}.length === 4 && ${notes}.length === 2`, tag + ": four sends and two messages");
+  await until(ev, `${sends}.length === 4 && ${notes}.length === 4`, tag + ": four sends and four messages");
   // The names come with the Activity list; wait for the goal to show.
   await until(ev, `${sends}[0].querySelector(".notice-title").textContent.includes("relift lane")`, tag + ": the goal names the subagent");
   const got = await ev(`${sends}.map((x) => x.querySelector(".notice-title").textContent)`);
   assert.deepStrictEqual(got, [
     'Sent a message to the subagent "' + GOAL + '"',
-    "Sent a message to a subagent (sa-0-ffff0000)",
+    "Sent a message to a subagent",
     "Sent a message to the parent",
     'Sent a message to the chat "Other chat"',
   ], tag + ": send titles " + JSON.stringify(got));
-  assert.ok(!got.some((t) => /subagent subagent/.test(t)), tag + ": no doubled word");
+  assert.ok(!got.some((t) => /subagent subagent|sa-\d/.test(t)), tag + ": no doubled word or id");
   const heads = await ev(`${sends}.map((x) => x.querySelector(".notice-head").getBoundingClientRect().height)`);
   assert.ok(heads.every((h) => h < 110), tag + ": short title " + JSON.stringify(heads));
   await until(ev, `${notes}[0].querySelector(".notice-title").textContent.includes("relift lane")`, tag + ": the message card names the subagent");
   const from = await ev(`${notes}.map((x) => x.querySelector(".notice-title").textContent)`);
-  assert.deepStrictEqual(from, ['Message from the subagent "' + GOAL + '"', "Message from the parent"], tag + ": message titles " + JSON.stringify(from));
+  assert.deepStrictEqual(from, [
+    'Message from the subagent "' + GOAL + '"',
+    'Message from the subagent "' + GOAL + '"',
+    'Message from the subagent "measure the antenna"',
+    "Message from the parent",
+  ], tag + ": message titles " + JSON.stringify(from));
 }
 
 // ledger: calls that worked have no card and are not in a fold line; the one
@@ -79,7 +84,8 @@ async function run(c, w, h, touch, dark) {
   await ev(`${notes}[0].scrollIntoView({ block: "center" })`);
   await ev(`${notes}[0].querySelector(".notice-head").click()`);
   await until(ev, `!${notes}[0].querySelector(".notice-body-wrap").hidden`, tag + ": message opened");
-  assert.ok((await ev(`${notes}[0].querySelector(".notice-body-wrap").innerText`)).includes("sa-0-edd20c0e"), tag + ": the sender's id is in the details");
+  const sender = await ev(`${notes}[0].querySelector(".notice-body-wrap").innerText`);
+  assert.ok(sender.includes("sa-0-edd20c0e") && sender.includes("(goal: relift lane") && sender.includes("of chat 'Names'"), tag + ": the raw sender label is in the details: " + sender);
   await shot(c, tag + "-message");
   assert.ok(await ev(`document.documentElement.scrollWidth <= window.innerWidth + 1`), tag + ": the page does not scroll sideways");
 

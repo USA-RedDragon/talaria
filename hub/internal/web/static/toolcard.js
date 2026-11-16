@@ -329,7 +329,7 @@ window.HubToolCard = (() => {
     out.title = verb(c, "Sent a message to ", "Sending a message to ") + peer.label;
     out.status = str(res.delivery) ? upperFirst(squash(res.delivery)) : "Sent";
     if (a.text) out.blocks.push({ label: "Message", text: str(a.text), pre: true });
-    if (peer.id) out.blocks.push({ label: peer.kind === "sub" ? "Subagent" : "Chat", text: peer.id, pre: true });
+    if (peer.id) out.blocks.push({ label: { sub: "Subagent", cron: "Scheduled job" }[peer.kind] || "Chat", text: peer.id, pre: true });
     if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
     return out;
   }

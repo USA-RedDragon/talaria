@@ -521,7 +521,13 @@ window.HubNotice = (() => {
       body.append(list);
     }
     body.append(details(ctx, n));
-    if (peer && peer.id) body.append(section(ctx, peer.kind === "sub" ? "Subagent" : "Chat", peer.id, { pre: true, long: false }));
+    if (peer) {
+      // The details keep what Hermes called the sender, and the raw id.
+      const rawFrom = n0.title.slice(fromHead.length);
+      const kindName = { sub: "Subagent", cron: "Scheduled job" }[peer.kind] || "Chat";
+      if (peer.id && peer.id !== rawFrom) body.append(section(ctx, kindName, peer.id, { pre: true, long: false }));
+      if (rawFrom) body.append(section(ctx, "Sender", rawFrom, { pre: true, long: false }));
+    }
     const copy = window.HubIcons.button("copy", "Copy the whole notice", "ghost ib notice-copy");
     copy.onclick = async () => {
       try {
