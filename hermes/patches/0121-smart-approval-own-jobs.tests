@@ -1,0 +1,8 @@
+# Upstream and earlier-patch tests of the review, the card and the child-process handoff the patch changes
+tests/tools/test_smart_provenance.py
+tests/tools/test_smart_approval_card_parts.py
+tests/tools/test_approval_provenance.py
+tests/tools/test_delegation_keep_child_processes.py
+tests/tools/test_subagent_process_handoff.py
+tests/tools/test_process_handoff.py
+tests/tools/test_delegate_control_actions.py
