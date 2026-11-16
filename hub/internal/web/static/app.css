@@ -183,6 +183,7 @@ button.primary.ib:hover { filter: brightness(1.08); }
 .notice-head:hover { background: var(--hover); }
 .notice-head > .ico { width: 1.1rem; height: 1.1rem; color: var(--accent); }
 .notice[data-state="bad"] > .notice-head > .ico:first-child, .notice-row[data-state="bad"] > .notice-head > .ico:first-child { color: var(--bad); }
+.tool[data-tool="project_memory"][data-state="bad"] > .notice-head .notice-meta { color: var(--bad); }
 .notice-head > .notice-chev { width: .85rem; height: .85rem; color: var(--muted); transform: rotate(-90deg); transition: transform .12s; }
 .notice-head[aria-expanded="true"] > .notice-chev { transform: none; }
 .notice-title { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

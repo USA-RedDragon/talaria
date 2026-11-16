@@ -87,3 +87,13 @@ def test_a_remove_reports_how_many(mem, slug):
 def test_a_remove_of_a_topic_that_is_missing_fails(mem, slug):
     out = write(mem, {"action": "topic_remove", "topic": "ghost"})
     assert out["success"] is False
+
+
+def test_every_result_carries_the_project_name(mem, slug):
+    out = write(mem, {"action": "add", "content": "A fact"})
+    assert out["project_name"] == "demo"
+    assert out["project"] == "github.com/alice/demo"
+    import json
+    assert json.loads(mem.handle({"action": "read"}, session_id="s1"))["project_name"] == "demo"
+    bad = write(mem, {"action": "remove", "old_text": "nope"})
+    assert bad["project_name"] == "demo"

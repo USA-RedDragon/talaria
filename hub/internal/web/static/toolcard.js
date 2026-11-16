@@ -565,13 +565,27 @@ window.HubToolCard = (() => {
 
   const noteWord = (n) => (n === 1 ? "a project note" : n + " project notes");
 
+  // projectName is the project in plain words: the name the plugin sends,
+  // else the repo or folder name read out of its key. The raw key (root:<sha>,
+  // folder:<device>:<path>, host/owner/repo) never reaches a title.
+  function projectName(res, c) {
+    const fromKey = (k) => {
+      k = str(k);
+      if (/^root:[0-9a-f]{8,}$/i.test(k)) return "";
+      const m = k.match(/^folder:[^:]*:(.*)$/);
+      if (m) return base(m[1]);
+      return /\/|:/.test(k) ? base(k) : k;
+    };
+    return short(str(res.project_name) || fromKey(res.project) || str(res.name) || base(str(res.folder) || str(res.path) || str(res.project_path) || str(res.root)) || fromKey(c.project));
+  }
+
   function projectMemory(c) {
     const a = isObj(c.args) ? c.args : {};
     const res = isObj(c.res) ? c.res : {};
     let ops = Array.isArray(a.operations) ? a.operations.filter(isObj) : [];
     if (!ops.length && ["add", "patch", "replace", "remove"].includes(str(a.action))) ops = [a];
     const out = { icon: "database", blocks: [] };
-    const name = short(str(res.project) || str(res.project_name) || str(res.name) || base(str(res.folder) || str(res.path) || str(res.project_path) || str(res.root)) || str(c.project));
+    const name = projectName(res, c);
     const count = (...k) => ops.filter((o) => k.includes(str(o.action))).length;
     const added = count("add");
     const edited = count("replace", "patch");
@@ -587,6 +601,7 @@ window.HubToolCard = (() => {
       else if (added) head = verb(c, "Added ", "Adding ") + noteWord(added) + (name ? " to " + name : "");
       else if (edited) head = verb(c, "Edited ", "Editing ") + noteWord(edited) + (name ? " in " + name : "");
       else head = verb(c, "Removed ", "Removing ") + noteWord(removed) + (name ? " from " + name : "");
+      if (c.done && c.failed) head = head.replace(/^Added /, "Could not add ").replace(/^Edited /, "Could not edit ").replace(/^Removed /, "Could not remove ").replace(/^Changed /, "Could not change ").replace(/ (to|from|in) /, (m, w) => " " + w + " ");
       out.title = head;
       out.status = "Saved";
       out.blocks.push(...noteBlocks(ops));

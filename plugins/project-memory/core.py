@@ -1436,9 +1436,10 @@ def handle(args: Any, **kwargs) -> str:
     ensure_layout(slug)
     meta = read_meta(slug) or {}
     project = meta.get("identity", slug)
+    name = str(meta.get("name") or "")
     st = session_store(session_id, slug)
     if action != "write":
-        return json.dumps(_read(slug, meta, st, {**args, "action": action}), ensure_ascii=False)
+        return json.dumps({**_read(slug, meta, st, {**args, "action": action}), "project_name": name}, ensure_ascii=False)
     try:
         from tools.memory_tool_store import FAILURE_CLASS
         token = FAILURE_CLASS.set("other")
@@ -1447,7 +1448,7 @@ def handle(args: Any, **kwargs) -> str:
     try:
         held = _gate(st, slug, project, operations)
         if held is not None:
-            return json.dumps(held, ensure_ascii=False)
+            return json.dumps({**held, "project_name": name}, ensure_ascii=False)
         result = write_ops(slug, st, operations)
     except L.Bad as exc:
         result = {"success": False, "error": str(exc)}
@@ -1457,6 +1458,7 @@ def handle(args: Any, **kwargs) -> str:
     result = dict(result)
     result.pop("target", None)
     result["project"] = project
+    result["project_name"] = name
     return json.dumps(result, ensure_ascii=False)
 
 
