@@ -1197,7 +1197,13 @@
       const m = el("div", "msg user" + (pending ? " pending" : ""));
       if (from.page) m.append(el("div", "frompage", "From page: " + from.page));
       if (shown.atts.length) m.append(attachmentRow(shown.atts, this.base));
-      if (shown.text) window.HubLinkify.append(m, shown.text);
+      if (shown.text) {
+        // The user's own words render as Markdown, as a reply does.
+        const body = el("div", "utext");
+        if (window.hubMarkdown && window.hubMarkdown.renderUser) window.hubMarkdown.renderUser(body, shown.text);
+        else window.HubLinkify.append(body, shown.text);
+        m.append(body);
+      }
       m.rawText = shown.text || "";
       if (atts) for (const a of atts) if (a.url) this.urls.push(a.url);
       this.add(m);

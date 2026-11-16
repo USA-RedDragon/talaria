@@ -498,6 +498,23 @@ button.danger-text { color: var(--bad); }
 .md a { color: var(--accent); overflow-wrap: anywhere; }
 a.autolink { color: var(--accent); overflow-wrap: anywhere; }
 .msg.user a.autolink { color: #fff; text-decoration: underline; }
+/* The user's own Markdown, on the blue bubble. */
+.msg.user .utext { white-space: normal; }
+.msg.user .utext > :first-child { margin-top: 0; }
+.msg.user .utext > :last-child { margin-bottom: 0; }
+.msg.user .utext p, .msg.user .utext ul, .msg.user .utext ol, .msg.user .utext blockquote, .msg.user .utext .codeblock, .msg.user .utext .table-wrap { margin: .35rem 0; }
+.msg.user .utext h1, .msg.user .utext h2, .msg.user .utext h3, .msg.user .utext h4, .msg.user .utext h5, .msg.user .utext h6 { font-size: 1em; font-weight: 700; margin: .35rem 0; line-height: inherit; }
+.msg.user .utext a { color: #fff; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.msg.user .utext blockquote { border-left: 3px solid rgba(255, 255, 255, .7); color: inherit; background: rgba(255, 255, 255, .12); border-radius: 0 6px 6px 0; }
+.msg.user .utext hr { border-top-color: rgba(255, 255, 255, .55); }
+.msg.user .utext code { background: rgba(0, 0, 0, .28); color: #fff; padding: .05em .3em; border-radius: 4px; }
+.msg.user .utext .codeblock { background: rgba(0, 0, 0, .32); border-color: rgba(255, 255, 255, .3); color: #fff; }
+.msg.user .utext .codehead { color: rgba(255, 255, 255, .85); border-bottom-color: rgba(255, 255, 255, .25); }
+.msg.user .utext .codeblock code, .msg.user .utext .codeblock code * { background: none; padding: 0; color: #fff; }
+.msg.user .utext .codeblock pre { color: #fff; }
+.msg.user .utext .codehead .copy { color: #fff; border-color: rgba(255, 255, 255, .5); background: transparent; }
+.msg.user .utext th, .msg.user .utext td { border-color: rgba(255, 255, 255, .45); }
+.msg.user .utext th { background: rgba(0, 0, 0, .2); }
 .md hr { border: 0; border-top: 1px solid var(--line); margin: .8rem 0; }
 .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em; }
 .table-wrap { overflow-x: auto; }

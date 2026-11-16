@@ -40,6 +40,21 @@ window.hubMarkdown = (() => {
   const PUNCT = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/;
   const WORD = /[\p{L}\p{N}]/u;
 
+  // userMode is set while a message the user typed renders. People type
+  // *, _ and ~ in paths, globs and names, so an emphasis run there needs the
+  // flanking a person writes on purpose: it opens after a space or an opening
+  // mark and before a word, and closes before a space or a closing mark.
+  // "a * b * c", "*.go", "snake_case", "/x/_y_/z" and "__init__.py" stay as typed.
+  let userMode = false;
+  const userOpen = (s, i, len) =>
+    (i === 0 || /[\s(\[{"'*_~]/.test(s[i - 1])) && /[\p{L}\p{N}*_~`\[("'<]/u.test(s[i + len] || "");
+  const userClose = (s, k) => {
+    const n = s[k] || "";
+    if (!n || /\s/.test(n)) return true;
+    if (n === ".") return !s[k + 1] || /\s/.test(s[k + 1]);
+    return /[,;:!?)\]}"'*_~]/.test(n);
+  };
+
   // closing finds the end delimiter of an emphasis run that starts at i.
   function closing(s, i, delim) {
     let j = i + delim.length;
@@ -50,6 +65,7 @@ window.hubMarkdown = (() => {
       if (s[j - 1] === "\\" || /\s/.test(s[j - 1])) continue;
       if (delim.length === 1 && s[j + 1] === delim) { j++; continue; }
       if (delim[0] === "_" && WORD.test(s[j + delim.length] || "")) continue;
+      if (userMode && !userClose(s, j + delim.length)) continue;
       return j;
     }
   }
@@ -105,7 +121,7 @@ window.hubMarkdown = (() => {
     const flush = () => { if (buf) { parent.append(document.createTextNode(buf)); buf = ""; } };
     for (let i = 0; i < s.length; i++) {
       const c = s[i];
-      if (c === "\\" && i + 1 < s.length && PUNCT.test(s[i + 1])) { buf += s[++i]; continue; }
+      if (c === "\\" && i + 1 < s.length && PUNCT.test(s[i + 1]) && !(userMode && WORD.test(s[i - 1] || ""))) { buf += s[++i]; continue; }
       if (c === "\n") { flush(); parent.append(el("br")); continue; }
       if (c === "`") {
         let n = 1;
@@ -170,11 +186,25 @@ window.hubMarkdown = (() => {
           continue;
         }
       }
+      if (userMode && (c === "w" || c === "W") && !inLink && !WORD.test(s[i - 1] || "") && !"/@.".includes(s[i - 1] || " ")) {
+        const m = /^www\.[^\s<>]+/i.exec(s.slice(i));
+        if (m) {
+          const u = bareURL("https://" + m[0], 0).slice(8);
+          const href = u.includes(".") ? safeURL("https://" + u) : null;
+          if (href) {
+            flush();
+            parent.append(link(href, u));
+            i += u.length - 1;
+            continue;
+          }
+        }
+      }
       let matched = false;
       for (const [delim, tag] of EMPHASIS) {
         if (!s.startsWith(delim, i)) continue;
         if (delim[0] === "_" && WORD.test(s[i - 1] || "")) break;
         if (dead[delim] !== undefined && i >= dead[delim]) continue;
+        if (userMode && !userOpen(s, i, delim.length)) continue;
         const j = closing(s, i, delim);
         if (j < 0) { dead[delim] = i; continue; }
         flush();
@@ -447,7 +477,7 @@ window.hubMarkdown = (() => {
         while (i < lines.length && lines[i].trim()) {
           const q = QUOTE.exec(lines[i]);
           if (q) body.push(q[1]);
-          else if (startsBlock(lines, i)) break;
+          else if (userMode || startsBlock(lines, i)) break; // a typed quote ends at its last ">" line
           else body.push(lines[i]);
           i++;
         }
@@ -461,7 +491,7 @@ window.hubMarkdown = (() => {
       if (ITEM.test(l) && depth < MAX_DEPTH) { i = list(lines, i, parent, depth); continue; }
       const para = [];
       while (i < lines.length && lines[i].trim() && (para.length === 0 || !startsBlock(lines, i))) {
-        para.push(lines[i].trim());
+        para.push(userMode ? lines[i].trimEnd() : lines[i].trim());
         i++;
       }
       if (tight) {
@@ -574,5 +604,18 @@ window.hubMarkdown = (() => {
     }
   }
 
-  return { render, safeURL, codeBlock };
+  // renderUser draws a message the user typed: the same blocks and the same
+  // safe nodes as a reply, with the stricter emphasis of userMode and the
+  // lines as typed (a single newline is a line break).
+  function renderUser(node, text) {
+    userMode = true;
+    try {
+      render(node, text);
+    } finally {
+      userMode = false;
+    }
+    node.classList.add("md");
+  }
+
+  return { render, renderUser, safeURL, codeBlock };
 })();

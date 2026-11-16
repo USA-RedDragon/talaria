@@ -238,7 +238,14 @@ window.HubMiniChat = (() => {
 
     function steer(e) {
       const b = el("div", "msg user sm");
-      b.textContent = e.text || "";
+      const md = window.hubMarkdown;
+      if (md && md.renderUser) {
+        const body = el("div", "utext");
+        md.renderUser(body, e.text || "");
+        b.append(body);
+      } else {
+        b.textContent = e.text || "";
+      }
       const line = el("div", "queued");
       put(b);
       put(line);
