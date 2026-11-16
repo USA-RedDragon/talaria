@@ -940,6 +940,9 @@ def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dic
             methods = grant_methods(status.get("methods_seen"))
             if methods:  # the page showed a sign-in method picker and no method is chosen yet
                 return grant, login_grant_card(conn, host, status, existing="device")
+        # "Allow on <computer>" on the hub card is the user's standing answer for this host there:
+        # no second question, in chats and in scheduled runs alike, until the user revokes it.
+        return grant, None
     return grant, {
         "action": "approve", "rule_key": _rule("login", host),
         "message": (f"Sign in on {host} in {where} with the login Firefox has saved for it. Firefox fills the form "

@@ -718,12 +718,12 @@ class ToolTests(BrowserBase):
             self.assertIn(text, self.decision["message"])
             self.assertEqual(self.decision["login_grant"]["saved_logins"], n)
 
-    def test_login_granted_host_keeps_the_normal_approval(self):
+    def test_login_granted_host_asks_nothing_more_and_config_keeps_the_normal_approval(self):
         self.login_page()  # the extension lists it: config or grant
         self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "Password", "scope": "device"}
         self.run_tool("browser_login", tab_id=7)
-        self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
-        self.assertNotIn("login_grant", self.decision)
+        self.assertIsNone(self.decision)  # "Allow on <computer>" was the user's answer
+        self.assertEqual(self.last("login")["args"]["guard"]["login_hosts"], ["login.example.com"])
         self.fake.grants.clear()
         self.fake.config_hosts = {"login.example.com"}
         self.run_tool("browser_login", tab_id=7)
@@ -741,7 +741,7 @@ class ToolTests(BrowserBase):
         # A grant that has a method does not ask again.
         self.fake.grants["login.example.com"]["method"] = "Password"
         self.run_tool("browser_login", tab_id=7)
-        self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
+        self.assertIsNone(self.decision)
 
     def test_login_card_never_lists_refused_methods(self):
         self.assertEqual(browser.grant_methods(["Passkey", "Security key", "Verify", "Phone", "Password", "Use SMS", "  Pad ",
