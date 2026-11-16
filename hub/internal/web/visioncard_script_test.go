@@ -61,6 +61,19 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 	)
 	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
 	e.gw.SetFile(seen, shotPicture(t))
+	// A browser_vision call keeps the screenshot it looked at and names it in its result.
+	const (
+		kept    = "/opt/data/hermes/cache/screenshots/hermes-device/s9/shot-20261116-170000-aaaa1111.png"
+		removed = "/opt/data/hermes/cache/screenshots/hermes-device/s9/shot-20261101-170000-bbbb2222.png"
+	)
+	e.gw.SetFile(kept, shotPicture(t))
+	page := func(id, p string) []map[string]any {
+		return []map[string]any{
+			{kRole: roleAssistant, kText: "Looking.", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: "browser_vision", ilArgs: `{"question":"Where is the button?"}`}}}},
+			{kRole: stepTool, kCallID: id, fieldName: "browser_vision", kText: `{"tab_id":7,"title":"Example","screenshot_bytes":1234,"question":"Where is the button?","path":"` + p + `"}`,
+				kTimestamp: 1763000000.0, "display_metadata": map[string]any{"tool_outcome": map[string]any{"duration_ms": 879}}},
+		}
+	}
 	call := func(id, args string) map[string]any {
 		return map[string]any{kRole: roleAssistant, kText: "Looking.", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: "vision_analyze", ilArgs: args}}}}
 	}
@@ -74,10 +87,11 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 		call("c2", `{"image_url":"`+gone+`","question":"What is on screen?"}`), result("c2"),
 		call("c3", `{"image_url":"https://example.com/charts/q3.png","question":"Which chart is this?"}`), result("c3"),
 		call("c4", `{"image_url":"`+other+`","question":"Is this device-only image shown?"}`), result("c4"),
+		page("c5", kept)[0], page("c5", kept)[1], page("c6", removed)[0], page("c6", removed)[1],
 		{kRole: roleAssistant, kText: "done"},
 	}})
 	prof := t.TempDir()
-	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "visioncard", "run.js"), chrome, e.url, prof, seen, gone).CombinedOutput()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "visioncard", "run.js"), chrome, e.url, prof, seen, gone, kept, removed).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

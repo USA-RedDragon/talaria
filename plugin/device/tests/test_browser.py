@@ -936,6 +936,24 @@ class ToolTests(BrowserBase):
         self.assertEqual(json.loads(out["text_summary"])["title"], "Example Domain")
         self.assertEqual(self.last("screenshot")["args"], {"tab_id": 7, "format": "jpeg", "quality": 85})
 
+    def test_vision_result_offers_the_image_the_model_saw(self):
+        """The hub never sees the image in the envelope: the result text names a kept copy of the exact
+        embedded image, in the session's screenshot folder, so the card can show it."""
+        with mock.patch.object(browser, "_native_vision", lambda: True), \
+                mock.patch.object(browser, "_resize", lambda path, mime: "data:image/jpeg;base64,c21hbGw="):
+            out = self.run_tool("browser_vision", tab_id=7)
+        summary = json.loads(out["text_summary"])
+        path = Path(summary["path"])
+        self.assertEqual(path.parent.parent, browser.shots_root())
+        self.assertEqual(path.parent.name, self.session)
+        self.assertEqual(path.read_bytes(), b"small")
+        self.assertEqual(json.loads(out["content"][0]["text"].split("\n\n")[0])["path"], str(path))
+
+    def test_vision_text_fallback_keeps_no_file(self):
+        with mock.patch.object(browser, "_native_vision", lambda: False):
+            out = self.run_tool("browser_vision", tab_id=7)
+        self.assertNotIn("path", out)
+
     def test_vision_asks_for_png_in_fit_mode(self):
         with mock.patch.object(browser, "_native_vision", lambda: True), \
                 mock.patch.object(browser, "_fit_mode", lambda: True), \

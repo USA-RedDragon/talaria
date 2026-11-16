@@ -1169,9 +1169,12 @@ def _untrusted(out: dict) -> dict:
 
 
 def vision_result(page: dict, data_url: str, question: str, *, native: Callable[[], bool],
-                  resize: Callable[[Path, str], str]) -> Any:
+                  resize: Callable[[Path, str], str],
+                  save: Optional[Callable[[str], Path]] = None) -> Any:
     """The browser_vision result: the Hermes multimodal envelope with the screenshot, or text
-    when the model cannot take images in tool results."""
+    when the model cannot take images in tool results. save keeps the exact image the model gets
+    in the session's screenshot folder and its path goes into the result text as ``path``, which
+    is how the hub's card shows the image (the hub never sees the image in the envelope)."""
     m = _DATA_URL.fullmatch(data_url or "")
     if not m:
         return _err("the browser returned no screenshot")
@@ -1197,6 +1200,11 @@ def vision_result(page: dict, data_url: str, question: str, *, native: Callable[
             os.unlink(path)
         except OSError:
             pass
+    if save is not None:
+        try:
+            summary["path"] = str(save(embedded))
+        except (OSError, ValueError):
+            _core().logger.warning("device: could not keep the screenshot browser_vision looked at", exc_info=True)
     text = json.dumps(summary, ensure_ascii=False)
     ask = f" Question: {question}" if question else ""
     return {"_multimodal": True, "text_summary": text, "meta": {"native_vision": True, "tool": "browser_vision"},
@@ -2267,12 +2275,13 @@ def _shot(conn: Any, args: dict, tab: int, lossless: bool = False) -> dict:
     return shot if isinstance(shot, dict) else {}
 
 
-def _vision(args: dict, conn: Any, _sid: str) -> Any:
+def _vision(args: dict, conn: Any, sid: str) -> Any:
     tab = _need_tab(args)
     # vision.resize_mode fit keeps PNG, so ask the browser for one; JPEG q85 would already blur small text
     shot = _shot(conn, args, tab, lossless=_fit_mode())
     return vision_result(_page(shot) or {"tab_id": tab}, str(shot.get("data_url") or ""),
-                         str(args.get("question") or "").strip(), native=_native_vision, resize=_resize)
+                         str(args.get("question") or "").strip(), native=_native_vision, resize=_resize,
+                         save=lambda url: save_shot(_session(sid), url))
 
 
 def _screenshot(args: dict, conn: Any, sid: str) -> str:

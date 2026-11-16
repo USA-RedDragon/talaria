@@ -191,7 +191,7 @@ func (o *offer) sendFile(raw json.RawMessage, p string) {
 
 // offers says how the session offered p: a send_file result, a reply
 // (a MEDIA directive, or a Markdown link or image with any extension),
-// a browser_screenshot result, a page_publish result (the card of a page
+// a browser_screenshot or browser_vision result, a page_publish result (the card of a page
 // shows before the reply that names it), a user's image attachment or the image a
 // vision_analyze or browser_vision call looked at, in the snapshot's
 // transcript or the events since.
@@ -290,7 +290,7 @@ func rowsOffer(rows []json.RawMessage, p string, o *offer) {
 				name = calls[r.ToolCallID]
 			}
 			switch {
-			case name == hub.ScreenshotTool && screenshotNames(content, p):
+			case (name == hub.ScreenshotTool || name == "browser_vision") && screenshotNames(content, p):
 				o.named = true
 			case name == hub.PagePublishTool:
 				if hub.PublishedPage(r.Content, content) == p {
@@ -347,7 +347,7 @@ func eventsOffer(ring []hub.Event, p string, o *offer) {
 				if hub.PublishedPage(d.Result, d.ResultText) == p {
 					o.named = true
 				}
-			case hub.ScreenshotTool:
+			case hub.ScreenshotTool, "browser_vision":
 				var res string
 				if json.Unmarshal(d.Result, &res) != nil {
 					res = string(d.Result)

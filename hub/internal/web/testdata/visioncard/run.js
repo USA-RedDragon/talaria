@@ -1,6 +1,6 @@
 "use strict";
 // Drives the real hub page in headless Chrome over the DevTools protocol.
-// usage: node run.js CHROME HUB_URL PROFILE_DIR SEEN_PATH GONE_PATH
+// usage: node run.js CHROME HUB_URL PROFILE_DIR SEEN_PATH GONE_PATH KEPT_PATH REMOVED_PATH
 // Asserts that a vision_analyze card shows a thumbnail of the image it looked
 // at beside the question, that a tap opens the image full screen, that the
 // open card shows the image (at most 14rem tall) with its path and without
@@ -10,7 +10,7 @@
 // screenshots.
 const assert = require("assert");
 const fs = require("fs");
-const [bin, url, dir, seen, gone] = process.argv.slice(2);
+const [bin, url, dir, seen, gone, kept, removed] = process.argv.slice(2);
 
 const { proc, connect } = require("../cdp.js").launch(bin, dir);
 const { until } = require("../cdp.js");
@@ -120,6 +120,22 @@ async function run(c, w, h, touch, dark) {
   assert.ok(/Image not available here/.test(await ev(`${card(1)}.querySelector(".vis-sec").textContent`)), tag + ": open placeholder");
   assert.ok(await ev(`!${card(1)}.querySelector("img")`), tag + ": open placeholder has no image");
   assert.ok(await ev(`document.documentElement.scrollWidth <= window.innerWidth + 1`), tag + ": the page does not scroll sideways");
+
+  // browser_vision: the card shows the screenshot the model looked at, which
+  // the plugin kept and named in the result; a removed one says why.
+  const pv = (n) => `document.querySelectorAll('.tool[data-tool="browser_vision"]')[${n}]`;
+  await until(ev, `document.querySelectorAll('.tool[data-tool="browser_vision"]').length === 2`, tag + ": two browser_vision cards");
+  await ev(`document.querySelectorAll("details.toolgroup").forEach((d) => { d.open = true; })`);
+  await until(ev, `!!${pv(0)}.querySelector(".vis-thumb img") && ${pv(0)}.querySelector(".vis-thumb img").complete`, tag + ": the kept screenshot to load");
+  assert.ok(await ev(`${pv(0)}.querySelector(".vis-thumb img").naturalWidth === 640`), tag + ": the kept screenshot is the real image");
+  assert.ok((await ev(`${pv(0)}.querySelector(".vis-thumb img").src`)).includes("/media?path=" + encodeURIComponent(kept)), tag + ": served from the kept path");
+  assert.strictEqual(await ev(`${pv(0)}.querySelector(".notice-title").textContent`), "Looked at the page", tag + ": browser_vision title");
+  await until(ev, `!${pv(1)}.querySelector("img") && !!${pv(1)}.querySelector(".vis-gone")`, tag + ": the removed screenshot to turn into a placeholder");
+  const why = await ev(`${pv(1)}.querySelector(".vis").textContent`);
+  assert.ok(/The screenshot was removed after 7 days/.test(why) && !/Image not available here/.test(why), tag + ": says why it is gone: " + why);
+  await ev(`${pv(0)}.scrollIntoView({ block: "center" })`);
+  await shot(c, tag + "-browser-vision");
+  assert.ok(await ev(`document.documentElement.scrollWidth <= window.innerWidth + 1`), tag + ": the page does not scroll sideways after browser_vision");
 }
 
 (async () => {

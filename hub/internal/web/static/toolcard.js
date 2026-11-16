@@ -761,6 +761,8 @@ window.HubToolCard = (() => {
     if (dataImage.test(u)) return { kind: "data", url: u };
     if (/^https?:\/\//i.test(u)) return { kind: "link", url: u };
     if (imageFile(u)) return { kind: "file", path: u };
+    // browser_vision keeps the screenshot it looked at and names it in its result
+    if (!u && typeof res.path === "string" && imageFile(res.path)) return { kind: "file", path: res.path };
     return { kind: "none", path: u[0] === "/" ? u : "" };
   }
   function vision(c) {
@@ -1153,6 +1155,13 @@ window.HubToolCard = (() => {
       b.onclick = () => ctx.zoom(src, name);
       return b;
     }
+    // missing says why a kept screenshot cannot be shown: the plugin deletes
+    // them after 7 days (and keeps each chat's newest 50).
+    function missing(v) {
+      return v.kind === "file" && /\/cache\/screenshots\/hermes-device\//.test(v.path || "")
+        ? "The screenshot was removed after 7 days"
+        : "Image not available here";
+    }
     function drawVision(d) {
       const v = d.vision;
       const open = head.getAttribute("aria-expanded") === "true";
@@ -1188,7 +1197,7 @@ window.HubToolCard = (() => {
         } else if (v.kind === "link") {
           visBig.append(link(v.url));
         } else {
-          visBig.append(el("span", "vis-note", "Image not available here"));
+          visBig.append(el("span", "vis-note", missing(v)));
           if (path) visBig.append(path);
         }
         return;
@@ -1201,7 +1210,7 @@ window.HubToolCard = (() => {
         vis.append(gone(), q);
         if (v.kind === "link") q.append(link(v.url));
         else {
-          q.append(el("small", "", "Image not available here"));
+          q.append(el("small", "", missing(v)));
           if (path) q.append(path);
         }
       }

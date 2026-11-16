@@ -425,3 +425,37 @@ func TestMediaNamedByVisionCall(t *testing.T) {
 		t.Fatalf("its own image = %d %q", resp.StatusCode, body)
 	}
 }
+
+// The screenshot a browser_vision call looked at is kept by the plugin and
+// named in the call's result: that offers it to the chat that made the call,
+// from the stored transcript, and to no other chat or path.
+func TestMediaNamedByBrowserVisionResult(t *testing.T) {
+	t.Parallel()
+	e := setup(t)
+	seen, unnamed := shotDir+"shot-seen.png", shotDir+"shot-unnamed.png"
+	for _, p := range []string{seen, unnamed} {
+		e.gw.SetFile(p, []byte(shotPNG))
+	}
+	e.gw.AddSession(&gatewaytest.Session{ID: "m1", Title: titleMedia, Live: true, StartedAt: 200, Messages: []map[string]any{
+		{kRole: roleAssistant, kText: "", "tool_calls": []map[string]any{{"id": "v1", "function": map[string]any{"name": "browser_vision", "arguments": `{"question":"where?"}`}}}},
+		{kRole: "tool", "tool_call_id": "v1", "content": `{"tab_id":7,"title":"t","screenshot_bytes":12,"path":"` + seen + `"}`},
+	}})
+	e.gw.AddSession(&gatewaytest.Session{ID: "m2", Title: "Elsewhere", Live: true, StartedAt: 100, Messages: []map[string]any{
+		{kRole: roleUser, kText: "hi"},
+	}})
+	c := client(t)
+	login(t, e, c)
+	if resp, body := get(t, c, mediaURL(e, "pc", seen)); resp.StatusCode != http.StatusOK || body != shotPNG || !strings.HasPrefix(resp.Header.Get("Content-Disposition"), "inline") {
+		t.Fatalf("the looked-at screenshot = %d %q %v", resp.StatusCode, body, resp.Header)
+	}
+	if resp, body := get(t, c, mediaURL(e, "pc", unnamed)); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("an unnamed screenshot = %d %s", resp.StatusCode, body)
+	}
+	if resp, body := get(t, c, e.url+"/api/sessions/pc/m2/media?path="+url.QueryEscape(seen)); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("another chat's view = %d %s", resp.StatusCode, body)
+	}
+	anon := client(t)
+	if resp, _ := get(t, anon, mediaURL(e, "pc", seen)); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous = %d", resp.StatusCode)
+	}
+}
