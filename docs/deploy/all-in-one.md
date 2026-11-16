@@ -85,7 +85,7 @@ checked in the image: as the sandbox user, `ls /opt/data`, `cat /talaria/secrets
 | A crash | Docker restarts that container | s6 restarts that service; a gateway crash restarts the container |
 | Size | Same images, about 1.2 GB to pull | One image, about the same size (the three extra binaries are about 70 MB) |
 | Memory | About 300 MB idle | About 380 MB idle (measured) |
-| Optional parts (Ollama, Honcho) | Profiles in the same file | Separate apps, pointed at by URL |
+| Optional part (Ollama) | Profiles in the same file | Separate apps, pointed at by URL |
 | Several agent servers | Possible (edit the hub config) | One |
 
 Use the all-in-one image when the platform needs one container, or to try Talaria. Use compose or Helm when you

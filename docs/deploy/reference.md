@@ -28,8 +28,7 @@ TALARIA_PUBLIC_URL=
 # --- Accounts ---
 # There is no admin password here: the first person who opens Talaria makes the admin account on its setup
 # page. Other login options (your OIDC provider, or a reverse proxy such as Authelia): https://usa-reddragon.github.io/talaria/deploy/auth.html
-# The hub account of the person this agent works for, once it exists (optional). Names that person in Honcho
-# memory, and owns chats that are on no computer. Empty: works while one person's computers are paired
+# The hub account of the person this agent works for, once it exists (optional). Owns chats that are on no computer. Empty: works while one person's computers are paired
 TALARIA_USER=
 # Contact address that push services get with Web Push, such as mailto:you@example.com. Empty: the public URL
 # when that is https (push notifications need https anyway)
@@ -41,7 +40,7 @@ TALARIA_PUSH_CONTACT=
 # (see the docs page "Choosing models and providers"). Provider keys that the agent reads from its environment,
 # such as OPENROUTER_API_KEY, can go in compose.override.yaml under hermes: environment:.
 #
-# Optional parts to start, comma-separated: demo, ollama, honcho, honcho-embeddings.
+# Optional parts to start, comma-separated: demo, ollama.
 # demo: a stand-in model that needs no API key, to try Talaria. The agent then offers it as the provider
 # talaria-demo; pick it with "hermes model". ollama: Ollama on this host (its address for the agent:
 # http://ollama:11434/v1).
@@ -65,19 +64,6 @@ TZ=
 
 # --- Telegram bot (optional): a token from @BotFather
 TALARIA_TELEGRAM_TOKEN=
-
-# --- Long-term memory with Honcho (optional) ---
-# Add honcho to COMPOSE_PROFILES and set:
-#   TALARIA_HONCHO_URL=http://honcho:8000
-# Embeddings: add honcho-embeddings to COMPOSE_PROFILES for a small local model (about 1 GB of RAM), or use a
-# hosted API, for example OpenAI:
-#   TALARIA_EMBEDDINGS_BASE_URL=https://api.openai.com/v1
-#   TALARIA_EMBEDDINGS_MODEL=text-embedding-3-small
-#   TALARIA_EMBEDDINGS_API_KEY=sk-...
-#   TALARIA_EMBEDDINGS_DIMENSIONS=1536
-# Honcho needs its own model for what it learns (Honcho's setting): TALARIA_HONCHO_LLM_BASE_URL,
-# TALARIA_HONCHO_LLM_API_KEY and TALARIA_HONCHO_MODEL, an OpenAI-compatible API. Default: the demo model.
-TALARIA_HONCHO_URL=
 ```
 <!-- /docgen:code -->
 
@@ -97,11 +83,6 @@ searxng
 demo-llm
 ollama
 ollama-pull
-honcho-db
-honcho-migrate
-honcho
-honcho-deriver
-honcho-embeddings
 ```
 <!-- /docgen:output -->
 
@@ -340,10 +321,7 @@ Every install pulls these, pinned by digest. [Images](images.md) says what each 
 ```text
 docker.io/library/caddy:2.10-alpine
 docker.io/ollama/ollama:0.40.16
-docker.io/pgvector/pgvector:0.8.1-pg17
 docker.io/searxng/searxng:2026.11.13-8a53a6aa5
-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4
-ghcr.io/plastic-labs/honcho:v3.6.0
 ghcr.io/usa-reddragon/talaria-hermes:v0.23.1-p54
 ghcr.io/usa-reddragon/talaria-hub:v0.26.86
 ghcr.io/usa-reddragon/talaria-sandbox:v0.26.0

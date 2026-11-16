@@ -88,17 +88,14 @@ def send_file_result(out):
 
 
 def recall(body, word):
-    """Lines that mention the word in what Hermes gave the model: the system prompt (built-in memory) and the
-    <memory-context> block that Honcho adds to the message."""
+    """Lines that mention the word in what Hermes gave the model: the system prompt (built-in memory)."""
     def text_of(m):
         c = m.get("content")
         return c if isinstance(c, str) else " ".join(p.get("text", "") for p in c or [] if isinstance(p, dict))
     msgs = body.get("messages") or []
     system = "\n".join(text_of(m) for m in msgs if m.get("role") == "system")
-    last = text_of(msgs[-1]) if msgs else ""
-    honcho = last.split("<memory-context>", 1)[1].split("</memory-context>", 1)[0] if "<memory-context>" in last else ""
     found = []
-    for source, text in (("memory notes", system), ("Honcho", honcho)):
+    for source, text in (("memory notes", system),):
         hits = [ln.strip(" -*") for ln in text.splitlines() if word and word.lower() in ln.lower()]
         found += ["%s: %s" % (source, h[:200]) for h in hits[:3]]
     if not found:

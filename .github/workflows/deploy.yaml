@@ -45,7 +45,7 @@ jobs:
         run: |
           cp compose/.env.example compose/.env
           docker compose -f compose/compose.yaml config -q
-          COMPOSE_PROFILES=demo,ollama,honcho,honcho-embeddings docker compose -f compose/compose.yaml config -q
+          COMPOSE_PROFILES=demo,ollama docker compose -f compose/compose.yaml config -q
       - name: Helm chart
         run: |
           # The packaged common library in charts/ matches Chart.lock

@@ -5,8 +5,8 @@
 #   docker compose exec -u hermes hermes hermes model    # or pick a model here (talaria-demo with profile demo)
 #
 # Settings are in .env (copy .env.example). Every secret is made by the init service on the first start and
-# kept in the "secrets" volume. Optional parts are profiles: demo, ollama, honcho, honcho-embeddings. Web search
-# (SearXNG) is on; TALARIA_SEARXNG=0 in .env turns it off.
+# kept in the "secrets" volume. Optional parts are profiles: demo, ollama. Web search (SearXNG) is on;
+# TALARIA_SEARXNG=0 in .env turns it off.
 name: talaria
 
 x-images:
@@ -28,7 +28,6 @@ x-hermes-env: &hermes-env
   # With profile demo, the demo model is offered to the agent as the provider talaria-demo
   TALARIA_DEMO_URL: http://demo-llm:8000/v1
   TALARIA_DEMO_PROBE: "1"
-  TALARIA_HONCHO_URL: ${TALARIA_HONCHO_URL:-}
 
 services:
   # Makes the secrets once, writes the hub config on every start, prints the address
@@ -41,7 +40,6 @@ services:
       TALARIA_USER: ${TALARIA_USER:-}
       TALARIA_PUSH_CONTACT: ${TALARIA_PUSH_CONTACT:-}
       TALARIA_TELEGRAM_TOKEN: ${TALARIA_TELEGRAM_TOKEN:-}
-      TALARIA_HONCHO_URL: ${TALARIA_HONCHO_URL:-}
     volumes:
       - ./files:/files:ro
       - secrets:/secrets
@@ -327,102 +325,6 @@ services:
       M: ${TALARIA_OLLAMA_PULL:-}
     entrypoint: ["/bin/sh", "-c", "[ -z \"$$M\" ] || ollama pull \"$$M\""]
 
-  # --- profile honcho: long-term memory (Honcho by Plastic Labs) ---
-  honcho-db:
-    profiles: [honcho]
-    image: docker.io/pgvector/pgvector:0.8.1-pg17@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: honcho
-      POSTGRES_PASSWORD: honcho
-      POSTGRES_DB: honcho
-    volumes:
-      - honcho-db:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "honcho"]
-      interval: 10s
-      timeout: 3s
-      start_period: 30s
-      start_interval: 1s
-
-  honcho-migrate:
-    profiles: [honcho]
-    image: &honcho-image ghcr.io/plastic-labs/honcho:v3.6.0@sha256:eb906a2d251aa48b22347e4465b40785ea7a84e2bfd1105780416bf1f0121099
-    depends_on:
-      honcho-db:
-        condition: service_healthy
-    environment: &honcho-env
-      DB_CONNECTION_URI: postgresql+psycopg://honcho:honcho@honcho-db:5432/honcho
-      AUTH_USE_AUTH: "false"
-      LLM_OPENAI_API_KEY: ${TALARIA_HONCHO_LLM_API_KEY:-none}
-      LLM_OPENAI_BASE_URL: ${TALARIA_HONCHO_LLM_BASE_URL:-http://demo-llm:8000/v1}
-      DERIVER_MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      SUMMARY_MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      DREAM_DEDUCTION_MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      DREAM_INDUCTION_MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      DIALECTIC_LEVELS__minimal__MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      DIALECTIC_LEVELS__low__MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      DIALECTIC_LEVELS__medium__MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      DIALECTIC_LEVELS__high__MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      DIALECTIC_LEVELS__max__MODEL_CONFIG__MODEL: ${TALARIA_HONCHO_MODEL:-talaria-demo}
-      EMBEDDING_MODEL_CONFIG__TRANSPORT: openai
-      EMBEDDING_MODEL_CONFIG__MODEL: ${TALARIA_EMBEDDINGS_MODEL:-BAAI/bge-small-en-v1.5}
-      EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: ${TALARIA_EMBEDDINGS_BASE_URL:-http://honcho-embeddings:8080/v1}
-      EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY: ${TALARIA_EMBEDDINGS_API_KEY:-none}
-      EMBEDDING_MODEL_CONFIG__DIMENSIONS_MODE: never
-      EMBEDDING_VECTOR_DIMENSIONS: ${TALARIA_EMBEDDINGS_DIMENSIONS:-384}
-      EMBEDDING_MAX_INPUT_TOKENS: "480"
-      SENTRY_ENABLED: "false"
-      METRICS_ENABLED: "false"
-      TELEMETRY_ENABLED: "false"
-      CACHE_ENABLED: "false"
-      TIKTOKEN_CACHE_DIR: /tmp/tiktoken
-    command: ["sh", "-c", "python scripts/provision_db.py && python scripts/configure_embeddings.py --yes"]
-
-  honcho:
-    profiles: [honcho]
-    image: *honcho-image
-    restart: unless-stopped
-    depends_on:
-      honcho-migrate:
-        condition: service_completed_successfully
-    environment: *honcho-env
-    command: ["fastapi", "run", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "src/main.py"]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
-      start_interval: 2s
-
-  honcho-deriver:
-    profiles: [honcho]
-    image: *honcho-image
-    restart: unless-stopped
-    depends_on:
-      honcho-migrate:
-        condition: service_completed_successfully
-    environment: *honcho-env
-    command: ["python", "-m", "src.deriver"]
-
-  # A small CPU embedding model (BAAI/bge-small-en-v1.5, 384 dimensions, about 1 GB of RAM). Leave this profile
-  # off and set TALARIA_EMBEDDINGS_* to use a hosted embeddings API instead
-  honcho-embeddings:
-    profiles: [honcho-embeddings]
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
-    restart: unless-stopped
-    command: ["--model-id", "BAAI/bge-small-en-v1.5", "--hostname", "0.0.0.0", "--port", "8080", "--max-batch-tokens", "2048"]
-    environment:
-      HUGGINGFACE_HUB_CACHE: /data
-    volumes:
-      - honcho-embeddings:/data
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 5m
-      start_interval: 5s
-
 volumes:
   secrets:
   hermes-data:
@@ -431,5 +333,3 @@ volumes:
   caddy-data:
   sandbox-work:
   ollama-data:
-  honcho-db:
-  honcho-embeddings:

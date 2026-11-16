@@ -223,10 +223,8 @@ DEFAULTS = {
     # Leave out the prompt paragraph and the skill that answer "how do I set this up" with the agent's own commands
     # and docs; Talaria's hint above points to its Settings and docs instead (patched Hermes)
     "agent": {"product_help_guidance": False},
-    # Long chats (patched Hermes 0069, 0070 and 0075): recalled memory (Honcho) leaves older turns once the prompt
-    # cache is cold or at compaction, cut by section to 8000 chars, and older agent messages lose their repeated instructions paragraph. A real chat carried
-    # an 18K-char recall block on every user turn, about 99% of each row.
-    "memory": {"recall_history": False, "recall_max_chars": 8000},
+    # Long chats (patched Hermes 0070): older relayed agent messages lose their repeated instructions paragraph
+    # (about 500 chars each), keeping who wrote it, that it is never the user's approval, and how to answer.
     "context": {"collapse_agent_messages": True},
     # Compaction keeps the newest loaded skill whole up to 20000 chars instead of a reload marker (patched Hermes
     # 0015; Claude Code re-attaches up to 5K tokens per skill, and 40 of 44 skills measured fit), and old tool
@@ -383,7 +381,6 @@ def main():
     os.chmod(path + ".tmp", 0o600)
     os.replace(path + ".tmp", path)
     subprocess.run([HERMES, "plugins", "enable", "device"], check=False)
-    setup_honcho()
     print("hermes-init: done")
 
 
@@ -534,32 +531,6 @@ def searxng_env(url, written):
         os.chmod(path + ".tmp", 0o600)
         os.replace(path + ".tmp", path)
     return url if url and not theirs else ""
-
-
-def setup_honcho():
-    """Honcho memory, when TALARIA_HONCHO_URL is set: the catalog plugin and its settings."""
-    url = env("TALARIA_HONCHO_URL")
-    if not url:
-        return
-    # The hub's Memory page asks Honcho for the same peer (init.sh, or the chart's hub config)
-    user = hub_user() or "user"
-    conf = {"hosts": {"hermes": {"baseUrl": url, "workspace": "talaria", "peerName": user, "aiPeer": "hermes",
-                                 "sessionStrategy": "per-session", "pinUserPeer": True}}}
-    path = os.path.join(HOME, "honcho.json")
-    with open(path + ".tmp", "w") as f:
-        json.dump(conf, f, indent=2)
-    os.replace(path + ".tmp", path)
-    if not os.path.isdir(os.path.join(HOME, "plugins", "honcho")):
-        subprocess.run([HERMES, "plugins", "install", "honcho", "--yes-deps"], check=False)
-    subprocess.run([HERMES, "plugins", "enable", "honcho"], check=False)
-    cfg_path = os.path.join(HOME, "config.yaml")
-    with open(cfg_path) as f:
-        config = safe_load(f) or {}
-    merge(config, {"memory": {"provider": "honcho"}})
-    with open(cfg_path + ".tmp", "w") as f:
-        safe_dump(config, f, sort_keys=False)
-    os.chmod(cfg_path + ".tmp", 0o600)
-    os.replace(cfg_path + ".tmp", cfg_path)
 
 
 if __name__ == "__main__":

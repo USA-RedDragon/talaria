@@ -145,10 +145,6 @@ See [Fix computer problems](../guides/troubleshooting.md): [pairing fails](../gu
 - Topics do not appear: the group needs Topics turned on, and the bot must be an admin who can manage topics and delete messages. Send `/link` in the group. See [Telegram](telegram.md#a-topic-for-each-chat).
 - A file is ignored: the bot cannot download files over 20 MB, and answers with a note.
 
-## Memory (Honcho) is empty
-
-Honcho needs a few chats before it writes facts. Check `docker compose logs honcho honcho-deriver`. If the embedding dimensions in `.env` do not match the model, Honcho fails: they cannot change after it stored facts.
-
 ## Out of memory or disk
 
 The agent uses about 275 MB idle and up to about 1 GB during a turn, plus the hub (about 40 MB) and the sandbox (a few MB). The agent's data grows with use: a few GB after weeks. `docker system df` and `docker volume ls` show what is big. Do not remove `talaria_*` volumes: they hold your chats.

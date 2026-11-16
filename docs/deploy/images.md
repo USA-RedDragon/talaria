@@ -8,10 +8,7 @@ pin in all of them), and the chart's `appVersion` is the hub release it pins.
 ```text
 docker.io/library/caddy:2.10-alpine
 docker.io/ollama/ollama:0.40.16
-docker.io/pgvector/pgvector:0.8.1-pg17
 docker.io/searxng/searxng:2026.11.13-8a53a6aa5
-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4
-ghcr.io/plastic-labs/honcho:v3.6.0
 ghcr.io/usa-reddragon/talaria-hermes:v0.23.1-p54
 ghcr.io/usa-reddragon/talaria-hub:v0.26.86
 ghcr.io/usa-reddragon/talaria-sandbox:v0.26.0
@@ -29,8 +26,7 @@ ghcr.io/usa-reddragon/talaria:v0.26.0
 | `docker.io/searxng/searxng` | SearXNG, the agent's web search ([Web search](reference.md#web-search)) | Yes |
 | `ghcr.io/usa-reddragon/talaria-aio` | The all-in-one image (Unraid, TrueNAS, `docker run`) | Yes |
 
-Optional parts (compose profiles): `docker.io/ollama/ollama`, `ghcr.io/plastic-labs/honcho`,
-`docker.io/pgvector/pgvector`, `ghcr.io/huggingface/text-embeddings-inference`.
+Optional parts (compose profiles): `docker.io/ollama/ollama`.
 
 Every image is public; no install needs a registry login.
 

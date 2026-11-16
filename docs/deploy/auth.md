@@ -65,10 +65,8 @@ password, restore a backup of the hub's data or start over (see [Upgrades and ba
 
 Optional. Set it to the hub user name of the person this agent works for, once that account exists
 (`TALARIA_USER` in `.env` or on the all-in-one container, `auth.user` with Helm), then apply (`docker compose up
--d`, or `helm upgrade`). It does two things:
+-d`, or `helm upgrade`). It does one thing:
 
-- **Memory:** with Honcho on, it is that person's name in Honcho, and the hub's Memory page shows what Honcho
-  learned about them. Empty: the name is `user`.
 - **Computers:** a chat that runs on no computer belongs to this person when the agent's `/device` command moves it
   to a computer. Empty: it belongs to the one person whose computers are connected; with several people's
   computers connected, move such chats from the hub instead.

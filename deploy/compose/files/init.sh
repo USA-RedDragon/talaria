@@ -55,8 +55,8 @@ g() { cat "$S/generated/$1"; }
 
 PUBLIC_URL=${TALARIA_PUBLIC_URL:-http://localhost:8080}
 PUBLIC_URL=${PUBLIC_URL%/}
-# The hub account of the person this Hermes works for (optional): the Honcho peer name, and the owner of chats
-# that the device plugin cannot tie to a computer
+# The hub account of the person this Hermes works for (optional): the owner of chats that the
+# device plugin cannot tie to a computer
 USER_NAME=${TALARIA_USER:-}
 
 # --- hub: backends can only be set in its config file. Login settings (auth.mode and the rest) come from the
@@ -92,17 +92,6 @@ backends:
 EOF
 if [ -n "$ACP_URL" ]; then
   printf '    acp_url: %s\n' "$ACP_URL" >> "$S/hub/config.yaml.tmp"
-fi
-if [ -n "${TALARIA_HONCHO_URL:-}" ]; then
-  # Shows what Honcho learned on the hub's Memory page. The compose Honcho runs without auth
-  cat >> "$S/hub/config.yaml.tmp" <<EOF
-    honcho:
-      url: $TALARIA_HONCHO_URL
-      workspace: talaria
-      user_peer: ${USER_NAME:-user}
-      ai_peer: hermes
-      api_key: ${TALARIA_HONCHO_API_KEY:-none}
-EOF
 fi
 if [ -n "${TALARIA_TELEGRAM_TOKEN:-}" ]; then
   printf 'telegram:\n  enabled: true\n  token: %s\n' "$TALARIA_TELEGRAM_TOKEN" >> "$S/hub/config.yaml.tmp"

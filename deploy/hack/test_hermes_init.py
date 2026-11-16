@@ -170,7 +170,6 @@ class Defaults(unittest.TestCase):
                     mock.patch.object(m, "install_plugin"), \
                     mock.patch.object(m, "write_public_key", return_value="/k"), \
                     mock.patch.object(m, "talaria_config", return_value={"gateway": {"x": 1}}), \
-                    mock.patch.object(m, "setup_honcho"), \
                     mock.patch.object(m, "demo_provider"), \
                     mock.patch.object(m.subprocess, "run"):
                 m.main()
@@ -217,7 +216,6 @@ class LongChatDefaults(unittest.TestCase):
                     mock.patch.object(m, "install_plugin"), \
                     mock.patch.object(m, "write_public_key", return_value="/k"), \
                     mock.patch.object(m, "talaria_config", return_value={}), \
-                    mock.patch.object(m, "setup_honcho"), \
                     mock.patch.object(m, "demo_provider"), \
                     mock.patch.object(m.subprocess, "run"):
                 m.main()
@@ -226,16 +224,15 @@ class LongChatDefaults(unittest.TestCase):
 
     def test_unset_gets_the_long_chat_settings(self):
         got = self.run_init()
-        self.assertEqual(got["memory"], {"recall_history": False, "recall_max_chars": 8000})
         self.assertEqual(got["context"], {"collapse_agent_messages": True})
         self.assertEqual(got["compression"], {"keep_last_skill_chars": 20000, "proactive_prune_tokens": 100000,
                                               "summary_style": "compact", "decision_ledger_chars": 6000})
         self.assertIs(got["approvals"]["smart_provenance"], True)
 
     def test_explicit_values_win(self):
-        got = self.run_init({"memory": {"provider": "honcho", "recall_history": True},
+        got = self.run_init({"memory": {"provider": "builtin"},
                              "compression": {"threshold": 0.7, "proactive_prune_tokens": 0}})
-        self.assertEqual(got["memory"], {"provider": "honcho", "recall_history": True, "recall_max_chars": 8000})
+        self.assertEqual(got["memory"], {"provider": "builtin"})
         self.assertEqual(got["compression"], {"threshold": 0.7, "proactive_prune_tokens": 0,
                                               "keep_last_skill_chars": 20000, "summary_style": "compact",
                                               "decision_ledger_chars": 6000})
@@ -253,11 +250,10 @@ class StockDefaults(unittest.TestCase):
     this step runs. Stock values get Talaria's, on a new install and on an upgrade; values someone changed stay."""
 
     # The keys of the agent's seeded config.yaml (cli-config.yaml.example) that Talaria has defaults for
-    STOCK = {"memory": {"memory_enabled": True, "recall_history": True, "recall_max_chars": 0},
+    STOCK = {"memory": {"memory_enabled": True},
              "compression": {"enabled": True, "keep_last_skill_chars": 0, "proactive_prune_tokens": 0},
              "agent": {"max_turns": 90}, "gateway": None}
-    TALARIA = {"memory.recall_history": False, "memory.recall_max_chars": 8000,
-               "compression.keep_last_skill_chars": 20000, "compression.proactive_prune_tokens": 100000,
+    TALARIA = {"compression.keep_last_skill_chars": 20000, "compression.proactive_prune_tokens": 100000,
                "compression.summary_style": "compact", "compression.decision_ledger_chars": 6000,
                "gateway.replay_buffer_events": 0, "vision.resize_mode": "fit", "approvals.smart_provenance": True}
 
@@ -282,7 +278,6 @@ class StockDefaults(unittest.TestCase):
                 mock.patch.object(self.m, "install_plugin"), \
                 mock.patch.object(self.m, "write_public_key", return_value="/k"), \
                 mock.patch.object(self.m, "talaria_config", return_value={}), \
-                mock.patch.object(self.m, "setup_honcho"), \
                 mock.patch.object(self.m, "demo_provider"), \
                 mock.patch.object(self.m.subprocess, "run"):
             self.m.main()
@@ -319,47 +314,47 @@ class StockDefaults(unittest.TestCase):
         self.assertTalaria(self.run_init(old))
 
     def test_upgrade_keeps_values_someone_changed(self):
-        old = self.stock(memory__recall_max_chars=4000, compression__proactive_prune_tokens=50000,
+        old = self.stock(compression__keep_last_skill_chars=4000, compression__proactive_prune_tokens=50000,
                          compression__summary_style="legacy")
         got = self.run_init(old)
-        self.assertEqual(got["memory"]["recall_max_chars"], 4000)
+        self.assertEqual(got["compression"]["keep_last_skill_chars"], 4000)
         self.assertEqual(got["compression"]["proactive_prune_tokens"], 50000)
         self.assertEqual(got["compression"]["summary_style"], "legacy")
-        self.assertTalaria(got, "memory.recall_max_chars", "compression.proactive_prune_tokens",
+        self.assertTalaria(got, "compression.keep_last_skill_chars", "compression.proactive_prune_tokens",
                            "compression.summary_style")
         self.assertEqual(self.run_init(), got)
 
     def test_a_value_changed_after_this_step_is_yours_for_good(self):
         got = self.run_init(self.stock())
         # Set back to the stock value in Settings: a choice, and it stays
-        got["memory"]["recall_history"] = True
+        got["compression"]["proactive_prune_tokens"] = 0
         got["compression"]["keep_last_skill_chars"] = 0
         got = self.run_init(got)
-        self.assertIs(got["memory"]["recall_history"], True)
+        self.assertEqual(got["compression"]["proactive_prune_tokens"], 0)
         self.assertEqual(got["compression"]["keep_last_skill_chars"], 0)
-        self.assertEqual(self.run_init(got)["memory"]["recall_history"], True)
+        self.assertEqual(self.run_init(got)["compression"]["proactive_prune_tokens"], 0)
         with open(os.path.join(self.home, "talaria", "defaults.json")) as f:
             state = json.load(f)
-        self.assertIn("memory.recall_history", state["yours"])
-        self.assertNotIn("memory.recall_history", state["applied"])
+        self.assertIn("compression.proactive_prune_tokens", state["yours"])
+        self.assertNotIn("compression.proactive_prune_tokens", state["applied"])
 
     def test_a_new_talaria_default_replaces_the_one_this_step_set(self):
         self.run_init(self.stock())
-        with mock.patch.dict(self.m.DEFAULTS["memory"], {"recall_max_chars": 6000}):
-            self.assertEqual(self.run_init()["memory"]["recall_max_chars"], 6000)
+        with mock.patch.dict(self.m.DEFAULTS["compression"], {"proactive_prune_tokens": 60000}):
+            self.assertEqual(self.run_init()["compression"]["proactive_prune_tokens"], 60000)
 
     def test_compose_install_with_talarias_values_already_set(self):
         # Compose ran this step before the agent ever started, so config.yaml holds Talaria's values and no record
-        got = self.run_init({"memory": {"recall_history": False, "recall_max_chars": 8000}})
+        got = self.run_init({"compression": {"proactive_prune_tokens": 100000}})
         self.assertTalaria(got)
 
     def test_without_a_seeded_file_a_stock_value_is_a_choice(self):
-        # Compose and the chart: the agent never seeded config.yaml, so someone wrote recall_history: true
+        # Compose and the chart: the agent never seeded config.yaml, so someone wrote proactive_prune_tokens: 0
         self.env = {}
         os.environ.pop("TALARIA_STOCK_CONFIG", None)
-        got = self.run_init({"memory": {"recall_history": True}})
-        self.assertIs(got["memory"]["recall_history"], True)
-        self.assertTalaria(got, "memory.recall_history")
+        got = self.run_init({"compression": {"proactive_prune_tokens": 0}})
+        self.assertEqual(got["compression"]["proactive_prune_tokens"], 0)
+        self.assertTalaria(got, "compression.proactive_prune_tokens")
 
     def test_false_is_not_zero(self):
         # replay_buffer_events false is no stock value of the integer key
@@ -399,7 +394,6 @@ class VisionDefaults(unittest.TestCase):
                     mock.patch.object(m, "install_plugin"), \
                     mock.patch.object(m, "write_public_key", return_value="/k"), \
                     mock.patch.object(m, "talaria_config", return_value={}), \
-                    mock.patch.object(m, "setup_honcho"), \
                     mock.patch.object(m, "demo_provider"), \
                     mock.patch.object(m.subprocess, "run"):
                 m.main()
