@@ -372,7 +372,7 @@ window.HubToolCard = (() => {
   const words = {
     todo: ["checkcircle", "Updating the to-do list"], todo_list: ["checkcircle", "Updating the to-do list"],
     memory: ["database", "Saving to memory"], project_memory: ["database", "Updating the project notes"],
-    delegate_task: ["bot", "Starting a subagent"], agent_send: ["mail", "Sending a message"], agent_peers: ["list", "Listing your chats"], agent_set_name: ["edit", "Naming this chat"],
+    delegate_task: ["bot", "Starting a subagent"], send_file: ["file", "Offering a file"], page_publish: ["file", "Publishing a page"], agent_send: ["mail", "Sending a message"], agent_peers: ["list", "Listing your chats"], agent_set_name: ["edit", "Naming this chat"],
     skills_list: ["book", "Looking at skills"], skill_view: ["book", "Reading a skill"], skill_manage: ["book", "Editing a skill"],
     tool_search: ["search", "Looking up a tool"], tool_describe: ["search", "Looking up a tool"],
     mcp_device_servers: ["plug", "Looking up the servers on your computer"], mcp_device_tools: ["plug", "Looking up tools on your computer"],
@@ -875,8 +875,8 @@ window.HubToolCard = (() => {
   // mem (the log's memory()). ctx is create's, plus what the log can do:
   // activity { opens(name, args), open(name, args, result) } (Show in
   // Activity), background(key) (the Run in background buttons of a
-  // command, only where the hub can move it), media(paths) (a row of
-  // images), fileCard(offer) (the card of a file offered), refusal(node,
+  // command, only where the hub can move it), fileCard(offer) (the card of
+  // a file offered), refusal(node,
   // text) (an agent message that was refused), question() (a question card
   // replaced its tool card).
   function mount(ctx, s) {
@@ -946,10 +946,6 @@ window.HubToolCard = (() => {
     call.mem.learn(call.name, call.args, res);
     node.view.update(call);
     if (node.toolName === "agent_send" && ctx.refusal) ctx.refusal(node, call.out + " " + call.error);
-    if (node.toolName === "browser_screenshot" && !failed && res && typeof res.path === "string" && ctx.media) {
-      const row = ctx.media([res.path]);
-      if (row) node.view.body.append(row);
-    }
     // A refused offer is a failed call that still shows its file card.
     if (node.toolName === "send_file" && ctx.fileCard) fileOffer(ctx, node, res, call.endedAt);
     void el;

@@ -65,7 +65,7 @@ async function commands(c, tag) {
       lead: code ? t.firstChild.textContent : null, leadMono: /mono|Menlo/i.test(ts.fontFamily), ratio: cs ? parseFloat(cs.fontSize) / parseFloat(ts.fontSize) : 0, h: t.getBoundingClientRect().height, lh: parseFloat(ts.lineHeight) || parseFloat(ts.fontSize) * 1.5, ellipsis: ts.textOverflow, ws: ts.whiteSpace };
   }))`));
   assert.strictEqual(got.length, 4, tag + ": four command cards " + JSON.stringify(got));
-  const lead = { terminal: /^(Ran |Started in the background: )$/, execute_code: /^Ran $/, process_manage: /^Waited for background command $/ };
+  const lead = { terminal: /^(Ran |Started in the background: )$/, execute_code: /^Ran (Python |JavaScript |code )?$/, process_manage: /^Waited for background command $/ };
   for (const g of got) {
     assert.ok(g.code, tag + ": " + g.tool + " has a code element: " + JSON.stringify(g));
     assert.ok(g.mono, tag + ": the code is monospace: " + JSON.stringify(g));
@@ -105,12 +105,12 @@ async function run(c, w, h, touch, dark) {
 
   await ev(`document.querySelectorAll("details.toolgroup").forEach((d) => { d.open = true; })`);
   await commands(c, tag);
-  // Open the first send: the id is in the details, not the title.
+  // Open the first send: the details hold the message, never the raw id.
   await ev(`${sends}[0].scrollIntoView()`);
   await ev(`${sends}[0].querySelector(".notice-head").click()`);
   await until(ev, `!${sends}[0].querySelector(".notice-body-wrap").hidden`, tag + ": send opened");
   const det = await ev(`${sends}[0].querySelector(".notice-body-wrap").textContent`);
-  assert.ok(det.includes("sa-0-edd20c0e"), tag + ": the id is in the details: " + det);
+  assert.ok(det.includes("Message") && !det.includes("sa-0-edd20c0e"), tag + ": the details hold the message and no id: " + det);
   await ev(`${sends}[3].querySelector(".notice-head").click()`);
   await ev(`${sends}[3].scrollIntoView({ block: "center" })`);
   await shot(c, tag + "-sends");
@@ -118,7 +118,7 @@ async function run(c, w, h, touch, dark) {
   await ev(`${notes}[0].querySelector(".notice-head").click()`);
   await until(ev, `!${notes}[0].querySelector(".notice-body-wrap").hidden`, tag + ": message opened");
   const sender = await ev(`${notes}[0].querySelector(".notice-body-wrap").innerText`);
-  assert.ok(sender.includes("sa-0-edd20c0e") && sender.includes("(goal: relift lane") && sender.includes("of chat 'Names'"), tag + ": the raw sender label is in the details: " + sender);
+  assert.ok(!sender.includes("sa-0-edd20c0e") && !sender.includes("(goal: "), tag + ": the details hold the message, not the raw sender label: " + sender);
   await shot(c, tag + "-message");
   assert.ok(await ev(`document.documentElement.scrollWidth <= window.innerWidth + 1`), tag + ": the page does not scroll sideways");
 

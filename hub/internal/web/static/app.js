@@ -1423,7 +1423,6 @@
       if (!this.cctx) {
         this.cctx = { el, toast, highlight: highlightBash, diff: diffView, page: (p) => this.publishedPage(p),
           image: (p) => (mediaPath(p) && imagePath(p) ? mediaURL(this.base, p) : ""), zoom: openImage,
-          media: (paths) => (paths.every((p) => mediaPath(p)) ? mediaRow(this.base, paths, "shot") : null),
           fileCard: (o) => fileCard(this.base, o),
           activity: { opens: (n, a) => activity.opens(n, a), open: (n, a, r) => activity.fromTool(n, a, r) } };
       }

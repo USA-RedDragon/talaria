@@ -143,16 +143,13 @@ function shape(n) {
   assert.strictEqual(shape(plainT.querySelector(".notice-head")), shape(t.querySelector(".notice-head")));
   // A file offer and a screenshot row come from the log's context.
   const offers = [];
-  const files = Object.assign({}, ctx, { fileCard: (o) => { offers.push(o.status); return el("div", "fcard"); }, media: (p) => el("div", "media " + p.join()) });
+  const files = Object.assign({}, ctx, { fileCard: (o) => { offers.push(o.status); return el("div", "fcard"); } });
   const host = el("div");
   const f = H.mount(files, { key: "c5", name: "send_file", args: { path: "/home/alice/a.pdf" }, mem: H.memory() });
   host.append(f);
   H.finish(files, f, { result: JSON.stringify({ status: "offered", file_offer: { path: "/home/alice/a.pdf", name: "a.pdf", size: 10 } }), endedAt: 5 });
   assert.deepStrictEqual(offers, ["offered"]);
   assert.ok(host.querySelector(".file-offer .fcard"), "the file card sits after the tool card");
-  const shot = H.mount(files, { key: "c6", name: "browser_screenshot", args: {}, mem: H.memory() });
-  H.finish(files, shot, { result: JSON.stringify({ path: "/home/alice/s.png" }) });
-  assert.ok(shot.querySelector(".tool-extra .media"));
 }
 
 // The model's answer about an image: the first block of thinking or reply
