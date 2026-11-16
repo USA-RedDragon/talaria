@@ -23,3 +23,4 @@ tests/tools/test_approval_gateway_wait_coalesce_race.py
 tests/tools/test_approval_gateway_wait_late_choice.py
 tests/tools/test_denial_circuit_breaker.py
 tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_approval_plugin_hooks.py

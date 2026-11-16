@@ -34,10 +34,10 @@ A turn still between boundaries when the wait ends, or one run by a managed work
  hermes_state_runtime.py                     |  72 +++++
  tests/agent/test_turn_boundary_handoff.py   | 203 ++++++++++++
  tests/gateway/test_restart_turn_boundary.py | 329 +++++++++++++++++++
- tools/approval.py                           |  25 +-
+ tools/approval.py                           |  27 +-
  tools/approval_gateway_wait.py              |  27 +-
- tools/prompt_handoff.py                     | 129 ++++++++
- 25 files changed, 1459 insertions(+), 22 deletions(-)
+ tools/prompt_handoff.py                     | 135 ++++++++
+ 25 files changed, 1467 insertions(+), 22 deletions(-)
  create mode 100644 agent/turn_boundary_handoff.py
  create mode 100644 gateway/turn_boundary.py
  create mode 100644 tests/agent/test_turn_boundary_handoff.py
@@ -1661,16 +1661,17 @@ index 00000000..2f183041
 +    turn_boundary._resuming.add("a1")
 +    assert [r["admission_id"] for r in pending_rows(authority, SimpleNamespace(session_id="s1"))] == ["a2"]
 diff --git a/tools/approval.py b/tools/approval.py
-index 93510560..8c91b691 100644
+index 93510560..93173c1f 100644
 --- a/tools/approval.py
 +++ b/tools/approval.py
-@@ -964,7 +964,13 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+@@ -964,7 +964,14 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
      from agent.redact import redact_approval_display
  
      smart_denied = review_blocked  # a provenance review block: the owner may override this one operation
 -    if smart and not review_blocked:
-+    from tools.prompt_handoff import peek_approval
-+    handed = peek_approval(session_key, redact_approval_display(command), pattern_keys) if smart else None
++    from tools.prompt_handoff import has_approvals, peek_approval
++    handed = (peek_approval(session_key, redact_approval_display(command), pattern_keys)
++              if smart and has_approvals(session_key) else None)
 +    if handed is not None and not review_blocked:
 +        # gateway.restart_turn_handoff_boundary: the previous gateway's smart review raised this card and handed
 +        # it over; the user's answer to that card decides, without a second review.
@@ -1679,7 +1680,7 @@ index 93510560..8c91b691 100644
          result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
                                             session_key, human_present=is_cli or is_gateway or is_ask)
          if result is not None:
-@@ -1101,6 +1107,15 @@ def _provenance_on() -> bool:
+@@ -1101,6 +1108,15 @@ def _provenance_on() -> bool:
  _REVIEW_ADVICE = " If other work does not depend on this action, continue with it."
  
  
@@ -1695,14 +1696,15 @@ index 93510560..8c91b691 100644
  def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command: str, approval_callback,
                           is_cli: bool, is_gateway: bool, is_ask: bool, pending_body=None) -> dict:
      """Provenance review (``approvals.smart_provenance``) of one action: allow runs it; a HARD rule
-@@ -1108,7 +1123,13 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+@@ -1108,7 +1124,14 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
      one-operation card naming the rule (blocked when no human can answer). Never allows on a failed review."""
      session_key = get_current_session_key()
      agent, cwd = _automode._current_agent(), _automode._cwd()
 -    verdict = _automode.review(tool_name, args, agent=agent, cwd=cwd)
 +    from agent.redact import redact_approval_display
-+    from tools.prompt_handoff import peek_approval
-+    handed = peek_approval(session_key, redact_approval_display(command), ["smart_provenance"])
++    from tools.prompt_handoff import has_approvals, peek_approval
++    handed = (peek_approval(session_key, redact_approval_display(command), ["smart_provenance"])
++              if has_approvals(session_key) else None)
 +    # gateway.restart_turn_handoff_boundary: the previous gateway's review raised this card and handed it over;
 +    # its verdict stands and the user's answer to that card decides, without a second review.
 +    verdict = (_handed_over_verdict(handed.data) if handed is not None
@@ -1764,10 +1766,10 @@ index 6dcff9c0..ffaca5e6 100644
              # the last record the wait side has of the prompt until it settles. Correlation only —
 diff --git a/tools/prompt_handoff.py b/tools/prompt_handoff.py
 new file mode 100644
-index 00000000..7e2d0243
+index 00000000..616b16ff
 --- /dev/null
 +++ b/tools/prompt_handoff.py
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,135 @@
 +"""Prompts a restart handed to this gateway (``gateway.restart_turn_handoff_boundary``).
 +
 +A turn parked on a clarify question or an approval card when the previous gateway exited is resumed here:
@@ -1865,6 +1867,12 @@ index 00000000..7e2d0243
 +def _matches(entry: Any, command: str, pattern_keys) -> bool:
 +    return (entry.data.get("command") == command
 +            and list(entry.data.get("pattern_keys") or [entry.data.get("pattern_key", "")]) == list(pattern_keys or []))
++
++
++def has_approvals(session_key: str) -> bool:
++    """Whether a handed-over approval waits for its call in this session (cheap: no redaction needed)."""
++    with _lock:
++        return bool(_approvals.get(session_key))
 +
 +
 +def peek_approval(session_key: str, command: str, pattern_keys) -> Any:
