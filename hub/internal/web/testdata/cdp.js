@@ -160,6 +160,9 @@ exports.launch = (bin, dir) => {
       const site = callSite();
       const r = await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, site);
       if (r.exceptionDetails) throw new Error(`Runtime.evaluate threw (at ${site}): ${JSON.stringify(r.exceptionDetails)}`);
+      // returnByValue leaves no value for -0, NaN and Infinity (a Math.round
+      // of -0.3 is -0): give the number, or a test sees undefined.
+      if (r.result.unserializableValue !== undefined && r.result.type === "number") return Number(r.result.unserializableValue);
       return r.result.value;
     };
     await send("Inspector.enable"); // so a renderer crash is reported
