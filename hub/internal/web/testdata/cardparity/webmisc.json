@@ -10,7 +10,8 @@
     "web": [
      {
       "title": "Go 1.26 Release Notes",
-      "url": "https://go.dev/doc/go1.26"
+      "url": "https://go.dev/doc/go1.26",
+      "description": "Go 1.26 introduces new language features and library changes."
      },
      {
       "title": "golang/go: milestone 1.26",

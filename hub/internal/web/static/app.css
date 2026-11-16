@@ -1829,6 +1829,9 @@ pre.diff.tool-box { tab-size: 4; }
 
 
 /* cards/web.js and cards/misc.js */
+.tool-li.gap { margin-top: .4rem; }
+.tool-li .tlink { color: var(--accent, #2563eb); text-decoration: none; }
+.tool-li .tlink:hover { text-decoration: underline; }
 
 /* end cards/web.js and cards/misc.js */
 

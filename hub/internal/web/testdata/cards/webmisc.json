@@ -193,11 +193,12 @@
     "docs.example.com"
    ],
    "status": "",
-   "more": "2 read, 1 failed · 33k characters",
+   "more": "3 pages, 2 read, 1 failed · 33k characters",
    "state": "ok",
    "lines": [
-    "Install guide, Configuration reference"
+    "Install guide, Configuration reference, Changelog"
    ],
+   "raw": true,
    "lineStyles": [
     "dim"
    ],

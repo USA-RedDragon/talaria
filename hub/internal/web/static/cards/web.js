@@ -77,10 +77,16 @@
     out.lines = [hosts.slice(0, 3).join(", ") + (rows.length > hosts.slice(0, 3).length ? " +" + (rows.length - hosts.slice(0, 3).length) + " more" : "")];
     const top = squash(str(rows[0].title));
     if (top) out.lines.push({ parts: "Top: " + top, dim: true });
-    out.blocks.push({
-      label: "Results",
-      text: rows.map((r) => [squash(str(r.title)) || str(r.url), str(r.url), squash(str(r.description) || str(r.page_age))].filter(Boolean).join("\n")).join("\n\n"),
+    // Each result: its title as a link (new tab), then its host and snippet.
+    const items = [];
+    rows.forEach((r, i) => {
+      const url = str(r.url);
+      const title = squash(str(r.title)) || url;
+      items.push({ parts: [{ link: url, text: title }], gap: i > 0 });
+      const note = squash(str(r.description) || str(r.page_age));
+      items.push({ parts: host(url) + (note ? " \u00b7 " + cut(note, 160) : ""), dim: true });
     });
+    out.blocks.push({ label: "Results", kind: "list", items, copy: false });
     return out;
   }
 
@@ -142,14 +148,15 @@
       out.more = [cut(bad[0].error, 80)];
       out.bad = true;
     } else if (bad.length) {
-      out.more = [{ tone: "ok", text: good + " read" }, ", ", { tone: "bad", text: bad.length + " failed" }].concat(total ? [" \u00b7 " + chars(total)] : []);
+      out.more = [list.length + " pages, ", { tone: "ok", text: good + " read" }, ", ", { tone: "bad", text: bad.length + " failed" }].concat(total ? [" \u00b7 " + chars(total)] : []);
       out.status = "";
     } else {
       out.status = n > 1 ? n + " read" : total ? "Done" : "No text";
       out.tone = total || n > 1 ? "ok" : "warn";
       if (total) out.more = [chars(total)];
     }
-    const titles = list.filter((p) => !p.error && p.title).map((p) => p.title);
+    const titles = list.map((p) => p.title || (p.error ? nameOf(p.url) : "")).filter(Boolean);
+    if (bad.length) out.raw = H.util.rawOf(c);
     if (n > 1 && titles.length) out.lines = [{ parts: titles.join(", "), dim: true }];
     const limit = typeof a.char_limit === "number" ? a.char_limit : defaultLimit;
     const note = (p) => (p.error
