@@ -1,0 +1,6 @@
+# The resume action, the handoff record it rebuilds from, and the stored-session reads it relies on
+tests/tools/test_delegate_resume_action.py
+tests/tools/test_delegation_restart_handoff.py
+tests/tools/test_delegate_subagent_brief.py
+tests/tools/test_delegate_tool_sessions.py
+tests/tools/test_delegate_transcript_action.py
