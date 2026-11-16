@@ -199,6 +199,14 @@ async function onMessage(msg) {
 // until the agent navigates the tab again.
 const taints = new Map();
 const scripted = new Set();
+// unsealed holds tabs whose extension world may still run agent code that
+// can use the extension's own fetch (see sealCode). scriptGraceUntil keeps
+// the window open a moment after a script returns, for a request it sent
+// just before. Together they say when a request without a tab might be an
+// agent script's.
+const unsealed = new Set();
+let scriptGraceUntil = 0;
+const SCRIPT_GRACE_MS = 2000;
 // everScripted holds tabs that ran a script at any time. They may not go
 // back, so a page that ran agent code is never restored from the history
 // cache without its limits.
@@ -211,6 +219,8 @@ browser.tabs.onRemoved.addListener((tabId) => {
   agentTabs.delete(tabId);
   taints.delete(tabId);
   scripted.delete(tabId);
+  unsealed.delete(tabId);
+  knownTabs.delete(tabId);
   everScripted.delete(tabId);
   frameNums.delete(tabId);
   loginGuards.delete(tabId);
@@ -219,11 +229,18 @@ browser.tabs.onRemoved.addListener((tabId) => {
 // A tab that a scripted tab opens inherits its limits.
 browser.tabs.onCreated.addListener((tab) => {
   inheritTaint(tab);
+  knownTabs.add(tab.id);
 });
+// knownTabs holds the tabs that existed when the opener's limits were last
+// checked: a tab inherits limits only if it was created after its opener
+// got them, never later (a tab the user opened from a tab that only later
+// ran a script keeps working).
+const knownTabs = new Set();
+browser.tabs.query({}).then((tabs) => tabs.forEach((t) => knownTabs.add(t.id)), () => {});
 
 function inheritTaint(tab) {
   const from = tab.openerTabId !== undefined ? taints.get(tab.openerTabId) : undefined;
-  if (from && !taints.has(tab.id)) {
+  if (from && !taints.has(tab.id) && !knownTabs.has(tab.id)) {
     taints.set(tab.id, { sites: new Map(from.sites) });
     scripted.add(tab.id);
     everScripted.add(tab.id);
@@ -551,9 +568,13 @@ browser.webRequest.onBeforeRequest.addListener(
     if (details.tabId < 0) {
       // Requests a content script makes with the extension's own fetch or
       // XMLHttpRequest have no tab and no origin (measured on Firefox
-      // 157). While a tab holds a script's limits, those are refused, so
-      // agent code cannot reach other sites around the tab's limits.
-      return taints.size && !details.originUrl && !details.documentUrl ? { cancel: true } : {};
+      // 157), and so do those of other extensions' content scripts, which
+      // look the same. They are refused only while an agent script may be
+      // running in a tab: from its start until it returned and sealed the
+      // extension world's network calls, plus a short grace. At any other
+      // time they are not ours to judge.
+      return taints.size && (unsealed.size > 0 || Date.now() < scriptGraceUntil) && !details.originUrl && !details.documentUrl ?
+        { cancel: true } : {};
     }
     const lg = loginGuards.get(details.tabId);
     if (lg && lg.submitting && details.method !== "GET" && details.method !== "HEAD" &&
@@ -704,6 +725,7 @@ async function loadIn(tabId, url) {
     }
     taints.delete(tabId);
     scripted.delete(tabId);
+    unsealed.delete(tabId);
   }
   const loaded = waitComplete(tabId, true);
   await browser.tabs.update(tabId, { url });
@@ -1188,6 +1210,25 @@ async function composeText(tabId) {
 // evalCode wraps the agent's script, the body of an async function, so
 // its result comes back as JSON. fetch and XMLHttpRequest are the page's
 // own, so requests go out as the page's, with its cookies and origin.
+// sealCode runs after agent code returned. It makes the extension world's
+// own network calls throw, so a timer or listener the script left behind
+// cannot use them later; the browser reports these requests without a tab
+// or origin, and the request filter refuses them only while a script may be
+// running. Calls through the page (content.fetch) are not sealed: they
+// carry the tab and its limits. It sets __hermesSealed to true when every
+// call is sealed.
+function sealCode() {
+  return "let __hermesSealed = true;\n" +
+    "{\n" +
+    "  const refuse = function __hermesRefuse() { throw new TypeError('network calls of the extension world are not available after a script returned; use fetch inside the script'); };\n" +
+    "  for (const k of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource']) {\n" +
+    "    if (globalThis[k] && globalThis[k].name === '__hermesRefuse') { continue; }\n" +
+    "    try { Object.defineProperty(globalThis, k, { value: refuse, writable: false, configurable: false }); } catch (e) {}\n" +
+    "    if (globalThis[k] !== refuse) { __hermesSealed = false; }\n" +
+    "  }\n" +
+    "}\n";
+}
+
 function evalCode(script, site, blocked) {
   // The extension API (native messaging, tabs) is
   // taken out of this world before agent code runs; the helpers keep only
@@ -1200,25 +1241,29 @@ function evalCode(script, site, blocked) {
     "  const h = location.hostname.toLowerCase().replace(/\\.$/, '');\n" +
     "  const s = h.startsWith('www.') ? h.slice(4) : h;\n" +
     "  if (!/^https?:$/.test(location.protocol) || s !== " + JSON.stringify(site) + " || " + JSON.stringify(blocked) + ".includes(h)) {\n" +
-    "    return { ok: false, refused: true, error: 'the frame shows another page than the one approved; take a new snapshot' };\n" +
+    "    return { ok: false, refused: true, sealed: true, error: 'the frame shows another page than the one approved; take a new snapshot' };\n" +
     "  }\n" +
     "  if ([...document.querySelectorAll('input[type=password]')].some((f) => f.value !== '')) {\n" +
-    "    return { ok: false, refused: true, error: 'scripts are refused on a page with a filled password field' };\n" +
+    "    return { ok: false, refused: true, sealed: true, error: 'scripts are refused on a page with a filled password field' };\n" +
     "  }\n" +
     "}\n" +
     "for (const k of ['browser', 'chrome', 'messenger']) {\n" +
     "  try { delete globalThis[k]; } catch (e) {}\n" +
     "  try { if (globalThis[k] !== undefined) { Object.defineProperty(globalThis, k, {value: undefined}); } } catch (e) {}\n" +
-    "  if (globalThis[k] !== undefined) { return { ok: false, error: 'the extension API could not be hidden from the script' }; }\n" +
+    "  if (globalThis[k] !== undefined) { return { ok: false, sealed: true, error: 'the extension API could not be hidden from the script' }; }\n" +
     "}\n" +
     "const fetch = (...a) => content.fetch(...a);\n" +
     "const XMLHttpRequest = content.XMLHttpRequest;\n" +
+    "let __hermesOut;\n" +
     "try {\n" +
     "const __hermesValue = await (async () => {\n" + script + "\n})();\n" +
-    "return { ok: true, json: JSON.stringify(__hermesValue === undefined ? null : __hermesValue), undef: __hermesValue === undefined };\n" +
+    "__hermesOut = { ok: true, json: JSON.stringify(__hermesValue === undefined ? null : __hermesValue), undef: __hermesValue === undefined };\n" +
     "} catch (e) {\n" +
-    "return { ok: false, error: String((e && e.message) || e) };\n" +
+    "__hermesOut = { ok: false, error: String((e && e.message) || e) };\n" +
     "}\n" +
+    sealCode() +
+    "__hermesOut.sealed = __hermesSealed;\n" +
+    "return __hermesOut;\n" +
     "})();\n";
 }
 
@@ -2152,7 +2197,18 @@ const OPS = {
     taints.set(tab_id, { sites });
     scripted.add(tab_id);
     everScripted.add(tab_id);
-    const [res] = await browser.tabs.executeScript(tab_id, { code: evalCode(script, site, [...autologinHosts]), frameId });
+    unsealed.add(tab_id);
+    let res;
+    try {
+      [res] = await browser.tabs.executeScript(tab_id, { code: evalCode(script, site, [...autologinHosts]), frameId });
+    } finally {
+      scriptGraceUntil = Date.now() + SCRIPT_GRACE_MS;
+      // A script that did not report its seal (it threw before, the frame
+      // went away) leaves the window open until the tab loads a page again.
+      if (res && typeof res === "object" && res.sealed === true) {
+        unsealed.delete(tab_id);
+      }
+    }
     if (!res || typeof res !== "object") {
       throw new Error("the script did not finish");
     }
