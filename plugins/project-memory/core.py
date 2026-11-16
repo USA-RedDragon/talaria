@@ -1238,6 +1238,53 @@ def _spill(slug: str, st, ops: list, apply_index, *, forced_only: bool) -> dict:
     return result
 
 
+def _excerpt(text: str, cap: int = 100) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= cap else text[:cap].rstrip() + "..."
+
+
+def _closest(candidates: list[str], old_text: Any) -> list[str]:
+    """Short excerpts of the candidates that contain ``old_text`` (an ambiguous match) or share the most words
+    with it (a miss), so the agent can copy the right text."""
+    if not isinstance(old_text, str) or not old_text.strip():
+        return []
+    hits = [c for c in candidates if old_text.strip() in c]
+    if not hits:
+        words = set(re.findall(r"\w+", old_text.lower()))
+        scored = sorted(((len(words & set(re.findall(r"\w+", c.lower()))) / len(words), i)
+                         for i, c in enumerate(candidates)) if words else [], key=lambda p: (-p[0], p[1]))
+        hits = [candidates[i] for score, i in scored[:3] if score >= 0.3]
+    return [_excerpt(c) for c in hits[:3]]
+
+
+def _failed_op(error: Any, ops: list) -> Optional[dict]:
+    m = re.match(r"Operation (\d+) \(", str(error or ""))
+    return ops[int(m.group(1)) - 1] if m and 0 < int(m.group(1)) <= len(ops) else None
+
+
+def _with_closest(slug: str, result: dict, ops: list) -> dict:
+    """A failed replace, patch, remove or topic_patch names the entries nearest its old_text (short excerpts)."""
+    if result.get("success"):
+        return result
+    result = dict(result)
+    error = result.get("error")
+    if result.get("closest_entries"):
+        result["closest_entries"] = [_excerpt(c) for c in result["closest_entries"]]
+        return result
+    op = _failed_op(error, ops)
+    if op is None or op.get("action") not in ("remove", "patch", "replace", "topic_patch"):
+        return result
+    if op["action"] == "topic_patch":
+        doc = L.read_doc(project_dir(slug), "topic", L.clean_name(op.get("topic")))
+        pool = [ln for ln in (doc["body"].splitlines() if doc else []) if ln.strip()]
+    else:
+        pool = entries(slug)
+    close = _closest(pool, op.get("old_text"))
+    if close:
+        result["closest_entries"] = close
+    return result
+
+
 def write_ops(slug: str, st, operations: list, apply_index=None) -> dict:
     """Apply a batch: file operations first, then the index operations as one all-or-nothing batch, moving
     detail into topics when the index would overflow. ``apply_index`` runs an index batch (the store's own by
@@ -1245,7 +1292,7 @@ def write_ops(slug: str, st, operations: list, apply_index=None) -> dict:
     apply_index = apply_index or (lambda ops: st.apply_batch("memory", ops))
     why = _check_ops(slug, operations)
     if why:
-        return {"success": False, "error": why + " Nothing was written."}
+        return _with_closest(slug, {"success": False, "error": why + " Nothing was written."}, operations)
     notes_done = [_apply_file_op(slug, op) for op in operations if op.get("action") in FILE_ACTIONS]
     index_ops = [op for op in operations if op.get("action") in INDEX_ACTIONS]
     forced = [op for op in index_ops if op.get("action") == "add" and op.get("topic")]
@@ -1261,7 +1308,13 @@ def write_ops(slug: str, st, operations: list, apply_index=None) -> dict:
         result = dict(apply_index(plain))
         if not result.get("success") and _over_budget():
             result = _spill(slug, st, plain, apply_index, forced_only=False)
-    result = dict(result)
+    result = _with_closest(slug, result, plain)
+    removed = result.get("removed_entries")
+    removes = sum(1 for op in plain if op.get("action") == "remove")
+    if result.get("success") and removes:
+        n = len(removed) if isinstance(removed, dict) and removed else removes
+        result["removed"] = n
+        result["message"] = f"Removed {n} project note{'s' if n != 1 else ''}."
     if notes_done:
         result["files"] = notes_done
         if result.get("success") and not index_ops:
