@@ -505,7 +505,7 @@
    }
   },
   "want": {
-   "icon": "file",
+   "icon": "download",
    "title": "Sent q3-summary.pdf",
    "code": "q3-summary.pdf",
    "status": "Offered",
@@ -582,7 +582,8 @@
   "want": {
    "title": "Not sent .env",
    "status": "Looks like a secret",
-   "tone": "warn",
+   "tone": "bad",
+   "icon": "download",
    "lines": [
     "/home/alice/app/"
    ],
@@ -675,6 +676,7 @@
   },
   "want": {
    "title": "Could not publish a page",
+   "icon": "close",
    "status": "The file is empty",
    "lines": [
     "empty.html"

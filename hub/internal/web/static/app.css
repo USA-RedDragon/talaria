@@ -1822,6 +1822,7 @@ pre.code .body { display: block; background: transparent; padding: 0 .75rem 0 0;
 
 
 /* cards/files.js */
+pre.diff.tool-box { tab-size: 4; }
 .tool[data-tool="search_files"] .tool-li.mono { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* end cards/files.js */

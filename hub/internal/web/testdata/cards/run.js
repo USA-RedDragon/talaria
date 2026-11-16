@@ -37,7 +37,7 @@ for (const f of fs.readdirSync(casesDir).filter((x) => x.endsWith(".json")).sort
     const all = {
       icon: d.icon, title: d.title, status: d.status, state: d.state, tone: d.tone || "", code: d.code, chips: d.chips,
       sub: d.sub ? text(d.sub.parts) : "", lines: d.lines.map((l) => text(l.parts)),
-      lineStyles: d.lines.map((l) => [l.dim ? "dim" : "", l.mono ? "mono" : "", l.closed ? "closed" : ""].filter(Boolean).join(" ")),
+      lineStyles: d.lines.map((l) => [l.dim ? "dim" : "", l.mono ? "mono" : "", l.closed ? "closed" : "", l.wrap ? "wrap" : ""].filter(Boolean).join(" ")),
       more: text(d.more), blocks: d.blocks.map((b) => b.label || b.kind || ""), raw: !!d.raw, page: d.page || null, vision: d.vision || null, waiting: !!d.waiting,
     };
     const seen = {};

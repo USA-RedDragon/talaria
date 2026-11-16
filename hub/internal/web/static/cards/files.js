@@ -371,7 +371,7 @@
     const a = args(c);
     const res = result(c);
     const offer = isObj(res.file_offer) ? res.file_offer : {};
-    const out = { icon: "file", blocks: [] };
+    const out = { icon: "download", blocks: [] };
     const path = str(offer.path) || str(a.path);
     const real = base(path) || str(offer.name) || str(a.name) || "a file";
     const refused = res.status === "refused" || offer.secret === true && !!offer.reason;
@@ -386,7 +386,7 @@
     if (c.failed) {
       if (refused) {
         out.status = upperFirst(str(offer.reason) || errorText(res)) || "Not sent";
-        out.tone = "warn";
+        out.tone = "bad";
         out.ownFailure = true;
       } else {
         const e = errorText(res) || str(c.error);
@@ -419,7 +419,7 @@
   function pagePublish(c) {
     const a = args(c);
     const res = result(c);
-    const out = { icon: "file", blocks: [] };
+    const out = { icon: c.failed ? "close" : "file", blocks: [] };
     const src = pathOf(a);
     const name = base(src);
     const title = short(str(res.title));

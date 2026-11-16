@@ -369,15 +369,15 @@
     if (usage) facts.push(store + " " + usage.pct + "% full (" + num(usage.used) + " of " + num(usage.limit) + " characters)" + (count !== null ? " · " + plural(count, "note") : ""));
     else if (count !== null) facts.push(store + " " + plural(count, "note"));
     const factText = facts.join(" · ").replace(/^Already saved, no duplicate added · /, "Already saved, no duplicate added · ").replace(/ · Memory /, " · Memory ");
-    if (factText) out.lines.push(dimLine([dup && usage ? "Already saved, no duplicate added · " + store + " " + usage.pct + "% full (" + num(usage.used) + " of " + num(usage.limit) + " characters)" + (count !== null ? " · " + plural(count, "note") : "") : factText]));
+    if (factText) out.lines.push(dimLine([dup && usage ? "Already saved, no duplicate added · " + store + " " + usage.pct + "% full (" + num(usage.used) + " of " + num(usage.limit) + " characters)" + (count !== null ? " · " + plural(count, "note") : "") : factText], { wrap: true }));
 
     for (const o of ops) {
       const act = str(o.action);
-      if (act === "add") out.blocks.push({ label: failed ? "Note" : "Added note", text: failed ? str(o.content) : "\n+ " + str(o.content).split("\n").join("\n+ "), kind: failed ? "pre" : "diff" });
-      else if (act === "remove") out.blocks.push({ label: failed ? "Note to remove" : "Removed note", text: failed ? str(o.old_text) : "\n- " + str(o.old_text).split("\n").join("\n- "), kind: failed ? "pre" : "diff" });
+      if (act === "add") out.blocks.push({ label: failed ? "Note" : "Added note", text: str(o.content), pre: true });
+      else if (act === "remove") out.blocks.push({ label: failed ? "Note to remove" : "Removed note", text: str(o.old_text), pre: true });
       else if (act === "patch" || act === "replace") {
         if (failed) out.blocks.push({ label: "Note", text: str(o.content), pre: true });
-        else out.blocks.push({ label: "Added note", text: "\n+ " + str(o.content).split("\n").join("\n+ "), kind: "diff" }, { label: "Removed note", text: "\n- " + str(o.old_text).split("\n").join("\n- "), kind: "diff" });
+        else out.blocks.push({ label: "Added note", text: str(o.content), pre: true }, { label: "Removed note", text: str(o.old_text), pre: true });
       }
     }
     if (!failed && (usage || count !== null)) {
