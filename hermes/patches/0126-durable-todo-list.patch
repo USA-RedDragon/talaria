@@ -1,0 +1,1769 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 08:22:52 +0000
+Subject: [PATCH] feat(todo): durable, always-loaded todo list for long work
+
+todo_list was deferred behind tool_search and lived only in memory, rebuilt
+from the transcript (results over a size cap dropped), so a long chat lost its
+plan at compactions, fresh per-message agents and restarts, and agents rarely
+used it.
+
+- Always loaded: todo_list is no longer in the default tools.tool_search.defer
+  list, and its description says when to use it (more than a few steps, every
+  delegation plan, every 'all N items' job) and that the list survives.
+- Durable: every write is a read-modify-write of a session_todos row in
+  state.db in one transaction. A read walks the compression lineage back to
+  the newest stored row, so the list follows a chat across every compaction,
+  fresh agent, restart and resume, with no transcript size cap. Transcript
+  hydration stays the fallback for chats from before.
+- Items: nesting to any depth (parent), notes, an optional owner (subagent
+  id), status blocked, up to 1000 items. One in_progress item per owner:
+  lanes owned by different subagents may run together.
+- Subagents: a narrowed child keeps the todo toolset. list='parent' reads the
+  parent's list and updates status and notes of the items assigned to the
+  child (or adds subtasks under them). subagent_id reads a child's list,
+  running or finished. delegate_task action='list' shows each child's current
+  item and counts.
+- Compaction: the stored list is loaded before the snapshot is folded in; the
+  snapshot shows open items with notes and owners and counts the done ones.
+- Gateway: session.todos reads the stored list (or a child's with
+  subagent_id); subagent.list rows carry the child's todo brief; a child's
+  update of its parent's items, and a messaging route's write, publish
+  todo.updated; resumes prefer the stored list.
+---
+ agent/conversation_compression.py             |   5 +
+ agent/inline_tool_executors.py                |   6 +-
+ agent/turn_context.py                         |   4 +
+ apps/shared/src/gateway-contract.generated.ts |  26 ++
+ apps/shared/src/gateway-contract.openrpc.json | 164 +++++++++
+ gateway/session_ancillary.py                  |  93 ++++-
+ gateway/session_controls.py                   |  13 +-
+ hermes_cli/config_defaults.py                 |   3 +-
+ hermes_state_todo.py                          | 107 +++++-
+ tests/tools/test_todo_durable.py              | 325 ++++++++++++++++++
+ tests/tools/test_tool_search.py               |   7 +-
+ tools/delegate_tool_registry.py               |   6 +
+ tools/delegate_tool_toolsets.py               |   4 +
+ tools/todo_durable.py                         | 277 +++++++++++++++
+ tools/todo_tool.py                            | 195 +++++++++--
+ .../contracts/canonical_projections.py        |  22 +-
+ ...ofiles_vault_complete_foreign_subagents.py |  18 +
+ tui_gateway/tool_progress.py                  |  19 +-
+ 18 files changed, 1242 insertions(+), 52 deletions(-)
+ create mode 100644 tests/tools/test_todo_durable.py
+ create mode 100644 tools/todo_durable.py
+
+diff --git a/agent/conversation_compression.py b/agent/conversation_compression.py
+index dcd1bab5..18fe78dc 100644
+--- a/agent/conversation_compression.py
++++ b/agent/conversation_compression.py
+@@ -2973,6 +2973,11 @@ def _run_summary_dispatch(
+ 
+ def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
+     """Strip stale todo snapshots from ``compressed`` and fold the live one in (in place)."""
++    # A fresh agent (one per gateway message, or after a restart) may not have loaded the stored
++    # list yet: load it, so the compaction carries the whole plan.
++    from tools.todo_durable import sync as _sync_todos
++    with contextlib.suppress(Exception):
++        _sync_todos(agent)
+     todo_snapshot = agent._todo_store.format_for_injection()
+     # Non-empty store (even all done) is authoritative: drop the old snapshot. A
+     # truly empty store may be un-rehydrated post-compaction: keep the snapshot.
+diff --git a/agent/inline_tool_executors.py b/agent/inline_tool_executors.py
+index 0a9f5423..dbdabb22 100644
+--- a/agent/inline_tool_executors.py
++++ b/agent/inline_tool_executors.py
+@@ -289,9 +289,11 @@ def _setup_mcp_shim(agent, args: dict, ctx: InlineToolContext) -> Any:
+ 
+ # Order is the historical if/elif order of ``execute_tool_calls_sequential``.
+ _RAW_INLINE_TOOL_EXECUTORS: dict[str, InlineToolExecutor] = {
++    # agent: the list is stored in the agent's session database (tools/todo_durable.py).
+     "todo_list": _tool(
+-        "tools.todo_tool", "todo_tool", ("todos", "todos"), ("merge", "merge", False),
+-        store=lambda agent, ctx: agent._todo_store,
++        "tools.todo_tool", "todo_tool", ("todos", "todos"), ("merge", "merge", False), ("list_name", "list"),
++        ("subagent_id", "subagent_id"),
++        store=lambda agent, ctx: agent._todo_store, agent=lambda agent, ctx: agent,
+     ),
+     # Bot Mode teammate DM is injected, not registered: only a canonical Bot
+     # Chat session carries the schema, and the tool re-gates on the title.
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index 658af469..0ffa48de 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -773,6 +773,10 @@ def _hydrate_from_history(agent: Any, conversation_history: Optional[list[Any]])
+     """Hydrate process-local state from persisted history on the first resumed turn."""
+     if not conversation_history:
+         return
++    # The stored list (state.db) first: it holds every write, also those a compaction cut from the
++    # transcript; transcript hydration covers chats from before the list was stored.
++    from tools.todo_durable import sync as _sync_todos
++    _sync_todos(agent)
+     if not agent._todo_store.has_items():
+         agent._hydrate_todo_store(conversation_history)
+     # A live native checkpoint arms this latch while its response is captured.  A
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index fac5e14e..9e496b27 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -2461,9 +2461,20 @@ export interface SubagentSnapshot {
+   accepting_steer?: boolean | null
+   waiting_on?: string[] | null
+   child_session_id?: string | null
++  todo?: SubagentTodoBrief | null
+ }
+ /** Lifecycle of one delegated child (``tools/delegate_tool_child_run.py``); ``failed`` / ``error`` / ``timeout`` / ``interrupted`` / ``completed`` are terminal. */
+ export type SubagentStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'error' | 'timeout' | 'interrupted'
++/** A child's todo list at a glance (``tools/todo_tool.py`` ``TodoStore.brief``). */
++export interface SubagentTodoBrief {
++  current?: SubagentTodoItem[]
++  counts?: Record<string, number>
++  revision?: number
++}
++export interface SubagentTodoItem {
++  id: string
++  content: string
++}
+ /** ``async_delegation.failed_delegations_for_session`` row: one failed task of an async delegation. */
+ export interface FailedDelegation {
+   delegation_id: string
+@@ -5446,6 +5457,19 @@ export interface CanonicalConfigGetResult {
+   scope?: string | null
+   options?: ('normal' | 'fast' | 'auto' | 'cold' | 'ultrafast')[] | null
+ }
++/** ``subagent_id``: read that child's list (running or finished) instead of the session's. */
++export interface CanonicalSessionTodosParams {
++  session_id: string
++  profile?: string | null
++  subagent_id?: string | null
++}
++/** ``gateway/session_ancillary.py`` ``session.todos``: the stored todo list (``tools/todo_durable.py``), read from state.db, so it answers after any number of compactions and with no live agent. Changes arrive as ``todo.updated``. ``todo_state`` is null when no list was ever stored. */
++export interface CanonicalSessionTodosResult {
++  session_id: string
++  subagent_id?: string | null
++  running?: boolean | null
++  todo_state?: TodoState | null
++}
+ /** Session controls (``busy`` / ``verbose`` / ``yolo`` / ``show_reasoning`` / ``service_tier``, which need ``session_id``) and the TUI's profile preferences (``gateway/session_tui_config.py``; ``session_id`` optional). ``model`` is recognised only to be refused with ``use_session_mutation_model``: a model pick is the revision-fenced ``session.mutate`` operation, never a config write. */
+ export interface CanonicalConfigSetParams {
+   profile?: string | null
+@@ -7176,6 +7200,7 @@ export interface CanonicalRpcMethods {
+   /** The session.usage dict on demand: what main's classic CLI read off its agent. */
+   'session.stats': { params: SessionStatsParams; result: SessionStats }
+   'session.steer': { params: CanonicalCorrectionParams; result: CanonicalCorrectionResult }
++  'session.todos': { params: CanonicalSessionTodosParams; result: CanonicalSessionTodosResult }
+   /** One page of a stored conversation's display rows across its compression lineage (live rows and rows a compaction archived, each logical message once, and each compaction handoff as a `row_kind: 'compaction'` row at its position), from the oldest or the newest. Never attaches the caller. A page holds at most `limit` (1-500) rows, compaction rows included, plus up to 64 tool results of the call at its edge, and at most 2 MiB of JSON, cut between tool groups (a single larger row keeps only its role, kind, time, ids and the head of its text, and carries `truncated`). Oldest order: read on until a page is empty, then poll with the same `next_cursor` for the rows written since; `reset: true` means the rows the cursor covered changed shape, so the reply starts again from the first page. Latest order: read on until `next_cursor` is null; its cursor stays valid across later compactions and turns. A rotated lineage past `sessions.max_resume_messages` pages only its current segment (a cursor from before it crossed, or a latest-order cursor from before a compaction rotated that segment, answers `reset: true`). With `subagent_id`: a delegated child of the session (running: through the parent's roster; finished: through its stored row, when its ancestry reaches this conversation); a foreign or unknown child is `available: false`. Refusals: invalid_params (a cursor issued for another session, child or order, or not by this read), not_found, permission_denied, profile_mismatch. */
+   'session.transcript': { params: StoredTranscriptParams; result: StoredTranscriptResult }
+   /** Ink ``!cmd`` / ``{!cmd}`` on the shared owner: one safe command for a local session, in its frozen launch cwd (``gateway/session_shell.py``). */
+@@ -7238,6 +7263,7 @@ export const CANONICAL_RPC_METHODS = [
+   'session.resume',
+   'session.stats',
+   'session.steer',
++  'session.todos',
+   'session.transcript',
+   'shell.exec',
+   'worker.adopt',
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index b7378e2d..eaff7087 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -11026,6 +11026,95 @@
+         "title": "CanonicalSessionRef",
+         "type": "object"
+       },
++      "CanonicalSessionTodosParams": {
++        "additionalProperties": false,
++        "description": "``subagent_id``: read that child's list (running or finished) instead of the session's.",
++        "properties": {
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "profile": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Profile"
++          },
++          "subagent_id": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Subagent Id"
++          }
++        },
++        "required": [
++          "session_id"
++        ],
++        "title": "CanonicalSessionTodosParams",
++        "type": "object"
++      },
++      "CanonicalSessionTodosResult": {
++        "additionalProperties": false,
++        "description": "``gateway/session_ancillary.py`` ``session.todos``: the stored todo list (``tools/todo_durable.py``),\nread from state.db, so it answers after any number of compactions and with no live agent. Changes\narrive as ``todo.updated``. ``todo_state`` is null when no list was ever stored.",
++        "properties": {
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "subagent_id": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Subagent Id"
++          },
++          "running": {
++            "anyOf": [
++              {
++                "type": "boolean"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Running"
++          },
++          "todo_state": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/TodoState"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null
++          }
++        },
++        "required": [
++          "session_id"
++        ],
++        "title": "CanonicalSessionTodosResult",
++        "type": "object"
++      },
+       "CanonicalShellExecParams": {
+         "additionalProperties": false,
+         "properties": {
+@@ -44711,6 +44800,17 @@
+             ],
+             "default": null,
+             "title": "Child Session Id"
++          },
++          "todo": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/SubagentTodoBrief"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null
+           }
+         },
+         "required": [
+@@ -44824,6 +44924,52 @@
+         "title": "SubagentTailResult",
+         "type": "object"
+       },
++      "SubagentTodoBrief": {
++        "additionalProperties": false,
++        "description": "A child's todo list at a glance (``tools/todo_tool.py`` ``TodoStore.brief``).",
++        "properties": {
++          "current": {
++            "items": {
++              "$ref": "#/components/schemas/SubagentTodoItem"
++            },
++            "title": "Current",
++            "type": "array"
++          },
++          "counts": {
++            "additionalProperties": {
++              "type": "integer"
++            },
++            "title": "Counts",
++            "type": "object"
++          },
++          "revision": {
++            "default": 0,
++            "title": "Revision",
++            "type": "integer"
++          }
++        },
++        "title": "SubagentTodoBrief",
++        "type": "object"
++      },
++      "SubagentTodoItem": {
++        "additionalProperties": false,
++        "properties": {
++          "id": {
++            "title": "Id",
++            "type": "string"
++          },
++          "content": {
++            "title": "Content",
++            "type": "string"
++          }
++        },
++        "required": [
++          "id",
++          "content"
++        ],
++        "title": "SubagentTodoItem",
++        "type": "object"
++      },
+       "SubscriptionChangeEffect": {
+         "enum": [
+           "charge_now",
+@@ -50782,6 +50928,24 @@
+         }
+       }
+     },
++    {
++      "name": "session.todos",
++      "summary": "",
++      "params": [
++        {
++          "name": "params",
++          "schema": {
++            "$ref": "#/components/schemas/CanonicalSessionTodosParams"
++          }
++        }
++      ],
++      "result": {
++        "name": "result",
++        "schema": {
++          "$ref": "#/components/schemas/CanonicalSessionTodosResult"
++        }
++      }
++    },
+     {
+       "name": "session.transcript",
+       "summary": "One page of a stored conversation's display rows across its compression lineage (live rows and rows a compaction archived, each logical message once, and each compaction handoff as a `row_kind: 'compaction'` row at its position), from the oldest or the newest. Never attaches the caller. A page holds at most `limit` (1-500) rows, compaction rows included, plus up to 64 tool results of the call at its edge, and at most 2 MiB of JSON, cut between tool groups (a single larger row keeps only its role, kind, time, ids and the head of its text, and carries `truncated`). Oldest order: read on until a page is empty, then poll with the same `next_cursor` for the rows written since; `reset: true` means the rows the cursor covered changed shape, so the reply starts again from the first page. Latest order: read on until `next_cursor` is null; its cursor stays valid across later compactions and turns. A rotated lineage past `sessions.max_resume_messages` pages only its current segment (a cursor from before it crossed, or a latest-order cursor from before a compaction rotated that segment, answers `reset: true`). With `subagent_id`: a delegated child of the session (running: through the parent's roster; finished: through its stored row, when its ancestry reaches this conversation); a foreign or unknown child is `available: false`. Refusals: invalid_params (a cursor issued for another session, child or order, or not by this read), not_found, permission_denied, profile_mismatch.",
+diff --git a/gateway/session_ancillary.py b/gateway/session_ancillary.py
+index 9f027759..9741b6a7 100644
+--- a/gateway/session_ancillary.py
++++ b/gateway/session_ancillary.py
+@@ -23,9 +23,10 @@ _PROCESS_TAIL_CHARS = 32768  # main's dock tail view (cli_process_dock.process_t
+ 
+ 
+ def handlers(connection):
++    watch_todos(connection.authority)
+     return {**{name: partial(read, connection, kind=kind) for name, kind in {
+         'session.control.read': 'control', 'process.list': 'processes',
+-        'subagent.list': 'subagents', 'subagent.tail': 'tail',
++        'subagent.list': 'subagents', 'subagent.tail': 'tail', 'session.todos': 'todos',
+     }.items()}, 'approval.pending': partial(approvals, connection),
+         'approval.received': partial(approvals, connection, ack=True),
+         'process.stop': partial(stop_processes, connection),
+@@ -232,10 +233,12 @@ async def approvals(connection, ref, params, *, ack=False):
+ 
+ 
+ async def read(connection, ref, params, *, kind):
+-    fields = {'session_id', 'profile'} | ({'subagent_id'} if kind == 'tail' else set())
++    fields = {'session_id', 'profile'} | ({'subagent_id'} if kind in ('tail', 'todos') else set())
+     if (set(params) - fields or not isinstance(ref.session_id, str) or not ref.session_id
+             or (kind == 'tail' and (not isinstance(params.get('subagent_id'), str)
+-                                   or not params['subagent_id']))):
++                                   or not params['subagent_id']))
++            or (kind == 'todos' and 'subagent_id' in params and (not isinstance(params['subagent_id'], str)
++                                                                 or not params['subagent_id']))):
+         raise RuntimeStoreError('invalid_params')
+     authority = connection.authority
+     # Cold adoption belongs to session.resume, never an ancillary poll.
+@@ -270,12 +273,16 @@ def _project(authority, ref, params, kind):
+         # Persisted per session id, never the route's live objects: readable after a messaging
+         # route moved on to another conversation.
+         return {'control': control_snapshot(authority, ref)}
++    if kind == 'todos' and not params.get('subagent_id'):
++        return todos_snapshot(authority, ref)
+     _require_current_route(authority, ref)
+     agent, records = _owner_objects(authority, ref, include_fallback_evicted=kind in ('subagents', 'tail'))
+     if kind == 'subagents':
+         return {'subagents': [subagent_row(record) for record in records], 'delegations': []}
+     if kind == 'tail':
+         return subagent_tail(records, params['subagent_id'])
++    if kind == 'todos':
++        return subagent_todos(authority, ref, records, params['subagent_id'])
+     return {'processes': process_snapshot(authority, ref, agent, records)}
+ 
+ 
+@@ -600,10 +607,86 @@ def _compression_lineage(db, session_id):
+ 
+ def subagent_row(record):
+     """One ``subagent.list`` row; ``child_session_id`` is the child's own stored session, the one
+-    ``session.transcript`` reads for its ``subagent_id``."""
++    ``session.transcript`` reads for its ``subagent_id``. ``todo``: the child's current todo item(s)
++    and counts, None while it keeps no list (``session.todos`` with ``subagent_id`` reads it all)."""
++    from tools.todo_durable import brief
+     child = getattr(record.get('agent'), 'session_id', None)
+     return {**{key: record.get(key) for key in _SUBAGENT_FIELDS},
+-            'child_session_id': child if isinstance(child, str) and child else None}
++            'child_session_id': child if isinstance(child, str) and child else None,
++            'todo': brief(record.get('agent'))}
++
++
++def _todo_state(row):
++    """The ``todo_state`` wire shape (``{todos, revision}``) of a stored list, None when none is stored."""
++    if not row:
++        return None
++    return {'todos': list(row.get('todos') or []), 'revision': int(row.get('revision') or 0)}
++
++
++def todos_snapshot(authority, ref):
++    """``session.todos``: the session's stored todo list (tools/todo_durable.py), read from state.db, so
++    it answers with no live agent and after any number of compactions."""
++    target = physical_target(authority, ref)
++    target = authority.db.get_compression_tip(target) or target
++    return {'session_id': ref.session_id, 'todo_state': _todo_state(authority.db.get_session_todos(target))}
++
++
++def subagent_todos(authority, ref, records, subagent_id):
++    """``session.todos`` with ``subagent_id``: the list of one child of this session, running or
++    finished (a finished child's stored list stays readable)."""
++    record = next((r for r in records if r.get('subagent_id') == subagent_id), None)
++    child = getattr((record or {}).get('agent'), 'session_id', None)
++    if not (isinstance(child, str) and child):
++        from tools.delegate_tool_sessions import stored_child_session
++        from tools.delegate_tool_transcript import _compression_lineage
++        target = physical_target(authority, ref)
++        child = stored_child_session(authority.db, subagent_id,
++                                     _compression_lineage(authority.db, authority.db.get_compression_tip(target) or target))
++    if not child:
++        raise RuntimeStoreError('not_found')
++    state = _todo_state(authority.db.get_session_todos(child))
++    store = getattr((record or {}).get('agent'), '_todo_store', None)
++    if store is not None:
++        live = store.snapshot()
++        if (live['todos'] or live['revision']) and (state is None or live['revision'] > state['revision']):
++            state = {'todos': live['todos'], 'revision': live['revision']}
++    return {'session_id': ref.session_id, 'subagent_id': subagent_id, 'running': record is not None,
++            'todo_state': state}
++
++
++def watch_todos(authority):
++    """Publish ``todo.updated`` to a live session's viewers when its stored todo list changes outside
++    the session's own local turn: a subagent updating the items assigned to it, or a messaging
++    route's turn (a local turn already publishes it with its ``tool.complete``)."""
++    if getattr(authority, '_todo_listener', None) is not None:
++        return
++    import weakref
++    from types import SimpleNamespace
++    from tools import todo_durable
++    owner = weakref.ref(authority)
++
++    def listener(session_id, snapshot, origin):
++        current = owner()
++        if current is None:
++            todo_durable.remove_listener(listener)
++            return
++        from gateway.config import Platform
++        for sid, live in list(current.sessions.items()):
++            source = getattr(live, 'source', None)
++            if origin == 'own' and source is not None and source.platform == Platform.LOCAL:
++                continue
++            try:
++                target = physical_target(current, SimpleNamespace(session_id=sid))
++                if (current.db.get_compression_tip(target) or target) != session_id:
++                    continue
++                live.event_stream.publish(sid, {'todos': list(snapshot.get('todos') or []),
++                                                'revision': int(snapshot.get('revision') or 0)},
++                                          event_type='todo.updated')
++            except Exception:
++                continue
++
++    authority._todo_listener = listener
++    todo_durable.add_listener(listener)
+ 
+ 
+ def subagent_tail(records, subagent_id):
+diff --git a/gateway/session_controls.py b/gateway/session_controls.py
+index 16269f99..8e9c9a51 100644
+--- a/gateway/session_controls.py
++++ b/gateway/session_controls.py
+@@ -127,11 +127,16 @@ async def _resume_transcript(authority, ref, snapshot, history, omit):
+     stored count and the todo plan of the physical target the attach resolved, as the stdio resume answers
+     it; the display-row lineage read is skipped (the todo lookup still walks the lineage's todo rows)."""
+     # Its home module, not tui_gateway.server: importing the stdio sidecar points sys.stdout at stderr.
+-    from tui_gateway.tool_progress import _todo_state_from_history
++    from tui_gateway.tool_progress import _stored_todo_state, _todo_state_from_history
+     if not omit:
+-        # The newest todo result in the transcript, the snapshot the session's agent hydrates
+-        # from and its ``todo.updated`` frames carried: a viewer attaching shows the plan now.
+-        return {'messages': history, 'message_count': len(history), 'todo_state': _todo_state_from_history(history)}
++        # The stored list (tools/todo_durable.py), which a compaction never cuts; else the newest todo
++        # result in the transcript, the snapshot the session's agent hydrates from and its
++        # ``todo.updated`` frames carried: a viewer attaching shows the plan now.
++        todo_state = _todo_state_from_history(history)
++        stored = await asyncio.to_thread(_stored_todo_state, authority.db, snapshot.transcript_target)
++        if stored is not None and (todo_state is None or stored['revision'] >= todo_state['revision']):
++            todo_state = stored
++        return {'messages': history, 'message_count': len(history), 'todo_state': todo_state}
+     from gateway.session_local_recovery import omitted_history_state
+     # A delete committed since the attach is ``not_found``, as one during the attach is.
+     todo_state, count = await asyncio.to_thread(authority.unless_deleted, ref, partial(
+diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
+index cc1d16bf..693688dc 100644
+--- a/hermes_cli/config_defaults.py
++++ b/hermes_cli/config_defaults.py
+@@ -2092,8 +2092,9 @@ DEFAULT_CONFIG = {
+             # event-triggered built-ins; an explicit list replaces it wholesale and [] keeps every
+             # tool eager. The runtime fallback in tools/tool_search.py derives from this value.
+             "defer": [
++                # todo_list is not here: it holds the plan of long work, so it is always loaded.
+                 "computer_use", "session_search", "image_generate",
+-                "todo_list", "process_manage", "cronjob_manage", "browser_vault",
++                "process_manage", "cronjob_manage", "browser_vault",
+                 # Desktop GUI surface (desktop_ui, project and catalog toolsets)
+                 "drive_preview", "gui_tour", "desktop_preview", "annotate_preview", "manage_catalog",
+                 "show_tip", "desktop_project", "close_terminal",
+diff --git a/hermes_state_todo.py b/hermes_state_todo.py
+index 9c752025..207c9a57 100644
+--- a/hermes_state_todo.py
++++ b/hermes_state_todo.py
+@@ -9,8 +9,113 @@ from typing import Any, Optional
+ 
+ _TODO_TOOLS = "tool_name IN ('todo_list', 'todo')"
+ 
++# The durable todo list (tools/todo_durable.py): one row per session segment that wrote the list.
++# Created on the first write, so a database that never stored a list has no table. Deleting or
++# pruning a session drops its rows (the writer runs with foreign_keys=ON).
++_TODO_LIST_DDL = (
++    "CREATE TABLE IF NOT EXISTS session_todos (session_id TEXT PRIMARY KEY REFERENCES sessions(id) "
++    "ON DELETE CASCADE, todos_json TEXT NOT NULL, revision INTEGER NOT NULL, updated_at REAL NOT NULL)"
++)
++# Compactions a lineage walk follows back; relift-sized chats compact a few hundred times.
++_TODO_LINEAGE_LIMIT = 5000
+ 
+-class SessionTodoResultMixin:
++
++class SessionTodoListMixin:
++    """The durable todo list of a conversation: stored per segment, read back along the compression
++    lineage, so it survives compaction, restarts and resumes without the transcript."""
++
++    def _todo_lineage_back(self, session_id: str) -> list[str]:
++        """*session_id*, then each segment it continues by compression, newest first."""
++        ids, seen = [session_id], {session_id}
++        row = self.get_session(session_id)
++        while row and len(ids) < _TODO_LINEAGE_LIMIT and self._is_compression_child_row(row):
++            parent = row["parent_session_id"]
++            if parent in seen:
++                break
++            seen.add(parent)
++            ids.append(parent)
++            row = self.get_session(parent)
++        return ids
++
++    @staticmethod
++    def _todo_row_dict(row) -> Optional[dict[str, Any]]:
++        if row is None:
++            return None
++        try:
++            todos = json.loads(row["todos_json"])
++        except (TypeError, ValueError):
++            return None
++        if not isinstance(todos, list):
++            return None
++        return {"todos": todos, "revision": int(row["revision"] or 0), "session_id": row["session_id"],
++                "updated_at": row["updated_at"]}
++
++    @staticmethod
++    def _todo_pick(conn, ids: list[str]) -> Optional[dict[str, Any]]:
++        """The stored row of the first of *ids* that has one."""
++        order = {sid: i for i, sid in enumerate(ids)}
++        best = None
++        for start in range(0, len(ids), 500):
++            chunk = ids[start:start + 500]
++            for row in conn.execute(
++                    "SELECT session_id, todos_json, revision, updated_at FROM session_todos "
++                    f"WHERE session_id IN ({','.join('?' * len(chunk))})", tuple(chunk)):
++                if best is None or order[row["session_id"]] < order[best["session_id"]]:
++                    best = row
++            if best is not None:
++                break
++        return SessionTodoListMixin._todo_row_dict(best)
++
++    def get_session_todos(self, session_id: str) -> Optional[dict[str, Any]]:
++        """``{todos, revision, session_id, updated_at}`` of the newest stored list in *session_id*'s
++        compression lineage (``session_id`` is the segment that stored it), or None."""
++        import sqlite3
++
++        if not session_id:
++            return None
++        try:
++            with self._read_ctx() as conn:
++                found = self._todo_pick(conn, [session_id])
++        except sqlite3.OperationalError:  # no list was ever stored here: no table
++            return None
++        if found is not None:
++            return found
++        ids = self._todo_lineage_back(session_id)
++        if len(ids) == 1:
++            return None
++        try:
++            with self._read_ctx() as conn:
++                return self._todo_pick(conn, ids[1:])
++        except sqlite3.OperationalError:
++            return None
++
++    def update_session_todos(self, session_id: str, fn) -> Any:
++        """Read-modify-write the list of *session_id* in one write transaction. ``fn(row)`` gets the
++        stored list (``get_session_todos`` shape, or None) and returns ``(result, snapshot)``; a
++        snapshot ``{todos, revision}`` is stored under *session_id*, None stores nothing. Returns
++        ``result``. An exception from ``fn`` rolls back."""
++        if not session_id:
++            raise ValueError("session_id is required")
++        ids = self._todo_lineage_back(session_id)
++
++        def _do(conn):
++            import time
++
++            conn.execute(_TODO_LIST_DDL)
++            result, snapshot = fn(self._todo_pick(conn, ids))
++            if snapshot is not None:
++                conn.execute(
++                    "INSERT INTO session_todos (session_id, todos_json, revision, updated_at) VALUES (?, ?, ?, ?) "
++                    "ON CONFLICT(session_id) DO UPDATE SET todos_json = excluded.todos_json, "
++                    "revision = excluded.revision, updated_at = excluded.updated_at",
++                    (session_id, json.dumps(snapshot["todos"], ensure_ascii=False), int(snapshot["revision"]),
++                     time.time()))
++            return result
++
++        return self._execute_write(_do)
++
++
++class SessionTodoResultMixin(SessionTodoListMixin):
+     """Latest visible, paired and valid Todo tool result of a session's lineage."""
+ 
+     def get_latest_todo_result(self, session_id: str, *, max_chars: Optional[int] = None) -> Optional[str]:
+diff --git a/tests/tools/test_todo_durable.py b/tests/tools/test_todo_durable.py
+new file mode 100644
+index 00000000..4cd691ed
+--- /dev/null
++++ b/tests/tools/test_todo_durable.py
+@@ -0,0 +1,325 @@
++"""The todo list is a durable planning tool: always loaded, stored in state.db on every call, nested to
++any depth with notes and owners, shared between a parent and its subagents, carried through every
++compaction and restart, and readable over the gateway (tools/todo_durable.py, hermes_state_todo.py)."""
++
++import json
++import weakref
++from types import SimpleNamespace
++
++import pytest
++
++from hermes_state import SessionDB
++from tools.todo_tool import MAX_TODO_RESULT_CHARS, TODO_INJECTION_HEADER, TODO_SCHEMA, TodoStore, todo_tool
++
++
++@pytest.fixture
++def db(tmp_path):
++    with SessionDB(db_path=tmp_path / "state.db") as database:
++        yield database
++
++
++class _Agent(SimpleNamespace):
++    """A stand-in AIAgent (weak-referenceable, as the spawn tree's parent refs need)."""
++
++
++def _agent(db, session_id, **extra):
++    return _Agent(session_id=session_id, _session_db=db, _todo_store=TodoStore(), **extra)
++
++
++def _call(agent, **kwargs):
++    return json.loads(todo_tool(store=agent._todo_store, agent=agent, **kwargs))
++
++
++def _compact(db, old, new):
++    """One compaction: the old segment ends 'compression' and the new one continues it."""
++    db.create_session(new, source="cli", parent_session_id=old)
++    db.end_session(old, "compression")
++
++
++# (1) Always loaded, and the description says when to use it.
++
++def test_todo_list_is_not_deferred_by_default():
++    from hermes_cli.config_defaults import DEFAULT_CONFIG
++    from tools.tool_search import is_deferrable_tool_name
++
++    defer = frozenset(DEFAULT_CONFIG["tools"]["tool_search"]["defer"])
++    assert "todo_list" not in defer
++    assert not is_deferrable_tool_name("todo_list", defer, frozenset())
++
++
++def test_description_says_when_to_use_it_and_that_it_survives():
++    text = TODO_SCHEMA["description"]
++    for phrase in ("more than a few steps", "delegation plan", "'all N items'", "compaction", "restart"):
++        assert phrase in text
++    item = TODO_SCHEMA["parameters"]["properties"]["todos"]["items"]["properties"]
++    assert {"notes", "owner", "parent"} <= set(item)
++    assert "blocked" in item["status"]["enum"]
++
++
++def test_a_narrowed_subagent_keeps_the_todo_list():
++    from tools.delegate_tool_toolsets import _resolve_child_toolsets
++
++    parent = SimpleNamespace(enabled_toolsets=["hermes-cli"], disabled_toolsets=[])
++    enabled, _ = _resolve_child_toolsets(parent, ["terminal", "file"], "leaf")
++    assert "todo" in enabled
++
++
++# (2) Durable storage in state.db, never the transcript.
++
++def test_a_fresh_agent_reads_the_stored_list(db):
++    db.create_session("s1", source="cli")
++    first = _agent(db, "s1")
++    out = _call(first, todos=[{"id": "a", "content": "plan", "status": "in_progress"}])
++    assert out["durable"] is True
++    # A restart: a new database handle and a new agent, no transcript at all.
++    reopened = SessionDB(db_path=db.db_path)
++    try:
++        fresh = _agent(reopened, "s1")
++        assert [i["id"] for i in _call(fresh)["todos"]] == ["a"]
++    finally:
++        reopened.close()
++
++
++def test_a_list_bigger_than_the_transcript_cap_survives(db):
++    db.create_session("big", source="cli")
++    agent = _agent(db, "big")
++    todos = [{"id": f"i{n}", "content": "x" * 3000, "status": "pending", "notes": "n" * 3000} for n in range(200)]
++    out = todo_tool(todos=todos, store=agent._todo_store, agent=agent)
++    assert len(out) > MAX_TODO_RESULT_CHARS  # transcript hydration drops a result this size
++    fresh = _agent(db, "big")
++    assert len(_call(fresh)["todos"]) == 200
++
++
++def test_turn_start_loads_the_stored_list_before_the_transcript(db):
++    from agent.turn_context import _hydrate_from_history
++
++    db.create_session("t", source="cli")
++    _call(_agent(db, "t"), todos=[{"id": "a", "content": "stored", "status": "pending"}])
++    fresh = _agent(db, "t", _user_turn_count=1)
++    fresh._hydrate_todo_store = lambda history: pytest.fail("the stored list must win")
++    _hydrate_from_history(fresh, [{"role": "user", "content": "hi"}])
++    assert fresh._todo_store.read()[0]["content"] == "stored"
++
++
++def test_a_rejected_write_stores_nothing(db):
++    db.create_session("r", source="cli")
++    agent = _agent(db, "r")
++    _call(agent, todos=[{"id": "a", "content": "one", "status": "in_progress"}])
++    bad = _call(agent, todos=[{"id": "b", "content": "two", "status": "in_progress"}], merge=True)
++    assert "error" in bad
++    assert [i["id"] for i in db.get_session_todos("r")["todos"]] == ["a"]
++
++
++# (3) Any depth, stable ids, notes, owners, blocked, one in_progress per agent.
++
++def test_nesting_to_any_depth_with_notes_owner_and_blocked(db):
++    db.create_session("n", source="cli")
++    agent = _agent(db, "n")
++    chain = [{"id": f"d{n}", "content": f"level {n}", "status": "pending",
++              **({"parent": f"d{n - 1}"} if n else {})} for n in range(40)]
++    _call(agent, todos=chain)
++    _call(agent, todos=[{"id": "d39", "status": "blocked", "notes": "waits on CI run 123"},
++                        {"id": "d20", "owner": "sa-0-abc"}], merge=True)
++    items = {i["id"]: i for i in _call(_agent(db, "n"))["todos"]}
++    assert len(items) == 40 and items["d39"]["parent"] == "d38"
++    assert items["d39"]["status"] == "blocked" and items["d39"]["notes"] == "waits on CI run 123"
++    assert items["d20"]["owner"] == "sa-0-abc"
++    _call(agent, todos=[{"id": "d20", "owner": ""}], merge=True)
++    assert "owner" not in {i["id"]: i for i in _call(agent)["todos"]}["d20"]
++
++
++def test_one_in_progress_per_agent_and_parallel_lanes_by_owner(db):
++    db.create_session("p", source="cli")
++    agent = _agent(db, "p")
++    lanes = [{"id": f"lane{n}", "content": f"lane {n}", "status": "in_progress", "owner": f"sa-{n}"}
++             for n in range(3)]
++    out = _call(agent, todos=[*lanes, {"id": "mine", "content": "merge results", "status": "in_progress"}])
++    assert out["summary"]["in_progress"] == 4
++    clash = _call(agent, todos=[{"id": "lane9", "content": "x", "status": "in_progress", "owner": "sa-1"}],
++                  merge=True)
++    assert "both in_progress" in clash["error"]
++
++
++# (4) Subagents: own lists, the parent's view, assigned items.
++
++def _spawn(db, parent, child_sid, subagent_id):
++    db.create_session(child_sid, source="subagent", parent_session_id=parent.session_id,
++                      model_config={"_delegate_from": parent.session_id, "_subagent_id": subagent_id})
++    child = _agent(db, child_sid, _parent_session_id=parent.session_id, _subagent_id=subagent_id)
++    child._delegate_parent_ref = weakref.ref(parent)
++    return child
++
++
++def test_a_child_updates_its_assigned_items_and_the_parent_sees_it(db):
++    db.create_session("P", source="cli")
++    parent = _agent(db, "P")
++    _call(parent, todos=[{"id": "lane", "content": "port module", "status": "in_progress", "owner": "sa-1"},
++                         {"id": "other", "content": "someone else", "status": "pending", "owner": "sa-2"}])
++    child = _spawn(db, parent, "C", "sa-1")
++    seen = _call(child, list_name="parent")
++    assert seen["assigned_to_you"] == ["lane"]
++    done = _call(child, list_name="parent", todos=[{"id": "lane", "status": "completed", "notes": "commit abc123"},
++                                              {"id": "lane.1", "content": "follow-up", "status": "pending",
++                                               "parent": "lane"}])
++    assert "error" not in done
++    refused = _call(child, list_name="parent", todos=[{"id": "other", "status": "completed"}])
++    assert "not assigned to you" in refused["error"]
++    items = {i["id"]: i for i in _call(parent)["todos"]}
++    assert items["lane"]["status"] == "completed" and items["lane"]["notes"] == "commit abc123"
++    assert items["lane.1"]["owner"] == "sa-1" and items["other"]["status"] == "pending"
++
++
++def test_the_parent_reads_a_running_and_a_finished_childs_list(db):
++    from tools import delegate_tool_registry as registry
++
++    db.create_session("P", source="cli")
++    parent = _agent(db, "P")
++    child = _spawn(db, parent, "C", "sa-7")
++    _call(child, todos=[{"id": "1", "content": "read code", "status": "completed"},
++                        {"id": "2", "content": "write fix", "status": "in_progress"}])
++    with registry._active_subagents_lock:
++        registry._active_subagents["sa-7"] = {"subagent_id": "sa-7", "agent": child, "status": "running",
++                                              "owner_agent_session_id": "P"}
++    try:
++        listed = registry._list_payload(parent)["subagents"][0]
++        assert listed["todo"]["current"] == [{"id": "2", "content": "write fix"}]
++        assert listed["todo"]["counts"]["completed"] == 1
++        running = _call(parent, subagent_id="sa-7")
++        assert running["subagent_status"] == "running" and len(running["todos"]) == 2
++    finally:
++        with registry._active_subagents_lock:
++            registry._active_subagents.pop("sa-7", None)
++    db.end_session("C", "completed")
++    finished = _call(parent, subagent_id="sa-7")
++    assert finished["subagent_status"] == "finished" and [i["id"] for i in finished["todos"]] == ["1", "2"]
++    assert "error" in _call(parent, subagent_id="sa-nope")
++
++
++# (5) Compaction: the handoff carries the open items in full and the done ones as a count.
++
++def test_injection_has_open_items_notes_and_a_done_count():
++    store = TodoStore()
++    store.write([{"id": "1", "content": "done thing", "status": "completed"},
++                 {"id": "2", "content": "phase", "status": "in_progress"},
++                 {"id": "2.1", "content": "waits", "status": "blocked", "parent": "2", "notes": "on review"},
++                 {"id": "3", "content": "dropped", "status": "cancelled"}])
++    text = store.format_for_injection()
++    assert "2. phase (in_progress)" in text and "[!] 2.1. waits (blocked)" in text and "notes: on review" in text
++    assert "done thing" not in text and "1 completed and 1 cancelled" in text
++
++
++def test_compaction_on_a_fresh_agent_carries_the_stored_list(db):
++    from agent.conversation_compression import _fold_todo_snapshot
++
++    db.create_session("s0", source="cli")
++    _call(_agent(db, "s0"), todos=[{"id": "a", "content": "keep me", "status": "pending"}])
++    _compact(db, "s0", "s1")
++    fresh = _agent(db, "s1")  # the gateway builds one per message; its store starts empty
++    compressed = [{"role": "user", "content": "summary"}, {"role": "assistant", "content": "ok"}]
++    _fold_todo_snapshot(fresh, compressed)
++    assert any(TODO_INJECTION_HEADER in str(m.get("content")) and "keep me" in str(m.get("content"))
++               for m in compressed)
++
++
++# (6) The relift case: days of work, hundreds of subagents, many compactions and restarts.
++
++def test_a_master_plan_survives_many_compactions_restarts_and_subagents(db):
++    db.create_session("seg0", source="cli")
++    expected = {}
++    segment = "seg0"
++    for day in range(25):
++        handle = SessionDB(db_path=db.db_path)  # a gateway restart before every round
++        try:
++            parent = _agent(handle, segment)
++            phase = f"phase{day}"
++            batch = [{"id": phase, "content": f"phase {day}", "status": "pending"}]
++            for n in range(8):  # one lane per subagent
++                batch.append({"id": f"{phase}.{n}", "content": f"lane {n}", "status": "in_progress",
++                              "parent": phase, "owner": f"sa-{day}-{n}"})
++            assert "error" not in _call(parent, todos=batch, merge=True)
++            for n in range(8):
++                child = _spawn(handle, parent, f"child-{day}-{n}", f"sa-{day}-{n}")
++                status = "completed" if n % 3 else "blocked"
++                out = _call(child, list_name="parent", todos=[{"id": f"{phase}.{n}", "status": status,
++                                                         "notes": f"result {day}/{n}"}])
++                assert "error" not in out
++                expected[f"{phase}.{n}"] = status
++            expected[phase] = "pending"
++        finally:
++            handle.close()
++        nxt = f"seg{day + 1}"
++        _compact(db, segment, nxt)
++        segment = nxt
++    final = _agent(SessionDB(db_path=db.db_path), segment)
++    try:
++        items = {i["id"]: i for i in _call(final)["todos"]}
++        assert {k: v["status"] for k, v in items.items()} == expected
++        assert items["phase3.4"]["notes"] == "result 3/4"
++        text = final._todo_store.format_for_injection()
++        assert all(f"phase{d}.0." in text for d in range(25))  # every blocked lane is still in the handoff
++    finally:
++        final._session_db.close()
++
++
++# (7) The gateway: a read call and an event.
++
++@pytest.fixture
++def authority(tmp_path):
++    from gateway.session_authority import LiveSession, SessionAuthority
++    from gateway.session_controls import AuthorityConnection
++    from hermes_state_runtime import begin_runtime_epoch
++
++    with SessionDB(db_path=tmp_path / "gw.db") as database:
++        database.create_session("s", source="test")
++        epoch = begin_runtime_epoch(database, instance_id="current")
++        owner = SessionAuthority(SimpleNamespace(_draining=False), profile_id="owned", instance_id="current",
++                                 db=database, epoch=epoch)
++        owner.sessions["s"] = LiveSession(None, "route")
++        yield AuthorityConnection(owner, object(), {"user_id": "owner"}), owner, database
++
++
++@pytest.mark.asyncio
++async def test_gateway_reads_the_list_and_publishes_a_subagents_change(authority):
++    from tools import todo_durable
++    from tui_gateway.contracts.registry import CANONICAL_METHODS
++
++    connection, owner, database = authority
++    try:
++        empty = await connection.dispatch({"id": 1, "method": "session.todos", "params": {"session_id": "s"}})
++        assert empty["result"]["todo_state"] is None
++        frames = []
++        owner.sessions["s"].event_stream.observers.add(frames.append)
++        store = TodoStore()
++        todo_durable.transact(database, "s", store, lambda s: s.write(
++            [{"id": "x", "content": "assigned", "status": "completed", "owner": "sa-1"}]), origin="subagent")
++        events = [f["params"] for f in frames if f["params"]["type"] == "todo.updated"]
++        assert events and events[-1]["payload"]["todos"][0]["id"] == "x"
++        read = await connection.dispatch({"id": 2, "method": "session.todos", "params": {"session_id": "s"}})
++        CANONICAL_METHODS["session.todos"].result.model_validate(read["result"])
++        assert read["result"]["todo_state"]["todos"][0]["status"] == "completed"
++    finally:
++        await connection.close()
++
++
++def test_a_cold_resume_shows_the_stored_list_after_compactions(db):
++    from tui_gateway.tool_progress import _todo_state_from_db
++
++    db.create_session("c0", source="cli")
++    _call(_agent(db, "c0"), todos=[{"id": "a", "content": "plan", "status": "pending"}])
++    _compact(db, "c0", "c1")
++    _compact(db, "c1", "c2")  # no todo result is left in any transcript
++    assert _todo_state_from_db(db, "c2")["todos"][0]["id"] == "a"
++
++
++def test_the_model_facing_call_reaches_the_durable_list(db):
++    """The inline executor passes the agent and maps the schema's ``list`` and ``subagent_id``."""
++    from agent.inline_tool_executors import _RAW_INLINE_TOOL_EXECUTORS
++
++    db.create_session("P", source="cli")
++    parent = _agent(db, "P")
++    run = _RAW_INLINE_TOOL_EXECUTORS["todo_list"]
++    run(parent, {"todos": [{"id": "a", "content": "lane", "status": "pending", "owner": "sa-9"}]}, None)
++    child = _spawn(db, parent, "C", "sa-9")
++    out = json.loads(run(child, {"list": "parent"}, None))
++    assert out["assigned_to_you"] == ["a"]
++    assert db.get_session_todos("P")["todos"][0]["owner"] == "sa-9"
+diff --git a/tests/tools/test_tool_search.py b/tests/tools/test_tool_search.py
+index 4c7ff8a8..7bc85caf 100644
+--- a/tests/tools/test_tool_search.py
++++ b/tests/tools/test_tool_search.py
+@@ -470,9 +470,10 @@ class TestBridgeDispatch:
+         must execute with {} instead of looping on a JSON parse error (#83937); malformed
+         non-blank arguments still fail closed."""
+         from tools.tool_search import resolve_underlying_call
+-        name, args, err = resolve_underlying_call({"calls": [{"name": "todo_list", "arguments": raw_args}]})
+-        assert (name, args, err) == ("todo_list", {}, None)
+-        _, _, err = resolve_underlying_call({"calls": [{"name": "todo_list", "arguments": '{"todos": ['}]})
++        # todo_list is always loaded now (talaria-hermes durable todos): session_search is still deferred.
++        name, args, err = resolve_underlying_call({"calls": [{"name": "session_search", "arguments": raw_args}]})
++        assert (name, args, err) == ("session_search", {}, None)
++        _, _, err = resolve_underlying_call({"calls": [{"name": "session_search", "arguments": '{"query": ['}]})
+         assert err
+ 
+ 
+diff --git a/tools/delegate_tool_registry.py b/tools/delegate_tool_registry.py
+index b61bfa74..4b83c3d3 100644
+--- a/tools/delegate_tool_registry.py
++++ b/tools/delegate_tool_registry.py
+@@ -294,6 +294,10 @@ def _owns_subagent_record(record: dict[str, Any], parent_agent: Any) -> bool:
+     # Compression rotation on either side: compare lineage tips.
+     return _resolve_session_lineage(owner_sid, parent_agent) in {parent_sid, _resolve_session_lineage(parent_sid, parent_agent)}
+ 
++def _todo_brief(agent: Any) -> Optional[dict[str, Any]]:
++    from tools.todo_durable import brief
++    return brief(agent)
++
+ def _list_payload(parent_agent: Any) -> dict[str, Any]:
+     with _active_subagents_lock:
+         records = list(_active_subagents.values())
+@@ -312,6 +316,8 @@ def _list_payload(parent_agent: Any) -> dict[str, Any]:
+             "accepting_steer": bool(r.get("accepting_steer", False)),
+             **({"waiting_on": r["waiting_on"]} if r.get("waiting_on") else {}),
+             "live_transcript": getattr(r.get("agent"), "_live_transcript_path", None),
++            # The child's todo list: its current item and counts (todo_list subagent_id= reads it all).
++            **({"todo": todo} if (todo := _todo_brief(r.get("agent"))) else {}),
+         })
+     payload: dict[str, Any] = {"action": "list", "count": len(entries), "subagents": entries}
+     if not entries:
+diff --git a/tools/delegate_tool_toolsets.py b/tools/delegate_tool_toolsets.py
+index 6ab7e5c2..9e17aca6 100644
+--- a/tools/delegate_tool_toolsets.py
++++ b/tools/delegate_tool_toolsets.py
+@@ -102,6 +102,10 @@ def _resolve_child_toolsets(
+     if toolsets:
+         expanded_parent = _expand_parent_toolsets(parent_toolsets)
+         child_toolsets = [t for t in toolsets if t in expanded_parent]
++        # The todo list is how a child keeps its plan and reports on assigned items: a narrowed
++        # child keeps it whenever the parent has it.
++        if "todo" in expanded_parent and "todo" not in child_toolsets:
++            child_toolsets.append("todo")
+         if _get_inherit_mcp_toolsets():
+             # Append any parent MCP toolsets missing from the narrowed child.
+             child_toolsets += [
+diff --git a/tools/todo_durable.py b/tools/todo_durable.py
+new file mode 100644
+index 00000000..1e760fa6
+--- /dev/null
++++ b/tools/todo_durable.py
+@@ -0,0 +1,277 @@
++"""Durable todo lists: every write lands in state.db (``session_todos``) in one transaction.
++
++The agent's ``TodoStore`` is a cache of the stored list. A write loads the stored list inside the
++write transaction, applies the change and saves it, so a fresh AIAgent (the gateway builds one per
++message), a resumed or restarted chat, and a subagent that updates its parent's items all work on
++one list. A read loads the stored list when it is newer than the cache. Rows are keyed by session
++segment; a read walks the compression lineage back to the newest stored row, so the list follows a
++chat across every compaction (hermes_state_todo.py).
++
++Without a session database that stores lists (no ``_session_db``, a worker's runtime store), the
++store stays in memory as before, and transcript hydration is the only recovery.
++"""
++
++from __future__ import annotations
++
++import logging
++import threading
++from typing import Any, Callable, Optional
++
++logger = logging.getLogger(__name__)
++
++_lock = threading.RLock()
++_listeners: list[Callable[[str, dict[str, Any], str], None]] = []
++
++
++def add_listener(listener: Callable[[str, dict[str, Any], str], None]) -> None:
++    """Call ``listener(session_id, snapshot, origin)`` after every stored change. ``origin`` is ``own``
++    for the list owner's write and ``subagent`` for a child's update of its assigned items."""
++    with _lock:
++        if listener not in _listeners:
++            _listeners.append(listener)
++
++
++def remove_listener(listener: Callable[[str, dict[str, Any], str], None]) -> None:
++    with _lock:
++        if listener in _listeners:
++            _listeners.remove(listener)
++
++
++def _notify(session_id: str, snapshot: dict[str, Any], origin: str) -> None:
++    with _lock:
++        listeners = list(_listeners)
++    for listener in listeners:
++        try:
++            listener(session_id, snapshot, origin)
++        except Exception:
++            logger.debug("todo listener failed", exc_info=True)
++
++
++def session_db(agent: Any) -> Any:
++    """The agent's session database when it stores todo lists, else None."""
++    db = getattr(agent, "_session_db", None)
++    if db is None or not callable(getattr(db, "update_session_todos", None)):
++        return None
++    return db
++
++
++def _restore(store: Any, todos: Any, revision: Any) -> None:
++    try:
++        store.restore(todos if isinstance(todos, list) else [], revision=revision)
++    except ValueError:
++        logger.warning("stored todo list is invalid; keeping the one in memory")
++
++
++def sync(agent: Any, store: Any = None) -> bool:
++    """Load the stored list into the agent's store when it is at least as new. True when the list is
++    stored. A store ahead of the stored copy (a save that failed) is written back."""
++    store = store if store is not None else getattr(agent, "_todo_store", None)
++    db, sid = session_db(agent), str(getattr(agent, "session_id", "") or "")
++    if store is None or db is None or not sid:
++        return False
++    try:
++        row = db.get_session_todos(sid)
++    except Exception:
++        logger.debug("todo list read failed for %s", sid, exc_info=True)
++        return False
++    if row is None:
++        return False
++    with _lock:
++        if int(row.get("revision") or 0) >= int(store.snapshot().get("revision") or 0):
++            _restore(store, row.get("todos"), row.get("revision"))
++            return True
++    try:
++        transact(db, sid, store, lambda s: None)
++    except Exception:
++        logger.debug("todo list write-back failed for %s", sid, exc_info=True)
++    return True
++
++
++def transact(db: Any, session_id: str, store: Any, mutate: Callable[[Any], Any], *,
++             origin: str = "own") -> Any:
++    """Run ``mutate(store)`` on the stored list of *session_id* in one write transaction and save the
++    result. ``mutate`` may raise ValueError to reject the change (nothing is saved). Returns its
++    result."""
++    with _lock:
++        before_items, before_rev = store.read(), int(store.snapshot().get("revision") or 0)
++        saved: dict[str, Any] = {}
++
++        def apply(row: Optional[dict[str, Any]]):
++            # Start from the stored list when it is at least as new as the cache, else from the cache
++            # (also on a retried transaction, so a change never applies twice).
++            if row is not None and int(row.get("revision") or 0) >= before_rev:
++                _restore(store, row.get("todos"), row.get("revision"))
++            else:
++                _restore(store, before_items, before_rev)
++            start_rev = int(store.snapshot().get("revision") or 0)
++            result = mutate(store)
++            snap = store.snapshot()
++            changed = snap["revision"] != start_rev
++            if row is None:
++                save = bool(snap["todos"]) or changed
++            else:
++                # A new segment (after a compaction) gets its own copy, so later reads stop early.
++                save = changed or row.get("session_id") != session_id or snap["revision"] > int(row.get("revision") or 0)
++            saved["snapshot"] = snap if save else None
++            return result, (snap if save else None)
++
++        result = db.update_session_todos(session_id, apply)
++    if saved.get("snapshot") is not None:
++        _notify(session_id, saved["snapshot"], origin)
++    return result
++
++
++def write(agent: Any, store: Any, todos: list, merge: bool) -> tuple[list[dict[str, str]], bool]:
++    """``store.write(todos, merge)`` on the stored list. ``(items, durable)``; raises ValueError for an
++    invalid write. A failed save keeps the change in memory (the next call writes it back)."""
++    db, sid = session_db(agent), str(getattr(agent, "session_id", "") or "")
++    if db is None or not sid:
++        return store.write(todos, merge), False
++    done: dict[str, Any] = {}
++
++    def mutate(s):
++        done["items"] = s.write(todos, merge)
++        return done["items"]
++
++    try:
++        return transact(db, sid, store, mutate), True
++    except ValueError:
++        raise
++    except Exception:
++        logger.warning("todo list was not saved for %s", sid, exc_info=True)
++        if "items" in done:
++            return store.read(), False
++        return store.write(todos, merge), False
++
++
++def _payload(row: Optional[dict[str, Any]], **extra: Any) -> str:
++    from tools.todo_tool import result_json
++
++    todos = (row or {}).get("todos") or []
++    return result_json(todos, int((row or {}).get("revision") or 0), **extra)
++
++
++def _parent_ids(agent: Any) -> tuple[str, str]:
++    return (str(getattr(agent, "_parent_session_id", "") or ""), str(getattr(agent, "_subagent_id", "") or ""))
++
++
++def parent_list(agent: Any, todos: Optional[list]) -> str:
++    """``list='parent'``: read the parent agent's list, or update the items it assigned to this
++    subagent (owner = this subagent's id): their status and notes, and new subtasks under them."""
++    from tools.registry import tool_error
++    from tools.todo_tool import TodoStore
++
++    parent_sid, me = _parent_ids(agent)
++    db = session_db(agent)
++    if not parent_sid or not me:
++        return tool_error("list='parent' works only in a subagent: this agent has no parent agent.")
++    if db is None:
++        return tool_error("The parent's list is not readable here: no session database.")
++    if todos is None:
++        row = db.get_session_todos(parent_sid)
++        assigned = [i.get("id") for i in (row or {}).get("todos") or [] if i.get("owner") == me]
++        return _payload(row, list="parent", assigned_to_you=assigned, your_subagent_id=me)
++    try:
++        target = db.get_compression_tip(parent_sid) or parent_sid
++    except Exception:
++        target = parent_sid
++
++    def mutate(store):
++        items = {i["id"]: i for i in store.read()}
++        owned = {i for i, item in items.items() if item.get("owner") == me}
++
++        def under_owned(parent: str) -> bool:
++            seen = set()
++            while parent and parent not in seen:
++                if parent in owned:
++                    return True
++                seen.add(parent)
++                parent = (items.get(parent) or {}).get("parent", "")
++            return False
++
++        changes = []
++        for t in todos:
++            if not isinstance(t, dict) or not str(t.get("id", "")).strip():
++                raise ValueError("Each item needs an id.")
++            item_id = str(t["id"]).strip()
++            if item_id in items:
++                if item_id not in owned:
++                    raise ValueError(f"Item '{item_id}' of your parent's list is not assigned to you "
++                                     f"(its owner is not {me}). You may update only your own items.")
++                extra = set(t) - {"id", "status", "notes"}
++                if extra:
++                    raise ValueError(f"On your parent's items you may change only status and notes, not "
++                                     f"{', '.join(sorted(extra))}.")
++                changes.append({k: t[k] for k in ("id", "status", "notes") if k in t})
++            else:
++                parent = str(t.get("parent") or "").strip()
++                if not under_owned(parent):
++                    raise ValueError(f"New item '{item_id}' must have parent set to an item assigned to you.")
++                changes.append({**{k: t[k] for k in ("id", "content", "status", "notes") if k in t},
++                                "parent": parent, "owner": me})
++        return store.write(changes, merge=True)
++
++    try:
++        items = transact(db, target, TodoStore(), mutate, origin="subagent")
++    except ValueError as e:
++        return tool_error(str(e))
++    row = db.get_session_todos(target)
++    return _payload(row or {"todos": items}, list="parent",
++                    assigned_to_you=[i.get("id") for i in items if i.get("owner") == me], your_subagent_id=me)
++
++
++def _child_session(agent: Any, subagent_id: str) -> tuple[Optional[str], Optional[dict[str, Any]]]:
++    """``(stored session id, live record)`` of a child in this agent's spawn tree."""
++    from tools.delegate_tool_transcript import _compression_lineage, _owned_records
++
++    record = next((r for r in _owned_records(agent) if r.get("subagent_id") == subagent_id), None)
++    child = getattr((record or {}).get("agent"), "session_id", None)
++    if isinstance(child, str) and child:
++        return child, record
++    db, parent_sid = getattr(agent, "_session_db", None), str(getattr(agent, "session_id", "") or "")
++    if db is None or not parent_sid:
++        return None, record
++    from tools.delegate_tool_sessions import stored_child_session
++    try:
++        return stored_child_session(db, subagent_id, _compression_lineage(db, parent_sid)), record
++    except Exception:
++        logger.debug("stored child lookup failed for %s", subagent_id, exc_info=True)
++        return None, record
++
++
++def read_subagent_list(agent: Any, subagent_id: str) -> str:
++    """The todo list of one child (running or finished) of this agent's spawn tree."""
++    from tools.registry import tool_error
++
++    if agent is None or not subagent_id:
++        return tool_error("subagent_id needs a subagent of this conversation.")
++    try:
++        child, record = _child_session(agent, subagent_id)
++    except Exception as exc:
++        return tool_error(f"Could not look up subagent '{subagent_id}': {exc}")
++    if not child and record is None:
++        return tool_error(f"No subagent '{subagent_id}' in this conversation's spawn tree.")
++    db = session_db(agent)
++    row = None
++    if db is not None and child:
++        try:
++            row = db.get_session_todos(child)
++        except Exception:
++            row = None
++    store = getattr((record or {}).get("agent"), "_todo_store", None)
++    if store is not None and (row is None or store.snapshot()["revision"] > int(row.get("revision") or 0)):
++        row = store.snapshot()
++    status = (record or {}).get("status") or "running" if record is not None else "finished"
++    return _payload(row, subagent_id=subagent_id, subagent_status=status)
++
++
++def brief(agent: Any) -> Optional[dict[str, Any]]:
++    """A running child's current item(s) and counts, for its parent's ``delegate_task(action='list')``."""
++    store = getattr(agent, "_todo_store", None)
++    brief_fn = getattr(store, "brief", None)
++    if not callable(brief_fn):
++        return None
++    try:
++        return brief_fn()
++    except Exception:
++        return None
+diff --git a/tools/todo_tool.py b/tools/todo_tool.py
+index 08d976ee..ccb19a06 100644
+--- a/tools/todo_tool.py
++++ b/tools/todo_tool.py
+@@ -1,17 +1,25 @@
+-"""Todo tool: in-memory, revisioned task list for multi-step work. State lives on the
+-AIAgent (one per session), is re-injected after context compression, and every write bumps
+-a monotonic revision so UI clients can reject stale updates. One ``todo_list`` tool: pass
+-``todos`` to write, omit to read; every call returns the full list. No system-prompt mutation."""
++"""Todo tool: revisioned task list for multi-step work. State lives on the AIAgent (one per
++session), is stored in state.db on every write (tools/todo_durable.py), is re-injected after
++context compression, and every write bumps a monotonic revision so UI clients can reject stale
++updates. One ``todo_list`` tool: pass ``todos`` to write, omit to read; every call returns the
++full list. Items nest to any depth (``parent``), carry ``notes`` and an optional ``owner`` (a
++subagent id). No system-prompt mutation."""
+ 
+ import json
+ from typing import Any, Dict, List, Optional
+ 
+-VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
++VALID_STATUSES = {"pending", "in_progress", "blocked", "completed", "cancelled"}
++# Status order of the summary counts.
++STATUS_ORDER = ("pending", "in_progress", "blocked", "completed", "cancelled")
+ # The list is re-read after every compression (format_for_injection), so unbounded
+ # content/count would defeat the compression it rides through. Caps apply equally to
+ # model-authored items and caller-replayed API history.
+ MAX_TODO_CONTENT_CHARS = 4000
+-MAX_TODO_ITEMS = 256
++MAX_TODO_NOTES_CHARS = 4000
++MAX_TODO_OWNER_CHARS = 128
++MAX_TODO_ITEMS = 1000
++# Notes shown per item in the post-compaction snapshot (the full notes stay in the list).
++_INJECTED_NOTES_CHARS = 400
+ # Max single todo tool-result payload accepted during history hydration, so a forged
+ # oversized result is dropped before parsing (AIAgent._hydrate_todo_store).
+ MAX_TODO_RESULT_CHARS = 512_000
+@@ -19,13 +27,15 @@ _TRUNCATION_MARKER = "… [truncated]"
+ # Persisted as ordinary message content; ContextCompressor keys on this stable header to
+ # tell the synthetic post-compaction row from a real user message.
+ TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
+-_STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
+-_ACTIVE_STATUSES = {"pending", "in_progress"}
++_STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]",
++                   "blocked": "[!]"}
++_ACTIVE_STATUSES = {"pending", "in_progress", "blocked"}
+ 
+ 
+ class TodoStore:
+     """In-memory todo list, one per AIAgent. List position is priority; items are
+-    ``{id, content, status, parent?}`` — ``parent`` nests a subtask."""
++    ``{id, content, status, parent?, notes?, owner?}``: ``parent`` nests a subtask (any depth),
++    ``owner`` names the subagent working the item."""
+ 
+     def __init__(self):
+         self._items: list[dict[str, str]] = []
+@@ -44,6 +54,7 @@ class TodoStore:
+                 self._merge(todos)
+             else:
+                 self._items = self._fresh_items(todos)
++            self._check_one_in_progress_per_owner(self._items)
+         except ValueError:
+             self._items = before  # rejected write must not leave a partial list behind
+             raise
+@@ -76,6 +87,13 @@ class TodoStore:
+                     cur["parent"] = parent
+                 else:
+                     cur.pop("parent", None)
++            for key, cap in (("notes", self._cap_notes), ("owner", self._cap_owner)):
++                if key in t:
++                    value = cap(str(t[key] or "").strip())
++                    if value:
++                        cur[key] = value
++                    else:
++                        cur.pop(key, None)
+         # Rebuild preserving original order for existing items (first occurrence wins).
+         rebuilt = {item["id"]: existing.get(item["id"], item) for item in self._items}
+         self._items = self._normalize_order(list(rebuilt.values()))
+@@ -86,6 +104,21 @@ class TodoStore:
+     def has_items(self) -> bool:
+         return bool(self._items)
+ 
++    def counts(self) -> dict[str, int]:
++        """``{total, <status>: n}`` for every status."""
++        counts = {"total": len(self._items)}
++        for status in STATUS_ORDER:
++            counts[status] = sum(1 for i in self._items if i["status"] == status)
++        return counts
++
++    def brief(self) -> Optional[dict[str, Any]]:
++        """The current item(s) and the counts, for a parent's view of a child (None when empty)."""
++        if not self._items:
++            return None
++        current = [{"id": i["id"], "content": i["content"][:200]} for i in self._items
++                   if i["status"] == "in_progress"]
++        return {"current": current, "counts": self.counts(), "revision": self._revision}
++
+     def snapshot(self) -> dict[str, Any]:
+         """Full state clients can reconcile atomically."""
+         return {"todos": self.read(), "revision": self._revision}
+@@ -119,8 +152,14 @@ class TodoStore:
+             keep = item["status"] in _ACTIVE_STATUSES or has_active_kid
+             if keep:
+                 marker = _STATUS_MARKERS.get(item["status"], "[?]")
++                owner = f" [owner {item['owner']}]" if item.get("owner") else ""
+                 out.append(f"{'  ' * depth}- {marker} {item['id']}. "
+-                           f"{item['content']} ({item['status']})")
++                           f"{item['content']} ({item['status']}){owner}")
++                if item.get("notes"):
++                    notes = item["notes"].replace("\n", " ")
++                    if len(notes) > _INJECTED_NOTES_CHARS:
++                        notes = notes[:_INJECTED_NOTES_CHARS] + "…"
++                    out.append(f"{'  ' * depth}  notes: {notes}")
+                 out.extend(kid_lines)
+             return keep
+ 
+@@ -128,7 +167,14 @@ class TodoStore:
+         for item in self._items:
+             if not item.get("parent"):
+                 render(item, 0, lines)
+-        return "\n".join(lines) if len(lines) > 1 else None
++        if len(lines) == 1:
++            return None
++        counts = self.counts()
++        done = [f"{counts[s]} {s}" for s in ("completed", "cancelled") if counts[s]]
++        if done:
++            lines.append(f"Not shown: {' and '.join(done)} item(s). The whole list, with full notes, is stored; "
++                         "call todo_list with no arguments to read it.")
++        return "\n".join(lines)
+ 
+     @staticmethod
+     def _cap_content(content: str) -> str:
+@@ -137,6 +183,33 @@ class TodoStore:
+             return content[:MAX_TODO_CONTENT_CHARS - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+         return content
+ 
++    @staticmethod
++    def _cap_notes(notes: str) -> str:
++        if len(notes) > MAX_TODO_NOTES_CHARS:
++            return notes[:MAX_TODO_NOTES_CHARS - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
++        return notes
++
++    @staticmethod
++    def _cap_owner(owner: str) -> str:
++        return owner[:MAX_TODO_OWNER_CHARS]
++
++    @staticmethod
++    def _check_one_in_progress_per_owner(items: list[dict[str, str]]) -> None:
++        """One in_progress item per agent: unowned items are the list owner's own; items owned by
++        different subagents may run in parallel."""
++        seen: dict[str, str] = {}
++        for item in items:
++            if item["status"] != "in_progress":
++                continue
++            owner = item.get("owner", "")
++            if owner in seen:
++                who = f"owner {owner}" if owner else "you (no owner)"
++                raise ValueError(
++                    f"Items '{seen[owner]}' and '{item['id']}' are both in_progress for {who}. Keep one "
++                    "in_progress item per agent: mark the other completed, pending or blocked, or give "
++                    "each the subagent id that works it as owner.")
++            seen[owner] = item["id"]
++
+     @staticmethod
+     def _validate(item: dict[str, Any]) -> dict[str, str]:
+         """Normalize one item to ``{id, content, status, parent?}`` (placeholders when missing)."""
+@@ -156,6 +229,12 @@ class TodoStore:
+         parent = str(item.get("parent") or "").strip()
+         if parent and parent != item_id:
+             result["parent"] = parent
++        notes = TodoStore._cap_notes(str(item.get("notes") or "").strip())
++        if notes:
++            result["notes"] = notes
++        owner = TodoStore._cap_owner(str(item.get("owner") or "").strip())
++        if owner:
++            result["owner"] = owner
+         return result
+ 
+     @staticmethod
+@@ -199,24 +278,44 @@ class TodoStore:
+ 
+ 
+ def todo_tool(todos: Optional[list[dict[str, Any]]] = None, merge: bool = False,
+-              store: Optional[TodoStore] = None) -> str:
+-    """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON."""
++              store: Optional[TodoStore] = None, *, agent: Any = None, list_name: Optional[str] = None,
++              subagent_id: Optional[str] = None) -> str:
++    """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON.
++
++    With *agent* the list is durable (tools/todo_durable.py): read from and written to state.db.
++    ``list_name='parent'`` reads the parent agent's list, or updates the items it assigned to this
++    subagent; *subagent_id* reads a child's list."""
++    from tools import todo_durable
++
++    if subagent_id:
++        if todos is not None:
++            return tool_error("subagent_id reads a subagent's list; it cannot write it.")
++        return todo_durable.read_subagent_list(agent, str(subagent_id).strip())
++    if list_name not in (None, "", "own", "parent"):
++        return tool_error(f"list must be 'own' or 'parent', got {list_name!r}")
++    if todos is not None and not isinstance(todos, list):
++        return tool_error(f"todos must be a list, got {type(todos).__name__}")
++    if list_name == "parent":
++        return todo_durable.parent_list(agent, todos)
+     if store is None:
+         return tool_error("TodoStore not initialized")
++    durable = todo_durable.sync(agent, store) if agent is not None else False
+     if todos is None:
+         items = store.read()
+     else:
+-        if not isinstance(todos, list):
+-            return tool_error(f"todos must be a list, got {type(todos).__name__}")
+         try:
+-            items = store.write(todos, merge)
++            items, durable = todo_durable.write(agent, store, todos, merge)
+         except ValueError as e:
+             return tool_error(str(e))
++    return result_json(items, store.snapshot()["revision"], durable=durable)
++
++
++def result_json(items: list[dict[str, str]], revision: int, **extra: Any) -> str:
++    """The todo tool result: ``{todos, revision, summary, ...}``."""
+     summary = {"total": len(items)}
+-    for status in ("pending", "in_progress", "completed", "cancelled"):
++    for status in STATUS_ORDER:
+         summary[status] = sum(1 for i in items if i["status"] == status)
+-    return json.dumps({"todos": items, "revision": store.snapshot()["revision"],
+-                       "summary": summary}, ensure_ascii=False)
++    return json.dumps({"todos": items, "revision": revision, "summary": summary, **extra}, ensure_ascii=False)
+ 
+ 
+ def check_todo_requirements() -> bool:
+@@ -230,16 +329,22 @@ TODO_SCHEMA = {
+     "name": "todo_list",
+     "description": (
+         # See #95681.
+-        "Track a task list for multi-step work (3+ steps). Use for complex tasks "
+-        "with 3+ steps or when the user provides multiple tasks. "
+-        "For 'all N items' tasks, enumerate every instance as its own checklist "
+-        "item so none are silently dropped. "
+-        "Call with no parameters to read the current list.\n"
+-        "List order is priority. Only ONE item in_progress at a time. "
+-        "Break large phases into subtasks via parent. "
+-        "Mark an item completed only after the work is verified done, never "
+-        "based on intent. If something fails, cancel it and add a revised "
+-        "item. Always returns the full current list."
++        "Your plan for any task with more than a few steps. Keep the plan here, not only in your "
++        "replies: use it for every multi-step task, every delegation plan (one item per subagent lane, "
++        "owner = its subagent id) and every 'all N items' job (one item per instance, so none is "
++        "silently dropped). Hermes stores the list in the session database on every call, re-attaches "
++        "the open items after each context compaction and reloads it after a restart or resume, so this "
++        "is the one place a plan survives long work; read it (call with no todos) after a compaction or "
++        "when you pick work back up.\n"
++        "Items nest to any depth with parent; give each a stable id. Put findings, blockers, paths and "
++        "commit ids in notes. List order is priority. One in_progress item per agent; items owned by "
++        "different subagents may be in_progress together. Use blocked for an item that waits on "
++        "something, and say on what in notes. Mark an item completed only after the work is verified "
++        "done; if something fails, cancel it and add a revised item. merge=true updates items by id "
++        "(only the fields you pass) and adds new ones; without it the whole list is replaced. "
++        "list='parent' (in a subagent) reads your parent's list and, with todos, updates the items "
++        "it assigned to you. subagent_id reads one of your subagents' lists, running or finished. "
++        "Always returns the full list."
+     ),
+     "parameters": {
+         "type": "object",
+@@ -259,11 +364,19 @@ TODO_SCHEMA = {
+                         },
+                         "status": {
+                             "type": "string",
+-                            "enum": ["pending", "in_progress", "completed", "cancelled"]
++                            "enum": ["pending", "in_progress", "blocked", "completed", "cancelled"]
+                         },
+                         "parent": {
+                             "type": "string",
+-                            "description": "Optional id of another item, making this a nested subtask. Omit for top-level."
++                            "description": "Optional id of another item, making this a nested subtask (any depth). Omit for top-level."
++                        },
++                        "notes": {
++                            "type": "string",
++                            "description": "Free text kept with the item: findings, blockers, paths, commit ids. Empty clears."
++                        },
++                        "owner": {
++                            "type": "string",
++                            "description": "Optional subagent id (sa-...) working this item. Empty clears."
+                         }
+                     },
+                     "required": ["id", "content", "status"]
+@@ -276,6 +389,19 @@ TODO_SCHEMA = {
+                     "false (default): replace the entire list with a fresh plan."
+                 ),
+                 "default": False
++            },
++            "list": {
++                "type": "string",
++                "enum": ["own", "parent"],
++                "description": (
++                    "own (default): your list. parent: in a subagent, your parent's list; with todos "
++                    "(merge only) update status and notes of items whose owner is your subagent id, or "
++                    "add subtasks under them."
++                )
++            },
++            "subagent_id": {
++                "type": "string",
++                "description": "Read the list of one of your subagents (running or finished). Read only."
+             }
+         },
+         "required": []
+@@ -296,8 +422,8 @@ def is_todo_tool_name(name: Any) -> bool:
+ def is_todo_tool_call(tool_call: Any) -> bool:
+     """True when a transcript tool_call entry (dict or object) invoked the Todo tool.
+ 
+-    Covers the current name, legacy aliases, and the ``tool_call`` bridge (``todo_list`` is deferred by
+-    default, and the transcript keeps the bridge name). The bridge is peeled from the recorded arguments
++    Covers the current name, legacy aliases, and the ``tool_call`` bridge (``todo_list`` was deferred by
++    default before it became always loaded, and old transcripts keep the bridge name). The bridge is peeled from the recorded arguments
+     only, never live tool-search config, and must wrap exactly one call. Keep this module free of model_tools / agent.tool_executor
+     imports: TUI resume and run_agent call this without loading either.
+     """
+@@ -332,5 +458,6 @@ from tools.registry import registry, tool_error
+ registry.register(
+     name="todo_list", toolset="todo", schema=TODO_SCHEMA, check_fn=check_todo_requirements,
+     handler=lambda args, **kw: todo_tool(
+-        todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
++        todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store"),
++        agent=kw.get("agent"), list_name=args.get("list"), subagent_id=args.get("subagent_id")),
+     emoji="📋")
+diff --git a/tui_gateway/contracts/canonical_projections.py b/tui_gateway/contracts/canonical_projections.py
+index 44085ec7..fa9f0d7a 100644
+--- a/tui_gateway/contracts/canonical_projections.py
++++ b/tui_gateway/contracts/canonical_projections.py
+@@ -4,13 +4,14 @@ from typing import Literal
+ from pydantic import model_validator
+ 
+ from .base import JsonValue, Params, Result
+-from .common import ProfileParams
++from .common import ProfileParams, SessionParams
+ from .canonical_sessions import CanonicalSessionParams
+ from .config_free_tier_control import ConfigGetParams, ConfigGetResult, ConfigSetResult
+ from .groups_bot_relay import GroupsApproveResult, GroupsCreateResult, GroupsRetryResult, RoomMemberInput, RoomParams
+ from .prompt_voice import AttachedImageResult, ImageAttachBytesParams
+ from .profiles_vault_complete_foreign_subagents import ProfileCanonicalSession, ProfileRow, ProfilesListResult
+ from .registry import canonical_method
++from .sessions import TodoState
+ 
+ 
+ class CanonicalConfigGetResult(ConfigGetResult):
+@@ -117,8 +118,27 @@ class CanonicalBotCancelResult(Result):
+     receipt_status: str
+ 
+ 
++class CanonicalSessionTodosParams(SessionParams):
++    """``subagent_id``: read that child's list (running or finished) instead of the session's."""
++
++    subagent_id: str | None = None
++
++
++class CanonicalSessionTodosResult(Result):
++    """``gateway/session_ancillary.py`` ``session.todos``: the stored todo list (``tools/todo_durable.py``),
++    read from state.db, so it answers after any number of compactions and with no live agent. Changes
++    arrive as ``todo.updated``. ``todo_state`` is null when no list was ever stored."""
++
++    session_id: str
++    subagent_id: str | None = None
++    #: With ``subagent_id``: whether that child is still running.
++    running: bool | None = None
++    todo_state: TodoState | None = None
++
++
+ for _name, _params, _result in (
+     ('config.get', ConfigGetParams, CanonicalConfigGetResult),
++    ('session.todos', CanonicalSessionTodosParams, CanonicalSessionTodosResult),
+     ('config.set', CanonicalConfigSetParams, ConfigSetResult),
+     ('profiles.list', CanonicalProfilesParams, CanonicalProfilesResult),
+     ('image.attach_bytes', ImageAttachBytesParams, CanonicalAttachedImageResult),
+diff --git a/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py b/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py
+index 326df845..ee12f37b 100644
+--- a/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py
++++ b/tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py
+@@ -657,6 +657,22 @@ method("session.foreign.import", params=SessionForeignIdParams, result=SessionFo
+ # ── subagents (methods_subagents) ─────────────────────────────────────────────────────────────
+ 
+ 
++class SubagentTodoItem(Result):
++    id: str
++    #: The item's text, cut to 200 characters.
++    content: str
++
++
++class SubagentTodoBrief(Result):
++    """A child's todo list at a glance (``tools/todo_tool.py`` ``TodoStore.brief``)."""
++
++    #: The child's in_progress item(s).
++    current: list[SubagentTodoItem] = Field(default_factory=list)
++    #: ``total`` and one count per status (pending, in_progress, blocked, completed, cancelled).
++    counts: dict[str, int] = Field(default_factory=dict)
++    revision: int = 0
++
++
+ class SubagentSnapshot(Result):
+     """``methods_subagents._SUBAGENT_SNAPSHOT_FIELDS`` projection of one live child record."""
+ 
+@@ -679,6 +695,8 @@ class SubagentSnapshot(Result):
+     waiting_on: list[str] | None = None
+     #: The child's own stored session (``session.transcript`` reads it by ``subagent_id``); None until it has one.
+     child_session_id: str | None = None
++    #: The child's current todo item(s) and counts; None while it keeps no list (``session.todos`` reads it all).
++    todo: SubagentTodoBrief | None = None
+ 
+ 
+ class FailedDelegation(Result):
+diff --git a/tui_gateway/tool_progress.py b/tui_gateway/tool_progress.py
+index 2d00f835..cbee5b74 100644
+--- a/tui_gateway/tool_progress.py
++++ b/tui_gateway/tool_progress.py
+@@ -161,9 +161,26 @@ def _attach_todo_state(payload: dict, session: dict) -> dict:
+     return payload
+ 
+ 
++def _stored_todo_state(db, session_id: str) -> dict | None:
++    """The durable todo list (tools/todo_durable.py) of a session's lineage, None when none is stored."""
++    getter = getattr(db, "get_session_todos", None)
++    if not callable(getter) or not session_id:
++        return None
++    try:
++        row = getter(session_id)
++    except Exception:
++        logger.debug("failed to read the stored todo list", exc_info=True)
++        return None
++    return _normalize_todo_state(row) if row else None
++
++
+ def _todo_state_from_db(db, session_id: str) -> dict | None:
+-    """Cold-resume Todo snapshot without the REST page or model-history limits."""
++    """Cold-resume Todo snapshot without the REST page or model-history limits: the stored list,
++    else the newest Todo result of the transcript (a chat from before lists were stored)."""
+     from tools.todo_tool import MAX_TODO_RESULT_CHARS
++    stored = _stored_todo_state(db, session_id)
++    if stored is not None:
++        return stored
+     getter = getattr(db, "get_latest_todo_result", None)
+     if not callable(getter):
+         return None

@@ -1,0 +1,21 @@
+# Upstream tests of the todo tool, its resume and gateway state, tool search, the compressor's todo
+# snapshot, subagent listing and toolsets, and the generated gateway contracts this patch touches
+tests/tools/test_todo_tool.py
+tests/tools/test_todo_nested.py
+tests/tools/test_todo_tool_type_coercion.py
+tests/tui_gateway/test_todo_state_events.py
+tests/tools/test_tool_search.py
+tests/tui_gateway/contracts/test_generated.py
+tests/gateway/test_canonical_wire_contract.py
+tests/gateway/test_canonical_wire_contracts.py
+tests/tui_gateway/test_subagent_snapshot.py
+tests/agent/test_turn_context.py
+tests/agent/test_skill_todo_retention_parity.py
+tests/gateway/test_resume_todo_state.py
+tests/gateway/test_resume_omit_messages.py
+tests/agent/test_display_todo_progress.py
+tests/tools/test_toolsets.py
+tests/agent/test_in_place_compaction.py
+tests/gateway/test_local_viewer_events_turn.py
+tests/tools/test_delegate_control_actions.py
+tests/tools/test_delegate.py
