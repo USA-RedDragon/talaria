@@ -361,7 +361,8 @@ class ToolTests(Base):
             out = self.run_tool("mcp_device_call", tool="slow")
         self.assertEqual(out["code"], core.MCP_CANCELLED)
         self.assertEqual(sent[-1]["type"], core.TYPE_KILL)
-        self.assertEqual(sent[-1]["id"], sent[-2]["id"])
+        # The kill names the request it cancels; other frames (a heartbeat, another call) may sit between them.
+        self.assertIn(sent[-1]["id"], [m.get("id") for m in sent[:-1] if m.get("type") != core.TYPE_KILL])
 
 
 class HubMCPTests(unittest.TestCase):
