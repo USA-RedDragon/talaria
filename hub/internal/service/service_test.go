@@ -341,10 +341,6 @@ func TestGatewayReconnectReplaysWithEventsSince(t *testing.T) {
 	e.gw.PublishOffline(sLive, "message.delta", map[string]any{kText: "c"})
 	e.gw.DropConnections()
 	evs := until(t, ch, hub.KindBackendStatus)
-	if len(evs) != 1 || string(evs[0].Data) != `{"connected":false}` {
-		t.Fatalf("got %v %s", kinds(evs), evs[0].Data)
-	}
-	evs = until(t, ch, hub.KindBackendStatus)
 	if !slices.Equal(kinds(evs), []string{hub.KindMessageDelta, hub.KindMessageDelta, hub.KindBackendStatus}) ||
 		text(t, evs[0]) != "b" || text(t, evs[1]) != "c" || string(evs[2].Data) != `{"connected":true}` {
 		t.Fatalf("after reconnect = %v", kinds(evs))
@@ -754,5 +750,61 @@ func TestNewSessionNoModel(t *testing.T) {
 	e.gw.RefuseCalls(gateway.MethodSessionCreate, "")
 	if _, err := e.svc.NewSession(context.Background(), userAlice, backendPC); err != nil {
 		t.Fatalf("new session after a model is set = %v", err)
+	}
+}
+
+// A cut connection (a killed pod, no close handshake) that is replaced within
+// the grace shows no connected:false.
+func TestShortDropShowsNoOfflineStatus(t *testing.T) {
+	t.Parallel()
+	e := setup(t, service.Options{ReconnectGrace: 600 * time.Millisecond})
+	ch, stop, err := e.svc.Attach(context.Background(), userAlice, backendPC, sLive, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	next(t, ch)
+	e.gw.Stop()
+	time.Sleep(100 * time.Millisecond)
+	e.gw.FinishRestart()
+	deadline := time.After(1500 * time.Millisecond)
+	for back := false; !back; {
+		select {
+		case ev := <-ch:
+			if ev.Kind == hub.KindBackendStatus {
+				if string(ev.Data) == `{"connected":false}` {
+					t.Fatal("got connected:false for a drop shorter than the grace")
+				}
+				back = true
+			}
+		case <-deadline:
+			t.Fatal("no connected:true after the gateway came back")
+		}
+	}
+	// Past the grace the stale timer must not fire either.
+	time.Sleep(800 * time.Millisecond)
+	select {
+	case ev := <-ch:
+		if ev.Kind == hub.KindBackendStatus && string(ev.Data) == `{"connected":false}` {
+			t.Fatal("late connected:false after the reconnect")
+		}
+	default:
+	}
+}
+
+// A gateway that stays down past the grace shows connected:false.
+func TestLongDropShowsOfflineStatus(t *testing.T) {
+	t.Parallel()
+	e := setup(t, service.Options{ReconnectGrace: 300 * time.Millisecond})
+	ch, stop, err := e.svc.Attach(context.Background(), userAlice, backendPC, sLive, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	next(t, ch)
+	e.gw.Stop()
+	evs := until(t, ch, hub.KindBackendStatus)
+	if got := evs[len(evs)-1]; string(got.Data) != `{"connected":false}` {
+		t.Fatalf("status = %s, want connected:false", got.Data)
 	}
 }

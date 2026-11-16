@@ -25,6 +25,9 @@ const (
 	defaultListFast   = 800 * time.Millisecond
 	defaultAttachFast = 800 * time.Millisecond
 	defaultAwayNotice = 60 * time.Second
+	// defaultReconnectGrace is Options.ReconnectGrace's default: longer than a
+	// gateway pod switchover (2.5 to 3.5 s measured), short next to a real outage.
+	defaultReconnectGrace = 10 * time.Second
 	// defaultAwayAlarm is how long a backend may not answer before the
 	// page calls it down, not restarting: the whole restart budget.
 	defaultAwayAlarm = gateway.RestartBudget

@@ -105,6 +105,10 @@ type Options struct {
 	// AwayAlarm is how long a backend may not answer before the page
 	// calls it down and not restarting. Default gateway.RestartBudget.
 	AwayAlarm time.Duration
+	// ReconnectGrace is how long viewers of a chat stay shown as connected
+	// after the backend connection drops, while the hub reconnects: a gateway
+	// switchover that ends sooner goes unseen. Default 10s.
+	ReconnectGrace time.Duration
 }
 
 // Service is the hub core.
@@ -205,6 +209,9 @@ func New(cfgs []config.Backend, dir Directory, opts Options) *Service {
 	}
 	if opts.AwayNotice == 0 {
 		opts.AwayNotice = defaultAwayNotice
+	}
+	if opts.ReconnectGrace == 0 {
+		opts.ReconnectGrace = defaultReconnectGrace
 	}
 	if opts.AwayAlarm == 0 {
 		opts.AwayAlarm = defaultAwayAlarm
@@ -1199,20 +1206,12 @@ func (b *backend) watch(c *gateway.Client) {
 			}
 		}
 	}
-	if gateway.RestartClose(c.Err()) || errors.Is(c.Err(), gateway.ErrStalled) {
-		// A gateway that closed for a restart is replaced within seconds, and a connection the
-		// hub dropped because it stalled is replaced at once: re-subscribe first and
-		// tell viewers only when that takes longer than restartReconnectGrace.
-		time.AfterFunc(restartReconnectGrace, offline)
-	} else {
-		offline()
-	}
+	// Any lost connection, a closed one (a restart) or a cut one (a pod that
+	// was killed), is usually replaced within seconds: re-subscribe first and
+	// tell viewers only when that takes longer than the reconnect grace.
+	time.AfterFunc(b.svc.opts.ReconnectGrace, offline)
 	b.retry()
 }
-
-// restartReconnectGrace is how long sessions of a gateway that closed for a
-// restart stay shown as connected while the hub re-subscribes them.
-const restartReconnectGrace = 10 * time.Second
 
 // retry reconnects and re-subscribes every session that has a viewer,
 // with backoff, until that works or no viewer is left. It outlives any
