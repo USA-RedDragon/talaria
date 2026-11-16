@@ -89,9 +89,9 @@ const { proc, connect } = driver();
   })()`);
 
   await c.nav(url + "/auth/login?next=/");
-  await until(`document.querySelectorAll('#sessions a.go[href="#/s/pc/work"]').length === 1`, "the chat list");
+  await until(`document.querySelectorAll('#sessions a.go[href="#/s/pc/mdchat"]').length === 1`, "the chat list");
   await until(`innerWidth === ${W}`, "the phone size");
-  await open("work", "Markdown");
+  await open("mdchat", "Markdown");
 
   // The seeded rich message.
   const r = await ev(`(() => {
@@ -120,8 +120,8 @@ const { proc, connect } = driver();
     assert.strictEqual(m.pending, false, kind + ": " + when + ": not pending");
   };
   await check("after sending");
-  await open("elsewhere", "Other");
-  await open("work", "Markdown");
+  await open("mdother", "Other");
+  await open("mdchat", "Markdown");
   await check("after a chat switch");
   await ev(`(window.__old = true)`);
   await c.reload();

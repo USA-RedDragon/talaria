@@ -48,12 +48,12 @@ func userMarkdownBrowser(t *testing.T, bin string) {
 	}
 	e := setup(t)
 	rich := "> From the model's next thinking, 1:15 PM\nDumb\n\n**Bold**, *italic*, `inline_code` and a [link](https://example.com).\n\n- first\n- second\n\n# A heading\n\n```go\nfmt.Println(\"hi\")\n```\nSee ~/my_dir/some_file_name.txt and *.go"
-	e.gw.AddSession(&gatewaytest.Session{ID: "work", Title: "Markdown", Live: true, StartedAt: 900, Messages: []map[string]any{
+	e.gw.AddSession(&gatewaytest.Session{ID: "mdchat", Title: "Markdown", Live: true, StartedAt: 900, Messages: []map[string]any{
 		{kRole: roleUser, kText: rich},
 		{kRole: roleAssistant, kText: "Got it."},
 	}})
-	e.gw.AddSession(&gatewaytest.Session{ID: "elsewhere", Title: titleOther, Live: true, StartedAt: 700, Messages: []map[string]any{
-		{kRole: roleUser, kText: "hello"},
+	e.gw.AddSession(&gatewaytest.Session{ID: "mdother", Title: titleOther, Live: true, StartedAt: 700, Messages: []map[string]any{
+		{kRole: roleUser, kText: "first words"},
 		{kRole: roleAssistant, kText: "hi"},
 	}})
 	prof := t.TempDir()
