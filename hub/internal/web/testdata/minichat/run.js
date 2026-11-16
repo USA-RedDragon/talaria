@@ -170,7 +170,7 @@ assert.deepStrictEqual(kids(), ["jump"]);
   ] };
   w.set({ model: "m" });
   w.add([ev({ type: "tool_start", call_id: "w1", name: "tool_call", args: wrapperArgs, at: 10 })]);
-  assert.deepStrictEqual(titles(), ["Waiting for background command proc_283637f9d51", "Searching past chats for “dns split horizon”", "Looking for a saved login on github.com"]);
+  assert.deepStrictEqual(titles(), ["Waiting for background command", "Searching past chats for “dns split horizon”", "Looking for a saved login on github.com"]);
   assert.strictEqual(b.querySelectorAll(".tool").length, 3);
   assert.ok(b.querySelectorAll(".tool").every((c) => c.classList.contains("running")));
   // One result row per inner call, all under the wrapper's id, out of order.
@@ -181,7 +181,7 @@ assert.deepStrictEqual(kids(), ["jump"]);
   const cards = b.querySelectorAll(".tool");
   assert.ok(cards.every((c) => !c.classList.contains("running") && c.finished), "every inner call finished");
   assert.deepStrictEqual(cards.map((c) => c.call.res && Object.keys(c.call.res)[0]), ["status", "results", "logins"]);
-  assert.deepStrictEqual(titles(), ["Waited for background command proc_283637f9d51", "Searched past chats for “dns split horizon”", "Looked for a saved login on github.com"]);
+  assert.deepStrictEqual(titles(), ["Waited for background command", "Searched past chats for “dns split horizon”", "Looked for a saved login on github.com"]);
   assert.deepStrictEqual(cards.map((c) => c.dataset.ukey), ["t:w1:0", "t:w1:1", "t:w1:2"]);
   // The batch ran together: the fold shows the real time from the first
   // start to the last end, not the 3 min 0.4 s the three times add up to.

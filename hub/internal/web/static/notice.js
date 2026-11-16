@@ -469,13 +469,36 @@ window.HubNotice = (() => {
     return c;
   }
 
+  // commandTitle is the title of a card: the command of a background
+  // command in monospace after its words, as on a tool card.
+  function commandTitle(el, n) {
+    const t = el("span", "notice-title");
+    const m = n.kind === "command" && !n.rows ? /^(Background command [a-z]+: )(.+)$/.exec(n.title) : null;
+    if (m) t.append(m[1], el("code", "tcode", m[2]));
+    else t.textContent = n.title;
+    return t;
+  }
+
+  // lastLine is the last line of a text that has anything in it.
+  function lastLine(text) {
+    const ls = String(text).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\n");
+    for (let i = ls.length - 1; i >= 0; i--) if (ls[i].trim()) return ls[i].trim();
+    return "";
+  }
+
   function header(ctx, n, nested, at) {
     const { el } = ctx;
     const head = el("button", "notice-head");
     head.type = "button";
     head.setAttribute("aria-expanded", "false");
-    head.append(window.HubIcons.icon(iconName(n)), el("span", "notice-title", n.title), chevron());
+    head.append(window.HubIcons.icon(iconName(n)), commandTitle(el, n), chevron());
     if ((n.meta && n.meta.length) || window.HubTimes.valid(at)) head.append(metaLine(el, n.meta, n.state, n.kind, at));
+    const end = n.kind === "command" && !n.rows && n.result ? lastLine(n.result) : "";
+    if (end) {
+      const box = el("div", "tool-lines");
+      box.append(el("div", "tool-line dim", end));
+      head.append(box);
+    }
     if (nested) head.classList.add("nested");
     return head;
   }

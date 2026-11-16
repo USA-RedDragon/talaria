@@ -1,0 +1,127 @@
+[
+ {
+  "id": "sh01",
+  "name": "terminal",
+  "args": {
+   "command": "npm test -- --run",
+   "workdir": "/home/alice/project/web"
+  },
+  "result": {
+   "output": " RUN  v1.6.0 /home/alice/project/web\n PASS src/app.test.ts (12)\n Tests 42 passed (42)",
+   "exit_code": 0
+  },
+  "duration_ms": 18000
+ },
+ {
+  "id": "sh02",
+  "name": "terminal",
+  "args": {
+   "command": "go build ./...",
+   "workdir": "/home/alice/project/api"
+  },
+  "result": {
+   "output": "main.go:3: undefined: x",
+   "exit_code": 1
+  },
+  "duration_ms": 4000
+ },
+ {
+  "id": "sh03",
+  "name": "terminal",
+  "args": {
+   "command": "make build",
+   "background": true,
+   "workdir": "/home/alice/app"
+  },
+  "result": {
+   "output": "Background process started",
+   "session_id": "proc_ab12",
+   "exit_code": 0
+  }
+ },
+ {
+  "id": "sh04",
+  "name": "execute_code",
+  "args": {
+   "code": "import json\nfiles = [1, 2]\nprint(len(files), \"json files\")\nprint(\"a.json\")"
+  },
+  "result": {
+   "status": "success",
+   "output": "2 json files\na.json",
+   "tool_calls_made": 0,
+   "duration_seconds": 0.3
+  },
+  "duration_ms": 300
+ },
+ {
+  "id": "sh05",
+  "name": "execute_code",
+  "args": {
+   "code": "for u in urls: fetch(u)"
+  },
+  "result": {
+   "status": "success",
+   "output": "",
+   "tool_calls_made": 5,
+   "duration_seconds": 4.8,
+   "tool_errors": [
+    {
+     "tool": "web_extract",
+     "error": "timeout"
+    }
+   ]
+  },
+  "duration_ms": 4800
+ },
+ {
+  "id": "sh06",
+  "name": "process_manage",
+  "args": {
+   "action": "wait",
+   "session_id": "proc_ab12"
+  },
+  "result": {
+   "status": "exited",
+   "command": "make build",
+   "exit_code": 1,
+   "output": "cc -o dist/app src/main.c\nerror: undefined reference"
+  },
+  "duration_ms": 130000
+ },
+ {
+  "id": "sh07",
+  "name": "process_manage",
+  "args": {
+   "action": "submit",
+   "session_id": "proc_ab12",
+   "data": "my-app"
+  },
+  "result": {
+   "status": "ok",
+   "command": "npm init"
+  }
+ },
+ {
+  "id": "sh08",
+  "name": "process_manage",
+  "args": {
+   "action": "list"
+  },
+  "result": {
+   "processes": [
+    {
+     "session_id": "proc_1",
+     "command": "npm start",
+     "status": "running",
+     "uptime_seconds": 240
+    },
+    {
+     "session_id": "proc_2",
+     "command": "make build",
+     "status": "exited",
+     "exit_code": 0
+    }
+   ]
+  }
+ }
+]

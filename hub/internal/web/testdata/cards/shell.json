@@ -1,0 +1,840 @@
+[
+ {
+  "name": "terminal finished shows the folder, no output line",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "npm test -- --run",
+    "workdir": "/home/alice/project/web"
+   },
+   "res": {
+    "output": " Tests 42 passed (42)",
+    "exit_code": 0
+   },
+   "out": " Tests 42 passed (42)",
+   "duration": 18
+  },
+  "want": {
+   "icon": "terminal",
+   "title": "Ran npm test -- --run",
+   "code": "npm test -- --run",
+   "status": "Exit 0",
+   "state": "ok",
+   "lines": [
+    "in /home/alice/project/web"
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "blocks": [
+    "Command",
+    "Output"
+   ],
+   "raw": false
+  }
+ },
+ {
+  "name": "terminal failed exit is the command's own result",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "go build ./...",
+    "workdir": "/home/alice/project/api"
+   },
+   "res": {
+    "output": "main.go:3: undefined: x",
+    "exit_code": 1
+   },
+   "failed": true,
+   "out": "main.go:3: undefined: x"
+  },
+  "want": {
+   "title": "Ran go build ./...",
+   "status": "Exit 1",
+   "state": "bad",
+   "lines": [
+    "in /home/alice/project/api"
+   ],
+   "blocks": [
+    "Command",
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "terminal running",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "make test",
+    "workdir": "/home/alice/project/api"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Running make test",
+   "status": "",
+   "state": "run",
+   "lines": [
+    "in /home/alice/project/api"
+   ],
+   "blocks": [
+    "Command"
+   ]
+  }
+ },
+ {
+  "name": "terminal timed out",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "sleep 300"
+   },
+   "res": {
+    "error": "Command timed out after 60 seconds",
+    "exit_code": 124
+   },
+   "failed": true,
+   "duration": 60
+  },
+  "want": {
+   "title": "Ran sleep 300",
+   "status": "Timed out",
+   "state": "bad",
+   "tone": "bad",
+   "lines": []
+  }
+ },
+ {
+  "name": "terminal takes the folder from the result when no workdir is given",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "ls"
+   },
+   "res": {
+    "output": "a",
+    "exit_code": 0,
+    "cwd": "/home/alice"
+   },
+   "out": "a"
+  },
+  "want": {
+   "status": "Exit 0",
+   "lines": [
+    "in /home/alice"
+   ]
+  }
+ },
+ {
+  "name": "terminal with no folder known has no line",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "ls"
+   },
+   "res": {
+    "output": "a",
+    "exit_code": 0
+   },
+   "out": "a"
+  },
+  "want": {
+   "status": "Exit 0",
+   "lines": []
+  }
+ },
+ {
+  "name": "terminal with no output has no output block",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "true"
+   },
+   "res": {
+    "output": "",
+    "exit_code": 0
+   }
+  },
+  "want": {
+   "status": "Exit 0",
+   "blocks": [
+    "Command"
+   ]
+  }
+ },
+ {
+  "name": "terminal that could not run",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "x"
+   },
+   "res": {
+    "error": "spawn failed"
+   },
+   "failed": true
+  },
+  "want": {
+   "status": "Failed: spawn failed",
+   "state": "bad"
+  }
+ },
+ {
+  "name": "terminal in the background still running",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "make build",
+    "background": true,
+    "workdir": "/home/alice/app"
+   },
+   "res": {
+    "output": "Background process started",
+    "session_id": "proc_ab12",
+    "exit_code": 0
+   }
+  },
+  "want": {
+   "icon": "terminal",
+   "title": "Started in the background: make build",
+   "status": "Running",
+   "tone": "warn",
+   "state": "ok",
+   "more": "in /home/alice/app",
+   "lines": [],
+   "blocks": [
+    "Command",
+    "Where"
+   ]
+  }
+ },
+ {
+  "name": "terminal in the background with watch patterns",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "tail -f logs/app.log",
+    "background": true,
+    "watch_patterns": [
+     "ERROR"
+    ]
+   },
+   "res": {
+    "session_id": "proc_cd34"
+   }
+  },
+  "want": {
+   "status": "Running",
+   "more": "",
+   "lines": [
+    "Watching for \"ERROR\""
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "blocks": [
+    "Command"
+   ]
+  }
+ },
+ {
+  "name": "terminal in the background starting",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "make build",
+    "background": true
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Starting in the background: make build",
+   "state": "run",
+   "status": ""
+  }
+ },
+ {
+  "name": "terminal refused",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "rm -rf /home/alice/build",
+    "background": true
+   },
+   "res": {
+    "status": "denied",
+    "error": "Command denied by the user"
+   },
+   "failed": true
+  },
+  "want": {
+   "title": "Not started: rm -rf /home/alice/build",
+   "status": "Refused",
+   "state": "bad",
+   "tone": "bad",
+   "more": "you declined the approval",
+   "lines": []
+  }
+ },
+ {
+  "name": "terminal foreground refused",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "rm -rf /home/alice/build"
+   },
+   "res": {
+    "status": "blocked",
+    "error": "BLOCKED: dangerous command"
+   },
+   "failed": true
+  },
+  "want": {
+   "title": "Did not run rm -rf /home/alice/build",
+   "status": "Refused",
+   "more": "dangerous command"
+  }
+ },
+ {
+  "name": "execute_code finished",
+  "call": {
+   "name": "execute_code",
+   "args": {
+    "code": "import json\nfrom pathlib import Path\nroot = Path(\"/home/alice/proj\")\nfiles = sorted(root.glob(\"**/*.json\"))\nprint(len(files), \"json files\")\nfor f in files[:3]:\n    print(f.name)"
+   },
+   "res": {
+    "status": "success",
+    "output": "12 json files\na.json\nb.json\nc.json",
+    "tool_calls_made": 0,
+    "duration_seconds": 0.3
+   },
+   "out": "12 json files\na.json\nb.json\nc.json"
+  },
+  "want": {
+   "icon": "terminal",
+   "title": "Ran Python root = Path(\"/home/alice/proj\")",
+   "status": "Done",
+   "state": "ok",
+   "more": "0 tool calls \u00b7 0.3 s",
+   "lines": [
+    "12 json files+3 lines"
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "blocks": [
+    "Code",
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "execute_code running",
+  "call": {
+   "name": "execute_code",
+   "args": {
+    "code": "results = web_search(\"rust async runtime\")"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Running Python results = web_search(\"rust async runtime\")",
+   "state": "run",
+   "status": "",
+   "lines": [],
+   "blocks": [
+    "Code"
+   ]
+  }
+ },
+ {
+  "name": "execute_code script error",
+  "call": {
+   "name": "execute_code",
+   "args": {
+    "code": "import json\ndata = json.loads(open(\"/home/alice/proj/x.json\").read())"
+   },
+   "res": {
+    "status": "error",
+    "exit_code": 1,
+    "output": "Traceback (most recent call last):\n  File \"script.py\", line 2, in <module>\njson.decoder.JSONDecodeError: Expecting value: line 1 column 1",
+    "tool_calls_made": 0,
+    "duration_seconds": 0.1
+   },
+   "failed": true,
+   "out": "x"
+  },
+  "want": {
+   "title": "Ran Python data = json.loads(open(\"/home/alice/proj/x.json\").read())",
+   "status": "Script error: exit 1",
+   "state": "bad",
+   "more": "0 tool calls \u00b7 0.1 s",
+   "lines": [
+    "json.decoder.JSONDecodeError: Expecting value: line 1 column 1"
+   ],
+   "blocks": [
+    "Code",
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "execute_code with failed inner calls and no output",
+  "call": {
+   "name": "execute_code",
+   "args": {
+    "code": "for u in urls: fetch(u)"
+   },
+   "res": {
+    "status": "success",
+    "output": "",
+    "tool_calls_made": 5,
+    "duration_seconds": 4.8,
+    "tool_errors": [
+     {
+      "tool": "web_extract",
+      "error": "timeout"
+     },
+     {
+      "tool": "web_extract",
+      "error": "404"
+     }
+    ]
+   }
+  },
+  "want": {
+   "status": "Done, 2 of 5 tool calls failed",
+   "tone": "warn",
+   "state": "ok",
+   "more": "4.8 s",
+   "lines": [
+    "No output"
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "blocks": [
+    "Code",
+    "Tool calls that failed"
+   ]
+  }
+ },
+ {
+  "name": "execute_code timed out",
+  "call": {
+   "name": "execute_code",
+   "args": {
+    "code": "while True: poll()",
+    "timeout": 300
+   },
+   "res": {
+    "status": "timeout",
+    "output": "",
+    "tool_calls_made": 41,
+    "duration_seconds": 300
+   },
+   "failed": true
+  },
+  "want": {
+   "status": "Timed out after 300 s",
+   "tone": "warn",
+   "state": "bad",
+   "more": "41 tool calls",
+   "lines": []
+  }
+ },
+ {
+  "name": "execute_code with no output and no tool calls",
+  "call": {
+   "name": "execute_code",
+   "args": {
+    "code": "x = 1"
+   },
+   "res": {
+    "status": "success",
+    "output": "",
+    "tool_calls_made": 0,
+    "duration_seconds": 0.1
+   }
+  },
+  "want": {
+   "status": "Done",
+   "lines": [
+    "No output"
+   ]
+  }
+ },
+ {
+  "name": "execute_code error only in the JSON",
+  "call": {
+   "name": "execute_code",
+   "args": {
+    "code": "x"
+   },
+   "res": {
+    "status": "error"
+   },
+   "failed": true
+  },
+  "want": {
+   "status": "Script error",
+   "state": "bad",
+   "raw": true
+  }
+ },
+ {
+  "name": "process wait exited with failure",
+  "learn": [
+   {
+    "name": "terminal",
+    "args": {
+     "command": "npm test",
+     "background": true
+    },
+    "res": {
+     "session_id": "proc_1"
+    }
+   }
+  ],
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "proc_1"
+   },
+   "res": {
+    "status": "exited",
+    "exit_code": 1,
+    "output": "PASS src/db.test.ts\nFAIL src/app.test.ts\nTests: 2 failed, 14 passed"
+   },
+   "failed": true,
+   "duration": 130
+  },
+  "want": {
+   "icon": "clock",
+   "title": "Waited for background command npm test",
+   "status": "Exited 1",
+   "tone": "bad",
+   "state": "bad",
+   "lines": [
+    "Tests: 2 failed, 14 passed"
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "blocks": [
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "process wait running",
+  "learn": [
+   {
+    "name": "terminal",
+    "args": {
+     "command": "npm test",
+     "background": true
+    },
+    "res": {
+     "session_id": "proc_1"
+    }
+   }
+  ],
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "proc_1"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Waiting for background command npm test",
+   "state": "run",
+   "status": "",
+   "lines": []
+  }
+ },
+ {
+  "name": "process wait finished without a failure",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "p"
+   },
+   "res": {
+    "status": "exited",
+    "exit_code": 0,
+    "command": "make build",
+    "output": "done"
+   },
+   "duration": 8
+  },
+  "want": {
+   "status": "Exited 0",
+   "tone": "",
+   "state": "ok"
+  }
+ },
+ {
+  "name": "process wait that gave up",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "p",
+    "timeout": 38
+   },
+   "res": {
+    "status": "timeout",
+    "command": "sleep 500",
+    "output": "tick"
+   },
+   "duration": 38
+  },
+  "want": {
+   "status": "Still running",
+   "state": "ok",
+   "lines": [
+    "tick"
+   ]
+  }
+ },
+ {
+  "name": "process send input",
+  "learn": [
+   {
+    "name": "terminal",
+    "args": {
+     "command": "npm init",
+     "background": true
+    },
+    "res": {
+     "session_id": "proc_2"
+    }
+   }
+  ],
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "submit",
+    "session_id": "proc_2",
+    "data": "my-app"
+   },
+   "res": {
+    "status": "ok"
+   }
+  },
+  "want": {
+   "icon": "send",
+   "title": "Sent input to background command npm init",
+   "status": "Sent",
+   "state": "ok",
+   "lines": [
+    "my-app then Enter"
+   ],
+   "blocks": [
+    "Sent"
+   ]
+  }
+ },
+ {
+  "name": "process write has no Enter",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "write",
+    "session_id": "p",
+    "data": "y"
+   },
+   "res": {
+    "status": "ok",
+    "command": "npm init"
+   }
+  },
+  "want": {
+   "status": "Sent",
+   "lines": [
+    "y"
+   ]
+  }
+ },
+ {
+  "name": "process stop failed",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "kill",
+    "session_id": "p"
+   },
+   "res": {
+    "status": "not_found",
+    "error": "command not found"
+   },
+   "failed": true
+  },
+  "want": {
+   "title": "Could not stop background command",
+   "status": "Failed: command not found",
+   "state": "bad"
+  }
+ },
+ {
+  "name": "process stop failed names the command",
+  "learn": [
+   {
+    "name": "terminal",
+    "args": {
+     "command": "npm start",
+     "background": true
+    },
+    "res": {
+     "session_id": "proc_3"
+    }
+   }
+  ],
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "kill",
+    "session_id": "proc_3"
+   },
+   "res": {
+    "error": "command not found"
+   },
+   "failed": true
+  },
+  "want": {
+   "title": "Could not stop background command npm start",
+   "status": "Failed: command not found"
+  }
+ },
+ {
+  "name": "process list",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "list"
+   },
+   "res": {
+    "processes": [
+     {
+      "session_id": "a",
+      "command": "npm start",
+      "status": "running",
+      "uptime_seconds": 240
+     },
+     {
+      "session_id": "b",
+      "command": "make build",
+      "status": "exited",
+      "exit_code": 0
+     }
+    ]
+   }
+  },
+  "want": {
+   "icon": "list",
+   "title": "Listed background commands",
+   "status": "2 commands",
+   "state": "ok",
+   "blocks": [
+    "Commands"
+   ],
+   "lines": [
+    "npm start, make build"
+   ]
+  }
+ },
+ {
+  "name": "process list empty",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "list"
+   },
+   "res": {
+    "processes": []
+   }
+  },
+  "want": {
+   "status": "0 commands",
+   "blocks": [],
+   "lines": []
+  }
+ },
+ {
+  "name": "process poll running",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "p"
+   },
+   "res": {
+    "status": "running",
+    "command": "npm start",
+    "output_preview": "listening\nready on 3000"
+   }
+  },
+  "want": {
+   "title": "Checked background command npm start",
+   "status": "Still running",
+   "lines": [
+    "ready on 3000"
+   ]
+  }
+ },
+ {
+  "name": "process log",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "log",
+    "session_id": "p"
+   },
+   "res": {
+    "status": "exited",
+    "command": "npm test",
+    "output": "a\nb",
+    "total_lines": 120,
+    "exit_code": 1
+   }
+  },
+  "want": {
+   "status": "120 lines",
+   "lines": [
+    "b"
+   ],
+   "blocks": [
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "process handoff",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "handoff",
+    "session_id": "p",
+    "data": "the full test run",
+    "resume_on_exit": true
+   },
+   "res": {
+    "status": "ok",
+    "command": "make test"
+   }
+  },
+  "want": {
+   "title": "Handed off background command make test",
+   "status": "Waiting for exit, will wake this chat",
+   "lines": [
+    "the full test run"
+   ]
+  }
+ }
+]

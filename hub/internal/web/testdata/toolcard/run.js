@@ -90,10 +90,10 @@ assert.strictEqual(wrapped("tool_call", "x"), null);
 {
   const wait = (extra) => derive(Object.assign({ name: "process_manage", args: { action: "wait", session_id: "proc_1", timeout: 3600 }, res: { status: "running" }, done: true, failed: false }, extra));
   const d = wait({ duration: 181 });
-  assert.strictEqual(d.status, "Still running after waiting 3 min");
+  assert.strictEqual(d.status, "Still running");
   assert.ok(d.idle, "an unfinished wait is not colored as success");
-  assert.strictEqual(wait({ duration: 12 }).status, "Still running after waiting 12 s");
-  assert.strictEqual(wait({ duration: 3720 }).status, "Still running after waiting 1 h 2 min");
+  assert.strictEqual(wait({ duration: 12 }).status, "Still running");
+  assert.strictEqual(wait({ duration: 3720 }).status, "Still running");
   assert.strictEqual(wait({}).status, "Still running");
   assert.ok(!/1800|3600/.test(wait({ duration: 180 }).status));
   const pict = /\p{Extended_Pictographic}|\uFE0F/u;
@@ -182,7 +182,7 @@ assert.strictEqual(wrapped("tool_call", "x"), null);
   split({ name: "terminal", args: { command: "ls -la /usr/bin/zig; file /usr/bin/zig" }, res: { exit_code: 0 } }, "Ran ", "ls -la /usr/bin/zig; file /usr/bin/zig", "Ran ls -la /usr/bin/zig; file /usr/bin/zig");
   split({ name: "terminal", args: { command: "sleep 60" }, done: false }, "Running ", "sleep 60", "Running sleep 60");
   split({ name: "terminal", args: { command: "make -j8", background: true }, res: { session_id: "proc_1" } }, "Started in the background: ", "make -j8", "Started in the background: make -j8");
-  split({ name: "execute_code", args: { code: "import json\nprint(1)" }, res: { output: "1" } }, "Ran ", "import json", "Ran import json");
+  split({ name: "execute_code", args: { code: "import json\nprint(1)" }, res: { output: "1" } }, "Ran Python ", "print(1)", "Ran Python print(1)");
   split({ name: "process_manage", args: { action: "wait", session_id: "proc_283637f9d51" }, res: { status: "exited", exit_code: 0 } }, "Waited for background command ", "npm test", "Waited for background command npm test");
   split({ name: "process_manage", args: { action: "kill", session_id: "proc_283637f9d51" }, res: { status: "killed" } }, "Stopped background command ", "npm test", "Stopped background command npm test");
   // Titles with no command stay one plain string.

@@ -1818,6 +1818,7 @@ pre.code .body { display: block; background: transparent; padding: 0 .75rem 0 0;
    section below, so the modules do not touch each other's lines. */
 
 /* cards/shell.js */
+.notice[data-kind="command"] > .notice-head > .tool-lines { grid-column: 2 / 4; min-width: 0; font-weight: 400; }
 
 /* end cards/shell.js */
 

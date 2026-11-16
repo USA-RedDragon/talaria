@@ -4,26 +4,170 @@
 // toolcard.js and is registered with HubToolCard.register.
 (() => {
   const H = window.HubToolCard;
-  const { isObj, str, cut, squash, short, first, last, plural, base, dir, lines, stripAnsi, host, verb, failure, errorText, exitCode, span, upperFirst, who, keyName, toolLabel, json, rawOf, num, size, plain } = H.util;
+  const { isObj, str, cut, squash, short, first, last, plural, lines, stripAnsi, verb, errorText, exitCode, span } = H.util;
+
+  // clock writes a length of time the way a command's run is told: 2 m 10 s.
+  function clock(s) {
+    s = Math.round(s);
+    if (s < 60) return s + " s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + " m" + (s % 60 ? " " + (s % 60) + " s" : "");
+    return Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " m" : "");
+  }
+
+  // secs writes a short run time: 0.3 s, 4.8 s, 41 s.
+  const secs = (s) => (s < 10 ? Math.round(s * 10) / 10 + " s" : clock(s));
+
+  const tail = (s) => last(stripAnsi(str(s)));
+  const hasText = (s) => str(s).trim() !== "";
+
+  // folder is where a command ran: the folder it was given, else the one
+  // the result names.
+  const folder = (a, res) => str(a.workdir) || str(res.cwd);
+
+  const timedOut = (res) => res.status === "timeout" || res.status === "timed_out" || /timed out/i.test(errorText(res));
+
+  // denied says a command did not run because the approval said no.
+  function denied(res) {
+    const e = errorText(res);
+    return res.status === "blocked" || res.status === "denied" || res.status === "refused" || /\b(denied|declined|blocked|not approved)\b/i.test(e);
+  }
+  const deniedWhy = (res) => (/\b(user|you)\b.*\b(denied|declined)\b|\bdenied by the user\b/i.test(errorText(res)) ? "you declined the approval" : cut(squash(errorText(res).replace(/^BLOCKED:\s*/i, "")), 80));
 
   function terminal(c) {
     const a = isObj(c.args) ? c.args : {};
     const res = isObj(c.res) ? c.res : {};
     const cmd = str(a.command);
     const bg = !!a.background || res.status === "yielded_to_background";
-    const out = { icon: "terminal", blocks: [] };
-    out.title = (bg ? verb(c, "Started in the background: ", "Starting in the background: ") : verb(c, "Ran ", "Running ")) + (short(cmd) || "a command");
-    if (short(cmd)) out.code = short(cmd);
+    const out = { icon: "terminal", blocks: [], lines: [] };
+    const dirText = folder(a, res);
+    const shown = short(cmd);
+    if (c.done && denied(res)) {
+      out.title = [bg ? "Not started: " : "Did not run ", ...(shown ? [{ code: shown }] : ["the command"])];
+      if (!shown && bg) out.title = ["Not started: the command"];
+      out.status = "Refused";
+      out.tone = "bad";
+      out.ownFailure = true;
+      out.bad = true;
+      out.more = [deniedWhy(res)].filter(Boolean);
+      return out;
+    }
+    const lead = bg ? verb(c, "Started in the background: ", "Starting in the background: ") : verb(c, "Ran ", "Running ");
+    out.title = shown ? [lead, { code: shown }] : lead + "a command";
     const exit = exitCode(res);
-    if (bg && !c.failed) out.status = "Running in the background";
-    else if (exit !== null && exit !== 0) out.status = "Exit " + exit;
-    else if (exit === 0) out.status = "Exit 0";
-    else out.status = "Done";
-    // A nonzero exit is the command's own result, not a failed call.
-    if (exit !== null && exit !== 0) out.ownFailure = true;
+    const watch = Array.isArray(a.watch_patterns) ? a.watch_patterns.map(str).filter(Boolean) : [];
+    if (bg) {
+      if (!c.failed) {
+        out.status = "Running";
+        out.tone = "warn";
+        if (dirText) out.more = ["in ", { code: dirText }];
+      }
+      if (watch.length) out.lines.push({ parts: ["Watching for " + watch.map((w) => "\"" + w + "\"").join(", ")], dim: true });
+      if (dirText && !out.more) out.lines.push({ parts: ["in ", { code: dirText }], dim: true });
+    } else {
+      if (timedOut(res)) {
+        out.status = "Timed out";
+        out.tone = "bad";
+        out.ownFailure = true;
+      } else if (exit !== null) {
+        out.status = "Exit " + exit;
+        // A nonzero exit is the command's own result, not a failed call.
+        if (exit !== 0) out.ownFailure = true;
+      } else out.status = "Done";
+      if (dirText) out.lines.push({ parts: ["in ", { code: dirText }], dim: true });
+    }
+    // The start of a background command has nothing worth showing as output.
     if (cmd) out.blocks.push({ label: "Command", text: cmd, kind: "command" });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
+    if (bg && !c.failed) {
+      if (dirText) out.blocks.push({ label: "Where", kind: "kv", rows: [{ k: "Folder", v: [dirText], mono: true }] });
+    } else if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
     return out;
+  }
+
+  // failedInner lists the inner tool calls of a script that failed.
+  function failedInner(res) {
+    return Array.isArray(res.tool_errors) ? res.tool_errors : [];
+  }
+
+  // meaningful is the line of a script that says what it does: the first
+  // one that is no blank, no comment and no bare import, else the first.
+  function meaningful(src) {
+    const ls = str(src).split("\n").map((l) => l.trim()).filter(Boolean);
+    const skip = (l) => l.startsWith("#") || /^(import|from)\s+\S+/.test(l);
+    return ls.find((l) => !skip(l)) || ls[0] || "";
+  }
+
+  function code(c) {
+    const a = isObj(c.args) ? c.args : {};
+    const res = isObj(c.res) ? c.res : {};
+    const src = str(a.code);
+    const line = short(meaningful(src));
+    const out = { icon: "terminal", blocks: [], lines: [] };
+    const lead = verb(c, "Ran Python", "Running Python");
+    out.title = line ? [lead + " ", { code: line }] : lead;
+    if (a.reset) out.chips = ["Fresh session"];
+    const status = str(res.status).toLowerCase();
+    const calls = typeof res.tool_calls_made === "number" ? res.tool_calls_made : null;
+    const stdout = str(res.output);
+    const err = str(res.error) || errorText(res);
+    const inner = failedInner(res);
+    const exit = exitCode(res);
+    const dur = typeof res.duration_seconds === "number" ? res.duration_seconds : null;
+    const more = [];
+    if (status === "timeout" || status === "timed_out") {
+      out.status = "Timed out" + (typeof a.timeout === "number" ? " after " + a.timeout + " s" : dur !== null ? " after " + span(dur) : "");
+      out.tone = "warn";
+      out.ownFailure = true;
+      out.bad = true;
+    } else if (status === "interrupted") {
+      out.status = "Interrupted";
+      out.tone = "warn";
+      out.ownFailure = true;
+      out.bad = true;
+    } else if (status === "error" || (exit !== null && exit !== 0)) {
+      out.status = "Script error" + (exit !== null ? ": exit " + exit : "");
+      out.ownFailure = true;
+      out.bad = true;
+    } else if (inner.length && calls !== null) {
+      out.status = "Done, " + inner.length + " of " + calls + " tool calls failed";
+      out.tone = "warn";
+    } else if (inner.length) {
+      out.status = "Done, " + plural(inner.length, "tool call") + " failed";
+      out.tone = "warn";
+    } else out.status = "Done";
+    if (calls !== null && !inner.length) more.push(plural(calls, "tool call"));
+    if (typeof c.duration !== "number" && dur !== null && !/^Timed out/.test(out.status)) more.push(secs(dur));
+    out.more = more.flatMap((m, i) => (i ? [" · ", m] : [m]));
+    // The line under the status: the error's last line, or the first line
+    // of what the script printed.
+    const body = stdout.trim() ? stdout : "";
+    if (out.bad && (err.trim() || body.trim())) out.lines.push({ parts: [tail(err) || tail(body)] });
+    else if (body) {
+      const n = lines(stripAnsi(body));
+      out.lines.push({ parts: [first(stripAnsi(body)), ...(n > 1 ? [{ chip: "+" + (n - 1) + " lines" }] : [])], dim: true });
+    } else if (c.done && !out.bad) out.lines.push({ parts: ["No output"], dim: true });
+    if (src) out.blocks.push({ label: "Code", text: src, kind: "pre" });
+    let shownOut = stdout;
+    if (err.trim() && !stdout.includes(err.trim())) shownOut += (shownOut && !shownOut.endsWith("\n") ? "\n" : "") + err;
+    if (shownOut.trim()) out.blocks.push({ label: "Output", text: shownOut, pre: true });
+    if (res.stdout_truncated || typeof res.warning === "string") {
+      out.blocks.push({ label: "Note", text: str(res.warning) || "The output was cut", kind: "plain", plain: true, copy: false });
+    }
+    if (inner.length) {
+      const items = inner.map((e) => {
+        if (isObj(e)) return { parts: [str(e.tool || e.name || "A tool call"), ": ", cut(squash(str(e.error || e.message)), 100)] };
+        return { parts: [cut(squash(str(e)), 120)] };
+      });
+      out.blocks.push({ label: "Tool calls that failed", kind: "list", items });
+    }
+    // An error that is only in the JSON: no output and no error text.
+    if (out.bad && !err.trim() && !stdout.trim() && c.res) out.raw = H.util.json(c.res);
+    return out;
+  }
+
+  // pmLast is the last output line of a background command's result.
+  function pmLast(res) {
+    return tail(res.output_preview) || tail(res.output);
   }
 
   function pm(c) {
@@ -31,86 +175,126 @@
     const res = isObj(c.res) ? c.res : {};
     const act = str(a.action) || "list";
     const id = str(a.session_id);
-    const cmd = short(str(res.command) || (c.mem && c.mem.proc(id)) || id);
-    const out = { icon: "activity", blocks: [] };
+    const known = str(res.command) || (c.mem && c.mem.proc(id)) || "";
+    const cmd = short(known);
+    const out = { icon: "activity", blocks: [], lines: [] };
     const exited = res.status === "exited" || res.status === "already_exited" || (typeof res.exit_code === "number" && res.status !== "killed");
     const exit = exitCode(res);
     const exitText = exit === null ? "Exited" : "Exited " + exit;
+    const ok = !c.failed || exited;
+    // The title: a verb, then the command in monospace; a command that is
+    // not known by name is not named by its id.
+    const title = (past, now, failed) => {
+      const w = c.done ? (c.failed && !exited ? failed : past) : now;
+      return [w + " background command" + (cmd ? " " : ""), ...(cmd ? [{ code: cmd }] : [])];
+    };
+    const tailLine = () => {
+      const l = pmLast(res);
+      if (l) out.lines.push({ parts: [{ code: l }], dim: true });
+      else if (c.done && ok && (act === "poll" || act === "wait" || act === "log" || act === "kill") && (res.output !== undefined || res.output_preview !== undefined)) out.lines.push({ parts: ["No output yet"], dim: true });
+    };
+    const outBlock = () => {
+      const text = str(res.output) || str(res.output_preview);
+      if (text.trim()) out.blocks.push({ label: "Output", text: stripAnsi(text), pre: true });
+    };
     switch (act) {
       case "kill":
         out.icon = "stop";
-        out.title = verb(c, "Stopped", "Stopping") + " background command " + cmd;
-        out.code = cmd;
+        out.title = title("Stopped", "Stopping", "Could not stop");
         out.status = res.status === "already_exited" ? exitText : "Stopped";
+        tailLine();
+        outBlock();
         break;
-      case "wait": {
+      case "wait":
         out.icon = "clock";
-        out.title = verb(c, "Waited for", "Waiting for") + " background command " + cmd;
-        out.code = cmd;
-        if (exited) out.status = exitText;
-        else if (res.status === "interrupted") out.status = "Interrupted";
+        out.title = title("Waited for", "Waiting for", "Could not wait for");
+        if (exited) {
+          out.status = exitText;
+          if (exit !== null && exit !== 0) {
+            out.tone = "bad";
+            out.ownFailure = true;
+          }
+        } else if (res.status === "interrupted") out.status = "Interrupted";
         else {
-          // The timeout asked for is not how long it waited; the card's own
-          // duration is. A wait that has not finished is not a success.
-          out.status = "Still running" + (typeof c.duration === "number" && c.duration >= 1 ? " after waiting " + span(c.duration) : "");
+          // A wait that has not finished is not a success; the card's own
+          // duration says how long it waited.
+          out.status = "Still running";
           out.idle = true;
+          out.ownFailure = res.status === "timeout";
         }
+        tailLine();
+        outBlock();
         break;
-      }
       case "poll":
-        out.title = verb(c, "Checked", "Checking") + " background command " + cmd;
-        out.code = cmd;
-        out.status = exited ? exitText : "Still running";
+        out.title = title("Checked", "Checking", "Could not check");
+        if (exited) {
+          out.status = exitText;
+          if (exit !== null && exit !== 0) {
+            out.tone = "bad";
+            out.ownFailure = true;
+          }
+        } else out.status = "Still running" + (typeof res.uptime_seconds === "number" ? ", up " + clock(res.uptime_seconds) : "");
+        tailLine();
+        outBlock();
         break;
       case "log": {
         out.icon = "list";
-        out.title = verb(c, "Read the output of", "Reading the output of") + " background command " + cmd;
-        out.code = cmd;
+        out.title = title("Read the output of", "Reading the output of", "Could not read the output of");
         const n = typeof res.total_lines === "number" ? res.total_lines : c.partial && c.partial.lines ? c.partial.lines : lines(str(res.output));
         out.status = plural(n, "line");
+        tailLine();
+        outBlock();
         break;
       }
       case "write":
-      case "submit":
+      case "submit": {
         out.icon = "send";
-        out.title = verb(c, "Sent input to", "Sending input to") + " background command " + cmd;
-        out.code = cmd;
+        out.title = title("Sent input to", "Sending input to", "Could not send input to");
         out.status = "Sent";
+        const data = str(a.data);
+        const enter = act === "submit";
+        const text = data.replace(/\n+$/, "");
+        if (text.trim()) out.lines.push({ parts: [{ code: short(text) }, ...(enter ? [" then Enter"] : [])], dim: true });
+        else if (enter) out.lines.push({ parts: ["Enter"], dim: true });
+        if (data || enter) out.blocks.push({ label: "Sent", text: data + (enter && !data.endsWith("\n") ? "\n" : ""), pre: true });
         break;
+      }
       case "close":
-        out.title = verb(c, "Closed the input of", "Closing the input of") + " background command " + cmd;
-        out.code = cmd;
+        out.title = title("Closed the input of", "Closing the input of", "Could not close the input of");
         out.status = "Closed";
         break;
-      case "handoff":
+      case "handoff": {
         out.icon = "send";
-        out.title = verb(c, "Handed off", "Handing off") + " background command " + cmd;
-        out.code = cmd;
-        out.status = "Handed off";
+        out.title = title("Handed off", "Handing off", "Could not hand off");
+        out.status = a.resume_on_exit ? "Waiting for exit, will wake this chat" : "Handed off";
+        const note = str(a.data);
+        if (note.trim()) out.lines.push({ parts: [short(note)], dim: true });
+        if (note.trim()) out.blocks.push({ label: "Note", text: note, kind: "plain", plain: true });
         break;
+      }
       default: {
         out.icon = "list";
-        out.title = verb(c, "Listed", "Listing") + " background commands";
-        const list = Array.isArray(res.processes) ? res.processes : null;
+        out.title = ["Listed background commands"];
+        if (c.done && c.failed) out.title = ["Could not list background commands"];
+        const list = Array.isArray(res.processes) ? res.processes.filter(isObj) : null;
         out.status = list ? plural(list.length, "command") : "Done";
+        if (list && list.length) {
+          const names = list.map((p) => short(str(p.command))).filter(Boolean);
+          if (names.length) out.lines.push({ parts: [names.join(", ")], dim: true });
+          out.blocks.push({
+            label: "Commands",
+            kind: "kv",
+            rows: list.map((p) => {
+              const st = str(p.status);
+              const up = typeof p.uptime_seconds === "number" ? clock(p.uptime_seconds) : "";
+              const state = st === "exited" || typeof p.exit_code === "number" ? "Exited" + (typeof p.exit_code === "number" ? " " + p.exit_code : "") : st ? H.util.upperFirst(st) : "";
+              return { k: short(str(p.command)) || "A command", v: [[state, up].filter(Boolean).join(", ")] };
+            }),
+          });
+        }
       }
     }
-    if (res.status === "not_found") out.status = "No such command";
-    out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-
-  // code is execute_code: the first line of the script.
-  function code(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const src = first(str(a.code));
-    const out = { icon: "terminal", blocks: [], status: "Done" };
-    out.title = verb(c, "Ran ", "Running ") + (src ? short(src) : "code");
-    if (src) out.code = short(src);
-    if (a.code) out.blocks.push({ label: "Code", text: str(a.code), kind: "pre" });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
+    if (res.status === "not_found" && !c.failed) out.status = "No such command";
     return out;
   }
 
