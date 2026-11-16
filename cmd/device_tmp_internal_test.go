@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/USA-RedDragon/talaria/internal/config"
@@ -27,7 +28,8 @@ func TestDeviceTempDirDefaultsToPrivateStateFolder(t *testing.T) {
 	if got != tmp {
 		t.Fatalf("deviceTempDir = %q, want %q", got, tmp)
 	}
-	if fi, err := os.Stat(got); err != nil || fi.Mode().Perm() != 0o700 {
+	// Windows has no Unix mode bits.
+	if fi, err := os.Stat(got); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o700) {
 		t.Errorf("tmp dir mode = %v, %v; want 0700", fi, err)
 	}
 	for name, want := range map[string]bool{"hermes-snap-aaaa.sh": false, "hermes-cwd-aaaa.txt": false, "keep.txt": true} {
