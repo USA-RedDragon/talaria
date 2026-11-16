@@ -1561,7 +1561,7 @@ func (g *Gateway) turn(id, admission, submission, text string) {
 	}
 	if text == "run slow" {
 		// A terminal command that never reports its end: the turn stays running.
-		g.publishLocked(s, "tool.start", map[string]any{kToolID: "t-slow", kName: kTerminal, kArgs: map[string]any{"command": "du -sh ~/ROMs"}})
+		g.publishLocked(s, "tool.start", map[string]any{kToolID: "t-slow", kName: kTerminal, kArgs: map[string]any{kCommand: "du -sh ~/ROMs"}})
 		return
 	}
 	g.publishLocked(s, "tool.start", map[string]any{kToolID: "t1", kName: toolReadFile, kArgs: map[string]any{kPath: "README.md"}})
