@@ -24,10 +24,10 @@ Opt-in compression.decision_ledger_chars. A summary is rewritten by a model at e
  create mode 100644 tools/ledger_tool.py
 
 diff --git a/agent/agent_init.py b/agent/agent_init.py
-index 659e6111..5ddcc673 100644
+index ac8cc99f..4f0f2eee 100644
 --- a/agent/agent_init.py
 +++ b/agent/agent_init.py
-@@ -1881,6 +1881,12 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
+@@ -1875,6 +1875,12 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
          (_ctx_section if isinstance(_ctx_section, dict) else {}).get("collapse_agent_messages"), default=False)
      with suppress(Exception):
          agent.context_compressor.collapse_agent_messages = agent._collapse_agent_messages
@@ -37,14 +37,14 @@ index 659e6111..5ddcc673 100644
 +    with suppress(Exception):
 +        agent.context_compressor.decision_ledger_chars = max(
 +            0, _parse_config_int(_comp_section.get("decision_ledger_chars", 0), 0))
-     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
-     if callable(_bind_session_state):
-         with suppress(Exception):
+     agent.compression_enabled = cs.enabled
+     agent.compression_in_place = cs.in_place
+     _cc = agent.context_compressor
 diff --git a/agent/context_compressor.py b/agent/context_compressor.py
-index 57c0dd2a..270135f8 100644
+index fb7cb488..5defcbac 100644
 --- a/agent/context_compressor.py
 +++ b/agent/context_compressor.py
-@@ -2855,6 +2855,8 @@ class ContextCompressor(
+@@ -2853,6 +2853,8 @@ class ContextCompressor(
          # context.collapse_agent_messages (set by agent init): relayed agent messages reach the summarizer
          # with a one-line note instead of their instructions paragraph.
          self.collapse_agent_messages = False
@@ -53,7 +53,7 @@ index 57c0dd2a..270135f8 100644
          self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
          self.quiet_mode = quiet_mode
          # Usable input = context_length - max_tokens; only a positive int counts as a reservation.
-@@ -5169,8 +5171,10 @@ Write only the summary body. Do not include any preamble or prefix."""
+@@ -5163,8 +5165,10 @@ Write only the summary body. Do not include any preamble or prefix."""
          summary_idx, summary_body = summary_hits[-1]
          if not self._previous_summary:
              from agent.compaction_skill_pin import active_skills_as_markers
@@ -65,7 +65,7 @@ index 57c0dd2a..270135f8 100644
              ) or self._previous_summary
          # Zero-user provenance (#64650) rides on the newest handoff hit.
          provenance = messages[summary_idx].get(COMPRESSED_SUMMARY_HAS_USER_TURN_KEY)
-@@ -5587,6 +5591,9 @@ Write only the summary body. Do not include any preamble or prefix."""
+@@ -5571,6 +5575,9 @@ Write only the summary body. Do not include any preamble or prefix."""
          summary, messages = self._keep_last_skill(
              summary, canonical_messages, messages, compress_start, max(compress_end, scan.tail_start),
          )
@@ -75,7 +75,7 @@ index 57c0dd2a..270135f8 100644
          # Phase 4: Assemble compressed message list
          compressed = self._assemble_compressed(messages, compress_start, compress_end, scan, summary)
          return self._finalize_compressed(compressed, canonical_messages, n_messages, spare_pending_images, pruned_count)
-@@ -5605,6 +5612,24 @@ Write only the summary body. Do not include any preamble or prefix."""
+@@ -5589,6 +5596,24 @@ Write only the summary body. Do not include any preamble or prefix."""
              logger.info("Compaction kept the body of skill %r on the handoff", pinned)
          return summary, messages
  
@@ -607,7 +607,7 @@ index 5a51f557..0a9f5423 100644
          "tools.clarify_tool", "clarify_tool", ("questions", "questions"),
          callback=lambda agent, ctx: agent.clarify_callback,
 diff --git a/gateway/run.py b/gateway/run.py
-index 129f670c..edc73036 100644
+index b9c231bc..7dd37951 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
 @@ -4090,6 +4090,7 @@ class GatewayRunner(
@@ -616,10 +616,10 @@ index 129f670c..edc73036 100644
          ("compression", "min_tail_user_messages"), ("compression", "keep_last_skill_chars"),
 +        ("compression", "decision_ledger_chars"),
          ("agent", "disabled_toolsets"),
-         ("memory", "provider"), ("memory", "recall_history"), ("memory", "recall_max_chars"),
-         ("memory", "recall_cold_after_seconds"),
+         ("memory", "provider"), ("context", "collapse_agent_messages"), ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
+         ("checkpoints", "max_total_size_mb"), ("checkpoints", "max_file_size_mb"))
 diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
-index 52dbec73..a273565a 100644
+index eb32ea55..6926c9d3 100644
 --- a/hermes_cli/config_defaults.py
 +++ b/hermes_cli/config_defaults.py
 @@ -600,6 +600,11 @@ DEFAULT_CONFIG = {
@@ -979,10 +979,10 @@ index b470f8ab..235fcd18 100644
  | `idle_compact_after_seconds` | `0` | ≥0 seconds | Opt-in: compact up front when a session resumes after this many seconds idle (0 = disabled). Skips when context ≤ threshold × target_ratio; honors cooldown/anti-thrash/lock guards |
  | `codex_gpt55_autoraise` | `true` | bool | Raise the trigger to 85% for gpt-5.4/5.5/5.6 and gpt-6 Astra on the ChatGPT Codex OAuth route (see below). Set `false` to keep the global `threshold` |
 diff --git a/website/docs/user-guide/configuration.md b/website/docs/user-guide/configuration.md
-index 820fb308..356fd659 100644
+index 26012887..272cb6b5 100644
 --- a/website/docs/user-guide/configuration.md
 +++ b/website/docs/user-guide/configuration.md
-@@ -1094,6 +1094,7 @@ compression:
+@@ -1091,6 +1091,7 @@ compression:
    proactive_prune_min_result_chars: 8000            # Prune's summarize pass only touches tool results larger than this (clamped >= 200)
    proactive_prune_min_reclaim_tokens: 4096          # Prune only commits when it reclaims at least this many tokens (0 = commit any)
    keep_last_skill_chars: 0                          # Opt-in: the handoff keeps the newest skill body up to this many chars instead of a reload marker (0 = off)
@@ -990,6 +990,3 @@ index 820fb308..356fd659 100644
  
  # The summarization model/provider is configured under auxiliary:
  auxiliary:
--- 
-2.56.0
-

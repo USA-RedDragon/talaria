@@ -20,10 +20,10 @@ Opt-in compression.summary_style (default legacy). structured follows the compac
  create mode 100644 tests/agent/test_compaction_structured.py
 
 diff --git a/agent/agent_init.py b/agent/agent_init.py
-index 5ddcc673..97197ac2 100644
+index 4f0f2eee..32782a88 100644
 --- a/agent/agent_init.py
 +++ b/agent/agent_init.py
-@@ -1887,6 +1887,10 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
+@@ -1881,6 +1881,10 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
      with suppress(Exception):
          agent.context_compressor.decision_ledger_chars = max(
              0, _parse_config_int(_comp_section.get("decision_ledger_chars", 0), 0))
@@ -31,9 +31,9 @@ index 5ddcc673..97197ac2 100644
 +    _style = str(_comp_section.get("summary_style") or "legacy").strip().lower()
 +    with suppress(Exception):
 +        agent.context_compressor.summary_style = _style if _style in ("legacy", "structured", "compact") else "legacy"
-     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
-     if callable(_bind_session_state):
-         with suppress(Exception):
+     agent.compression_enabled = cs.enabled
+     agent.compression_in_place = cs.in_place
+     _cc = agent.context_compressor
 diff --git a/agent/compaction_structured.py b/agent/compaction_structured.py
 new file mode 100644
 index 00000000..42b42b3d
@@ -471,10 +471,10 @@ index 00000000..42b42b3d
 +    ]
 +    return "\n\n".join(body)
 diff --git a/agent/context_compressor.py b/agent/context_compressor.py
-index 270135f8..3a00ba62 100644
+index 5defcbac..57ab5c2d 100644
 --- a/agent/context_compressor.py
 +++ b/agent/context_compressor.py
-@@ -2857,6 +2857,9 @@ class ContextCompressor(
+@@ -2855,6 +2855,9 @@ class ContextCompressor(
          self.collapse_agent_messages = False
          # compression.decision_ledger_chars (set by agent init): the decision ledger rides the handoff. 0 = off.
          self.decision_ledger_chars = 0
@@ -484,7 +484,7 @@ index 270135f8..3a00ba62 100644
          self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
          self.quiet_mode = quiet_mode
          # Usable input = context_length - max_tokens; only a positive int counts as a reservation.
-@@ -3947,6 +3950,19 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
+@@ -3941,6 +3944,19 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
          has_user_turn = getattr(self, "_summary_has_user_turn", None)
          if has_user_turn is None:
              has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
@@ -504,7 +504,7 @@ index 270135f8..3a00ba62 100644
          prompt = self._build_summary_prompt(content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn)
          try:
              content = self._call_summary_llm(prompt, prompt_started_at)
-@@ -3974,6 +3990,61 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
+@@ -3968,6 +3984,61 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
          except Exception as e:  # health: allow BLE001 -- unchanged summary boundary: every failure goes to _on_summary_failure
              return self._on_summary_failure(e, turns_to_summarize, focus_topic, memory_context)
  
@@ -567,7 +567,7 @@ index 270135f8..3a00ba62 100644
          """A healthy summary becomes the iterative base and clears the failure state."""
          self._previous_summary = summary
 diff --git a/gateway/run.py b/gateway/run.py
-index edc73036..a304ff76 100644
+index 7dd37951..771e8a89 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
 @@ -4090,7 +4090,7 @@ class GatewayRunner(
@@ -577,10 +577,10 @@ index edc73036..a304ff76 100644
 -        ("compression", "decision_ledger_chars"),
 +        ("compression", "decision_ledger_chars"), ("compression", "summary_style"),
          ("agent", "disabled_toolsets"),
-         ("memory", "provider"), ("memory", "recall_history"), ("memory", "recall_max_chars"),
-         ("memory", "recall_cold_after_seconds"),
+         ("memory", "provider"), ("context", "collapse_agent_messages"), ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
+         ("checkpoints", "max_total_size_mb"), ("checkpoints", "max_file_size_mb"))
 diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
-index a273565a..a6392723 100644
+index 6926c9d3..a9f7e291 100644
 --- a/hermes_cli/config_defaults.py
 +++ b/hermes_cli/config_defaults.py
 @@ -605,6 +605,12 @@ DEFAULT_CONFIG = {
@@ -812,10 +812,10 @@ index 235fcd18..7eda633d 100644
  | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
  | `idle_compact_after_seconds` | `0` | ≥0 seconds | Opt-in: compact up front when a session resumes after this many seconds idle (0 = disabled). Skips when context ≤ threshold × target_ratio; honors cooldown/anti-thrash/lock guards |
 diff --git a/website/docs/user-guide/configuration.md b/website/docs/user-guide/configuration.md
-index 356fd659..8fd1a2e9 100644
+index 272cb6b5..2bd4932e 100644
 --- a/website/docs/user-guide/configuration.md
 +++ b/website/docs/user-guide/configuration.md
-@@ -1094,6 +1094,7 @@ compression:
+@@ -1091,6 +1091,7 @@ compression:
    proactive_prune_min_result_chars: 8000            # Prune's summarize pass only touches tool results larger than this (clamped >= 200)
    proactive_prune_min_reclaim_tokens: 4096          # Prune only commits when it reclaims at least this many tokens (0 = commit any)
    keep_last_skill_chars: 0                          # Opt-in: the handoff keeps the newest skill body up to this many chars instead of a reload marker (0 = off)
@@ -823,6 +823,3 @@ index 356fd659..8fd1a2e9 100644
    decision_ledger_chars: 0                          # Opt-in: a decision ledger rides every handoff verbatim, bounded to this many chars, plus the ledger tool (0 = off)
  
  # The summarization model/provider is configured under auxiliary:
--- 
-2.56.0
-

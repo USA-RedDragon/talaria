@@ -387,7 +387,7 @@ index 49207f55..798a4ec7 100644
          event = None
          if operation == 'delete':
 -            event = SessionGoneEvent(tuple(projection.get('deleted_ids') or (session_id,)), 'delete')
-+            # A trashed chat keeps its plugin copies (Honcho, memory); only a purge tells them.
++            # A trashed chat keeps its plugin copies (memory providers); only a purge tells them.
 +            event = (None if projection.get('trashed') else
 +                     SessionGoneEvent(tuple(projection.get('deleted_ids') or (session_id,)), 'delete'))
          elif payload.get('archived') is True and session is not None and not session['archived']:

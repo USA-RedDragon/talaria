@@ -8,32 +8,32 @@ context.collapse_agent_messages (false = off): a hub's relayed agent message ([A
  agent/agent_init.py                       |  6 ++
  agent/agent_message_headers.py            | 72 +++++++++++++++++
  agent/context_compressor.py               |  7 ++
- agent/turn_context.py                     |  4 +
- gateway/run.py                            |  1 +
+ agent/turn_context.py                     |  7 +-
+ gateway/run.py                            |  2 +-
  hermes_cli/config_defaults.py             |  5 ++
  tests/agent/test_agent_message_headers.py | 96 +++++++++++++++++++++++
  website/docs/user-guide/configuration.md  |  7 ++
- 8 files changed, 198 insertions(+)
+ 8 files changed, 200 insertions(+), 2 deletions(-)
  create mode 100644 agent/agent_message_headers.py
  create mode 100644 tests/agent/test_agent_message_headers.py
 
 diff --git a/agent/agent_init.py b/agent/agent_init.py
-index cdd7b3d0..4694172e 100644
+index a30a991e..ac8cc99f 100644
 --- a/agent/agent_init.py
 +++ b/agent/agent_init.py
-@@ -1873,6 +1873,12 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
-     # memory.recall_history false: the summarizer's input carries no recalled memory either.
-     with suppress(Exception):
-         agent.context_compressor.strip_recalled_memory = not getattr(agent, "_memory_recall_history", True)
+@@ -1869,6 +1869,12 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
+     if callable(_bind_session_state):
+         with suppress(Exception):
+             _bind_session_state(session_db=session_db, session_id=agent.session_id)
 +    # context.collapse_agent_messages (false): older relayed agent messages without their instructions.
 +    _ctx_section = _agent_cfg.get("context") if isinstance(_agent_cfg, dict) else None
 +    agent._collapse_agent_messages = is_truthy_value(
 +        (_ctx_section if isinstance(_ctx_section, dict) else {}).get("collapse_agent_messages"), default=False)
 +    with suppress(Exception):
 +        agent.context_compressor.collapse_agent_messages = agent._collapse_agent_messages
-     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
-     if callable(_bind_session_state):
-         with suppress(Exception):
+     agent.compression_enabled = cs.enabled
+     agent.compression_in_place = cs.in_place
+     _cc = agent.context_compressor
 diff --git a/agent/agent_message_headers.py b/agent/agent_message_headers.py
 new file mode 100644
 index 00000000..bbd21efb
@@ -113,23 +113,23 @@ index 00000000..bbd21efb
 +    """Whether ``context.collapse_agent_messages`` is on for *agent* (default off)."""
 +    return getattr(agent, "_collapse_agent_messages", False) is True
 diff --git a/agent/context_compressor.py b/agent/context_compressor.py
-index 99b15826..a00ccb8a 100644
+index 76efe2ce..35d45659 100644
 --- a/agent/context_compressor.py
 +++ b/agent/context_compressor.py
-@@ -2852,6 +2852,9 @@ class ContextCompressor(
+@@ -2850,6 +2850,9 @@ class ContextCompressor(
+         self.min_tail_user_messages = min_tail_user_messages
+         # Newest skill body up to this many chars rides the handoff instead of a reload marker. 0 = off.
          self.keep_last_skill_chars = max(0, int(keep_last_skill_chars or 0))
-         # memory.recall_history false (set by agent init): user rows reach the summarizer without recall blocks.
-         self.strip_recalled_memory = False
 +        # context.collapse_agent_messages (set by agent init): relayed agent messages reach the summarizer
 +        # with a one-line note instead of their instructions paragraph.
 +        self.collapse_agent_messages = False
          self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
          self.quiet_mode = quiet_mode
          # Usable input = context_length - max_tokens; only a positive int counts as a reservation.
-@@ -3437,6 +3440,10 @@ class ContextCompressor(
-                 # memory.recall_history false: recalled memory is not part of the conversation.
-                 from agent.memory_context import strip_recalled_memory
-                 content = strip_recalled_memory(content)
+@@ -3431,6 +3434,10 @@ class ContextCompressor(
+             content = msg.get("content")
+             if isinstance(content, list):
+                 content = "\n".join(_summary_part_text(part) for part in content if isinstance(part, (dict, str)))
 +            if role == "user" and getattr(self, "collapse_agent_messages", False) and content:
 +                # context.collapse_agent_messages: a relayed agent message without its instructions paragraph.
 +                from agent.agent_message_headers import collapse_agent_message_text
@@ -138,21 +138,31 @@ index 99b15826..a00ccb8a 100644
              content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
              # Strip inline <think>-style blocks: scratch work wastes summarizer context and risks being kept as fact.
 diff --git a/agent/turn_context.py b/agent/turn_context.py
-index dbf17f98..f1d51289 100644
+index f6399b82..658af469 100644
 --- a/agent/turn_context.py
 +++ b/agent/turn_context.py
-@@ -1446,6 +1446,7 @@ def build_api_messages(
+@@ -1434,6 +1434,7 @@ def build_api_messages(
      replayed verbatim."""
      from agent.agent_runtime_helpers import fill_empty_non_final_wire_payload
      from agent.conversation_loop import _clone_message_for_send
 +    from agent.agent_message_headers import collapse_agent_message, collapse_enabled
-     from agent.memory_context import recall_history_kept, strip_recalled_memory
      from agent.replay_cleanup import canonicalize_replay_history
  
-@@ -1505,6 +1506,9 @@ def build_api_messages(
-         if idx < len(replayed_prefix) and msg.get("role") == "user" and not recall_history_kept(agent):
-             # memory.recall_history false: recalled memory rides only the turn it was recalled for.
-             api_msg["content"] = strip_recalled_memory(api_msg.get("content"))
+     has_current = isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages)
+@@ -1450,7 +1451,8 @@ def build_api_messages(
+     # rather than silently un-freezing it.
+     turn_now = agent._current_turn_timestamp
+     split = current_turn_user_idx if has_current else 0
+-    canonical_messages = canonicalize_replay_history(messages[:split], now=turn_now) + messages[split:]
++    replayed_prefix = canonicalize_replay_history(messages[:split], now=turn_now)
++    canonical_messages = replayed_prefix + messages[split:]
+ 
+     api_messages = []
+     for idx, msg in enumerate(canonical_messages):
+@@ -1488,6 +1490,9 @@ def build_api_messages(
+             # prefix stays byte-stable. User rows carry the injection sidecar; user
+             # and assistant rows may carry a sanitize-divergence sidecar.
+             api_msg["content"] = _api_content
 +        if idx < len(replayed_prefix) and msg.get("role") == "user" and collapse_enabled(agent):
 +            # context.collapse_agent_messages: an older relayed agent message keeps its header and body.
 +            api_msg["content"] = collapse_agent_message(api_msg.get("content"))
@@ -160,19 +170,20 @@ index dbf17f98..f1d51289 100644
          # Replay stored reasoning on every carrier the active route reads (and strip the
          # rest): message_sanitization.reasoning_replay_route owns the decision.
 diff --git a/gateway/run.py b/gateway/run.py
-index f2336864..b0dc18c1 100644
+index 5de8b1a1..b9c231bc 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -4092,6 +4092,7 @@ class GatewayRunner(
+@@ -4091,7 +4091,7 @@ class GatewayRunner(
+         ("compression", "proactive_prune_min_reclaim_tokens"),
          ("compression", "min_tail_user_messages"), ("compression", "keep_last_skill_chars"),
          ("agent", "disabled_toolsets"),
-         ("memory", "provider"), ("memory", "recall_history"), ("memory", "recall_max_chars"),
-+        ("context", "collapse_agent_messages"),
-         ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
+-        ("memory", "provider"), ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
++        ("memory", "provider"), ("context", "collapse_agent_messages"), ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
          ("checkpoints", "max_total_size_mb"), ("checkpoints", "max_file_size_mb"))
  
+     @staticmethod
 diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
-index edd05a30..6f6c5b77 100644
+index 662ed835..16108b1c 100644
 --- a/hermes_cli/config_defaults.py
 +++ b/hermes_cli/config_defaults.py
 @@ -1312,6 +1312,11 @@ DEFAULT_CONFIG = {
@@ -290,10 +301,10 @@ index 00000000..c0794506
 +                pass
 +    assert agent._collapse_agent_messages is True
 diff --git a/website/docs/user-guide/configuration.md b/website/docs/user-guide/configuration.md
-index 8a59d540..984d4e4e 100644
+index c040d0bf..3453ccb5 100644
 --- a/website/docs/user-guide/configuration.md
 +++ b/website/docs/user-guide/configuration.md
-@@ -1340,6 +1340,13 @@ context:
+@@ -1338,6 +1338,13 @@ context:
  
  Plugin engines are **never auto-activated** — you must explicitly set `context.engine` to the plugin name. Available engines can be browsed and selected via `hermes plugins` → Provider Plugins → Context Engine.
  

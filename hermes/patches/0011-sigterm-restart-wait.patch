@@ -261,7 +261,7 @@ index 7a9ee828b6..2a43220196 100644
          )
  
 +    # The write half of a restart's agent release: queued memory work, then the providers' session-end
-+    # flush (Honcho joins its sync thread for up to 10 s, then flushes): the upstream per-step bounds.
++    # flush (a provider may join its sync thread for up to 10 s, then flush): the upstream per-step bounds.
 +    _MEMORY_FLUSH_TIMEOUT_S = 25.0
 +
 +    async def _flush_agent_memory_off_loop(self, agent: Any, session_key: Optional[str]) -> None:
@@ -642,7 +642,7 @@ index 5c65a98320..46634c8b0c 100644
 +`gateway.restart_wait_plugin_sockets` (for example `[device]`) whose WebSocket
 +routes the finishing turns depend on, so those connections can come back.
 +Before it exits, a stopping gateway releases its idle cached agents, and a memory
-+provider's shutdown can take up to its HTTP timeout per agent (30 s for Honcho)
++provider's shutdown can take up to its HTTP timeout per agent (30 s for a slow one)
 +while it waits for a read-ahead. Set `gateway.restart_agent_cleanup_seconds`
 +(for example `5`) to release them together within that bound on a restart.
 +Background subagents (`delegate_task` in the background) do not hold the

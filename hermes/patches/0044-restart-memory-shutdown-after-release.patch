@@ -4,7 +4,7 @@ Date: Thu, 12 Nov 2026 21:57:27 +0000
 Subject: [PATCH] feat(gateway): a restart stop leaves memory-provider
  shutdowns until after the release
 
-gateway.restart_memory_shutdown_after_release_seconds (0 = off; with restart_agent_cleanup_seconds): on a restart stop, each idle cached agent whose queued memory writes and session end were flushed (as before, inside the stop) shuts its memory providers down on a thread of its own instead of inside the capped cleanup, and the process waits up to this long for those threads after it released the profile, alongside the listener relay. A Honcho read-ahead for a next turn that never comes held the cleanup to its 5 s cap, and the abandoned worker then held the executor quiesce 2 s more and made the stop skip the SessionDB close.
+gateway.restart_memory_shutdown_after_release_seconds (0 = off; with restart_agent_cleanup_seconds): on a restart stop, each idle cached agent whose queued memory writes and session end were flushed (as before, inside the stop) shuts its memory providers down on a thread of its own instead of inside the capped cleanup, and the process waits up to this long for those threads after it released the profile, alongside the listener relay. A provider read-ahead for a next turn that never comes held the cleanup to its 5 s cap, and the abandoned worker then held the executor quiesce 2 s more and made the stop skip the SessionDB close.
 ---
  agent/memory_manager.py                       |  12 ++
  gateway/config.py                             |  10 +-
@@ -124,7 +124,7 @@ index b886f76e48..0c6e522aae 100644
 +        """``gateway.restart_memory_shutdown_after_release_seconds``: each idle agent whose queued writes and
 +        session end were flushed shuts its memory providers down on a thread of its own, started now; the cleanup
 +        that follows skips that step, so neither it nor the executor quiesce waits for a provider's threads (a
-+        Honcho read-ahead for a next turn that never comes). The process joins them after the release."""
++        provider read-ahead for a next turn that never comes). The process joins them after the release."""
 +        if GatewayShutdownMixin._memory_shutdown_after_release(runner) <= 0:
 +            return
 +        deferred = getattr(runner, "_deferred_memory_shutdowns", None)
