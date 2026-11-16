@@ -1,0 +1,474 @@
+diff --git a/tests/tools/test_hub_stop_notice.py b/tests/tools/test_hub_stop_notice.py
+new file mode 100644
+index 00000000..4c24ceaa
+--- /dev/null
++++ b/tests/tools/test_hub_stop_notice.py
+@@ -0,0 +1,214 @@
++"""A background command stopped from the hub is reported to the agent that started it.
++
++``process.kill`` (the hub's Stop) used to mark the completion read, so the notice an agent gets when a job exits on
++its own never came, for a top-level chat or a subagent. Real registries and a real process; fake child agents.
++"""
++
++import json
++import queue
++import re
++import threading
++import time
++from unittest.mock import MagicMock
++
++import pytest
++
++from tests.tools.test_delegate_resume_action import (  # noqa: F401  (fixtures)
++    PARENT, SID, _Parent, _call, _clean_state, _completions, _db, _fake_child, _finished_child, seams,
++)
++from tests.tools.test_delegate_wait_wake import _start
++from tests.waiting import wait_until
++from tools import delegate_tool_wait as wait
++from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
++from tools.process_hub_stop import stop_from_hub
++from tools.process_registry import process_registry
++from tools.process_registry_notifications import format_process_notification, process_completion_display_text
++
++# The jobs are real processes the registry kills; their reparented descendants fall outside the guard's subtree walk.
++pytestmark = [pytest.mark.platforms("linux"), pytest.mark.live_system_guard_bypass]
++
++KEY = "chat-key"
++
++
++@pytest.fixture(autouse=True)
++def _empty_queue():
++    def drain():
++        while True:
++            try:
++                process_registry.completion_queue.get_nowait()
++            except queue.Empty:
++                return
++    drain()
++    yield
++    with _active_subagents_lock:
++        _active_subagents.pop(SID, None)
++    drain()
++
++
++def _settled(session):
++    """Wait until the shell has become (or forked) its ``sleep``: the suite's live-system guard rejects a signal
++    sent to a process it does not yet see in the test's tree."""
++    import psutil
++
++    def started():
++        proc = psutil.Process(session.pid)
++        return proc.children(recursive=True) or "sleep" in " ".join(proc.cmdline())
++    wait_until(started, what="the job to start")
++    time.sleep(0.2)
++
++
++def _job(owner=KEY, notify=True, command="sleep 60"):
++    session = process_registry.spawn_local(command, task_id=owner, owner_task_id=owner, session_key=owner)
++    session.notify_on_complete = notify
++    _settled(session)
++    return session
++
++
++def _queued(*sessions):
++    """What the chat's notification poller would deliver for ``sessions``: their queued events not already marked
++    read. (A job killed by an earlier test can publish late, so other jobs' events are not looked at.)"""
++    ids = {s.id for s in sessions}
++    events = []
++    while True:
++        try:
++            events.append(process_registry.completion_queue.get_nowait())
++        except queue.Empty:
++            return [e for e in events if e["session_id"] in ids and not process_registry.is_completion_consumed(e["session_id"])]
++
++
++def _published(session):
++    """The registry publishes a stopped job's notice when its reader thread finishes: wait for it."""
++    wait_until(lambda: session._completion_event.is_set(), what="the completion notice")
++    return _queued(session)
++
++
++def _ago(session, seconds):
++    session.started_at -= seconds  # a job that has run for a while
++
++
++def _assert_stop_text(text, command="sleep 60", ran="41h 41m"):
++    assert f"Stopped by the user from the hub: {command}" in text, text
++    assert f"(ran {ran})" in text or (ran == "0s" and re.search(r"\(ran [0-5]s\)", text)), text
++
++
++def test_stop_of_a_top_level_chats_job_queues_a_notice_for_that_chat():
++    session = _job()
++    _ago(session, 41 * 3600 + 41 * 60)
++    result = stop_from_hub(process_registry, session.id)
++    assert result["status"] == "killed" and result["termination_source"] == "the user from the hub"
++    events = _published(session)
++    assert [e["session_id"] for e in events] == [session.id]
++    assert not process_registry.is_completion_consumed(session.id)  # the poller delivers it
++    text = format_process_notification(events[0])
++    _assert_stop_text(text)
++    assert text.startswith(f"[IMPORTANT: Background process {session.id} stopped by the user from the hub")
++    assert "Command: sleep 60" in text and "Output:" in text
++    assert process_completion_display_text(events[:1]).startswith("Background Process Stopped by You")
++
++
++def test_stop_of_a_job_that_does_not_notify_on_exit_still_notifies():
++    session = _job(notify=False)
++    stop_from_hub(process_registry, session.id)
++    events = _published(session)
++    assert len(events) == 1 and events[0]["owner_task_id"] == KEY
++    assert events[0]["completion_reason"] == "killed"
++    _assert_stop_text(format_process_notification(events[0]), ran="0s")
++
++
++def test_an_agents_own_kill_keeps_its_behavior_and_gets_no_second_notice():
++    session = _job()
++    result = process_registry.kill_process(session.id)  # what process_manage kill does
++    assert result["status"] == "killed", result
++    assert result["termination_source"] == "process.kill"
++    assert process_registry.is_completion_consumed(session.id)
++    time.sleep(1.0)
++    assert _queued(session) == []  # the kill result was the notice
++
++
++def test_stop_of_a_handed_off_job_reaches_the_parent_that_got_it():
++    session = _job(owner=SID)
++    process_registry.keep_for_parent(session.id, from_owner=SID, to_owner=KEY, to_task_id=KEY, to_session_key=KEY,
++                                     note="left running by subagent; kept for you")
++    stop_from_hub(process_registry, session.id)
++    events = _published(session)
++    assert len(events) == 1 and events[0]["owner_task_id"] == KEY
++    text = format_process_notification(events[0])
++    assert text.startswith("[IMPORTANT: Background process")
++    assert "Handed off to you by a subagent" in text
++    _assert_stop_text(text, ran="0s")
++
++
++def _running_subagent(steer_result="queued"):
++    agent = MagicMock()
++    record = {"subagent_id": SID, "agent": agent, "status": "running", "accepting_steer": True}
++    with _active_subagents_lock:
++        _active_subagents[SID] = record
++    return agent, record
++
++
++def test_stop_of_a_running_subagents_job_goes_to_that_subagent_not_the_chat():
++    agent, _record = _running_subagent()
++    agent.steer.return_value = True
++    session = _job(owner=SID)
++    _ago(session, 37 * 3600 + 23 * 60)
++    stop_from_hub(process_registry, session.id)
++    time.sleep(1.0)
++    assert _queued(session) == []  # the parent chat did not start this job
++    assert process_registry.is_completion_consumed(session.id)
++    (text,), _ = agent.steer.call_args
++    _assert_stop_text(text, ran="37h 23m")
++
++
++def test_a_subagent_that_cannot_take_the_notice_hands_it_to_the_chat():
++    _agent, record = _running_subagent()
++    record["accepting_steer"] = False
++    session = _job(owner=SID)
++    stop_from_hub(process_registry, session.id)
++    events = _published(session)
++    assert len(events) == 1 and not process_registry.is_completion_consumed(session.id)
++    text = format_process_notification(events[0])
++    assert f"Started by subagent {SID}" in text
++    _assert_stop_text(text, ran="0s")
++
++
++def test_stop_of_a_job_a_waiting_subagent_watches_wakes_it_with_the_stop(seams):
++    child, run_id = _start(seams, "sleep 60")
++    session = child.seen["session"]
++    _settled(session)
++    _ago(session, 41 * 3600 + 41 * 60)
++    try:
++        stop_from_hub(process_registry, session.id)
++        wait_until(lambda: len(child.conversations) == 2, timeout=10, what="the wake-up round")
++        message = child.conversations[1]["user_message"]
++        assert message.startswith("A process you were waiting on was stopped by the user")
++        _assert_stop_text(message)
++    finally:
++        wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++
++
++def test_stop_of_an_unwatched_job_of_a_waiting_subagent_wakes_it_and_keeps_the_watch(seams):
++    child, run_id = _start(seams, "sleep 60")
++    other = process_registry.spawn_local("sleep 61", task_id=SID, owner_task_id=SID)
++    other.notify_on_complete = True
++    _settled(other)
++    _ago(other, 3 * 3600 + 5 * 60)
++    try:
++        res = stop_from_hub(process_registry, other.id)
++        assert res["status"] == "killed", res
++        wait_until(lambda: len(child.conversations) == 2, timeout=10, what="the wake-up round")
++        message = child.conversations[1]["user_message"]
++        _assert_stop_text(message, command="sleep 61", ran="3h 5m")
++        assert "sleep 60" in message and "still running" in message  # the watched job goes on
++        assert len(wait.waits_of(child)) == 1 and not child.seen["session"].exited
++        assert _queued(other) == []
++    finally:
++        process_registry.kill_process(child.seen["session"].id)
++        wait_until(lambda: _completions(run_id), timeout=30, what="completion")
++
++
++def test_stop_of_an_exited_job_says_nothing():
++    session = _job()
++    process_registry.kill_process(session.id)
++    _queued(session)
++    result = stop_from_hub(process_registry, session.id)
++    assert result["status"] == "already_exited" and _queued(session) == []
+diff --git a/tools/delegate_tool_wait.py b/tools/delegate_tool_wait.py
+index fc0768df..8f54fb96 100644
+--- a/tools/delegate_tool_wait.py
++++ b/tools/delegate_tool_wait.py
+@@ -123,6 +123,11 @@ def _exited(session: Any) -> bool:
+     return session is None or bool(getattr(session, "exited", False))
+ 
+ 
++def _stop_fields(session: Any) -> dict[str, Any]:
++    return {"session_id": getattr(session, "id", None), "completion_reason": getattr(session, "completion_reason", None),
++            "termination_source": getattr(session, "termination_source", None)}
++
++
+ def _describe(entry: dict[str, Any], session: Any, timed_out: bool) -> str:
+     from tools.process_registry import _output_tail, process_registry
+     command = str(entry.get("command", ""))[:200]
+@@ -134,6 +139,10 @@ def _describe(entry: dict[str, Any], session: Any, timed_out: bool) -> str:
+                 "result is unknown; re-run it or report that.")
+     process_registry.poll(session.id)  # marks the result read, so it is not reported again as unread
+     tail = _output_tail(session, _TAIL_CHARS).strip()
++    from tools.process_registry_notifications import is_hub_stop, stopped_text
++    if is_hub_stop(_stop_fields(session)):
++        ran = (float(getattr(session, "exited_at", 0) or 0) or time.time()) - float(getattr(session, "started_at", 0) or 0)
++        return stopped_text(command, entry["session_id"], ran, tail)
+     return (f"`{command}` ({entry['session_id']}) exited with code {session.exit_code} "
+             f"({getattr(session, 'completion_reason', 'exited')}).\nOutput tail:\n{tail or '(no output)'}")
+ 
+@@ -191,8 +200,12 @@ def await_exit(child: Any, subagent_id: Optional[str], stopped: Callable[[], boo
+                 if finished:
+                     parts.append(subunits.completion_text(finished))
+                 if ready:
+-                    parts.append("A process you were waiting on finished. Continue your task with its result.\n\n"
+-                                 + "\n\n".join(_describe(*item) for item in ready))
++                    from tools.process_registry_notifications import is_hub_stop
++                    all_stopped = all(item[1] is not None and is_hub_stop(_stop_fields(item[1])) for item in ready)
++                    head = ("A process you were waiting on was stopped by the user. Continue your task without its "
++                            "result, or report that it was stopped." if all_stopped
++                            else "A process you were waiting on finished. Continue your task with its result.")
++                    parts.append(head + "\n\n" + "\n\n".join(_describe(*item) for item in ready))
+                 if messages:
+                     body = "\n\n".join(messages)
+                     parts.append(("Messages sent to you while you were waiting:\n\n" if ready or finished
+diff --git a/tools/process_hub_stop.py b/tools/process_hub_stop.py
+new file mode 100644
+index 00000000..58075302
+--- /dev/null
++++ b/tools/process_hub_stop.py
+@@ -0,0 +1,99 @@
++"""A background command the user stops from the hub is reported to the agent that started it.
++
++``process.kill`` used to kill with ``consume_output=True``, which marks the completion read: the notice the agent
++gets when a job exits on its own was dropped, because a kill is assumed to come from the agent that reads the kill
++result. The hub's Stop button is not that agent. Now the kill records the hub as its source, and the owner is told:
++
++* a top-level chat (or the parent a subagent handed the job to) gets the usual completion notice, worded as a stop;
++  a job without ``notify_on_complete`` gets one too, because the user stopped it and the agent must know;
++* a running or waiting subagent gets the notice as its next input (a waiting one wakes at once), unless it already
++  watches the job: its watch reports the stop when its turn ends;
++* a subagent that cannot take it (finished, no longer accepting input) falls back to the chat that owns the job.
++
++An agent's own kill keeps its behavior: it reads the kill result and gets no second notice.
++"""
++
++from __future__ import annotations
++
++import logging
++import time
++from typing import Any
++
++from tools.process_registry_notifications import HUB_STOP_SOURCE, mark_hub_stop, stopped_text, unmark_hub_stop
++
++logger = logging.getLogger(__name__)
++
++
++def _live_subagent(owner: str):
++    if not owner.startswith("sa-"):
++        return None
++    from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
++    with _active_subagents_lock:
++        record = _active_subagents.get(owner)
++        if record is None or record.get("agent") is None:
++            return None
++        return record
++
++
++def _ran_seconds(session: Any) -> float:
++    ended = float(getattr(session, "exited_at", 0) or 0) or time.time()
++    started = float(getattr(session, "started_at", 0) or 0)
++    return max(ended - started, 0.0) if started else 0.0
++
++
++def _event(session: Any) -> dict:
++    from tools.process_registry import _completion_output, _redact_process_result
++    evt = {
++        "type": "completion", "session_id": session.id, "session_key": session.session_key,
++        "task_id": session.task_id, "owner_task_id": session.owner_task_id, "command": session.command,
++        **({"handoff_note": session.handoff_note} if session.handoff_note else {}),
++        "exit_code": session.exit_code, "completion_reason": session.completion_reason,
++        "termination_source": session.termination_source, **_completion_output(session),
++        "started_at": session.started_at,
++    }
++    _redact_process_result(evt)
++    return evt
++
++
++def _tell_subagent(record: dict, session: Any) -> bool:
++    """True when the subagent has the stop: through its own watch of the job, or as an input it was given."""
++    from tools.delegate_tool_registry import _active_subagents_lock, steer_record_locked
++    from tools.delegate_tool_wait import waits_of
++    agent = record["agent"]
++    if any(w.get("session_id") == session.id for w in waits_of(agent)):
++        return True  # await_exit reports the stop when the subagent's turn ends (or wakes it now if it waits)
++    from tools.process_registry import _output_tail
++    text = stopped_text(session.command, session.id, _ran_seconds(session), _output_tail(session, 2000))
++    with _active_subagents_lock:
++        if record.get("accepting_steer", False) is not True:
++            return False
++        return bool(steer_record_locked(record, text))
++
++
++def stop_from_hub(registry: Any, proc_id: str) -> dict:
++    """Kill one background process for the hub and report the stop to the agent that owns it."""
++    session = registry.get(proc_id)
++    owner = str(getattr(session, "owner_task_id", "") or "") if session is not None else ""
++    record = _live_subagent(owner)
++    # A subagent's copy of the notice would reach the parent chat, which did not start the job: suppress it and
++    # tell the subagent directly. Anything else keeps the registry's own notice.
++    was_running = session is not None and not session.exited
++    mark_hub_stop(proc_id)
++    result = registry.kill_process(proc_id, source=HUB_STOP_SOURCE, consume_output=record is not None)
++    # The reader thread can record the SIGTERM exit before kill_process does, which then answers "already_exited":
++    # the user's stop still happened, so it is reported like a "killed" one.
++    if session is None or not was_running or result.get("status") not in ("killed", "already_exited"):
++        unmark_hub_stop(proc_id)
++        return result
++    if record is not None:
++        registry._completion_consumed.add(proc_id)
++    try:
++        if record is not None and _tell_subagent(record, session):
++            return result
++        if record is not None:
++            registry._completion_consumed.discard(proc_id)  # the owning chat gets it instead
++        if not session.notify_on_complete:
++            registry.completion_queue.put(_event(session))
++    except Exception as exc:  # the kill happened; never turn a delivery failure into a failed Stop
++        logger.warning("could not report the hub stop of %s: %s", proc_id, exc)
++    return result
+diff --git a/tools/process_registry_notifications.py b/tools/process_registry_notifications.py
+index 7ec87b42..3c5b1380 100644
+--- a/tools/process_registry_notifications.py
++++ b/tools/process_registry_notifications.py
+@@ -8,6 +8,7 @@ from dataclasses import dataclass
+ from contextlib import suppress
+ 
+ _DONE = ("completed", "success")
++HUB_STOP_SOURCE = "the user from the hub"  # ``termination_source`` of a job stopped from the hub (process.kill)
+ _REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start"}
+ 
+ 
+@@ -391,7 +392,9 @@ def process_completion_display_text(events: list) -> str:
+         return f"{len(events)} Background Processes Finished"
+     evt = events[0]
+     reason, exit_code = evt.get("completion_reason") or "exited", evt.get("exit_code", "?")
+-    if reason == "killed":
++    if is_hub_stop(evt):
++        outcome = "Stopped by You"
++    elif reason == "killed":
+         outcome = "Terminated"
+     elif reason in _REASON_STATUS:
+         outcome = "Lost" if reason == "lost" else "Failed to Start"
+@@ -484,8 +487,60 @@ def _delegation_attribution_line(evt: dict) -> str | None:
+             + (f' Task: "{goal}"' if goal else ""))
+ 
+ 
++def ran_for(seconds: float) -> str:
++    """'41h 41m', '5m', '40s': how long a job ran."""
++    seconds = int(max(seconds or 0, 0))
++    if seconds < 60:
++        return f"{seconds}s"
++    minutes = seconds // 60
++    return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
++
++
++def stopped_text(command: str, session_id: str, ran_seconds: float, output_tail: str = "") -> str:
++    """What an agent reads when the user stopped its background job from the hub."""
++    text = (f"Stopped by the user from the hub: {str(command)[:200]} ({session_id}) (ran {ran_for(ran_seconds)}). "
++            "The job is no longer running; do not restart it unless the user asks.")
++    return text + (f"\nOutput tail:\n{output_tail.strip()}" if output_tail.strip() else "")
++
++
++_hub_stops: dict[str, float] = {}  # session id -> when the hub asked for the stop; marked BEFORE the kill
++_HUB_STOPS_CAP = 256
++
++
++def mark_hub_stop(session_id: str) -> None:
++    """Record that the hub is stopping ``session_id``. The process's reader thread can record its exit (as a plain
++    SIGKILL exit) before the kill returns, so the stop is known from this mark, not only from the session fields."""
++    _hub_stops[session_id] = time.time()
++    while len(_hub_stops) > _HUB_STOPS_CAP:
++        _hub_stops.pop(next(iter(_hub_stops)), None)
++
++
++def unmark_hub_stop(session_id: str) -> None:
++    _hub_stops.pop(session_id, None)
++
++
++def is_hub_stop(evt) -> bool:
++    """An event, or ``{completion_reason, termination_source, session_id}`` of a session, that is the hub's stop."""
++    if evt.get("completion_reason") == "killed" and evt.get("termination_source") == HUB_STOP_SOURCE:
++        return True
++    return bool(evt.get("session_id")) and evt["session_id"] in _hub_stops and evt.get("completion_reason") != "lost"
++
++
++def _hub_stop_ran(evt: dict) -> float:
++    started = float(evt.get("started_at") or 0)
++    if not started:
++        return 0.0
++    ended = 0.0
++    with suppress(Exception):
++        from tools.process_registry import process_registry
++        ended = float(getattr(process_registry.get(evt.get("session_id", "")), "exited_at", 0) or 0)
++    return (ended or time.time()) - started
++
++
+ def _completion_status(evt: dict) -> str:
+     reason = evt.get("completion_reason") or "exited"
++    if is_hub_stop(evt):
++        return f"stopped by {HUB_STOP_SOURCE}"
+     if reason == "killed":
+         return f"terminated by {evt.get('termination_source') or 'Hermes'}"
+     return _REASON_STATUS.get(reason) or ("completed normally" if evt.get("exit_code", "?") == 0 else "exited")
+@@ -532,6 +587,8 @@ def format_process_notification(evt: dict) -> str | None:
+         # Say so where the output is the payload (a teammate's reply): a silent tail reads as whole.
+         _out = (f"...(first {evt['output_cut']} characters cut — process(action=\"log\", "
+                 f"session_id=\"{_sid}\") has the full output)\n{_out}")
++    if is_hub_stop(evt):
++        attribution += stopped_text(_cmd, _sid, _hub_stop_ran(evt)).split("\nOutput tail:")[0] + "\n"
+     return (
+         f"[IMPORTANT: Background process {_sid} {_completion_status(evt)} (exit code {_exit}{_signal}).\n"
+         f"{attribution}Command: {_cmd}\nOutput:\n{_out}]")
+diff --git a/tui_gateway/methods_tools.py b/tui_gateway/methods_tools.py
+index 9ff2a17d..60446855 100644
+--- a/tui_gateway/methods_tools.py
++++ b/tui_gateway/methods_tools.py
+@@ -292,7 +292,8 @@ def _(rid, params: dict, session) -> dict:
+     proc = registry.get(proc_id)
+     if proc is None or str(getattr(proc, "session_key", "") or "") != str(session.get("session_key") or ""):
+         return _err(rid, 4044, f"no such process: {proc_id}")
+-    return _ok(rid, registry.kill_process(proc_id))
++    # The hub's Stop: the owning agent is told (tools/process_hub_stop.py), unlike an agent's own kill.
++    return _ok(rid, _tools_mod("tools.process_hub_stop").stop_from_hub(registry, proc_id))
+ 
+ 
+ def _mcp_reload_confirm_required() -> bool:

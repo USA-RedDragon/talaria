@@ -1,0 +1,5 @@
+# New: a command stopped from the hub is reported to its owner (tests/tools/test_hub_stop_notice.py)
+# The wait, wake and handoff of a subagent's jobs, and the kill/notice paths it changes
+tests/tools/test_delegate_wait_wake.py
+tests/tools/test_delegate_child_wait.py
+tests/tools/test_process_registry_completion_races.py
