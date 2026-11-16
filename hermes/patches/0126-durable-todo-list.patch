@@ -40,16 +40,17 @@ used it.
  gateway/session_controls.py                   |  13 +-
  hermes_cli/config_defaults.py                 |   3 +-
  hermes_state_todo.py                          | 107 +++++-
- tests/tools/test_todo_durable.py              | 325 ++++++++++++++++++
+ tests/tools/test_connector_local_batches.py   |   5 +-
+ tests/tools/test_todo_durable.py              | 335 ++++++++++++++++++
  tests/tools/test_tool_search.py               |   7 +-
  tools/delegate_tool_registry.py               |   6 +
  tools/delegate_tool_toolsets.py               |   4 +
- tools/todo_durable.py                         | 277 +++++++++++++++
- tools/todo_tool.py                            | 195 +++++++++--
+ tools/todo_durable.py                         | 279 +++++++++++++++
+ tools/todo_tool.py                            | 195 ++++++++--
  .../contracts/canonical_projections.py        |  22 +-
  ...ofiles_vault_complete_foreign_subagents.py |  18 +
  tui_gateway/tool_progress.py                  |  19 +-
- 18 files changed, 1242 insertions(+), 52 deletions(-)
+ 19 files changed, 1257 insertions(+), 54 deletions(-)
  create mode 100644 tests/tools/test_todo_durable.py
  create mode 100644 tools/todo_durable.py
 
@@ -655,12 +656,28 @@ index 9c752025..207c9a57 100644
      """Latest visible, paired and valid Todo tool result of a session's lineage."""
  
      def get_latest_todo_result(self, session_id: str, *, max_chars: Optional[int] = None) -> Optional[str]:
+diff --git a/tests/tools/test_connector_local_batches.py b/tests/tools/test_connector_local_batches.py
+index da51a29b..640ab9e0 100644
+--- a/tests/tools/test_connector_local_batches.py
++++ b/tests/tools/test_connector_local_batches.py
+@@ -77,8 +77,9 @@ def test_single_local_unwrap_keeps_session_db_todo_store_and_setup_callback(tmp_
+     results = []
+     try:
+         for entry in calls:
+-            if entry["name"] == "manage_connections":
+-                # Not deferrable, so it reaches invoke_tool directly and must find the agent callback.
++            if entry["name"] in ("manage_connections", "todo_list"):
++                # Not deferrable (todo_list is always loaded: talaria-hermes durable todos), so it
++                # reaches invoke_tool directly and must find the agent callback or store.
+                 name, args, error = entry["name"], entry["arguments"], None
+             else:
+                 name, args, error = _unwrap_tool_search_call(
 diff --git a/tests/tools/test_todo_durable.py b/tests/tools/test_todo_durable.py
 new file mode 100644
-index 00000000..4cd691ed
+index 00000000..8aab4ec9
 --- /dev/null
 +++ b/tests/tools/test_todo_durable.py
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,335 @@
 +"""The todo list is a durable planning tool: always loaded, stored in state.db on every call, nested to
 +any depth with notes and owners, shared between a parent and its subagents, carried through every
 +compaction and restart, and readable over the gateway (tools/todo_durable.py, hermes_state_todo.py)."""
@@ -986,6 +1003,16 @@ index 00000000..4cd691ed
 +    out = json.loads(run(child, {"list": "parent"}, None))
 +    assert out["assigned_to_you"] == ["a"]
 +    assert db.get_session_todos("P")["todos"][0]["owner"] == "sa-9"
++
++
++def test_a_store_without_snapshot_is_left_alone(db):
++    """A plugin's or test's store with only format_for_injection/has_items never breaks a turn or compaction."""
++    db.create_session("f", source="cli")
++    _call(_agent(db, "f"), todos=[{"id": "a", "content": "x", "status": "pending"}])
++    from tools.todo_durable import sync as todo_durable_sync
++
++    fake = SimpleNamespace(format_for_injection=lambda: None, has_items=lambda: False)
++    assert todo_durable_sync(_Agent(session_id="f", _session_db=db, _todo_store=fake)) is False
 diff --git a/tests/tools/test_tool_search.py b/tests/tools/test_tool_search.py
 index 4c7ff8a8..7bc85caf 100644
 --- a/tests/tools/test_tool_search.py
@@ -1045,10 +1072,10 @@ index 6ab7e5c2..9e17aca6 100644
              child_toolsets += [
 diff --git a/tools/todo_durable.py b/tools/todo_durable.py
 new file mode 100644
-index 00000000..1e760fa6
+index 00000000..57ded763
 --- /dev/null
 +++ b/tools/todo_durable.py
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,279 @@
 +"""Durable todo lists: every write lands in state.db (``session_todos``) in one transaction.
 +
 +The agent's ``TodoStore`` is a cache of the stored list. A write loads the stored list inside the
@@ -1120,6 +1147,8 @@ index 00000000..1e760fa6
 +    db, sid = session_db(agent), str(getattr(agent, "session_id", "") or "")
 +    if store is None or db is None or not sid:
 +        return False
++    if not (callable(getattr(store, "snapshot", None)) and callable(getattr(store, "restore", None))):
++        return False  # a store without the TodoStore interface (a plugin's or a test's) stays as it is
 +    try:
 +        row = db.get_session_todos(sid)
 +    except Exception:

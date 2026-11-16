@@ -19,3 +19,4 @@ tests/agent/test_in_place_compaction.py
 tests/gateway/test_local_viewer_events_turn.py
 tests/tools/test_delegate_control_actions.py
 tests/tools/test_delegate.py
+tests/agent/test_api_content_sidecar.py
