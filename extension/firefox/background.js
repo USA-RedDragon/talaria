@@ -964,7 +964,7 @@ function pageLogin(hosts, tabHost, submit) {
 // Labels of sign-in methods that browser_login never clicks, whatever the
 // config says: passkeys, security keys and approvals on another device.
 // The daemon's config check uses the same words.
-const REFUSED_METHOD = /passkey|pass key|security key|verify|push|approve|authenticator|biometric|fingerprint|face id|touch id|sms|text message|one-time|otp/i;
+const REFUSED_METHOD = /passkey|pass key|security key|verify|verification|push|approve|approval|authenticator|biometric|fingerprint|face id|touch id|windows hello|sms|text message|one-time|otp|phone|notification|another device|other device/i;
 
 // pageMethod handles a sign-in method picker: a page of an autologin host
 // with no password field that offers the ways to sign in as buttons or
@@ -2275,9 +2275,10 @@ const OPS = {
       }
       let method = "";
       if (state.passwords === 0) {
-        // A method picker (IBM w3id offers Passkey, w3id Password and IBM
-        // Verify) comes before the password form. The device config names
-        // the button to click; nothing else is ever clicked.
+        // A method picker (such as Passkey, Password and Approve on phone)
+        // comes before the password form. The device config or the user's
+        // sign-in grant names the button to click; nothing else is ever
+        // clicked.
         before = await activate(tab);
         const step = await chooseMethod(tabId, host, hosts, timeout_ms);
         if (step.result) {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/talaria/internal/mcp"
+	"github.com/USA-RedDragon/talaria/logingrant"
 )
 
 // Hub is where the device connects.
@@ -325,9 +326,10 @@ func (m MCP) validate() error {
 // another device. The extension checks the same words.
 var refusedMethodRE = regexp.MustCompile("(?i)" + RefusedMethodPattern)
 
-// RefusedMethodPattern is the pattern of refusedMethodRE without its flags.
-// extension/firefox/background.js must carry the same pattern.
-const RefusedMethodPattern = `passkey|pass key|security key|verify|push|approve|authenticator|biometric|fingerprint|face id|touch id|sms|text message|one-time|otp`
+// RefusedMethodPattern is the pattern of refusedMethodRE without its flags,
+// the one sign-in grants use. extension/firefox/background.js must carry the
+// same pattern.
+const RefusedMethodPattern = logingrant.RefusedMethodPattern
 
 // validateMethods checks browser.autologin-methods: every host is in
 // browser.autologin-hosts, every label is short visible text, and no label
