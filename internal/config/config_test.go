@@ -206,6 +206,34 @@ func TestLegacyEnvironmentVariables(t *testing.T) {
 	}
 }
 
+func TestCommandTasks(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]int64{
+		"off": 0, "OFF": 0, "0": 0, " off ": 0, "64": 64, "8192": 8192, "65536": 65536,
+	} {
+		n, err := config.Device{CommandTasksMax: in}.CommandTasks()
+		if err != nil || n != want {
+			t.Errorf("%q: %d, %v", in, n, err)
+		}
+	}
+	for _, in := range []string{"", "-1", "63", "1.5", "4G", "lots", "auto"} {
+		if _, err := (config.Device{CommandTasksMax: in}).CommandTasks(); !errors.Is(err, config.ErrTasksMax) {
+			t.Errorf("%q: %v", in, err)
+		}
+	}
+	cfg, err := load(map[string]string{hubURLEnv: hubURL}, "")
+	if err != nil || cfg.Device.CommandTasksMax != "16384" {
+		t.Errorf("default %+v, %v", cfg, err)
+	}
+	cfg, err = load(map[string]string{hubURLEnv: hubURL, "TALARIA_DEVICE_COMMAND_TASKS_MAX": "off"}, "")
+	if err != nil || cfg.Device.CommandTasksMax != "off" {
+		t.Errorf("off %+v, %v", cfg, err)
+	}
+	if _, err := load(map[string]string{hubURLEnv: hubURL, "TALARIA_DEVICE_COMMAND_TASKS_MAX": "few"}, ""); !errors.Is(err, config.ErrTasksMax) {
+		t.Errorf("bad value: %v", err)
+	}
+}
+
 func TestCommandMemory(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]int64{

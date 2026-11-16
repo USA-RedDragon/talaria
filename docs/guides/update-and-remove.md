@@ -27,7 +27,7 @@ Keep the program and your server close in version. The agent plugin and the prog
 
 ## Change the settings of the service
 
-The unit that setup writes has no memory or task limit. Releases before the one that dropped them wrote `MemoryMax=2G` and `TasksMax=512`; run `talaria setup` again to replace such a unit with the current one. To limit the service, put `MemoryMax` in a drop-in file (`systemctl --user edit talaria`). `talaria update` does not change the unit. Run `talaria setup` again to get the unit of a newer release. A unit you edited is saved as a backup first, and drop-in files in `talaria.service.d` are left alone.
+The unit that setup writes has no memory or task limit. Releases before the one that dropped them wrote `MemoryMax=2G` and `TasksMax=512`; run `talaria setup` again to replace such a unit with the current one. The `TasksMax=512` of such a unit limits the daemon only: agent commands run in scopes of their own with the limit `device.command-tasks-max` (default 16384) and do not copy the service's, so an old unit no longer stops a large parallel build. Set that to `off` to have talaria set no limit on commands. To limit the service, put `MemoryMax` in a drop-in file (`systemctl --user edit talaria`). `talaria update` does not change the unit. Run `talaria setup` again to get the unit of a newer release. A unit you edited is saved as a backup first, and drop-in files in `talaria.service.d` are left alone.
 
 ## Move to another hub
 

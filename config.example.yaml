@@ -32,6 +32,8 @@ device:
   max-grace: "10m"
   # Memory cap of each agent command, as bytes or with a K, M, G or T suffix (powers of 1024), for example 4G. Default off: no cap. On Linux with a systemd user manager, run starts each command in a systemd scope of its own, so an out-of-memory kill ends only that command and not the daemon, and with a size here the scope has that MemoryMax and the agent is told when a command used more. off, 0 and auto (the old default, now the same as off) set no cap. No effect on macOS
   command-memory-max: "off"
+  # Most tasks (processes and threads) in each agent command, as a number, for example 4096. Default 16384, enough for a build of dozens of parallel jobs (a release build of 380 crates at -j32 peaked at 346) while a fork bomb still stops. On Linux with a systemd user manager each command runs in a systemd scope of its own, and a number here is that scope's TasksMax. It does not copy the TasksMax of the talaria service. off and 0 make talaria set no limit, so the user manager's own default applies (DefaultTasksMax, 15% of the kernel's thread limit unless you changed it). No effect on macOS
+  command-tasks-max: "16384"
 gateway:
   # Loopback address of the chat splice. Port 0 picks a free port
   listen: "127.0.0.1:0"

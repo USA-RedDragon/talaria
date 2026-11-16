@@ -41,6 +41,8 @@ type Device struct {
 	MaxGrace     time.Duration `name:"max-grace" default:"10m" description:"Longest time run keeps commands running after the exec leg drops, waiting for a resume. The plugin's grace_seconds applies when it is shorter"`
 	// CommandMemoryMax is parsed by CommandMemory.
 	CommandMemoryMax string `name:"command-memory-max" default:"off" description:"Memory cap of each agent command, as bytes or with a K, M, G or T suffix (powers of 1024), for example 4G. Default off: no cap. On Linux with a systemd user manager, run starts each command in a systemd scope of its own, so an out-of-memory kill ends only that command and not the daemon, and with a size here the scope has that MemoryMax and the agent is told when a command used more. off, 0 and auto (the old default, now the same as off) set no cap. No effect on macOS"`
+	// CommandTasksMax is parsed by CommandTasks.
+	CommandTasksMax string `name:"command-tasks-max" default:"16384" description:"Most tasks (processes and threads) in each agent command, as a number, for example 4096. Default 16384, enough for a build of dozens of parallel jobs (a release build of 380 crates at -j32 peaked at 346) while a fork bomb still stops. On Linux with a systemd user manager each command runs in a systemd scope of its own, and a number here is that scope's TasksMax. It does not copy the TasksMax of the talaria service. off and 0 make talaria set no limit, so the user manager's own default applies (DefaultTasksMax, 15% of the kernel's thread limit unless you changed it). No effect on macOS"`
 }
 
 // Gateway is the run daemon's loopback splice that chat points the local
@@ -151,6 +153,7 @@ var (
 	ErrMCPServer       = errors.New("invalid mcp.servers entry")
 	ErrUpdateInterval  = errors.New("update.interval must be at least 1h")
 	ErrMemorySize      = errors.New("device.command-memory-max must be off, 0, auto, or a size such as 4G")
+	ErrTasksMax        = errors.New("device.command-tasks-max must be off, 0, or a number of tasks of at least 64")
 )
 
 // Validate checks what the tags can't. Settings only some subcommands need
@@ -198,6 +201,9 @@ func (c Config) Validate() error {
 	}
 	if c.Device.ResumeBuffer < 4096 || c.Device.MaxGrace < 0 {
 		return ErrResume
+	}
+	if _, err := c.Device.CommandTasks(); err != nil {
+		return err
 	}
 	if _, err := c.Device.CommandMemory(); err != nil {
 		return err
@@ -334,4 +340,23 @@ func (d Device) CommandMemory() (int64, error) {
 		return 0, fmt.Errorf("%w (at least 16M): %q", ErrMemorySize, d.CommandMemoryMax)
 	}
 	return n << shift, nil
+}
+
+// MinCommandTasks is the smallest task limit that device.command-tasks-max
+// accepts. Below it a shell could not run a pipeline.
+const MinCommandTasks = 64
+
+// CommandTasks parses device.command-tasks-max. It returns 0 for no limit
+// set by talaria (off or 0), and otherwise the limit.
+func (d Device) CommandTasks() (int64, error) {
+	v := strings.TrimSpace(strings.ToLower(d.CommandTasksMax))
+	switch v {
+	case "off", "0":
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < MinCommandTasks {
+		return 0, fmt.Errorf("%w: %q", ErrTasksMax, d.CommandTasksMax)
+	}
+	return n, nil
 }

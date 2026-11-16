@@ -31,8 +31,9 @@ type Scope struct {
 	SystemdRun, Systemctl string
 	// MemoryMax is the cap of each command in bytes; 0 sets none.
 	MemoryMax int64
-	// TasksMax caps the tasks of each command; 0 leaves the manager's
-	// default.
+	// TasksMax caps the tasks of each command; 0 sets none, so the user
+	// manager's DefaultTasksMax applies. It is never copied from the
+	// service that runs the daemon.
 	TasksMax int64
 	// PartOf is the unit that runs the daemon, if any. Stopping or
 	// restarting it stops the scopes too, as it stopped the commands when
@@ -88,11 +89,11 @@ func SystemProbe(env []string) ScopeProbe {
 	return ScopeProbe{GOOS: runtime.GOOS, ProcCgroup: "/proc/self/cgroup", CgroupRoot: "/sys/fs/cgroup", LookPath: exec.LookPath, Env: env}
 }
 
-// NewScope returns the scope for a memory cap of memoryMax bytes, or with 0
-// for none. It runs one empty command in a scope
+// NewScope returns the scope for a memory cap of memoryMax bytes and a task
+// limit of tasksMax, or with 0 for none. It runs one empty command in a scope
 // to check that the systemd user manager takes them. The error wraps
 // ErrNoScope and says why commands cannot have a scope.
-func NewScope(ctx context.Context, p ScopeProbe, memoryMax int64) (*Scope, error) {
+func NewScope(ctx context.Context, p ScopeProbe, memoryMax, tasksMax int64) (*Scope, error) {
 	if p.GOOS != "linux" {
 		return nil, fmt.Errorf("%w: only on Linux with systemd", ErrNoScope)
 	}
@@ -104,10 +105,8 @@ func NewScope(ctx context.Context, p ScopeProbe, memoryMax int64) (*Scope, error
 	if err != nil {
 		return nil, fmt.Errorf("%w: no systemctl: %w", ErrNoScope, err)
 	}
-	s := &Scope{SystemdRun: run, Systemctl: ctl, MemoryMax: memoryMax}
+	s := &Scope{SystemdRun: run, Systemctl: ctl, MemoryMax: memoryMax, TasksMax: tasksMax}
 	if cg, ok := ownCgroup(p.ProcCgroup); ok {
-		dir := filepath.Join(p.CgroupRoot, filepath.FromSlash(cg))
-		s.TasksMax = readLimit(filepath.Join(dir, "pids.max"))
 		if base := filepath.Base(cg); strings.HasSuffix(base, ".service") && strings.Contains(cg, "/user@") {
 			s.PartOf = base
 		}
@@ -158,20 +157,6 @@ func ownCgroup(path string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// readLimit reads a cgroup limit file such as pids.max. It returns 0 for
-// max and for a file it cannot read.
-func readLimit(path string) int64 {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
 }
 
 // oomWait is how long oomKilled waits for systemd to finish a scope whose

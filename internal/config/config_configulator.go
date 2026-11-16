@@ -41,6 +41,7 @@ type deviceShadow struct {
 	ResumeBuffer     *int           `json:"resume-buffer"      toml:"resume-buffer"      yaml:"resume-buffer"`
 	MaxGrace         *impl.Duration `json:"max-grace"          toml:"max-grace"          yaml:"max-grace"`
 	CommandMemoryMax *string        `json:"command-memory-max" toml:"command-memory-max" yaml:"command-memory-max"`
+	CommandTasksMax  *string        `json:"command-tasks-max"  toml:"command-tasks-max"  yaml:"command-tasks-max"`
 }
 
 type gatewayShadow struct {
@@ -147,6 +148,8 @@ func configApplyDefaults(cfg *Config, _ string, set configulator.SetOrigin) erro
 	set("device.max-grace", configulator.LayerDefault, "default tag")
 	cfg.Device.CommandMemoryMax = "off"
 	set("device.command-memory-max", configulator.LayerDefault, "default tag")
+	cfg.Device.CommandTasksMax = "16384"
+	set("device.command-tasks-max", configulator.LayerDefault, "default tag")
 	cfg.Gateway.Listen = "127.0.0.1:0"
 	set("gateway.listen", configulator.LayerDefault, "default tag")
 	cfg.Gateway.Splice = true
@@ -274,6 +277,10 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 		if s.Device.CommandMemoryMax != nil {
 			cfg.Device.CommandMemoryMax = *s.Device.CommandMemoryMax
 			set("device.command-memory-max", configulator.LayerFile, file)
+		}
+		if s.Device.CommandTasksMax != nil {
+			cfg.Device.CommandTasksMax = *s.Device.CommandTasksMax
+			set("device.command-tasks-max", configulator.LayerFile, file)
 		}
 	}
 	if s.Gateway != nil {
@@ -584,6 +591,10 @@ func configApplyEnv(cfg *Config, ec configulator.EnvContext, set configulator.Se
 		cfg.Device.CommandMemoryMax = v
 		set("device.command-memory-max", configulator.LayerEnv, n)
 	}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "device", "command-tasks-max"); ok {
+		cfg.Device.CommandTasksMax = v
+		set("device.command-tasks-max", configulator.LayerEnv, n)
+	}
 	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "gateway", "listen"); ok {
 		cfg.Gateway.Listen = v
 		set("gateway.listen", configulator.LayerEnv, n)
@@ -849,6 +860,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 		"device" + o.Separator + "resume-buffer",
 		"device" + o.Separator + "max-grace",
 		"device" + o.Separator + "command-memory-max",
+		"device" + o.Separator + "command-tasks-max",
 		"gateway" + o.Separator + "listen",
 		"gateway" + o.Separator + "splice",
 		"chat" + o.Separator + "managed",
@@ -910,37 +922,38 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.Var(impl.NewInt(1048576), names[12], "Most output bytes per command that run keeps for a resume of the exec leg until the plugin confirms them. Older output of a command is dropped, and the plugin shows the gap")
 	fs.Duration(names[13], time.Duration(int64(600000000000)), "Longest time run keeps commands running after the exec leg drops, waiting for a resume. The plugin's grace_seconds applies when it is shorter")
 	fs.String(names[14], "off", "Memory cap of each agent command, as bytes or with a K, M, G or T suffix (powers of 1024), for example 4G. Default off: no cap. On Linux with a systemd user manager, run starts each command in a systemd scope of its own, so an out-of-memory kill ends only that command and not the daemon, and with a size here the scope has that MemoryMax and the agent is told when a command used more. off, 0 and auto (the old default, now the same as off) set no cap. No effect on macOS")
-	fs.String(names[15], "127.0.0.1:0", "Loopback address of the chat splice. Port 0 picks a free port")
-	fs.Bool(names[16], true, "Run the chat splice in run. false (or run --no-splice) runs only the exec leg: no listener, no daemon state file and no whoami call, for a headless service device such as the sandbox pod")
-	fs.Bool(names[17], true, "On Linux, run the exact agent build the server runs: run fetches it from the server's container image by digest when the server reports one, verifies it and keeps it in chat.managed-dir. false, or no image from the server, runs chat.hermes instead")
-	fs.String(names[18], "", "Directory for the managed agent builds and their own home. Defaults to talaria/hermes in the user cache directory")
-	fs.String(names[19], "hermes", "Local agent launcher (Hermes Agent) when chat.managed is off or the server reports no image. It must be the same release as the server's agent")
-	fs.String(names[20], ":9130", "Address the ACP host listens on. Only the Talaria hub may reach it")
-	fs.String(names[21], "", "This backend's id, the aud the hub puts in its assertions. Needed by acp-host")
-	fs.String(names[22], "", "Hub Ed25519 public keys: PEM PUBLIC KEY blocks or base64 lines of the raw 32 bytes")
-	fs.String(names[23], "", "File holding the hub public keys, in the same format as hub-public-key")
-	fs.String(names[24], "hermes", "Hermes launcher that the host runs as <hermes> acp for each connection")
-	fs.String(names[25], "", "Server directory that stands in for the device directory in ACP session cwds. Must match the device plugin's placeholder. Needed by acp-host")
-	fs.Var(impl.NewInt(8), names[26], "Most hermes acp processes the host runs at once")
-	fs.String(names[27], "", "Bindings file the device plugin writes. Defaults to device/bindings.json in $HERMES_HOME")
-	fs.String(names[28], "http://127.0.0.1:9120/api/health", "Health URL of the pod's Hermes gateway. The host starts hermes acp only while it answers, because hermes acp starts a gateway of its own when none runs. Empty turns the check off")
-	fs.Duration(names[29], time.Duration(int64(1000000000)), "First delay after a lost connection")
-	fs.Duration(names[30], time.Duration(int64(30000000000)), "Longest delay between attempts")
-	fs.Bool(names[31], false, "Serve the Talaria Firefox extension on a private socket in the state directory and offer browser control to the plugin, so the agent can use tabs in its tab group. Run talaria browser install once")
-	fs.StringSlice(names[32], nil, "Loopback or private network host names the agent may open. All other loopback, private, link-local and CGNAT addresses are blocked in agent tabs")
-	fs.StringSlice(names[33], nil, "Sites where every click and every Enter or Space key press asks the user each time and scripts may only read. Host names; each covers its subdomains. The plugin cannot change this list")
-	fs.StringSlice(names[34], nil, "Exact host names where browser_login may submit the login form that Firefox fills from its own saved login, so a scheduled job can sign in without the agent seeing the password. Only https pages whose top-level host is listed; no subdomains. Scripts are refused there, and clicks, typing, key presses and screenshots on its login pages. Example: login.w3.ibm.com. The plugin cannot change this list")
-	fs.Bool(names[35], true, "Let the agent start Firefox, with the user's default profile, in the user's graphical session when the extension is not connected, so a scheduled job works after Firefox was closed. Not used with headless")
-	fs.Bool(names[36], false, "Run a Firefox of the daemon's own with no display, on a profile of its own, with the Talaria extension installed in it, and keep it running (docs/browser.md section 5.2). For a device that has no desktop, such as the sandbox image, which turns it on. Needs browser.enabled. It replaces start-firefox, and the profile holds only the logins of that device")
-	fs.String(names[37], "", "Where the headless Firefox keeps its profile, so cookies and logins survive restarts. Default: firefox-profile in the state directory")
-	fs.String(names[38], "firefox", "Command that starts Firefox for start-firefox: a name on PATH or an absolute path")
-	fs.Duration(names[39], time.Duration(int64(3600000000000)), "Stop an MCP server after this long without a request. It starts again on the next request, without its earlier state. 0 keeps it running until run stops")
-	fs.Bool(names[40], true, "Let run install new releases by itself: it checks GitHub, verifies the release like talaria update, waits until no browser operation, MCP call or chat runs (commands keep running across the restart where they can, else it waits for them too), and exits so the service restarts it. Only when the talaria service runs it and the device token comes from login, so never on a service device that uses hub.token or hub.token-file. The sandbox and device images turn it off")
-	fs.Duration(names[41], time.Duration(int64(21600000000000)), "Time between release checks of run, with up to 10% jitter. At least 1h")
-	fs.Bool(names[42], false, "Count the tokens Claude Code used here and send the counts to the hub: only token counts, model names, account ids, the signed-in account's email and project folder names, never what was said. Unset: on for run, except in a container, and on for acp-host")
-	fs.StringSlice(names[43], nil, "More Claude Code config directories (CLAUDE_CONFIG_DIR values) to count, besides $CLAUDE_CONFIG_DIR or ~/.claude")
-	fs.String(names[44], "", "acp-host: directory of the per-account Claude Code directories. Defaults to $CLAUDE_ACCOUNTS_ROOT, else claude in $HERMES_HOME")
-	fs.String(names[45], "", "File that keeps what was counted across restarts. Defaults to claude-usage.gob in the state directory for run, and device/claude-usage.gob in $HERMES_HOME for acp-host")
+	fs.String(names[15], "16384", "Most tasks (processes and threads) in each agent command, as a number, for example 4096. Default 16384, enough for a build of dozens of parallel jobs (a release build of 380 crates at -j32 peaked at 346) while a fork bomb still stops. On Linux with a systemd user manager each command runs in a systemd scope of its own, and a number here is that scope's TasksMax. It does not copy the TasksMax of the talaria service. off and 0 make talaria set no limit, so the user manager's own default applies (DefaultTasksMax, 15% of the kernel's thread limit unless you changed it). No effect on macOS")
+	fs.String(names[16], "127.0.0.1:0", "Loopback address of the chat splice. Port 0 picks a free port")
+	fs.Bool(names[17], true, "Run the chat splice in run. false (or run --no-splice) runs only the exec leg: no listener, no daemon state file and no whoami call, for a headless service device such as the sandbox pod")
+	fs.Bool(names[18], true, "On Linux, run the exact agent build the server runs: run fetches it from the server's container image by digest when the server reports one, verifies it and keeps it in chat.managed-dir. false, or no image from the server, runs chat.hermes instead")
+	fs.String(names[19], "", "Directory for the managed agent builds and their own home. Defaults to talaria/hermes in the user cache directory")
+	fs.String(names[20], "hermes", "Local agent launcher (Hermes Agent) when chat.managed is off or the server reports no image. It must be the same release as the server's agent")
+	fs.String(names[21], ":9130", "Address the ACP host listens on. Only the Talaria hub may reach it")
+	fs.String(names[22], "", "This backend's id, the aud the hub puts in its assertions. Needed by acp-host")
+	fs.String(names[23], "", "Hub Ed25519 public keys: PEM PUBLIC KEY blocks or base64 lines of the raw 32 bytes")
+	fs.String(names[24], "", "File holding the hub public keys, in the same format as hub-public-key")
+	fs.String(names[25], "hermes", "Hermes launcher that the host runs as <hermes> acp for each connection")
+	fs.String(names[26], "", "Server directory that stands in for the device directory in ACP session cwds. Must match the device plugin's placeholder. Needed by acp-host")
+	fs.Var(impl.NewInt(8), names[27], "Most hermes acp processes the host runs at once")
+	fs.String(names[28], "", "Bindings file the device plugin writes. Defaults to device/bindings.json in $HERMES_HOME")
+	fs.String(names[29], "http://127.0.0.1:9120/api/health", "Health URL of the pod's Hermes gateway. The host starts hermes acp only while it answers, because hermes acp starts a gateway of its own when none runs. Empty turns the check off")
+	fs.Duration(names[30], time.Duration(int64(1000000000)), "First delay after a lost connection")
+	fs.Duration(names[31], time.Duration(int64(30000000000)), "Longest delay between attempts")
+	fs.Bool(names[32], false, "Serve the Talaria Firefox extension on a private socket in the state directory and offer browser control to the plugin, so the agent can use tabs in its tab group. Run talaria browser install once")
+	fs.StringSlice(names[33], nil, "Loopback or private network host names the agent may open. All other loopback, private, link-local and CGNAT addresses are blocked in agent tabs")
+	fs.StringSlice(names[34], nil, "Sites where every click and every Enter or Space key press asks the user each time and scripts may only read. Host names; each covers its subdomains. The plugin cannot change this list")
+	fs.StringSlice(names[35], nil, "Exact host names where browser_login may submit the login form that Firefox fills from its own saved login, so a scheduled job can sign in without the agent seeing the password. Only https pages whose top-level host is listed; no subdomains. Scripts are refused there, and clicks, typing, key presses and screenshots on its login pages. Example: login.w3.ibm.com. The plugin cannot change this list")
+	fs.Bool(names[36], true, "Let the agent start Firefox, with the user's default profile, in the user's graphical session when the extension is not connected, so a scheduled job works after Firefox was closed. Not used with headless")
+	fs.Bool(names[37], false, "Run a Firefox of the daemon's own with no display, on a profile of its own, with the Talaria extension installed in it, and keep it running (docs/browser.md section 5.2). For a device that has no desktop, such as the sandbox image, which turns it on. Needs browser.enabled. It replaces start-firefox, and the profile holds only the logins of that device")
+	fs.String(names[38], "", "Where the headless Firefox keeps its profile, so cookies and logins survive restarts. Default: firefox-profile in the state directory")
+	fs.String(names[39], "firefox", "Command that starts Firefox for start-firefox: a name on PATH or an absolute path")
+	fs.Duration(names[40], time.Duration(int64(3600000000000)), "Stop an MCP server after this long without a request. It starts again on the next request, without its earlier state. 0 keeps it running until run stops")
+	fs.Bool(names[41], true, "Let run install new releases by itself: it checks GitHub, verifies the release like talaria update, waits until no browser operation, MCP call or chat runs (commands keep running across the restart where they can, else it waits for them too), and exits so the service restarts it. Only when the talaria service runs it and the device token comes from login, so never on a service device that uses hub.token or hub.token-file. The sandbox and device images turn it off")
+	fs.Duration(names[42], time.Duration(int64(21600000000000)), "Time between release checks of run, with up to 10% jitter. At least 1h")
+	fs.Bool(names[43], false, "Count the tokens Claude Code used here and send the counts to the hub: only token counts, model names, account ids, the signed-in account's email and project folder names, never what was said. Unset: on for run, except in a container, and on for acp-host")
+	fs.StringSlice(names[44], nil, "More Claude Code config directories (CLAUDE_CONFIG_DIR values) to count, besides $CLAUDE_CONFIG_DIR or ~/.claude")
+	fs.String(names[45], "", "acp-host: directory of the per-account Claude Code directories. Defaults to $CLAUDE_ACCOUNTS_ROOT, else claude in $HERMES_HOME")
+	fs.String(names[46], "", "File that keeps what was counted across restarts. Defaults to claude-usage.gob in the state directory for run, and device/claude-usage.gob in $HERMES_HOME for acp-host")
 	return nil
 }
 
@@ -1124,6 +1137,18 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, _ stri
 		}
 		cfg.Device.CommandMemoryMax = v
 		set("device.command-memory-max", configulator.LayerCLI, "--"+n)
+	}
+	if n := "device" + o.Separator + "command-tasks-max"; fs.Changed(n) {
+		v, err := fs.GetString(n)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "device.command-tasks-max",
+				Source: "--" + n,
+			}
+		}
+		cfg.Device.CommandTasksMax = v
+		set("device.command-tasks-max", configulator.LayerCLI, "--"+n)
 	}
 	if n := "gateway" + o.Separator + "listen"; fs.Changed(n) {
 		v, err := fs.GetString(n)
@@ -2032,6 +2057,19 @@ func (s *deviceShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 			default:
 				return configJSONError(path+".command-memory-max", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
+		case "command-tasks-max":
+			v, err := dec.ReadToken()
+			if err != nil {
+				return err
+			}
+			switch v.Kind() {
+			case jsontext.KindNull:
+			case jsontext.KindString:
+				str := v.String()
+				s.CommandTasksMax = &str
+			default:
+				return configJSONError(path+".command-tasks-max", v, fmt.Errorf("expected a string, got %v", v.Kind()))
+			}
 		default:
 			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
 				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
@@ -2924,6 +2962,7 @@ func (c Config) PrintConfig() string {
 	fmt.Fprintf(&b, "device.resume-buffer = %v\n", c.Device.ResumeBuffer)
 	fmt.Fprintf(&b, "device.max-grace = %v\n", c.Device.MaxGrace)
 	fmt.Fprintf(&b, "device.command-memory-max = %v\n", c.Device.CommandMemoryMax)
+	fmt.Fprintf(&b, "device.command-tasks-max = %v\n", c.Device.CommandTasksMax)
 	fmt.Fprintf(&b, "gateway.listen = %v\n", c.Gateway.Listen)
 	fmt.Fprintf(&b, "gateway.splice = %v\n", c.Gateway.Splice)
 	fmt.Fprintf(&b, "chat.managed = %v\n", c.Chat.Managed)

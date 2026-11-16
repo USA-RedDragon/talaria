@@ -86,17 +86,17 @@ func readArgs(t *testing.T, path string) []string {
 func TestNewScopeNoCapByDefault(t *testing.T) {
 	t.Parallel()
 	bin, args := fakeSystemd(t, "", "")
-	s, err := executor.NewScope(t.Context(), probe(t, bin, serviceCgroup, "2147483648", "512"), 0)
+	s, err := executor.NewScope(t.Context(), probe(t, bin, serviceCgroup, "2147483648", "512"), 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.MemoryMax != 0 || s.TasksMax != 512 || s.PartOf != "talaria.service" {
+	if s.MemoryMax != 0 || s.TasksMax != 0 || s.PartOf != "talaria.service" {
 		t.Errorf("scope = %+v", s)
 	}
 	got := strings.Join(readArgs(t, args), " ")
 	for _, want := range []string{
 		"--user --scope --quiet --unit=talaria-cmd-", "-p OOMPolicy=kill",
-		"-p TasksMax=512", "-p PartOf=talaria.service", "--expand-environment=no -- true END",
+		"-p PartOf=talaria.service", "--expand-environment=no -- true END",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("probe args %q lack %q", got, want)
@@ -105,19 +105,46 @@ func TestNewScopeNoCapByDefault(t *testing.T) {
 	if strings.Contains(got, "MemoryMax") {
 		t.Errorf("probe args %q set a MemoryMax", got)
 	}
+	// The service here has pids.max 512. A command does not copy it.
+	if strings.Contains(got, "TasksMax") {
+		t.Errorf("probe args %q set a TasksMax, which the service's pids.max must not give", got)
+	}
+}
+
+// device.command-tasks-max reaches systemd-run as TasksMax, whatever the
+// service's own pids.max is.
+func TestNewScopeTasksMax(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		tasks int64
+		want  string
+	}{"number": {8192, "-p TasksMax=8192"}, "off": {0, ""}} {
+		bin, args := fakeSystemd(t, "", "")
+		s, err := executor.NewScope(t.Context(), probe(t, bin, serviceCgroup, "max", "512"), 0, c.tasks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(readArgs(t, args), " ")
+		if s.TasksMax != c.tasks || c.want != "" && !strings.Contains(got, c.want) || c.want == "" && strings.Contains(got, "TasksMax") {
+			t.Errorf("%s: scope %+v, args %q", name, s, got)
+		}
+		if strings.Contains(got, "TasksMax=512") {
+			t.Errorf("%s: args %q copy the service's 512", name, got)
+		}
+	}
 }
 
 func TestNewScopeDefaults(t *testing.T) {
 	t.Parallel()
 	bin, _ := fakeSystemd(t, "", "")
-	s, err := executor.NewScope(t.Context(), probe(t, bin, "/user.slice/user-1000.slice/session-4.scope", "max", "max"), 0)
+	s, err := executor.NewScope(t.Context(), probe(t, bin, "/user.slice/user-1000.slice/session-4.scope", "max", "max"), 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.MemoryMax != 0 || s.TasksMax != 0 || s.PartOf != "" {
 		t.Errorf("scope = %+v", s)
 	}
-	s, err = executor.NewScope(t.Context(), probe(t, bin, serviceCgroup, "2147483648", "512"), 3<<30)
+	s, err = executor.NewScope(t.Context(), probe(t, bin, serviceCgroup, "2147483648", "512"), 3<<30, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +168,7 @@ func TestNewScopeUnavailable(t *testing.T) {
 		"no program": {missing, "no systemd-run"},
 		"no bus":     {probe(t, failing, serviceCgroup, "max", "max"), "Failed to connect to bus"},
 	} {
-		s, err := executor.NewScope(t.Context(), c.p, 0)
+		s, err := executor.NewScope(t.Context(), c.p, 0, 0)
 		if !errors.Is(err, executor.ErrNoScope) || !strings.Contains(err.Error(), c.want) || s != nil {
 			t.Errorf("%s: %v, %v", name, s, err)
 		}
@@ -152,7 +179,7 @@ func TestNewScopeWithoutExpandOption(t *testing.T) {
 	t.Parallel()
 	old := "case \"$*\" in *--expand-environment*) echo \"systemd-run: unrecognized option '--expand-environment=no'\" >&2; exit 1 ;; esac\n"
 	bin, args := fakeSystemd(t, old, "")
-	s, err := executor.NewScope(t.Context(), probe(t, bin, serviceCgroup, "max", "max"), 0)
+	s, err := executor.NewScope(t.Context(), probe(t, bin, serviceCgroup, "max", "max"), 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +292,7 @@ func TestScopeOOMSystemd(t *testing.T) {
 	if os.Getenv("TALARIA_SYSTEMD_TESTS") != "1" {
 		t.Skip("set TALARIA_SYSTEMD_TESTS=1 to run commands in real systemd scopes")
 	}
-	s, err := executor.NewScope(t.Context(), executor.SystemProbe(os.Environ()), 64<<20)
+	s, err := executor.NewScope(t.Context(), executor.SystemProbe(os.Environ()), 64<<20, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +315,7 @@ func TestScopeKeepsShellExpansionsSystemd(t *testing.T) {
 	if os.Getenv("TALARIA_SYSTEMD_TESTS") != "1" {
 		t.Skip("set TALARIA_SYSTEMD_TESTS=1 to run commands in real systemd scopes")
 	}
-	s, err := executor.NewScope(t.Context(), executor.SystemProbe(os.Environ()), 64<<20)
+	s, err := executor.NewScope(t.Context(), executor.SystemProbe(os.Environ()), 64<<20, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,5 +323,31 @@ func TestScopeKeepsShellExpansionsSystemd(t *testing.T) {
 	res, out := run(t, executor.Request{Cmd: cmd, Cwd: t.TempDir(), Env: append(os.Environ(), "TALARIA_T_B=1"), Scope: s})
 	if res.Code != 0 || out != "/home/alice/x TALARIA_T_A TALARIA_T_B set\n" {
 		t.Errorf("result %+v, output %q", res, out)
+	}
+}
+
+// TestScopeTasksMaxSystemd runs a command that holds 700 processes at once
+// in a real systemd user scope, from a process whose own cgroup allows 512
+// tasks, as the service of an old release did, and then in a scope limited
+// to 64 tasks. It needs a systemd user manager and TALARIA_SYSTEMD_TESTS=1.
+func TestScopeTasksMaxSystemd(t *testing.T) {
+	t.Parallel()
+	if os.Getenv("TALARIA_SYSTEMD_TESTS") != "1" {
+		t.Skip("set TALARIA_SYSTEMD_TESTS=1 to run commands in real systemd scopes")
+	}
+	// Each sleep is a task. The command prints how many of 700 started.
+	cmd := `n=0; for i in $(seq 700); do sleep 20 & if kill -0 $! 2>/dev/null; then n=$((n+1)); fi; done 2>/dev/null; echo started $n; kill $(jobs -p) 2>/dev/null; wait 2>/dev/null`
+	for name, c := range map[string]struct {
+		tasks int64
+		full  bool
+	}{"16384": {16384, true}, "64": {64, false}} {
+		s, err := executor.NewScope(t.Context(), executor.SystemProbe(os.Environ()), 0, c.tasks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, out := run(t, executor.Request{Cmd: cmd, Cwd: t.TempDir(), Env: os.Environ(), Scope: s})
+		if full := strings.Contains(out, "started 700"); full != c.full {
+			t.Errorf("TasksMax %s: output %q", name, out)
+		}
 	}
 }
