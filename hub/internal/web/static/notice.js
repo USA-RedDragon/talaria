@@ -233,6 +233,19 @@ window.HubNotice = (() => {
     return { cmd: rest.slice(0, oi).trim(), out: out.replace(/^\n+|\n+$/g, "") };
   }
 
+  const ranLine = /^Ran for (?:(\d+)h (\d+)m|(\d+)m(?: (\d+)s)?|(\d+)s)\.$/m;
+
+  // ranMeta is the run time a finish notice states ("Ran for 2m 14s."), as "ran 2 min 14 s"; "" when it has none.
+  // Only the lines before the command count: the output may say anything.
+  function ranMeta(t) {
+    const ci = t.indexOf("\nCommand: ");
+    const m = ranLine.exec(ci < 0 ? t : t.slice(0, ci));
+    if (!m) return "";
+    if (m[1]) return "ran " + m[1] + " h " + m[2] + " min";
+    if (m[3]) return "ran " + m[3] + " min" + (m[4] ? " " + m[4] + " s" : "");
+    return "ran " + m[5] + " s";
+  }
+
   function parseProcess(t) {
     if (t.startsWith("[Background process ")) {
       const m = heartbeatHead.exec(t);
@@ -256,6 +269,7 @@ window.HubNotice = (() => {
     const n = { kind: "command", title: "Background command " + verb + ": " + short(co.cmd), goal: co.cmd, result: co.out };
     const exit = m[3] === "?" ? "Exit unknown" : "Exit " + m[3];
     n.meta = m[2] === "completed normally" || m[2] === "exited" ? [exit] : [upperFirst(m[2]), exit];
+    if (ranMeta(t)) n.meta.push(ranMeta(t));
     n.state = m[3] === "0" && m[2] === "completed normally" ? "ok" : "bad";
     return n;
   }

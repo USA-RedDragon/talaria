@@ -1,0 +1,237 @@
+From 2e5b2fc996d31f0700714c097a2bce204bf43e5c Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 21:40:00 +0000
+Subject: [PATCH] feat(process): a background command's start and end times
+ reach the hub
+
+The launch result, poll, wait, log and list carry started_at (Unix
+seconds) and, once exited, exited_at; a poll of an exited command reports
+how long it ran, not the time since. The launch result also names the
+folder. A normal finish notice says how long the command ran.
+
+diff --git a/tests/tools/test_process_run_time.py b/tests/tools/test_process_run_time.py
+new file mode 100644
+index 00000000..3b774cde
+--- /dev/null
++++ b/tests/tools/test_process_run_time.py
+@@ -0,0 +1,101 @@
++"""A background command's start and end times reach the hub: the launch result, poll, wait, log, list and the notice."""
++
++import json
++import time
++
++import pytest
++
++from tests.waiting import wait_until
++from tools.process_registry import process_registry
++from tools.process_registry_notifications import format_process_notification, run_time
++from tools.terminal_tool_background import spawn_background_process
++
++pytestmark = [pytest.mark.platforms("linux"), pytest.mark.live_system_guard_bypass]
++
++
++def _finished(command="echo hi"):
++    session = process_registry.spawn_local(command, task_id="rt", owner_task_id="rt", session_key="rt")
++    wait_until(lambda: session.exited, what="the command to exit")
++    return session
++
++
++def test_launch_result_has_start_time_and_folder(tmp_path):
++    before = time.time()
++    result = json.loads(spawn_background_process(
++        command="sleep 5", env=None, env_type="local", effective_task_id="rt", task_id="rt", session_key="rt",
++        workdir=str(tmp_path), cwd=str(tmp_path), effective_pty=False, notify_on_complete=False,
++        watch_patterns=None, approval_note=None, pty_disabled_reason=None,
++    ))
++    try:
++        assert before - 1 <= result["started_at"] <= time.time() + 1
++        assert result["cwd"] == str(tmp_path)
++    finally:
++        process_registry.kill_process(result["session_id"])
++
++
++def test_poll_of_an_exited_command_reports_how_long_it_ran_not_the_time_since():
++    session = _finished()
++    session.exited_at = session.started_at + 134
++    session.started_at -= 500  # long ago: uptime must stop at the exit
++    session.exited_at -= 500
++    polled = process_registry.poll(session.id)
++    assert polled["uptime_seconds"] == 134
++    assert polled["started_at"] == session.started_at and polled["exited_at"] == session.exited_at
++
++
++def test_poll_of_a_running_command_has_its_start():
++    session = process_registry.spawn_local("sleep 30", task_id="rt", owner_task_id="rt", session_key="rt")
++    try:
++        polled = process_registry.poll(session.id)
++        assert polled["status"] == "running" and polled["started_at"] == session.started_at
++        assert "exited_at" not in polled
++        listed = [e for e in process_registry.list_sessions() if e["session_id"] == session.id][0]
++        assert listed["started_at_unix"] == session.started_at
++        assert listed["uptime_seconds"] <= 2
++    finally:
++        process_registry.kill_process(session.id)
++
++
++def test_wait_log_and_list_carry_the_times():
++    session = _finished()
++    waited = process_registry.wait(session.id, timeout=5)
++    assert waited["status"] == "exited"
++    assert waited["started_at"] == session.started_at and waited["exited_at"] == session.exited_at
++    logged = process_registry.read_log(session.id)
++    assert logged["started_at"] == session.started_at
++    listed = [e for e in process_registry.list_sessions(include_retained=True) if e["session_id"] == session.id]
++    assert listed and listed[0]["started_at_unix"] == session.started_at and listed[0]["exited_at"] == session.exited_at
++
++
++def test_wait_timeout_has_the_start():
++    session = process_registry.spawn_local("sleep 30", task_id="rt", owner_task_id="rt", session_key="rt")
++    try:
++        waited = process_registry.wait(session.id, timeout=1)
++        assert waited["status"] == "timeout" and waited["started_at"] == session.started_at
++    finally:
++        process_registry.kill_process(session.id)
++
++
++@pytest.mark.parametrize("seconds, text", [(0, "0s"), (41, "41s"), (134, "2m 14s"), (120, "2m"), (3900, "1h 5m")])
++def test_run_time_text(seconds, text):
++    assert run_time(seconds) == text
++
++
++def _event(**extra):
++    return {"type": "completion", "session_id": "proc_x", "command": "make build", "exit_code": 0,
++            "output": "ok", "started_at": 1000.0, **extra}
++
++
++def test_a_normal_finish_notice_says_how_long_it_ran():
++    text = format_process_notification(_event(exited_at=1134.4))
++    assert text.startswith("[IMPORTANT: Background process proc_x completed normally (exit code 0).\nRan for 2m 14s.\n")
++    assert "Command: make build\nOutput:\nok]" in text
++
++
++def test_a_failed_finish_notice_says_how_long_it_ran():
++    text = format_process_notification(_event(exit_code=2, exited_at=1041))
++    assert "exited (exit code 2).\nRan for 41s.\n" in text
++
++
++def test_a_notice_without_an_end_time_has_no_run_line():
++    assert "Ran for" not in format_process_notification(_event())
+diff --git a/tools/process_registry.py b/tools/process_registry.py
+index 17526893..8ddc4018 100644
+--- a/tools/process_registry.py
++++ b/tools/process_registry.py
+@@ -1695,11 +1695,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+ 
+     @staticmethod
+     def _exit_fields(session: ProcessSession) -> dict:
+-        return {
++        fields = {
+             "exit_code": session.exit_code,
+             "completion_reason": session.completion_reason,
+             "termination_source": session.termination_source,
+         }
++        if session.exited_at:
++            fields["exited_at"] = session.exited_at  # Unix seconds; with ``started_at`` it gives the run time
++        return fields
+ 
+     def _release_finished_handles(self, session: ProcessSession):
+         """Close a finished session's OS handles (Popen pipes / PTY master).
+@@ -2076,7 +2079,16 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+ 
+     @staticmethod
+     def _status_head(session: ProcessSession) -> dict:
+-        return {"session_id": session.id, "command": session.command, "status": "exited" if session.exited else "running"}
++        head = {"session_id": session.id, "command": session.command, "status": "exited" if session.exited else "running"}
++        if session.started_at:
++            head["started_at"] = session.started_at  # Unix seconds
++        return head
++
++    @staticmethod
++    def _uptime_seconds(session: ProcessSession) -> int:
++        """How long the process ran: to its exit when it has exited, else to now."""
++        end = (session.exited and session.exited_at) or time.time()
++        return int(max(end - session.started_at, 0))
+ 
+     def poll(self, session_id: str) -> dict:
+         """Check status and get new output for a background process."""
+@@ -2091,7 +2103,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+             exited, finalizing = session.exited, self._reader_finalizing(session)
+         result = {
+             **self._status_head(session), "pid": session.pid,
+-            "uptime_seconds": int(time.time() - session.started_at), "output_preview": output_preview}
++            "uptime_seconds": self._uptime_seconds(session), "output_preview": output_preview}
+         if exited:
+             result.update(self._exit_fields(session))
+             # Read-only: record in _poll_observed (CLI inline dedup) but NOT in
+@@ -2200,6 +2212,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+             session._completion_event.wait(timeout=min(1.0, remaining))
+         result = {
+             "status": "timeout", "command": session.command, "output": _output_tail(session, 1000),
++            **({"started_at": session.started_at} if session.started_at else {}),
+             # Not a failure — models re-issued identical waits after misreading this as an error.
+             "process_running": True}
+         base_note = (
+@@ -2219,6 +2232,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+         """Result dict for an exited session: exit metadata + the completion-sized output tail."""
+         return {
+             "status": status, "command": session.command,
++            **({"started_at": session.started_at} if session.started_at else {}),
+             **ProcessRegistry._exit_fields(session), **_completion_output(session)}
+ 
+     def kill_process(
+@@ -2494,7 +2508,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+                 "pid": s.pid,
+                 "owner_task_id": s.owner_task_id,
+                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(s.started_at)),
+-                "uptime_seconds": int(time.time() - s.started_at),
++                "started_at_unix": s.started_at,
++                "uptime_seconds": self._uptime_seconds(s),
+                 "status": "exited" if s.exited else "running",
+                 "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
+             }
+diff --git a/tools/process_registry_notifications.py b/tools/process_registry_notifications.py
+index 3c5b1380..643ce07c 100644
+--- a/tools/process_registry_notifications.py
++++ b/tools/process_registry_notifications.py
+@@ -496,6 +496,17 @@ def ran_for(seconds: float) -> str:
+     return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
+ 
+ 
++def run_time(seconds: float) -> str:
++    """'2m 14s', '41s', '3h 5m': how long a job ran, to the second below an hour."""
++    seconds = int(max(seconds or 0, 0))
++    if seconds < 60:
++        return f"{seconds}s"
++    minutes, rest = divmod(seconds, 60)
++    if minutes < 60:
++        return f"{minutes}m {rest}s" if rest else f"{minutes}m"
++    return f"{minutes // 60}h {minutes % 60}m"
++
++
+ def stopped_text(command: str, session_id: str, ran_seconds: float, output_tail: str = "") -> str:
+     """What an agent reads when the user stopped its background job from the hub."""
+     text = (f"Stopped by the user from the hub: {str(command)[:200]} ({session_id}) (ran {ran_for(ran_seconds)}). "
+@@ -589,6 +600,8 @@ def format_process_notification(evt: dict) -> str | None:
+                 f"session_id=\"{_sid}\") has the full output)\n{_out}")
+     if is_hub_stop(evt):
+         attribution += stopped_text(_cmd, _sid, _hub_stop_ran(evt)).split("\nOutput tail:")[0] + "\n"
++    elif evt.get("started_at") and evt.get("exited_at"):
++        attribution += f"Ran for {run_time(float(evt['exited_at']) - float(evt['started_at']))}.\n"
+     return (
+         f"[IMPORTANT: Background process {_sid} {_completion_status(evt)} (exit code {_exit}{_signal}).\n"
+         f"{attribution}Command: {_cmd}\nOutput:\n{_out}]")
+diff --git a/tools/terminal_tool_background.py b/tools/terminal_tool_background.py
+index 1b9def38..94d956a0 100644
+--- a/tools/terminal_tool_background.py
++++ b/tools/terminal_tool_background.py
+@@ -183,6 +183,10 @@ def spawn_background_process(
+         )
+         result_data = {"output": "Background process started", "session_id": proc_session.id,
+                        "pid": proc_session.pid, "exit_code": 0, "error": None}
++        if proc_session.started_at:
++            result_data["started_at"] = proc_session.started_at  # Unix seconds
++        if effective_cwd:
++            result_data["cwd"] = str(effective_cwd)
+         if persist_on_release:
+             result_data["persist_on_release"] = True
+         if approval_note:

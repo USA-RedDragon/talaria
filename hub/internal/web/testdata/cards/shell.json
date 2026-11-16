@@ -836,5 +836,188 @@
     "the full test run"
    ]
   }
+ },
+ {
+  "name": "terminal in the background running for a while",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "make build",
+    "background": true
+   },
+   "now": 1700000720000,
+   "res": {
+    "output": "Background process started",
+    "session_id": "proc_ab12",
+    "exit_code": 0,
+    "started_at": 1700000000,
+    "cwd": "/home/alice/app"
+   }
+  },
+  "want": {
+   "status": "Running for 12 m",
+   "tone": "warn",
+   "more": "in /home/alice/app",
+   "blocks": [
+    "Command",
+    "Where"
+   ]
+  }
+ },
+ {
+  "name": "terminal in the background just started keeps plain Running",
+  "call": {
+   "name": "terminal",
+   "args": {
+    "command": "make build",
+    "background": true
+   },
+   "now": 1700000001000,
+   "res": {
+    "output": "Background process started",
+    "session_id": "proc_ab12",
+    "exit_code": 0,
+    "started_at": 1700000000
+   }
+  },
+  "want": {
+   "status": "Running",
+   "tone": "warn"
+  }
+ },
+ {
+  "name": "process poll exited shows the run time",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "p"
+   },
+   "res": {
+    "status": "exited",
+    "command": "make build",
+    "exit_code": 2,
+    "started_at": 1700000000,
+    "exited_at": 1700000130,
+    "uptime_seconds": 130
+   }
+  },
+  "want": {
+   "status": "Exited 2 after 2 m 10 s",
+   "tone": "bad"
+  }
+ },
+ {
+  "name": "process poll exited from an older Hermes has no run time",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "p"
+   },
+   "res": {
+    "status": "exited",
+    "command": "make build",
+    "exit_code": 0,
+    "uptime_seconds": 9000
+   }
+  },
+  "want": {
+   "status": "Exited 0"
+  }
+ },
+ {
+  "name": "process poll running with start time",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "p"
+   },
+   "now": 1700000720000,
+   "res": {
+    "status": "running",
+    "command": "npm start",
+    "started_at": 1700000000,
+    "uptime_seconds": 720
+   }
+  },
+  "want": {
+   "status": "Still running, up 12 m"
+  }
+ },
+ {
+  "name": "process wait exited shows the run time",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "p"
+   },
+   "res": {
+    "status": "exited",
+    "command": "make build",
+    "exit_code": 0,
+    "started_at": 1700000000,
+    "exited_at": 1700000134
+   }
+  },
+  "want": {
+   "status": "Exited 0 after 2 m 14 s"
+  }
+ },
+ {
+  "name": "process wait that timed out says how long it has been up",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "p"
+   },
+   "now": 1700000720000,
+   "res": {
+    "status": "timeout",
+    "command": "npm start",
+    "started_at": 1700000000
+   }
+  },
+  "want": {
+   "status": "Still running, up 12 m"
+  }
+ },
+ {
+  "name": "process list rows tell up and ran",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "list"
+   },
+   "res": {
+    "processes": [
+     {
+      "session_id": "a",
+      "command": "npm start",
+      "status": "running",
+      "started_at_unix": 1700000000,
+      "uptime_seconds": 240
+     },
+     {
+      "session_id": "b",
+      "command": "make build",
+      "status": "exited",
+      "exit_code": 0,
+      "started_at_unix": 1700000000,
+      "exited_at": 1700000134,
+      "uptime_seconds": 134
+     }
+    ]
+   }
+  },
+  "want": {
+   "status": "2 commands",
+   "blocks": [
+    "Commands"
+   ]
+  }
  }
 ]

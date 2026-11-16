@@ -15,6 +15,21 @@
     return Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " m" : "");
   }
 
+  // ranFor is how long a background command ran, when the result says: its uptime_seconds,
+  // else the two Unix times. "" when it does not (an older Hermes), so no time is shown.
+  function ranFor(res) {
+    if (typeof res.exited_at === "number" && typeof res.started_at === "number" && res.exited_at >= res.started_at) return clock(res.exited_at - res.started_at);
+    // An older Hermes counted uptime to now even for an exited command: trust it only beside a start time.
+    return typeof res.started_at === "number" && typeof res.uptime_seconds === "number" && res.uptime_seconds >= 0 ? clock(res.uptime_seconds) : "";
+  }
+
+  // upFor is how long a command that has not exited has been running: from its start time to now.
+  function upFor(res, now) {
+    const started = typeof res.started_at === "number" ? res.started_at : typeof res.started_at_unix === "number" ? res.started_at_unix : 0;
+    if (started <= 0 || typeof now !== "number" || now / 1000 - started < 5) return typeof res.uptime_seconds === "number" ? clock(res.uptime_seconds) : "";
+    return clock(now / 1000 - started);
+  }
+
   // secs writes a short run time: 0.3 s, 4.8 s, 41 s.
   const secs = (s) => (s < 10 ? Math.round(s * 10) / 10 + " s" : clock(s));
 
@@ -58,7 +73,8 @@
     const watch = Array.isArray(a.watch_patterns) ? a.watch_patterns.map(str).filter(Boolean) : [];
     if (bg) {
       if (!c.failed) {
-        out.status = "Running";
+        const up = !c.done || typeof res.started_at !== "number" ? "" : upFor(res, typeof c.now === "number" ? c.now : Date.now());
+        out.status = up ? "Running for " + up : "Running";
         out.tone = "warn";
         if (dirText) out.more = ["in ", { code: dirText }];
       }
@@ -180,7 +196,9 @@
     const out = { icon: "activity", blocks: [], lines: [] };
     const exited = res.status === "exited" || res.status === "already_exited" || (typeof res.exit_code === "number" && res.status !== "killed");
     const exit = exitCode(res);
-    const exitText = exit === null ? "Exited" : "Exited " + exit;
+    const ran = ranFor(res);
+    const exitText = (exit === null ? "Exited" : "Exited " + exit) + (ran && exited ? " after " + ran : "");
+    const now = typeof c.now === "number" ? c.now : Date.now();
     const ok = !c.failed || exited;
     // The title: a verb, then the command in monospace; a command that is
     // not known by name is not named by its id.
@@ -218,7 +236,8 @@
         else {
           // A wait that has not finished is not a success; the card's own
           // duration says how long it waited.
-          out.status = "Still running";
+          const up = upFor(res, now);
+          out.status = "Still running" + (up ? ", up " + up : "");
           out.idle = true;
           out.ownFailure = res.status === "timeout";
         }
@@ -233,7 +252,10 @@
             out.tone = "bad";
             out.ownFailure = true;
           }
-        } else out.status = "Still running" + (typeof res.uptime_seconds === "number" ? ", up " + clock(res.uptime_seconds) : "");
+        } else {
+          const up = upFor(res, now);
+          out.status = "Still running" + (up ? ", up " + up : "");
+        }
         tailLine();
         outBlock();
         break;
@@ -286,8 +308,10 @@
             kind: "kv",
             rows: list.map((p) => {
               const st = str(p.status);
-              const up = typeof p.uptime_seconds === "number" ? clock(p.uptime_seconds) : "";
-              const state = st === "exited" || typeof p.exit_code === "number" ? "Exited" + (typeof p.exit_code === "number" ? " " + p.exit_code : "") : st ? H.util.upperFirst(st) : "";
+              const done = st === "exited" || typeof p.exit_code === "number";
+              const t = typeof p.uptime_seconds === "number" ? clock(p.uptime_seconds) : "";
+              const up = t && (typeof p.started_at_unix === "number" || typeof p.exited_at === "number") ? (done ? "ran " : "up ") + t : t;
+              const state = done ? "Exited" + (typeof p.exit_code === "number" ? " " + p.exit_code : "") : st ? H.util.upperFirst(st) : "";
               return { k: short(str(p.command)) || "A command", v: [[state, up].filter(Boolean).join(", ")] };
             }),
           });

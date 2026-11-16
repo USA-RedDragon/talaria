@@ -426,11 +426,35 @@ func parseProcess(t string) *Notice {
 	} else {
 		n.Meta = []string{upperFirst(m[2]), exit}
 	}
+	if ran := ranMeta(t); ran != "" {
+		n.Meta = append(n.Meta, ran)
+	}
 	n.State = StateBad
 	if m[3] == "0" && m[2] == "completed normally" {
 		n.State = StateOK
 	}
 	return n
+}
+
+var ranLine = regexp.MustCompile(`(?m)^Ran for (?:(\d+)h (\d+)m|(\d+)m(?: (\d+)s)?|(\d+)s)\.$`)
+
+// ranMeta is the run time a finish notice states ("Ran for 2m 14s."), as "ran 2 min 14 s";
+// "" when the notice has none. Only the lines before the command count: the output may say anything.
+func ranMeta(t string) string {
+	head, _, _ := strings.Cut(t, "\nCommand: ")
+	m := ranLine.FindStringSubmatch(head)
+	if m == nil {
+		return ""
+	}
+	switch {
+	case m[1] != "":
+		return "ran " + m[1] + " h " + m[2] + " min"
+	case m[3] != "" && m[4] != "":
+		return "ran " + m[3] + " min " + m[4] + " s"
+	case m[3] != "":
+		return "ran " + m[3] + " min"
+	}
+	return "ran " + m[5] + " s"
 }
 
 func commandAndOutput(t, outHead string) (cmd, out string, ok bool) {

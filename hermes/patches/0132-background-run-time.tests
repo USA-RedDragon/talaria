@@ -1,0 +1,10 @@
+# New: start and end times of a background command (tests/tools/test_process_run_time.py)
+# The registry's poll, wait, log, list and kill results and the completion notice this changes
+tests/tools/test_process_registry.py
+tests/tools/test_process_registry_list_exit.py
+tests/tools/test_process_wait_clarity.py
+tests/tools/test_process_heartbeat.py
+tests/tools/test_completed_process_results.py
+tests/tools/test_hub_stop_notice.py
+tests/tools/test_terminal_background_spawn_failure.py
+tests/tools/test_terminal_yield_to_background.py
