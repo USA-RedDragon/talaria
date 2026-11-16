@@ -466,7 +466,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleYolo(w http.ResponseWriter, r *http.Request) {
 	y, ok := s.svc.(ChatYolo)
 	if !ok {
-		errorJSON(w, http.StatusNotFound, "This hub cannot change how this chat asks")
+		errorJSON(w, http.StatusNotFound, "This hub cannot change how this chat requests approvals")
 		return
 	}
 	var set *bool

@@ -209,7 +209,7 @@ func (m *botManager) Steps() string {
 }
 
 // errBadToken is Telegram's refusal of a token, in plain words.
-var errBadToken = &hub.TelegramError{Status: http.StatusBadRequest, Message: "Telegram says this token is not valid. Copy it again from @BotFather, or make a new one with /token."}
+var errBadToken = &hub.TelegramError{Status: http.StatusBadRequest, Message: "Telegram rejected this token. Copy it again from @BotFather, or make a new one with /token."}
 
 // TestTelegram implements hub.TelegramAdmin: getMe with the token.
 func (m *botManager) TestTelegram(ctx context.Context, token string) (string, error) {

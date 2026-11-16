@@ -1,5 +1,5 @@
 // Package agentcfg drives the agent's own settings from the hub: its
-// personality, how it asks before risky commands, long-chat behavior, time
+// personality, how approval works for risky commands, long-chat behavior, time
 // zone, toolsets, skills, connections (MCP servers), diagnostics and its
 // share of a backup. It calls a fixed list of the agent's dashboard routes,
 // never a generic proxy, and each call checks what it sends. Settings the
@@ -459,7 +459,7 @@ func (s *Service) SetToolset(ctx context.Context, user, backendID, name string, 
 		return false, bad("Unknown tool.")
 	}
 	if alwaysOn(name) || talariaOwned(name) {
-		return false, &Error{Status: http.StatusConflict, Message: "Talaria needs this one: it runs commands and files on your computers and the sandbox."}
+		return false, &Error{Status: http.StatusConflict, Message: "This one is required: it runs commands and files on your computers and the sandbox."}
 	}
 	if s.Locked("tools." + name) {
 		return false, lockedErr()

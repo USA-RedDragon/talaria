@@ -1,13 +1,13 @@
 # Notifications
 
-Talaria tells you on your phone or in your browser when the agent needs you or is done, even when no hub page is open. A notice goes to your linked [Telegram](telegram.md) chat and to each browser where you turned on notifications (Web Push).
+Notices reach your phone or browser when the agent needs you or is done, even when no hub page is open. A notice goes to your linked [Telegram](telegram.md) chat and to each browser where you turned on notifications (Web Push).
 
 ## What notifies
 
 | Event | Default | When |
 | ----- | ------- | ---- |
-| Approvals | On | The agent asks before it runs something |
-| Questions | On | The agent asks you to choose or answer |
+| Approvals | On | Approval cards for commands and actions |
+| Questions | On | Questions that need an answer |
 | Failures | On | A turn ends with an error, or a scheduled job fails |
 | Long tasks done | Off | A reply that ran for 2 minutes or more is ready |
 | Scheduled jobs | Off | A scheduled job finished |
@@ -34,7 +34,7 @@ By device:
 - **iPhone and iPad:** Safari shows Web Push only for a web app on the Home Screen, on iOS 16.4 or later. Open the hub in Safari, tap Share, then Add to Home Screen, open it from there, and turn notifications on in Settings.
 - **Desktop browsers** work too.
 
-A push message carries only the kind of event, a fixed title such as "Talaria needs your approval", the name of the agent server and the address of the chat. It never carries the chat's title, a command or a question.
+A push message carries only the kind of event, a fixed title such as "Approval needed", the name of the agent server and the address of the chat. It never carries the chat's title, a command or a question.
 
 The server needs outbound HTTPS to the browsers' push services: `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com`, `*.push.apple.com` and `*.notify.windows.com`. If you limit what the server can reach, allow those.
 

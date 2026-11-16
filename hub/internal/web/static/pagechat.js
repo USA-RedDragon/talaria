@@ -194,7 +194,7 @@ window.HubPageChat = (ctx) => {
   const row = el("div", "prow");
   const scopeBtn = el("button", "pchip");
   scopeBtn.type = "button";
-  scopeBtn.title = "What Talaria can see. Click to switch.";
+  scopeBtn.title = "What is shared with the chat. Click to switch.";
   const scopeText = el("span");
   scopeBtn.append(I.icon("tabs"), scopeText);
   scopeBtn.onclick = () => {

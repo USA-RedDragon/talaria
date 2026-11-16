@@ -110,7 +110,7 @@ window.HubModels = (() => {
     const n = info && info.effective_context_length;
     if (!n || n >= minWindow) return null;
     return { title: info.model + " has a window of " + n.toLocaleString("en-US") + " tokens.",
-      text: "Hermes needs at least 64,000, so chats with it will fail or lose context early." };
+      text: "Hermes requires at least 64,000, so chats with it will fail or lose context early." };
   }
 
   // findProviders filters the API-key providers by a search.
@@ -397,7 +397,7 @@ window.HubModels = (() => {
       key.input.id = "cm-key";
       f.keyInput = key.input;
       body.append(field("Name", name, "Your models show under this name in the chat's model menu."), field("Address", addr, addrNote),
-        field("API key (only if the server asks for one)", key));
+        field("API key (only if the server requires one)", key));
       const test = btn("", busy ? "Testing..." : "Test address", () => testServer());
       test.disabled = busy || !f.address.trim();
       addr.addEventListener("input", () => { test.disabled = busy || !addr.value.trim(); });
@@ -408,7 +408,7 @@ window.HubModels = (() => {
       if (v) body.append(serverSay(v));
       if (v && v.models && v.models.length) {
         body.append(el("div", "label", pinned() ? "Its model" : "Start new chats with"), radios("cm-model", v.models, st.model, (m) => { st.model = m; }),
-          el("p", "hint", "Hermes needs a model with a window of at least 64,000 tokens. It asks the server for each model's window when you save."));
+          el("p", "hint", "Hermes requires a model with a window of at least 64,000 tokens. The server is queried for each model's window when you save."));
       } else if (v && v.noModels) {
         const typed = input("text", st.model, "The name the server uses, such as llama3.1:8b");
         typed.id = "cm-typed";
@@ -451,7 +451,7 @@ window.HubModels = (() => {
         sel.append(o);
       }
       sel.onchange = () => { f.mode = sel.value; };
-      const cl = input("number", f.ctxLen, "Ask the server");
+      const cl = input("number", f.ctxLen, "Look up from server");
       cl.id = "cm-ctx";
       cl.min = "1";
       cl.oninput = () => { f.ctxLen = cl.value; };
@@ -682,7 +682,7 @@ window.HubModels = (() => {
         return [head(title, true), body];
       }
       if (!st.code) {
-        body.append(el("p", "wait", "Asking for a code..."));
+        body.append(el("p", "wait", "Requesting a code..."));
         return [head(title, true), body];
       }
       body.append(el("p", "", "Open the sign-in page, then enter this code:"));
@@ -703,7 +703,7 @@ window.HubModels = (() => {
       wait.setAttribute("role", "status");
       const left = minutesLeft(st.until, Date.now());
       wait.append(el("span", "spin"), "Waiting for you to approve it. The code works for " + left + " more minute" + (left === 1 ? "" : "s") + ".");
-      body.append(wait, el("p", "hint", "You sign in on the provider's own page. Talaria and Hermes never see your password."));
+      body.append(wait, el("p", "hint", "You sign in on the provider's own page. Your password is never sent to Talaria or Hermes."));
       return [head(title, true), body, foot(btn("", "Cancel sign-in", () => { cancelSignIn(); go({ type: "back" }); }))];
     }
 
@@ -786,7 +786,7 @@ window.HubModels = (() => {
     function pickView() {
       const body = el("div", "pbody");
       if (st.verdict) body.append(say(st.verdict.tone, st.verdict.title, [st.verdict.text ? "~" + st.verdict.text : ""]));
-      if (!st.pick) body.append(el("p", "wait", "Asking Hermes for its models..."));
+      if (!st.pick) body.append(el("p", "wait", "Loading models from Hermes..."));
       else if (st.pick.error) body.append(say("bad", st.pick.error, []));
       else if (!st.pick.models.length) body.append(el("p", "hint", "Hermes lists no models for this provider yet. Pick one in a chat's model menu once it shows there."));
       else {
@@ -1143,7 +1143,7 @@ window.HubModelSettings = (ctx) => {
     const e = r.e;
     const name = input("text", e.name);
     const addr = input("text", e.base_url);
-    const k = secret(e.has_api_key ? "Saved. Type a new key to replace it." : "Leave empty if the server needs none");
+    const k = secret(e.has_api_key ? "Saved. Type a new key to replace it." : "Leave empty if the server requires none");
     box.append(field("Name", name), field("Address", addr), field("API key", k, e.has_api_key ? "Leave empty to keep the saved key." : ""));
     const acts = el("div", "acts");
     acts.append(btn("primary", busy ? "Saving..." : "Test and save", async () => {
@@ -1230,7 +1230,7 @@ window.HubModelSettings = (ctx) => {
   function removeAsk(r) {
     const box = el("div", "set-alert");
     box.setAttribute("role", "alertdialog");
-    const what = { endpoint: "Hermes forgets this server and its key.", key: "Hermes deletes the key.", account: "Hermes forgets the sign-in." }[r.kind];
+    const what = { endpoint: "Hermes removes this server and its key.", key: "Hermes deletes the key.", account: "Hermes removes the sign-in." }[r.kind];
     const t = el("span", "");
     t.append(el("b", "", "Remove " + r.name + "?"), " " + what + " Chats that use its models stop until you pick another model.");
     box.append(t);

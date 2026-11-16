@@ -14,15 +14,15 @@ window.HubMemory = (ctx) => {
     { id: "you", target: "user", label: "About you" },
   ];
   const copy = {
-    notes: "Talaria reads these notes at the start of every chat. Keep them short. Changes apply to new chats.",
+    notes: "These notes are loaded at the start of every chat. Keep them short. Changes apply to new chats.",
     skills: "Skills that belong to this project. Talaria loads them only in chats bound to this project and in their subagents. They win over a global skill of the same name here.",
-    project: "The index is what Talaria reads at the start of every chat in this project: one short line per note. Detail lives in topics; the agent reads a topic when a task calls for it. Changes apply to new chats.",
+    project: "The index is what is loaded at the start of every chat in this project: one short line per note. Detail lives in topics; the agent reads a topic when a task calls for it. Changes apply to new chats.",
     topics: "Topics hold the detail behind the index: any number, any length. Every chat gets the list of topic names; the agent reads a topic when a task calls for it. A topic no index line points to is still listed.",
-    paths: "Path notes are rules for part of the project. Talaria reads one the first time a chat opens or edits a file that matches its patterns, so they cost nothing in chats that never go there.",
-    you: "What Talaria has stored about you as a person. It reads this in every chat, on every device and in Telegram. Changes apply to new chats.",
-    help: "Talaria keeps two short files that it reads at the start of every chat: its own notes and what it has stored about you. Here you can read, fix and delete both. Chats that are already open keep what they started with; changes apply to new chats.",
-    full: "Almost full. Shorten or remove a line before Talaria needs room for a new one.",
-    off: "This file is turned off in the agent's memory settings, so Talaria does not read it and it cannot be changed here.",
+    paths: "Path notes are rules for part of the project. One is loaded the first time a chat opens or edits a file that matches its patterns, so they cost nothing in chats that never go there.",
+    you: "What is stored about you as a person. It is loaded in every chat, on every device and in Telegram. Changes apply to new chats.",
+    help: "Two short files are loaded at the start of every chat: the agent's own notes and what it has stored about you. Here you can read, fix and delete both. Chats that are already open keep what they started with; changes apply to new chats.",
+    full: "Almost full. Shorten or remove a line to make room for a new one.",
+    off: "This file is turned off in the agent's memory settings, so it is not loaded and cannot be changed here.",
   };
 
   let backends = [];
@@ -892,7 +892,7 @@ window.HubMemory = (ctx) => {
     const add = (k, v) => dl.append(el("dt", "", k), el("dd", "", v));
     const inProject = !!notes.project;
     add("File", store.file);
-    if (!inProject) add("Ask before Talaria saves", (notes.approval ? "On" : "Off"));
+    if (!inProject) add("Approve notes before saving", (notes.approval ? "On" : "Off"));
     add("Limit", fmt(store.limit) + " characters");
     d.append(dl);
     const acts = el("div", "mem-acts");
@@ -902,7 +902,7 @@ window.HubMemory = (ctx) => {
         () => change("POST", "/approval", { enabled: !notes.approval })));
     }
     d.append(acts);
-    if (!inProject && notes.approval) d.append(el("p", "mem-hint", "Talaria asks before it saves a note. Its proposed notes wait here, and the sidebar shows a count."));
+    if (!inProject && notes.approval) d.append(el("p", "mem-hint", "Approval needed before a note is saved; proposed notes wait here, and the sidebar shows a count."));
     return d;
   }
 

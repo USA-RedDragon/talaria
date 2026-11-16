@@ -16,13 +16,13 @@
   // connectValue is the model menu line that opens Connect a model.
   const connectValue = "\u0000connect";
   let current = null;
-  const words = { approval: "Talaria asks to run this", allow: "Allow", deny: "Deny",
+  const words = { approval: "Approval needed: run this command", allow: "Allow", deny: "Deny",
     args: "Input", result: "Output", running: "Running", done: "Done", failed: "Failed",
-    working: "Working", queued: "Queued: Talaria reads this when the current turn ends", waiting: "Waiting to run", newchat: "New chat", loading: "Loading\u2026",
+    working: "Working", queued: "Queued: sent when the current turn ends", waiting: "Waiting to run", newchat: "New chat", loading: "Loading\u2026",
     lost: "The agent restarted before it finished replying to this message. Messages sent after it wait until you dismiss it.",
     held: "The agent is restarting. Your message will send when it is back.", notsent: "Not sent.", again: "Send again",
     steered: "Sent to the running turn", now: "Stop and send now",
-    unread: "The turn stopped before Talaria read this message.",
+    unread: "The turn stopped before this message was read.",
     tobottom: "Jump to latest", newone: "1 new message", newmany: "%d new messages" };
   const t = (k) => words[k];
 
@@ -1545,7 +1545,7 @@
       const acts = el("div", "acts");
       const b = el("button", "", "Run in background");
       b.type = "button";
-      b.title = "Keep the command running in the background and let Talaria go on";
+      b.title = "Keep the command running in the background and let the chat go on";
       const back = () => {
         b.disabled = false;
         b.textContent = "Run in background";
@@ -4141,7 +4141,7 @@
       } else {
         for (const a of files) if (a.url) URL.revokeObjectURL(a.url);
       }
-      banner("Could not send: " + e.message + (e.mayBeSent ? ". It may have reached Talaria: look at the chat before you send it again." : ""), true);
+      banner("Could not send: " + e.message + (e.mayBeSent ? ". It may have been delivered: look at the chat before you send it again." : ""), true);
     } finally {
       endLine(null);
       if (files.length) sending--;

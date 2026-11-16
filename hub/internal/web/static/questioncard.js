@@ -105,8 +105,8 @@ window.HubQuestion = (() => {
       case "answered": return when ? "Answered at " + when + where(rec.via) : "Answered" + where(rec.via);
       case "skipped": return when ? "Skipped at " + when + where(rec.via) : "Skipped" + where(rec.via);
       case "timed_out": return "No answer: timed out" + (rec.timeoutS ? " after " + minutes(rec.timeoutS) : "");
-      case "cancelled": return "Withdrawn: the agent stopped waiting for an answer";
-      case "lost": return "Withdrawn: the agent no longer waits for this question. It may have been answered elsewhere, or the agent restarted.";
+      case "cancelled": return "Withdrawn: no answer is needed any more";
+      case "lost": return "Withdrawn: this question is no longer open. It may have been answered elsewhere, or the agent restarted.";
       case "undelivered": return "No answer: the question could not be shown";
       default: return rec.note || "";
     }

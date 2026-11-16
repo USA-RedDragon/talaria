@@ -28,7 +28,7 @@ window.HubComposer = (ctx) => {
   const labels = {
     send: ["Send (Enter)", "Send message", "send"],
     stop: ["Stop the turn (Esc)", "Stop the turn", "stop"],
-    steer: ["Send now; Talaria reads it after its current step (Enter)", "Send message to the running turn", "send"],
+    steer: ["Send now; read after the current step (Enter)", "Send message to the running turn", "send"],
   };
 
   function update() {

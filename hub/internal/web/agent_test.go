@@ -49,7 +49,7 @@ func (f *fakeTelegram) TelegramStatus(context.Context) hub.TelegramStatus {
 
 func (f *fakeTelegram) TestTelegram(_ context.Context, token string) (string, error) {
 	if !strings.Contains(token, ":") {
-		return "", &hub.TelegramError{Status: http.StatusBadRequest, Message: "Telegram says this token is not valid."}
+		return "", &hub.TelegramError{Status: http.StatusBadRequest, Message: "Telegram rejected this token."}
 	}
 	return testBot, nil
 }

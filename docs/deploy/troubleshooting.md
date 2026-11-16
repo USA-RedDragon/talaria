@@ -78,13 +78,13 @@ The hub watches every request it sends to the agent. When the agent has not answ
 
 ## An approval or question is stuck
 
-The agent asks before it runs something risky (an approval) or when it needs you to choose (a question). It waits until someone answers.
+An approval is needed before a risky command runs, and a question needs your answer when the agent needs you to choose. It waits until someone answers.
 
 - You do not see the card: open the chat it belongs to. Turn on [notifications](notifications.md) to be told; a prompt that still waits after 5 minutes gets one reminder.
 - You pressed a button and the card keeps waiting: the card settles only when the agent confirms it took the answer. Wait a few seconds. If it stays, press Stop and send the request again. The hub logs `Failed to record an approval's answer` when it could not save the answer.
-- The card says "Closed: the agent no longer waits for this. It was answered elsewhere, or the agent restarted and dropped it. Nothing was sent from this page.": another page or Telegram answered first, or the agent restarted, which forgets open prompts. Ask the agent again.
+- The card says "Closed: this is no longer open. It was answered elsewhere, or the agent restarted and dropped it. Nothing was sent from this page.": another page or Telegram answered first, or the agent restarted, which clears open prompts. Ask the agent again.
 - Telegram shows the buttons Once, This chat, Always and Deny.
-- You cannot change how often it asks: the install may lock the approval mode (`approvals.mode` shows "Set in the deployment config", read-only, in Settings, Agent). Change it in the deployment config.
+- You cannot change how often approval is required: the install may lock the approval mode (`approvals.mode` shows "Set in the deployment config", read-only, in Settings, Agent). Change it in the deployment config.
 - A scheduled job or another unattended run cannot ask. A step that needs your answer is blocked there, and the job reports it.
 - Firefox steps ask on the page of the chat too: see [Let the agent use Firefox](../guides/browser-extension.md#when-it-asks-you).
 

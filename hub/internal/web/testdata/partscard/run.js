@@ -62,7 +62,7 @@ async function check(c, card, w, touch, dark) {
   assert.ok(r.buttons.every((b) => b.l >= 0 && b.r <= r.vw), tag + ": a button is outside the screen " + JSON.stringify(r.buttons));
   assert.ok(r.scroll <= r.client, tag + ": the page scrolls sideways");
   assert.ok(r.box.l >= 0 && r.box.r <= r.vw, tag + ": the card is outside the screen");
-  assert.strictEqual(r.title, "Talaria asks to run this");
+  assert.strictEqual(r.title, "Approval needed: run this command");
   if (card.old) {
     assert.ok(r.asked && r.text.includes("asks: Smart approval rule"), tag + ": an old-format card keeps its sentence " + r.text);
     assert.strictEqual(r.dl, null, tag + ": no parts list");

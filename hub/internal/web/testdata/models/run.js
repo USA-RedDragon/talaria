@@ -76,7 +76,7 @@ assert.strictEqual(M.minutesLeft(0, 5), 0);
 assert.strictEqual(M.windowWarning({ model: "a", effective_context_length: 131072 }), null);
 assert.strictEqual(M.windowWarning({ model: "a", effective_context_length: 0 }), null);
 eq(M.windowWarning({ model: "qwen3:8b", effective_context_length: 40960 }),
-  { title: "qwen3:8b has a window of 40,960 tokens.", text: "Hermes needs at least 64,000, so chats with it will fail or lose context early." });
+  { title: "qwen3:8b has a window of 40,960 tokens.", text: "Hermes requires at least 64,000, so chats with it will fail or lose context early." });
 
 // Provider search.
 const keys = [{ provider: "openrouter", name: "OpenRouter" }, { provider: "deepseek", name: "DeepSeek" }, { provider: "gemini", name: "Google AI Studio" }];

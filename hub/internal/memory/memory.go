@@ -169,7 +169,7 @@ func (s *Service) ResolvePending(ctx context.Context, user, backendID, pendingID
 	return n.tagProjects(ctx, out, err)
 }
 
-// SetApproval turns on or off whether Hermes asks before it saves to
+// SetApproval turns on or off whether Hermes requires approval before it saves to
 // memory.
 func (s *Service) SetApproval(ctx context.Context, user, backendID string, on bool) (hub.Notes, error) {
 	n, err := s.notes(ctx, user, backendID)

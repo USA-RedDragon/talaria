@@ -457,11 +457,11 @@ type PushPayload struct {
 func Titles(kind string) string {
 	switch kind {
 	case hub.NoticeApproval:
-		return "Talaria needs your approval"
+		return "Approval needed"
 	case hub.NoticeQuestion:
-		return "Talaria has a question"
+		return "A question needs your answer"
 	case hub.NoticeFinished:
-		return "Talaria finished a long task"
+		return "A long task finished"
 	case hub.NoticeJob:
 		return "A scheduled job finished"
 	case hub.NoticeFailure:

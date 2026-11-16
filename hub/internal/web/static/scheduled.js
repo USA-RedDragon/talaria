@@ -10,7 +10,7 @@ window.HubScheduled = (ctx) => {
   const count = document.getElementById("schedcount");
   const week = 7 * 24 * 3600 * 1000;
   const results = [["hub", "This hub only"], ["general", "Telegram, General topic"], ["topic", "Telegram, its own topic"]];
-  const bad = "Talaria can't read that schedule. Try \"every monday 9am\" or cron like \"0 9 * * 1\".";
+  const bad = "Could not read that schedule. Try \"every monday 9am\" or cron like \"0 9 * * 1\".";
 
   let data = { zone: "", jobs: [], errors: {} };
   let backends = [];
@@ -424,7 +424,7 @@ window.HubScheduled = (ctx) => {
     const where = el("select");
     where.id = "f-where-" + id;
     where.disabled = true;
-    where.title = "A job gets a computer's Firefox from a chat: ask Talaria to use your browser for the job.";
+    where.title = "A job gets a computer's Firefox from a chat: ask the agent in a chat to use your browser for the job.";
     where.append(el("option", "", j ? j.runs_in : opt.runs_in || "Sandbox"));
     const model = el("select");
     model.id = "f-model-" + id;
@@ -494,7 +494,7 @@ window.HubScheduled = (ctx) => {
       return;
     }
     const n = p.next || [];
-    if (!n.length) prev.textContent = "Talaria reads this as " + p.display + (p.expr ? " (" + p.expr + ")" : "") + ". The next time shows after you save.";
+    if (!n.length) prev.textContent = "Read as " + p.display + (p.expr ? " (" + p.expr + ")" : "") + ". The next time shows after you save.";
     else prev.textContent = "Next: " + n[0] + (n[1] ? ", then " + n[1] : "") + (p.expr && p.expr !== p.display ? "  (" + p.expr + ")" : "");
   }
 

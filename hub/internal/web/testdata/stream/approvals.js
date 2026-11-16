@@ -26,7 +26,7 @@ class Node {
 }
 const el = (tag, cls, text) => { const n = new Node(tag, cls); if (text !== undefined && text !== null) n.textContent = text; return n; };
 
-const words = (k) => ({ approval: "Talaria asks to run this", allow: "Allow", deny: "Deny" })[k];
+const words = (k) => ({ approval: "Approval needed: run this command", allow: "Allow", deny: "Deny" })[k];
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -262,8 +262,8 @@ async function questionCards() {
     const { tracker, shown } = harness();
     for (const id of ["a", "b", "c"]) tracker.offer(prompt(id, "cleanup " + id));
     tracker.lost(["a", "c"]);
-    assert.ok(shown[0].text().includes("the agent no longer waits"));
-    assert.ok(shown[2].text().includes("the agent no longer waits"));
+    assert.ok(shown[0].text().includes("this is no longer open"));
+    assert.ok(shown[2].text().includes("this is no longer open"));
     assert.strictEqual(shown[0].buttons().length, 0);
     assert.strictEqual(shown[1].buttons().length, 4);
     tracker.cancelled(["b"]);
@@ -342,7 +342,7 @@ async function questionCards() {
     assert.deepStrictEqual(dl.children[3].children.map((c) => c.textContent), ["The kill names no process.", "A kill like this one was blocked earlier."]);
     assert.ok(!card.text().includes("Asked by a subagent") && !card.text().includes("old text") && !card.text().includes("asks:"));
     assert.deepStrictEqual(card.children.map((c) => c.tag), ["b", "div", "dl", "pre", "div"]);
-    assert.strictEqual(card.children[0].textContent, "Talaria asks to run this");
+    assert.strictEqual(card.children[0].textContent, "Approval needed: run this command");
     assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow", "Deny"]);
     // The chat's own card has no who line; a source row only with the source choice.
     const own = harness();

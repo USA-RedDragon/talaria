@@ -1086,7 +1086,7 @@ func (s settledPayload) end(p hub.PromptInfo) (questionEnd, bool) {
 	case "timed_out":
 		return questionEnd{note: "No answer: timed out" + afterTimeout(p)}, true
 	}
-	return questionEnd{note: "Withdrawn: the agent stopped waiting for an answer"}, true
+	return questionEnd{note: "Withdrawn: no answer is needed any more"}, true
 }
 
 // afterTimeout is " after 30m" for a prompt that says how long it waited.

@@ -556,7 +556,7 @@ window.HubToolCard = (() => {
     return out;
   }
 
-  // Hermes asks before it saves some notes. A result that says so, or a
+  // Hermes requires approval before it saves some notes. A result that says so, or a
   // call the page marked pending, is waiting for the user.
   const pendingWords = new Set(["pending", "pending_approval", "awaiting_approval", "approval_required", "needs_approval", "waiting_for_approval"]);
   function waiting(c) {

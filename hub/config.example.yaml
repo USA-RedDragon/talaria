@@ -79,7 +79,7 @@ usage:
   # Base URL of a Prometheus query API, such as http://prometheus:9090, that scrapes the metrics of ollama-priority-proxy in front of the local GPU's Ollama. The Usage page then shows how long the GPU was busy. Empty: it does not
   # prometheus_url: ""
 auth:
-  # How people log in: local (accounts in the hub's database, with a setup page that makes the first one), proxy (a reverse proxy in front of the hub tells it who the user is) or oidc (an OpenID Connect provider). Default: oidc when oidc.issuer_url is set, else local
+  # How people log in: local (accounts in the hub's database, with a setup page that makes the first one), proxy (a reverse proxy in front of the hub passes on who the user is) or oidc (an OpenID Connect provider). Default: oidc when oidc.issuer_url is set, else local
   # mode: ""
   # Hub user names that are admins besides accounts marked admin in Settings > Users: admins manage people and connect models (Settings > Models; models.admins can limit that per backend). The first local account is an admin
   # admins: []

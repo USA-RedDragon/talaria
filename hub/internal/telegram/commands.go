@@ -309,7 +309,7 @@ func (b *Bot) background(ctx context.Context, to dest, user, arg string) {
 		return
 	}
 	if strings.TrimSpace(arg) == "" {
-		b.sendText(ctx, to, "Send /bg and a prompt, such as /bg check the build. Talaria answers it in the background, and the answer comes here.")
+		b.sendText(ctx, to, "Send /bg and a prompt, such as /bg check the build. It runs in the background, and the answer comes here.")
 		return
 	}
 	a, ok := b.attached(ctx, to, user)

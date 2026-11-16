@@ -259,7 +259,7 @@ func (s *Server) handleEditUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if n == 0 {
-			errorJSON(w, http.StatusBadRequest, "The hub needs at least one admin")
+			errorJSON(w, http.StatusBadRequest, "At least one admin is required")
 			return
 		}
 	}
@@ -330,7 +330,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if n == 0 {
-			errorJSON(w, http.StatusBadRequest, "The hub needs at least one admin")
+			errorJSON(w, http.StatusBadRequest, "At least one admin is required")
 			return
 		}
 	}

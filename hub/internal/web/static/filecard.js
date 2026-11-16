@@ -222,7 +222,7 @@ window.HubFileCard = (() => {
         const reason = d.reason || "looks like a secret";
         kids.push(header("bad", [badge("bad", "Not sent"), reason], []));
         const small = el("small", "", "It was refused by " + own(d) + " credential rules (same list as file tools). Nothing left " + (d.machine_kind === "device" || !d.machine_kind ? "the computer" : where(d)) +
-          ". If you want it anyway, tell the agent in the chat, for example \"send " + d.name + " anyway\", and the card will say you allowed it.");
+          ". If you want it anyway, tell the agent in the chat, for example \"send " + d.name + " anyway\", and the card then shows that you allowed it.");
         const row = el("div", "row");
         const b = el("button", "", "Draft \"send it anyway\"");
         b.type = "button";

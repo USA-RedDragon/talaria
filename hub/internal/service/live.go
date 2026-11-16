@@ -482,7 +482,7 @@ func (ls *live) turnNotices(ev gateway.Event) {
 		}
 		ls.b.svc.notice(hub.Notice{Kind: hub.NoticeFailure, BackendID: ls.b.cfg.ID, SessionID: ls.id, Title: ls.title,
 			Key:    "blocked:" + ls.id + ":" + ls.epoch + ":" + strconv.FormatInt(ev.Seq, 10),
-			Detail: "An unattended run could not use " + p.Name + ": it needs your approval, given once with Always."})
+			Detail: "An unattended run could not use " + p.Name + ": approval is required, given once with Always."})
 	}
 }
 

@@ -63,7 +63,7 @@ window.HubSlash = (() => {
     "--provider": "Pick the provider", "--reasoning": "Set the reasoning effort", add: "Add one", redact: "Hide secrets in the export", wait: "Wait for a process", unwait: "Stop waiting", every: "Repeat on an interval", accept: "Accept it", dismiss: "Dismiss it",
     catalog: "Browse the catalog", pending: "Show what waits", approve: "Approve it", reject: "Reject it", approval: "The approval gate",
     queue: "Queue it for the next turn", steer: "Nudge the turn that runs", interrupt: "Stop the turn, then answer", full: "Show all of it",
-    level: "A reasoning level", normal: "Normal speed", fast: "Fast mode", auto: "Let Hermes decide", manual: "Ask every time", smart: "Ask when unsure",
+    level: "A reasoning level", normal: "Normal speed", fast: "Fast mode", auto: "Chosen automatically", manual: "Approve every time", smart: "Approve when unsure",
     help: "Show help", tts: "Speak replies", always: "Always, from now on", scale: "Set a size", toggle: "Switch it", clamp: "Limit it",
   };
   const PHD = {

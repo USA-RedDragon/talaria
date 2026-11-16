@@ -53,9 +53,9 @@ window.HubAuth = (() => {
     const last = u.admin && !u.disabled && others === 0;
     const own = "You cannot do this to yourself";
     return {
-      demote: self ? "You cannot take away your own admin rights" : last ? "The hub needs at least one admin" : "",
-      disable: self ? "You cannot disable yourself" : last ? "The hub needs at least one admin" : "",
-      remove: self ? "You cannot delete your own account" : last ? "The hub needs at least one admin" : "",
+      demote: self ? "You cannot take away your own admin rights" : last ? "At least one admin is required" : "",
+      disable: self ? "You cannot disable yourself" : last ? "At least one admin is required" : "",
+      remove: self ? "You cannot delete your own account" : last ? "At least one admin is required" : "",
       own,
     };
   }

@@ -90,7 +90,7 @@ Talaria's agent is built on. The agent needs a model with a context window of at
 
 From Talaria: Connect a model, **On my own computer or network**, address `http://<Ollama's address>:11434/v1`
 (`http://ollama:11434/v1` for the compose `ollama` profile), Test address, pick the model, Save and use. If the
-model's window is under 64,000 tokens, Talaria says so and lets you pick another.
+model's window is under 64,000 tokens, a warning shows and you can pick another.
 
 With `hermes model`, Ollama is the agent's **Custom endpoint**:
 

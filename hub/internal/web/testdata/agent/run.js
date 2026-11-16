@@ -66,8 +66,8 @@ eq(A.zones("", []), ["UTC"]);
 eq(A.splitSkills([{ name: "b", enabled: false }, { name: "a", enabled: false }, { name: "z", enabled: true, description: "pdf files" }]).map((s) => s.name), ["z", "a", "b"]);
 eq(A.splitSkills([{ name: "b", enabled: false }, { name: "z", enabled: true, description: "pdf files" }], "PDF").map((s) => s.name), ["z"]);
 
-assert.strictEqual(A.modeLabel("smart", true), "Ask when risky");
-assert.strictEqual(A.modeLabel("manual"), "Ask every time");
+assert.strictEqual(A.modeLabel("smart", true), "Approve when risky");
+assert.strictEqual(A.modeLabel("manual"), "Approve every time");
 console.log("ok");
 
 // Ids in a line to look at show as words.

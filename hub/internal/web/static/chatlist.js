@@ -28,7 +28,7 @@ window.HubChatList = (ctx) => {
     const out = [];
     if (needsText[s.needs]) {
       const n = el("span", "needs", needsText[s.needs]);
-      n.title = s.needs === "approval" ? "Talaria waits for your approval" : "Talaria asked you a question";
+      n.title = s.needs === "approval" ? "Waiting for your approval" : "A question needs your answer";
       out.push(n);
     }
     if (s.pinned) {

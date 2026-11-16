@@ -33,7 +33,7 @@ The setup page that makes the first account, the first chat with the demo model,
 
 ![A first chat: the demo model answers "This is the Talaria demo model", and the line under the title shows the model and the context size](images/chat-reply.png)
 
-![An approval: Talaria asks to run a command, with Allow, Deny, Allow in this chat and Always allow](images/approval.png)
+![An approval: a command to run, with Allow, Deny, Allow in this chat and Always allow](images/approval.png)
 
 ## What you need
 

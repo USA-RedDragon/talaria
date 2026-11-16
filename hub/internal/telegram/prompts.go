@@ -267,7 +267,7 @@ const (
 func settledOutcome(p hub.PromptInfo, shown, now time.Time, cancelled bool,
 	answer func() (hub.ApprovalOutcome, bool)) (head, note string, final bool) {
 	if cancelled {
-		return "Cancelled", "Talaria stopped waiting for an answer.", true
+		return "Cancelled", "This is no longer open.", true
 	}
 	if p.Kind != hub.PromptClarify && answer != nil {
 		if o, ok := answer(); ok {
@@ -390,7 +390,7 @@ func elsewhereEnd(p hub.PromptInfo, shown, now time.Time, cancelled bool) questi
 	timeout := time.Duration(p.Timeout * float64(time.Second))
 	switch {
 	case cancelled:
-		return questionEnd{note: "Withdrawn: the agent stopped waiting for an answer"}
+		return questionEnd{note: "Withdrawn: no answer is needed any more"}
 	case timeout > 0 && now.Sub(shown) >= timeout-slack(timeout):
 		return questionEnd{note: "No answer: timed out after " + duration(timeout)}
 	}
@@ -1070,7 +1070,7 @@ func (b *Bot) replyAnswer(ctx context.Context, to dest, user string, m *Message)
 		b.mu.Lock()
 		b.dropRepliesLocked(rt.prefix, rt.key)
 		b.mu.Unlock()
-		b.sendText(ctx, to, "That question no longer waits for an answer, so your message goes to the chat.")
+		b.sendText(ctx, to, "That question is no longer open, so your message goes to the chat.")
 		return false
 	case refusal != "":
 		b.sendText(ctx, to, refusal)
@@ -1089,7 +1089,7 @@ func (b *Bot) replyAnswer(ctx context.Context, to dest, user string, m *Message)
 	err := b.sendAnswer(ctx, user, t, a)
 	if errors.Is(err, hub.ErrUnknownApproval) || errors.Is(err, hub.ErrUnknownSession) {
 		b.dropPrompt(t)
-		b.sendText(ctx, to, "That question no longer waits for an answer, so your message goes to the chat.")
+		b.sendText(ctx, to, "That question is no longer open, so your message goes to the chat.")
 		return false
 	}
 	if err != nil {

@@ -62,7 +62,7 @@ Open the app (on iOS, the Home Screen icon, not Safari) and:
 
 Then:
 
-- A notice shows only the kind of event, a fixed title such as "Talaria needs your approval", and the name of the agent it ran on. It never shows the chat's title, a command or a question. Tap it to open that chat.
+- A notice shows only the kind of event, a fixed title such as "Approval needed", and the name of the agent it ran on. It never shows the chat's title, a command or a question. Tap it to open that chat.
 - You get no notice for a chat that is open on a visible screen. An approval or question that waits for 5 minutes (the default of `notify.remind_after`) gets one reminder.
 - **Quiet hours** set a time range in which nothing is sent. They use the time zone of the browser that saved them.
 - The list under the button shows every device you turned on, with **Remove**. Tap **Turn off on this device** here to stop this phone. You can have up to 10 devices.

@@ -7,8 +7,8 @@
 // helpers (doctorSummary, logTone, modeLabel, bannerText, updateSteps,
 // liveLine, zones, splitSkills) run against internal/web/testdata/agent/run.js.
 window.HubAgent = (() => {
-  const modes = [["manual", "Ask every time"], ["smart", "Ask only when a command looks risky"], ["off", "Never ask"]];
-  const shortModes = { manual: "Ask every time", smart: "Ask when risky", off: "Never ask" };
+  const modes = [["manual", "Approve every time"], ["smart", "Approve only when a command looks risky"], ["off", "Never require approval"]];
+  const shortModes = { manual: "Approve every time", smart: "Approve when risky", off: "Never require approval" };
   // The summary point is a slider: 30% to 90% in steps of 5%.
   const sumMin = 30, sumMax = 90, sumStep = 5, sumDefault = 50;
   // Models with a window under this many tokens summarize at 75% at the earliest.
@@ -927,7 +927,7 @@ window.HubAgent = (() => {
       const out = el("div", "");
       const acts = el("div", "acts");
       const test = btn("", "Test", async () => {
-        out.replaceChildren(waitLine("Asking Telegram"));
+        out.replaceChildren(waitLine("Contacting Telegram"));
         try { const r = await api("POST", "/api/admin/telegram/test", { token: i.value }); out.replaceChildren(say("good", "Works: this is " + r.bot + ".", [])); } catch (e) { out.replaceChildren(say("bad", e.message, [])); }
       });
       const save = btn("primary", "Save and start", null);
@@ -1035,21 +1035,21 @@ window.HubAgent = (() => {
         }, locked("approvals.mode")));
         if (locked("approvals.mode")) safe.append(lockLine());
       } else {
-        safe.append(el("p", "qnote", (modeLabel(sum.approvals_mode, false) || "The agent asks before risky commands") + ". An admin sets this for everyone."));
+        safe.append(el("p", "qnote", (modeLabel(sum.approvals_mode, false) || "Risky commands need approval") + ". An admin sets this for everyone."));
       }
-      const ys = switchRow("Never ask in this chat", "Only this chat, until it ends." + (sum.admin ? " Others keep the setting above." : ""), yolo.enabled);
+      const ys = switchRow("No approvals in this chat", "Only this chat, until it ends." + (sum.admin ? " Others keep the setting above." : ""), yolo.enabled);
       ys.t.onchange = async () => {
         ys.t.disabled = true;
         flash(safe);
         try {
           const r = await api("PUT", "/api/sessions/" + enc(v.backend) + "/" + enc(v.session) + "/yolo", { enabled: ys.t.checked });
           ys.t.checked = r.enabled;
-          if (r.enabled) flash(safe, say("warn", "This chat runs commands without asking. Other agents cannot send it messages while this is on.", []));
+          if (r.enabled) flash(safe, say("warn", "This chat runs commands without approval. Other agents cannot send it messages while this is on.", []));
         } catch (e) { ys.t.checked = !ys.t.checked; flash(safe, say("bad", "Not changed.", [e.message])); }
         ys.t.disabled = false;
       };
       safe.append(ys.row);
-      if (yolo.enabled) safe.append(say("warn", "This chat runs commands without asking. Other agents cannot send it messages while this is on.", []));
+      if (yolo.enabled) safe.append(say("warn", "This chat runs commands without approval. Other agents cannot send it messages while this is on.", []));
 
       if (!sum.admin) {
         const s = sec("", "On for every chat");

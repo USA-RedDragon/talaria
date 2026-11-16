@@ -1,6 +1,6 @@
 # Approvals and trust
 
-Talaria asks you before the agent does something risky, and it never lets a message from a file, a web page or another agent answer for you. This page covers how a question reaches you, what you can answer, how smart approval picks when to ask, and the settings that tell the agent whom to trust.
+Risky actions need your approval before the agent runs them, and a message from a file, a web page or another agent never answers for you. This page covers how a question reaches you, what you can answer, how smart approval picks when approval is needed, and the settings for which sources are trusted.
 
 The chat, the notices and Telegram are described in the [hub guide](../../hub/README.md). The patches behind smart approval are in [Talaria Hermes patches](../../hermes/README.md).
 
@@ -33,15 +33,15 @@ A background subagent that needs an approval, or has a question, asks in the cha
 
 Hermes sets which choices a prompt offers; the page and Telegram show exactly those.
 
-## When Talaria asks
+## When approval is needed
 
 Under Settings, Agent, "Before risky commands" has three settings, for everyone on the backend (admins change it):
 
-- **Ask every time** (`approvals.mode: manual`): every command that Hermes treats as risky asks.
-- **Ask only when a command looks risky** (`smart`): smart approval chooses, see below.
-- **Never ask** (`off`): nothing asks, for every chat of the profile.
+- **Approve every time** (`approvals.mode: manual`): every command that Hermes treats as risky needs approval.
+- **Approve only when a command looks risky** (`smart`): smart approval chooses, see below.
+- **Never require approval** (`off`): nothing needs approval, for every chat of the profile.
 
-Anyone can turn asking off for their own chat only ("Never ask in this chat", what `/yolo` does). The hub does not deliver an agent message to a chat in that mode, because what the message leads to would run with no approval you see. The keys that the install owns (`agent.locked_keys`, which the Helm chart fills from `hermes.config`) show read-only as "Set in the deployment config", `approvals.mode` can be one of them.
+Anyone can turn approvals off for their own chat only ("No approvals in this chat", what `/yolo` does). The hub does not deliver an agent message to a chat in that mode, because what the message leads to would run with no approval you see. The keys that the install owns (`agent.locked_keys`, which the Helm chart fills from `hermes.config`) show read-only as "Set in the deployment config", `approvals.mode` can be one of them.
 
 ## Smart approval with provenance review
 
@@ -120,7 +120,7 @@ There is no default. A `..` path, a look-alike host, and a clone made with `-c`,
 | `approvals.trusted_sources` | `config.yaml` | URL prefixes of repositories you own |
 | `approvals.timeout` | `config.yaml` | How long an approval waits for you |
 | `agent.clarify_timeout` | `config.yaml` | How long a question waits for you |
-| "Never ask in this chat" | Settings, in a chat | `/yolo` for one chat |
+| "No approvals in this chat" | Settings, in a chat | `/yolo` for one chat |
 | `notify.remind_after` | hub `config.yaml` | When an unanswered prompt gets its reminder |
 | `agent.locked_keys` | hub `config.yaml` | Keys the install owns, shown read-only |
 

@@ -8,8 +8,8 @@ window.HubNotify = (ctx) => {
   const { api, el } = ctx;
   const root = document.getElementById("notify-prefs");
   const kinds = [
-    ["approvals", "Approvals", "Talaria asks before it runs something"],
-    ["questions", "Questions", "Talaria asks you to choose or answer"],
+    ["approvals", "Approvals", "Approval cards for commands and actions"],
+    ["questions", "Questions", "Questions that need an answer"],
     ["failures", "Failures", "A chat or scheduled job failed or needs you to sign in"],
     ["finished", "Long tasks done", "A reply that took more than 2 minutes is ready"],
     ["jobs", "Scheduled jobs", "A scheduled job finished"],
@@ -193,7 +193,7 @@ window.HubNotify = (ctx) => {
       return;
     }
     const s = state.settings;
-    root.append(el("p", "hint", "Talaria tells you on your phone when it needs you or is done, while the chat is not open on a screen."));
+    root.append(el("p", "hint", "Phone notices arrive when a chat needs you or is done, while the chat is not open on a screen."));
     const shown = state.claude_admin ? [...kinds, ["claude_signin", "Claude sign-ins", "A Claude account that Talaria uses lost its login"]] : kinds;
     for (const [k, text, hint] of shown) root.append(check(k, text, hint, s[k], (v) => save({ [k]: v })));
 

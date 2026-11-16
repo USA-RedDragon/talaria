@@ -111,7 +111,7 @@ window.HubApprovals = (() => {
         for (const line of sentence ? String(sentence).split("\n") : []) if (line.trim()) box.append(el("div", "", line));
         if (split) box.append(el("pre", "", split[2]));
         if (p.command && !rule) box.append(el("pre", "", p.command));
-        if (rule && !p.description) box.append(el("div", "rule", "An approval rule asks before the " + rule[1].replace(/_/g, " ") + " tool runs."));
+        if (rule && !p.description) box.append(el("div", "rule", "An approval rule requires approval before the " + rule[1].replace(/_/g, " ") + " tool runs."));
         if (p.subagent && !parted && !clarify) box.append(el("div", "who", "Asked by a subagent: " + p.subagent));
       }
       if (clarify && p.subagent) {
@@ -264,7 +264,7 @@ window.HubApprovals = (() => {
       for (const id of ids || []) {
         const card = cards.get(id);
         if (card && !done(card) && card.clarify) closeQuestion(card, { outcome: "lost" });
-        else if (card && !done(card)) finish(id, "Closed: the agent no longer waits for this. It was answered elsewhere, or the agent restarted and dropped it. Nothing was sent from this page.");
+        else if (card && !done(card)) finish(id, "Closed: this is no longer open. It was answered elsewhere, or the agent restarted and dropped it. Nothing was sent from this page.");
       }
     }
 
