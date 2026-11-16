@@ -20,7 +20,9 @@
 // c: name, args, result (raw), res (parsed result or null), out (output
 // text), diff (inline diff text), done, failed, error, startedAt and endedAt
 // (Unix ms, 0 when not known), duration (s), answer (what the model said
-// about an image it looked at), pending, partial, mem.
+// about an image it looked at), pending, partial, mem, here (the name of the
+// chat's own computer, "" when not known: a card names another computer
+// only when it is not this one).
 //
 // The model a renderer returns (every field but title optional):
 //   icon       an icon name of icons.js
@@ -30,7 +32,8 @@
 //   status     the result in words; tone ok, bad, warn or still to color it
 //              (else the state's color); more: parts after it, " · " apart
 //   lines      up to three lines under the status: { parts, dim, mono,
-//              closed (shown only while the card is closed) }
+//              closed (shown only while the card is closed), wrap (the
+//              line wraps on a narrow screen instead of ending in "…") }
 //   blocks     the expanded part: { label, text, kind } where kind is pre
 //              (default), command, diff, plain, steps (items), page (meta),
 //              kv (rows of { k, v, mono }), list (items of parts), question
@@ -329,6 +332,13 @@ window.HubToolCard = (() => {
     d.blocks = d.blocks.filter((b) => b && (b.text || (b.items && b.items.length) || (b.rows && b.rows.length) || b.rec));
     for (const b of d.blocks) if (typeof b.text === "string" && b.text.length > outLen) b.text = b.text.slice(0, outLen) + "\n...";
     d.raw = typeof d.raw === "string" && d.raw.trim() ? (d.raw.length > outLen ? d.raw.slice(0, outLen) + "\n..." : d.raw) : "";
+    // A failed card that opens shows its error: the whole text when the
+    // status line had to cut it. One with nothing more does not open.
+    if (d.state === "bad" && !d.blocks.length && !d.raw && c.failed && d.status === failure(c) && d.status.endsWith("…")) {
+      const full = squash(errorText(c.res) || str(c.error) || first(c.out));
+      if (full) d.blocks.push({ label: "Error", text: full, plain: true, copy: false });
+    }
+    d.opens = d.blocks.length > 0 || !!d.raw || !!d.vision;
     return d;
   }
 
@@ -337,7 +347,7 @@ window.HubToolCard = (() => {
     const o = typeof l === "string" || Array.isArray(l) || !isObj(l) || l.parts === undefined ? { parts: l } : l;
     const parts = partsOf(o.parts).map((p) => (typeof p === "string" ? cut(p.replace(/\s*\n\s*/g, " "), lineLen) : p));
     if (!textOf(parts).trim()) return null;
-    return { parts, dim: !!o.dim, mono: !!o.mono, closed: !!o.closed };
+    return { parts, dim: !!o.dim, mono: !!o.mono, closed: !!o.closed, wrap: !!o.wrap };
   }
 
   // plain drops the emoji and variation selectors that Hermes puts in its
@@ -462,6 +472,29 @@ window.HubToolCard = (() => {
     return { res, failed, out: out || "" };
   }
 
+  // diffLines reads a diff for a card: the added and removed lines and the
+  // lines around them, without the file headers (diff, index, ---, +++) or
+  // the first hunk header; a later hunk starts after a "⋯" line. Color codes
+  // and blank lines at the start are dropped.
+  function diffLines(text) {
+    const src = stripAnsi(text).split("\n");
+    while (src.length && !src[0].trim()) src.shift();
+    // A first line that names the files, "a/x.go → b/x.go", is a header too.
+    if (src.length > 1 && /^\S.*(→|->)\s*\S/.test(src[0]) && !/^[-+ @]/.test(src[0])) src.shift();
+    const out = [];
+    let hunk = 0;
+    for (const l of src) {
+      if (/^(diff --git |index [0-9a-f]|--- |\+\+\+ |\\ No newline)/.test(l) || l === "---" || l === "+++") continue;
+      if (l.startsWith("@@")) {
+        if (hunk++ && out.length) out.push({ kind: "hunk", text: "⋯" });
+        continue;
+      }
+      out.push({ kind: l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : "", text: l });
+    }
+    while (out.length && !out[out.length - 1].text.trim() && !out[out.length - 1].kind) out.pop();
+    return out;
+  }
+
   // drawParts puts parts in a node: text, code in monospace, chips, tones.
   function drawParts(el, node, parts) {
     node.replaceChildren(...parts.map((p) => {
@@ -514,7 +547,18 @@ window.HubToolCard = (() => {
     chev.classList.add("notice-chev");
     let pending = false;
     const isOpen = () => head.getAttribute("aria-expanded") === "true";
+    // flat says the card has nothing more to show when open: no chevron,
+    // and a click does not open an empty body.
+    const flat = () => !!view.derived && !view.derived.opens && !extra.children.length && !(view.cur && view.cur.partial);
+    function shape() {
+      const f = flat();
+      head.classList.toggle("flat", f);
+      if (f) head.removeAttribute("aria-expanded");
+      else if (!head.getAttribute("aria-expanded")) head.setAttribute("aria-expanded", "false");
+      if (f) wrap.hidden = true;
+    }
     function toggle() {
+      if (flat()) return;
       const open = !isOpen();
       head.setAttribute("aria-expanded", open ? "true" : "false");
       wrap.hidden = !open;
@@ -533,7 +577,7 @@ window.HubToolCard = (() => {
     const vis = el("div", "vis");
     vis.hidden = true;
     box.append(head, vis, live, wrap);
-    const view = { node: box, body: extra, live, derived: null, cur: null, toggle };
+    const view = { node: box, body: extra, live, derived: null, cur: null, toggle, shape: () => shape() };
     cards.set(box, view);
     // The blocks of a card (and the code highlighting in them) are built when
     // the card first opens, not when it is created.
@@ -635,8 +679,8 @@ window.HubToolCard = (() => {
         pre.textContent = b.text;
         body.append(pre);
       } else if (b.kind === "diff") {
-        body = ctx.diff(b.text);
-        body.classList.add("tool-box");
+        body = el("pre", "diff tool-box");
+        for (const l of diffLines(b.text)) body.append(el("span", l.kind, l.text || " "));
       } else {
         body = el("pre", "tool-box" + (b.kind === "command" ? " command" : ""));
         const html = b.kind === "command" && ctx.highlight ? ctx.highlight(b.text) : null;
@@ -659,7 +703,7 @@ window.HubToolCard = (() => {
     function drawLines(d) {
       const open = isOpen();
       const row = (l) => {
-        const n = el("div", "tool-line" + (l.dim ? " dim" : "") + (l.mono ? " mono" : ""));
+        const n = el("div", "tool-line" + (l.dim ? " dim" : "") + (l.mono ? " mono" : "") + (l.wrap ? " wrap" : ""));
         drawParts(el, n, l.parts);
         return n;
       };
@@ -788,9 +832,9 @@ window.HubToolCard = (() => {
         meta.append(lead);
         const m = more();
         if (m) meta.append(" · ", m);
-        if (T && T.valid(c.startedAt)) {
-          meta.append(" · started ", T.stamp(el("span"), c.startedAt), " · ", T.ticking(el("span"), c.startedAt));
-        }
+        // How long it has run, never the clock time: the message the card
+        // belongs to shows that.
+        if (T && T.valid(c.startedAt)) meta.append(" · ", T.ticking(el("span", "nowrap"), c.startedAt));
         return;
       }
       const tone = d.waiting ? "wait" : d.tone === "warn" ? "wait" : d.tone || (d.idle ? "still" : d.state);
@@ -802,7 +846,9 @@ window.HubToolCard = (() => {
         w.append(m);
         lead = w;
       }
-      if (T) T.finished(meta, c.endedAt, c.duration, lead || undefined);
+      // The status and how long the call ran, never the clock time: the
+      // message the card belongs to shows that.
+      if (T) T.finished(meta, 0, c.duration, lead || undefined);
       else if (lead) meta.append(lead);
     }
 
@@ -836,6 +882,7 @@ window.HubToolCard = (() => {
       }
       drawPage(d);
       drawVision(d);
+      shape();
       return d;
     };
     // answer keeps what the model said about the image the call looked at.
@@ -882,7 +929,8 @@ window.HubToolCard = (() => {
   function mount(ctx, s) {
     const { el } = ctx;
     const call = { name: s.name || "tool", args: s.args === undefined ? null : s.args, res: null, out: "", done: false, failed: false,
-      startedAt: s.startedAt || 0, endedAt: 0, duration: undefined, mem: s.mem || memory(), batch: s.batch || "" };
+      startedAt: s.startedAt || 0, endedAt: 0, duration: undefined, mem: s.mem || memory(), batch: s.batch || "",
+      here: ctx.here ? ctx.here() || "" : "" };
     const view = create(ctx, call);
     const node = view.node;
     node.view = view;
@@ -900,6 +948,7 @@ window.HubToolCard = (() => {
         ctx.activity.open(call.name, call.args, node.result);
       };
       view.body.append(open);
+      view.shape();
     }
     if (ctx.background && call.name === "terminal" && isObj(call.args) && typeof call.args.command === "string" && !call.args.background) {
       const acts = ctx.background(s.key);
@@ -948,6 +997,7 @@ window.HubToolCard = (() => {
     if (node.toolName === "agent_send" && ctx.refusal) ctx.refusal(node, call.out + " " + call.error);
     // A refused offer is a failed call that still shows its file card.
     if (node.toolName === "send_file" && ctx.fileCard) fileOffer(ctx, node, res, call.endedAt);
+    node.view.shape();
     void el;
   }
 
@@ -1017,5 +1067,5 @@ window.HubToolCard = (() => {
 
   const util = { isObj, str, cut, squash, short, first, last, plural, base, dir, lines, stripAnsi, host, verb, failure, errorText, failedRes, exitCode, span, upperFirst, who, keyName, toolLabel, json, rawOf, num, size, plain };
 
-  return { register, util, drawTitle, quiet, derive, memory, create, mount, finish, answers, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
+  return { register, util, diffLines, drawTitle, quiet, derive, memory, create, mount, finish, answers, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
 })();

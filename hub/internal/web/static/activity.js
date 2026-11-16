@@ -826,11 +826,10 @@ window.HubActivity = (ctx) => {
     head.append(el("span", "state " + r.state), el("span", "goal", r.goal || (r.kind === "sub" ? "Subagent" : "Command")),
       el("span", "time", running ? window.HubTimes.counter(end - r.startedAt) : fmt((end - r.startedAt) / 1000)));
     const meta = el("div", "meta");
-    meta.append(el("span", "", stateWord[r.state] || "Done"));
-    const when = el("span");
-    if (running) when.append("started ", window.HubTimes.stamp(el("span"), r.startedAt));
-    else window.HubTimes.stamp(when, r.endedAt);
-    meta.append(when);
+    const word = stateWord[r.state] || "Done";
+    meta.append(el("span", "", word));
+    // No clock time: the length is at the right of the row, and the chat's
+    // messages carry their times.
     if (r.kind === "sub") {
       if (r.model) meta.append(el("span", "", r.model));
       meta.append(el("span", "", r.tools + (r.tools === 1 ? " tool" : " tools")));
@@ -839,7 +838,11 @@ window.HubActivity = (ctx) => {
     }
     if (r.tin !== null || r.tout !== null) meta.append(el("span", "", k(r.tin) + " in · " + k(r.tout) + " out"));
     head.append(meta);
-    head.append(...nowLine(r));
+    // The line under the meta says what the row does now; one that only
+    // repeats the state ("Running", "Done", "Finished") is left out.
+    const plainNow = typeof r.now === "string" ? r.now.trim() : "";
+    const repeats = !r.tool && (plainNow === word || ((r.state === "ok" || r.state === "done") && plainNow === "Finished"));
+    if (!repeats) head.append(...nowLine(r));
     const flip = () => {
       if (S.open.has(r.id)) S.open.delete(r.id); else S.open.add(r.id);
       draw();
@@ -1099,11 +1102,13 @@ window.HubActivity = (ctx) => {
     return { i, o, known };
   }
 
-  // tokenText says what the subagents used. Tokens come when a subagent
-  // finishes, so with none counted yet it says so and does not claim 0.
+  // tokenText says what the subagents used, and how many run and finished.
+  // Tokens come when a subagent finishes: with none counted yet it leaves
+  // them out and does not claim 0.
   function tokenText(t, running, finished) {
-    const state = running || finished ? " · " + running + " running, " + finished + " finished" : "";
-    if (!t.known) return [el("b", "", "tokens appear when each finishes"), state];
+    const counts = running || finished ? running + " running, " + finished + " finished" : "";
+    if (!t.known) return counts ? [counts] : [];
+    const state = counts ? " · " + counts : "";
     return [el("b", "", k(t.i)), " in · ", el("b", "", k(t.o)), " out", running ? " so far" + state : ""];
   }
 

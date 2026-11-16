@@ -107,7 +107,8 @@ let proc;
     await ev(`${main(id)}.querySelector(".notice-head").click()`);
     await ev(`${mini(id)}.querySelector(".notice-head").click()`);
   }
-  await until(ids.map((id) => `${main(id)}.querySelector(".notice-head").getAttribute("aria-expanded") === "true"`).join(" && "), "the chat's cards open");
+  // A card with nothing more to show (flat) does not open.
+  await until(ids.map((id) => `(${main(id)}.querySelector(".notice-head").classList.contains("flat") || ${main(id)}.querySelector(".notice-head").getAttribute("aria-expanded") === "true")`).join(" && "), "the chat's cards open");
   await compare("open");
   // The cards say something: no card has an empty title.
   const titles = await ev(`[...document.querySelectorAll("#log .tool .notice-title")].map((t) => t.textContent)`);

@@ -4,7 +4,7 @@
 // toolcard.js and is registered with HubToolCard.register.
 (() => {
   const H = window.HubToolCard;
-  const { isObj, str, cut, squash, short, first, plural, base, verb, errorText, rawOf, size, upperFirst } = H.util;
+  const { isObj, str, cut, squash, short, first, plural, base, verb, errorText, rawOf, size, upperFirst, toolLabel, lines } = H.util;
 
   // pairs writes a call's arguments as "key: value" pairs for a line.
   function pairs(args) {
@@ -29,9 +29,8 @@
   }
 
   // textNote says what an MCP result holds: text and its size, structured data.
-  function kinds(res) {
+  function kinds(res, text) {
     const k = [];
-    const text = str(res.content);
     if (text) k.push("text");
     if (res.structured_content !== undefined && res.structured_content !== null) k.push("structured data");
     if (res.images) k.push("images");
@@ -89,10 +88,10 @@
     const args = isObj(a.arguments) ? a.arguments : {};
     const line = pairs(args);
     if (line) out.lines = [{ parts: line, mono: true }];
-    const content = str(res.content);
+    const content = callText(c, res);
     if (c.done && !c.failed && !res.is_error) {
       out.status = "Done";
-      out.more = [kinds(res)];
+      out.more = [kinds(res, content)];
       const head = first(content);
       if (head) out.lines = (out.lines || []).concat([{ parts: "First line: " + head, dim: true }]);
     }
@@ -103,6 +102,26 @@
       out.blocks.push({ label: "Structured data", text: typeof res.structured_content === "string" ? res.structured_content : JSON.stringify(res.structured_content, null, 2) });
     }
     return fail(c, res, out, content);
+  }
+
+  // callText is the text a server returned, in the shapes it reaches the
+  // hub: content as text (the device plugin) or as MCP content blocks, a
+  // result or text field, the summary of a result with images, or a result
+  // that is plain text and no JSON at all.
+  function callText(c, res) {
+    const blocks = (v) => (Array.isArray(v) ? v.filter((b) => isObj(b) && typeof b.text === "string").map((b) => b.text).join("\n") : "");
+    if (typeof res.content === "string") return res.content;
+    const fromBlocks = blocks(res.content);
+    if (fromBlocks) return fromBlocks;
+    for (const k of ["result", "text", "output"]) if (typeof res[k] === "string" && res[k]) return res[k];
+    if (typeof res.text_summary === "string") {
+      try {
+        const inner = JSON.parse(res.text_summary);
+        if (isObj(inner)) return callText(c, inner);
+      } catch (_) { /* the summary is the text */ }
+      return res.text_summary;
+    }
+    return c.res ? "" : str(c.out);
   }
 
   // fail gives a failed call its status: the error text of the result, or
@@ -327,21 +346,20 @@
 
   // --- tools with no card of their own ----------------------------------------
 
+  // generic is the card of a tool no module knows: its name in plain
+  // words, its arguments as pairs, how much text it returned, and that text
+  // when open. The format is not known, so the call and result as they came
+  // are behind Raw too.
   function generic(c) {
     const a = isObj(c.args) ? c.args : {};
     const out = { icon: "tool", blocks: [] };
-    let hint = "";
-    for (const v of Object.values(a)) {
-      const t = typeof v === "string" ? v : typeof v === "number" ? String(v) : Array.isArray(v) ? v.filter((x) => typeof x === "string").join(", ") : "";
-      if (t) {
-        hint = short(t);
-        break;
-      }
-    }
-    out.title = (c.name || "tool") + (hint ? ": " + cut(hint, 60) : "");
+    out.title = verb(c, "Used ", "Using ") + toolLabel(c.name);
+    const line = pairs(a);
+    if (line) out.lines = [{ parts: line, dim: true }];
     out.status = "Done";
-    // The hub does not know this tool's format: its call and result are
-    // shown as they came, behind Raw.
+    const text = str(c.out).replace(/\s+$/, "");
+    if (c.done && !c.failed) out.more = [text ? plural(lines(text), "line") + " of text" : "no output"];
+    if (text) out.blocks.push({ label: "Result", text });
     out.raw = rawOf(c);
     return out;
   }

@@ -160,7 +160,7 @@ assert.match(body().querySelector("button.now2").textContent, /^Starting a subag
 assert.ok(!text().includes("{...}"));
 
 // The header does not claim 0 tokens when none are counted yet.
-assert.match(sumText(), /^tokens appear when each finishes · 1 running, 0 finished/, sumText());
+assert.match(sumText(), /^1 running, 0 finished/, sumText());
 act.event("subagent.complete", { subagent_id: "sa-1", status: "completed", summary: "Fixed it.", input_tokens: 3100, output_tokens: 920, duration_seconds: 400 });
 assert.match(sumText(), /^3\.1k in · 920 out$/, sumText());
 assert.ok(!sumText().includes("0 in"));

@@ -1415,6 +1415,13 @@
       }
     }
 
+    // computerName is the name of the computer this chat runs its commands
+    // on, when it is one of the user's: cards do not name it again.
+    computerName() {
+      const p = placeOf({ backend_id: this.backend, id: this.session });
+      return p && p.kind === "computer" && p.mine ? p.name || "" : "";
+    }
+
     // cardCtx is what the tool cards of this chat may use, wherever they
     // show: in the chat, or in a subagent's steps in Activity (subCtx). The
     // chat's own cards can also fetch a cut output and move a command to
@@ -1424,6 +1431,7 @@
         this.cctx = { el, toast, highlight: highlightBash, diff: diffView, page: (p) => this.publishedPage(p),
           image: (p) => (mediaPath(p) && imagePath(p) ? mediaURL(this.base, p) : ""), zoom: openImage,
           fileCard: (o) => fileCard(this.base, o),
+          here: () => this.computerName(),
           activity: { opens: (n, a) => activity.opens(n, a), open: (n, a, r) => activity.fromTool(n, a, r) } };
       }
       return this.cctx;

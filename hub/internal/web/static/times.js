@@ -188,13 +188,24 @@ window.HubTimes = (() => {
     return node;
   }
 
-  // finished fills node with "2:14 PM · 329 ms": when it ended and, when
-  // known, how long it ran. With neither it is left empty.
+  // finished fills node with "2:14 PM · 329 ms": when it ended (in the short
+  // form of when) and, when known, how long it ran. With neither it is left
+  // empty. The time and the length do not break inside: no "PM" or "ms" on
+  // a line of its own.
   function finished(node, ms, sec, lead) {
     const kids = lead ? [lead] : [];
     const run = span(sec);
-    if (valid(ms)) kids.push(stamp(document.createElement("span"), ms));
-    if (run) kids.push(run);
+    if (valid(ms)) {
+      const t = stamp(document.createElement("span"), ms);
+      t.className = "nowrap";
+      kids.push(t);
+    }
+    if (run) {
+      const r = document.createElement("span");
+      r.className = "nowrap";
+      r.textContent = run;
+      kids.push(r);
+    }
     const out = [];
     kids.forEach((k, i) => {
       if (i) out.push(" · ");

@@ -152,6 +152,46 @@ function shape(n) {
   assert.ok(host.querySelector(".file-offer .fcard"), "the file card sits after the tool card");
 }
 
+// A card with nothing more to show does not open: no chevron, a click does
+// nothing. A failed card whose status cut the error opens to the whole error.
+{
+  const short = H.mount(ctx, { key: "f1", name: "acme_lookup", args: {}, mem: H.memory() });
+  H.finish(ctx, short, { result: "{\"error\":\"No such kind\"}", is_error: true, endedAt: 5000, duration: 2 });
+  // Not this one: an unknown tool keeps its result behind Raw.
+  assert.ok(!short.querySelector(".notice-head").classList.contains("flat"));
+  H.register({ flat_tool: (c) => ({ icon: "tool", title: "Did a thing", status: "Done" }) });
+  const flat = H.mount(ctx, { key: "f2", name: "flat_tool", args: {}, mem: H.memory() });
+  H.finish(ctx, flat, { result: "{\"error\":\"Permission denied\"}", endedAt: 5000, duration: 2 });
+  const head = flat.querySelector(".notice-head");
+  assert.ok(head.classList.contains("flat"), "nothing to open");
+  assert.strictEqual(head.getAttribute("aria-expanded"), null);
+  flat.view.toggle();
+  assert.ok(flat.querySelector(".notice-body-wrap").hidden, "a click opens no empty body");
+  assert.strictEqual(text(flat.querySelector(".notice-meta")), "Failed: Permission denied · 2.0 s", "no clock time on a card");
+  const long = "x".repeat(50) + " " + "y".repeat(60);
+  const cut = H.mount(ctx, { key: "f3", name: "flat_tool", args: {}, mem: H.memory() });
+  H.finish(ctx, cut, { result: JSON.stringify({ error: long }) });
+  assert.ok(!cut.querySelector(".notice-head").classList.contains("flat"));
+  cut.view.toggle();
+  assert.strictEqual(text(cut.querySelector(".notice-body .tool-q")), long, "the whole error when open");
+  // A done card with nothing more is flat too, and Show in Activity opens it.
+  const ok = H.mount(ctx, { key: "f4", name: "flat_tool", args: {}, mem: H.memory() });
+  H.finish(ctx, ok, { result: "{}" });
+  assert.ok(ok.querySelector(".notice-head").classList.contains("flat"));
+  const act = Object.assign({}, ctx, { activity: { opens: () => true, open() {} } });
+  const withLink = H.mount(act, { key: "f5", name: "flat_tool", args: {}, mem: H.memory() });
+  H.finish(act, withLink, { result: "{}" });
+  assert.ok(!withLink.querySelector(".notice-head").classList.contains("flat"));
+}
+
+// A diff shows its lines, not the file and hunk headers.
+{
+  const d = H.diffLines("--- a/x.go\n+++ b/x.go\n@@ -1 +1,3 @@\n-\treturn nil\n+\tif err != nil {\n ctx\n@@ -9 +11 @@\n-a\n+b\n");
+  assert.deepStrictEqual([...d].map((l) => l.kind + ":" + l.text), ["del:-\treturn nil", "add:+\tif err != nil {", ": ctx", "hunk:⋯", "del:-a", "add:+b"]);
+  assert.deepStrictEqual([...H.diffLines("\n+ note")].map((l) => l.kind), ["add"]);
+  assert.deepStrictEqual([...H.diffLines("\x1b[1ma/x.go → b/x.go\x1b[0m\n\x1b[32m+new\x1b[0m")].map((l) => l.text), ["+new"]);
+}
+
 // The model's answer about an image: the first block of thinking or reply
 // after a vision call, shown on its card.
 {

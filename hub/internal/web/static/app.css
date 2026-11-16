@@ -189,6 +189,10 @@ button.primary.ib:hover { filter: brightness(1.08); }
 .notice-title .tcode, .act .row-head .now2 .lbl .tcode { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; font-weight: 600; }
 .notice-title { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .notice-meta { grid-column: 2 / 4; margin-top: .15rem; color: var(--muted); font-size: .85rem; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.notice-meta .nowrap { white-space: nowrap; }
+.notice-head.flat { cursor: default; }
+.notice-head.flat:hover { background: none; }
+.notice-head.flat > .notice-chev { display: none; }
 .notice-ok { color: var(--ok); }
 .notice-bad { color: var(--bad); }
 .notice-still { color: var(--muted); }
@@ -1647,6 +1651,7 @@ button.link svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; s
 .tool-sub, .tool-lines { min-width: 0; font-weight: 400; }
 .tool-line { margin-top: .15rem; font-size: .86rem; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-line.dim { color: var(--muted); }
+.tool-line.wrap { white-space: normal; overflow-wrap: anywhere; }
 .tool-line.mono, .tool-li.mono, .tool-kv dd.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }
 .tool-line .tcode, .tool-more .tcode, .tool-li .tcode, .tool-kv .tcode { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .tadd { color: var(--ok); }
