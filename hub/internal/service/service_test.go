@@ -772,7 +772,7 @@ func TestShortDropShowsNoOfflineStatus(t *testing.T) {
 		select {
 		case ev := <-ch:
 			if ev.Kind == hub.KindBackendStatus {
-				if string(ev.Data) == `{"connected":false}` {
+				if string(ev.Data) == offlineStatus {
 					t.Fatal("got connected:false for a drop shorter than the grace")
 				}
 				back = true
@@ -785,7 +785,7 @@ func TestShortDropShowsNoOfflineStatus(t *testing.T) {
 	time.Sleep(800 * time.Millisecond)
 	select {
 	case ev := <-ch:
-		if ev.Kind == hub.KindBackendStatus && string(ev.Data) == `{"connected":false}` {
+		if ev.Kind == hub.KindBackendStatus && string(ev.Data) == offlineStatus {
 			t.Fatal("late connected:false after the reconnect")
 		}
 	default:
@@ -804,7 +804,10 @@ func TestLongDropShowsOfflineStatus(t *testing.T) {
 	next(t, ch)
 	e.gw.Stop()
 	evs := until(t, ch, hub.KindBackendStatus)
-	if got := evs[len(evs)-1]; string(got.Data) != `{"connected":false}` {
+	if got := evs[len(evs)-1]; string(got.Data) != offlineStatus {
 		t.Fatalf("status = %s, want connected:false", got.Data)
 	}
 }
+
+// offlineStatus is the data of a backend.status event for a backend that is away.
+const offlineStatus = `{"connected":false}`

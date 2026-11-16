@@ -116,7 +116,7 @@ func TestSilentBackendServesTheCopy(t *testing.T) {
 	}
 	// Past AwayNotice the viewer and the list say the agent is away.
 	ev = next(t, ch)
-	if ev.Kind != hub.KindBackendStatus || string(ev.Data) != `{"connected":false}` || time.Since(started) < time.Second {
+	if ev.Kind != hub.KindBackendStatus || string(ev.Data) != offlineStatus || time.Since(started) < time.Second {
 		t.Fatalf("event while still silent = %+v after %s", ev, time.Since(started))
 	}
 	if _, err := other.Sessions(ctx, userAlice); hub.Unreachable(err) == nil || hub.Unreachable(err).Backends[backendPC] == "" {
