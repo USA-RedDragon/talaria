@@ -1,0 +1,87 @@
+[
+  {
+    "id": "r01",
+    "name": "terminal",
+    "args": {
+      "command": "npm test -- --run",
+      "workdir": "/home/alice/project/web"
+    },
+    "result": null,
+    "is_error": false,
+    "duration_ms": 0,
+    "running": true
+  },
+  {
+    "id": "r02",
+    "name": "browser_click",
+    "args": {
+      "ref": "e4"
+    },
+    "result": null,
+    "is_error": false,
+    "duration_ms": 0,
+    "running": true
+  },
+  {
+    "id": "r03",
+    "name": "delegate_task",
+    "args": {
+      "tasks": [
+        {
+          "goal": "scan the build logs"
+        },
+        {
+          "goal": "measure the antenna"
+        }
+      ]
+    },
+    "result": null,
+    "is_error": false,
+    "duration_ms": 0,
+    "running": true
+  },
+  {
+    "id": "r04",
+    "name": "web_search",
+    "args": {
+      "query": "go 1.26 release"
+    },
+    "result": null,
+    "is_error": false,
+    "duration_ms": 0,
+    "running": true
+  },
+  {
+    "id": "r05",
+    "name": "execute_code",
+    "args": {
+      "code": "for u in urls: fetch(u)"
+    },
+    "result": null,
+    "is_error": false,
+    "duration_ms": 0,
+    "running": true
+  },
+  {
+    "id": "r06",
+    "name": "browser_navigate",
+    "args": {
+      "url": "https://example.com/pricing"
+    },
+    "result": null,
+    "is_error": false,
+    "duration_ms": 0,
+    "running": true
+  },
+  {
+    "id": "r07",
+    "name": "delegate_task",
+    "args": {
+      "goal": "rebuild the APK"
+    },
+    "result": null,
+    "is_error": false,
+    "duration_ms": 0,
+    "running": true
+  }
+]
