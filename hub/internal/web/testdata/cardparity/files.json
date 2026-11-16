@@ -1,0 +1,166 @@
+[
+ {
+  "id": "f01",
+  "name": "read_file",
+  "args": {
+   "path": "/home/alice/app/src/core.py",
+   "offset": 400,
+   "limit": 120
+  },
+  "result": {
+   "content": "   400|def load(path):\n   401|    return open(path).read()",
+   "total_lines": 2310,
+   "file_size": 38912,
+   "truncated": true
+  }
+ },
+ {
+  "id": "f02",
+  "name": "read_file",
+  "args": {
+   "path": "/home/alice/app/src/settings.py"
+  },
+  "result": {
+   "error": "File not found: /home/alice/app/src/settings.py"
+  },
+  "is_error": true
+ },
+ {
+  "id": "f03",
+  "name": "write_file",
+  "args": {
+   "path": "/home/alice/project/docs/report.md",
+   "content": "# Report\nFindings\n"
+  },
+  "result": {
+   "bytes_written": 19
+  }
+ },
+ {
+  "id": "f04",
+  "name": "write_file",
+  "args": {
+   "path": "/etc/app/config.toml",
+   "content": "a = 1\n"
+  },
+  "result": {
+   "error": "Permission denied"
+  },
+  "is_error": true
+ },
+ {
+  "id": "f05",
+  "name": "patch",
+  "args": {
+   "path": "/home/alice/demo/src/server/handlers.go",
+   "old_string": "\treturn nil",
+   "new_string": "\tif err != nil {\n\t\treturn err\n\t}"
+  },
+  "result": {
+   "success": true,
+   "diff": "--- a/handlers.go\n+++ b/handlers.go\n@@ -1 +1,3 @@\n-\treturn nil\n+\tif err != nil {\n+\t\treturn err\n+\t}\n"
+  }
+ },
+ {
+  "id": "f06",
+  "name": "patch",
+  "args": {
+   "path": "/home/alice/demo/src/server/handlers.go",
+   "old_string": "return nil // TODO",
+   "new_string": "return errNotReady"
+  },
+  "result": {
+   "error": "Could not find the text to replace"
+  },
+  "is_error": true
+ },
+ {
+  "id": "f07",
+  "name": "search_files",
+  "args": {
+   "pattern": "TODO",
+   "path": "/home/alice/app/src",
+   "file_glob": "*.go"
+  },
+  "result": {
+   "total_count": 2,
+   "matches": [
+    {
+     "path": "db/conn.go",
+     "line": 42,
+     "content": "// TODO: retry"
+    },
+    {
+     "path": "api/h.go",
+     "line": 15,
+     "content": "// TODO: validate"
+    }
+   ]
+  }
+ },
+ {
+  "id": "f08",
+  "name": "search_files",
+  "args": {
+   "pattern": "*_test.go",
+   "target": "files"
+  },
+  "result": {
+   "files": [
+    "db/conn_test.go",
+    "api/handler_test.go"
+   ],
+   "total_count": 2
+  }
+ },
+ {
+  "id": "f09",
+  "name": "send_file",
+  "args": {
+   "path": "/home/alice/reports/q3-summary.pdf",
+   "note": "Q3 numbers"
+  },
+  "result": {
+   "status": "offered",
+   "file_offer": {
+    "path": "/home/alice/reports/q3-summary.pdf",
+    "name": "Q3 summary.pdf",
+    "size": 217088,
+    "type_label": "PDF document",
+    "mtime": 1794000000,
+    "note": "Q3 numbers"
+   }
+  }
+ },
+ {
+  "id": "f10",
+  "name": "send_file",
+  "args": {
+   "path": "/home/alice/app/.env"
+  },
+  "result": {
+   "status": "refused",
+   "reason": "looks like a secret",
+   "file_offer": {
+    "path": "/home/alice/app/.env",
+    "name": ".env",
+    "size": 120,
+    "reason": "looks like a secret",
+    "secret": true
+   }
+  },
+  "is_error": true
+ },
+ {
+  "id": "f12",
+  "name": "page_publish",
+  "args": {
+   "path": "/home/alice/notes/empty.html"
+  },
+  "result": {
+   "error": "the file is empty",
+   "code": "bad_page"
+  },
+  "is_error": true
+ }
+]

@@ -186,7 +186,7 @@ assert.strictEqual(wrapped("tool_call", "x"), null);
   split({ name: "process_manage", args: { action: "wait", session_id: "proc_283637f9d51" }, res: { status: "exited", exit_code: 0 } }, "Waited for background command ", "npm test", "Waited for background command npm test");
   split({ name: "process_manage", args: { action: "kill", session_id: "proc_283637f9d51" }, res: { status: "killed" } }, "Stopped background command ", "npm test", "Stopped background command npm test");
   // Titles with no command stay one plain string.
-  for (const call of [{ name: "read_file", args: { path: "/a/b.go" } }, { name: "process_manage", args: { action: "list" } }, { name: "terminal", args: {} }]) {
+  for (const call of [{ name: "process_manage", args: { action: "list" } }, { name: "terminal", args: {} }]) {
     const { kids } = draw(call);
     assert.strictEqual(kids.length, 1, call.name + ": no code element");
     assert.strictEqual(typeof kids[0], "string");

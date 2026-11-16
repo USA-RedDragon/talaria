@@ -1,0 +1,689 @@
+[
+ {
+  "name": "read a slice of a long file",
+  "call": {
+   "name": "read_file",
+   "args": {
+    "path": "/home/alice/app/src/core.py",
+    "offset": 400,
+    "limit": 120
+   },
+   "res": {
+    "content": "400|line\n401|line\n402|line\n403|line\n404|line\n405|line\n406|line\n407|line\n408|line\n409|line\n410|line\n411|line\n412|line\n413|line\n414|line\n415|line\n416|line\n417|line\n418|line\n419|line\n420|line\n421|line\n422|line\n423|line\n424|line\n425|line\n426|line\n427|line\n428|line\n429|line\n430|line\n431|line\n432|line\n433|line\n434|line\n435|line\n436|line\n437|line\n438|line\n439|line\n440|line\n441|line\n442|line\n443|line\n444|line\n445|line\n446|line\n447|line\n448|line\n449|line\n450|line\n451|line\n452|line\n453|line\n454|line\n455|line\n456|line\n457|line\n458|line\n459|line\n460|line\n461|line\n462|line\n463|line\n464|line\n465|line\n466|line\n467|line\n468|line\n469|line\n470|line\n471|line\n472|line\n473|line\n474|line\n475|line\n476|line\n477|line\n478|line\n479|line\n480|line\n481|line\n482|line\n483|line\n484|line\n485|line\n486|line\n487|line\n488|line\n489|line\n490|line\n491|line\n492|line\n493|line\n494|line\n495|line\n496|line\n497|line\n498|line\n499|line\n500|line\n501|line\n502|line\n503|line\n504|line\n505|line\n506|line\n507|line\n508|line\n509|line\n510|line\n511|line\n512|line\n513|line\n514|line\n515|line\n516|line\n517|line\n518|line\n519|line",
+    "total_lines": 2310,
+    "file_size": 38912,
+    "truncated": true
+   }
+  },
+  "want": {
+   "icon": "file",
+   "title": "Read core.py",
+   "code": "core.py",
+   "sub": "/home/alice/app/src/",
+   "status": "Lines 400 to 519 of 2,310",
+   "more": "38 KB · more below",
+   "state": "ok",
+   "blocks": [
+    "File text"
+   ],
+   "raw": false
+  }
+ },
+ {
+  "name": "read a whole small file",
+  "call": {
+   "name": "read_file",
+   "args": {
+    "path": "/home/alice/app/a.txt"
+   },
+   "res": {
+    "content": "     1|a\n     2|b\n",
+    "total_lines": 2
+   }
+  },
+  "want": {
+   "title": "Read a.txt",
+   "status": "All 2 lines",
+   "more": "",
+   "blocks": [
+    "File text"
+   ]
+  }
+ },
+ {
+  "name": "read running",
+  "call": {
+   "name": "read_file",
+   "args": {
+    "path": "/home/alice/app/src/core.py",
+    "offset": 400,
+    "limit": 120
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Reading core.py",
+   "sub": "/home/alice/app/src/",
+   "status": "Lines 400 to 519",
+   "state": "run"
+  }
+ },
+ {
+  "name": "read a missing file",
+  "call": {
+   "name": "read_file",
+   "args": {
+    "path": "/home/alice/app/src/settings.py"
+   },
+   "result": {
+    "error": "File not found: /home/alice/app/src/settings.py"
+   }
+  },
+  "want": {
+   "title": "Could not read settings.py",
+   "sub": "/home/alice/app/src/",
+   "status": "File not found",
+   "state": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "read an image",
+  "call": {
+   "name": "read_file",
+   "args": {
+    "path": "/home/alice/app/assets/logo.png"
+   },
+   "res": {
+    "is_image": true,
+    "file_size": 4404019,
+    "content": ""
+   }
+  },
+  "want": {
+   "title": "Read logo.png",
+   "status": "Image, 4.2 MB, not shown",
+   "tone": "warn",
+   "state": "ok",
+   "blocks": []
+  }
+ },
+ {
+  "name": "read an empty file",
+  "call": {
+   "name": "read_file",
+   "args": {
+    "path": "/home/alice/app/empty.txt"
+   },
+   "res": {
+    "content": "",
+    "total_lines": 0
+   }
+  },
+  "want": {
+   "status": "Empty file",
+   "blocks": []
+  }
+ },
+ {
+  "name": "write replaced a file",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/project/docs/report.md",
+    "content": "# Report\nFindings\n"
+   },
+   "res": {
+    "bytes_written": 1331
+   },
+   "diff": "--- a/report.md\n+++ b/report.md\n@@ -1 +1,2 @@\n-Old summary line\n+# Report\n+Findings\n"
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Wrote report.md",
+   "sub": "/home/alice/project/docs",
+   "status": "2 lines, 1.3 KB",
+   "more": "+2 -1",
+   "state": "ok",
+   "blocks": [
+    "Diff"
+   ]
+  }
+ },
+ {
+  "name": "write a new file",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/project/new-dir/notes.txt",
+    "content": "a\nb\nc\n"
+   },
+   "res": {
+    "bytes_written": 212,
+    "dirs_created": true
+   }
+  },
+  "want": {
+   "title": "Wrote notes.txt",
+   "sub": "/home/alice/project/new-dir",
+   "status": "3 lines, 212 B",
+   "more": "created folder",
+   "blocks": [
+    "Content"
+   ]
+  }
+ },
+ {
+  "name": "write running",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/project/docs/report.md",
+    "content": "a\nb\nc\n"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Writing report.md",
+   "sub": "/home/alice/project/docs",
+   "status": "Writing 3 lines",
+   "state": "run"
+  }
+ },
+ {
+  "name": "write refused by permissions",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/etc/app/config.toml",
+    "content": "a = 1\n"
+   },
+   "result": {
+    "error": "Permission denied"
+   },
+   "is_error": true
+  },
+  "want": {
+   "title": "Could not write config.toml",
+   "sub": "/etc/app",
+   "status": "Failed: Permission denied",
+   "state": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "patch with two places",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/Projects/demo/src/server/handlers.go",
+    "old_string": "return nil",
+    "new_string": "return err"
+   },
+   "res": {
+    "success": true
+   },
+   "diff": "--- a/handlers.go\n+++ b/handlers.go\n@@ -1 +1 @@\n-\treturn nil\n+\treturn err\n@@ -9 +9 @@\n-\treturn nil\n+\treturn err\n"
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited handlers.go src/server/",
+   "code": "src/server/",
+   "status": "+2 -2",
+   "more": "2 places",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/Projects/demo/src/server/handlers.go"
+   ]
+  }
+ },
+ {
+  "name": "patch of every match",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/Projects/demo/src/server/handlers.go",
+    "old_string": "a",
+    "new_string": "b",
+    "replace_all": true
+   },
+   "res": {
+    "success": true,
+    "replacements": 7
+   },
+   "diff": "--- a\n+++ b\n@@ -1 +1 @@\n-a\n+b\n"
+  },
+  "want": {
+   "status": "+1 -1",
+   "more": "every match (7)"
+  }
+ },
+ {
+  "name": "patch running",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/Projects/demo/src/server/handlers.go"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Editing handlers.go src/server/",
+   "status": "",
+   "state": "run"
+  }
+ },
+ {
+  "name": "patch could not find the text",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/Projects/demo/src/server/handlers.go",
+    "old_string": "return nil // TODO",
+    "new_string": "return errNotReady"
+   },
+   "result": {
+    "error": "Could not find the text to replace"
+   },
+   "is_error": true
+  },
+  "want": {
+   "title": "Edited handlers.go src/server/",
+   "status": "Failed: Could not find the text to replace",
+   "lines": [
+    "Looked for return nil // TODO"
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "state": "bad",
+   "blocks": [
+    "Not applied"
+   ]
+  }
+ },
+ {
+  "name": "patch several files",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Update File: a/x.go\n-a\n+b\n*** Update File: b/y.go\n-c\n+d\n*** End Patch"
+   },
+   "res": {
+    "success": true
+   },
+   "diff": "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-a\n+b\n--- a/y.go\n+++ b/y.go\n@@ -1 +1 @@\n-c\n+d\n"
+  },
+  "want": {
+   "title": "Edited 2 files",
+   "status": "+2 -2",
+   "blocks": [
+    "x.go",
+    "y.go"
+   ]
+  }
+ },
+ {
+  "name": "search with matches",
+  "call": {
+   "name": "search_files",
+   "args": {
+    "pattern": "TODO",
+    "path": "/home/alice/app/src",
+    "file_glob": "*.go"
+   },
+   "res": {
+    "total_count": 3,
+    "matches": [
+     {
+      "path": "db/conn.go",
+      "line": 42,
+      "content": "// TODO: retry on timeout"
+     },
+     {
+      "path": "db/conn.go",
+      "line": 97,
+      "content": "// TODO: close idle pool"
+     },
+     {
+      "path": "api/handler.go",
+      "line": 15,
+      "content": "// TODO: validate input"
+     }
+    ]
+   }
+  },
+  "want": {
+   "icon": "search",
+   "title": "Searched for TODO in src",
+   "code": "",
+   "status": "3 matches in 2 files",
+   "chips": [
+    "*.go"
+   ],
+   "lines": [
+    "db/conn.go:42  // TODO: retry on timeout"
+   ],
+   "lineStyles": [
+    "dim mono"
+   ],
+   "blocks": [
+    "kv",
+    "Results"
+   ],
+   "state": "ok"
+  }
+ },
+ {
+  "name": "search by file name that hit the limit",
+  "call": {
+   "name": "search_files",
+   "args": {
+    "pattern": "*_test.go",
+    "target": "files"
+   },
+   "res": {
+    "files": [
+     "db/conn_test.go",
+     "api/handler_test.go"
+    ],
+    "total_count": 100,
+    "truncated": true
+   }
+  },
+  "want": {
+   "title": "Searched for files named *_test.go",
+   "status": "At least 100 files",
+   "chips": [
+    "more available"
+   ],
+   "lines": [
+    "db/conn_test.go, api/handler_test.go"
+   ]
+  }
+ },
+ {
+  "name": "search running",
+  "call": {
+   "name": "search_files",
+   "args": {
+    "pattern": "retryCount",
+    "path": "/home/alice/app/src"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Searching for retryCount in src",
+   "status": "",
+   "state": "run"
+  }
+ },
+ {
+  "name": "search found nothing",
+  "call": {
+   "name": "search_files",
+   "args": {
+    "pattern": "legacyAuth",
+    "path": "/home/alice/app/src"
+   },
+   "res": {
+    "total_count": 0,
+    "matches": [],
+    "warning": "skipped 2 unreadable paths"
+   }
+  },
+  "want": {
+   "title": "Searched for legacyAuth in src",
+   "status": "None found",
+   "tone": "warn",
+   "lines": [
+    "Skipped 2 unreadable paths"
+   ],
+   "lineStyles": [
+    "dim"
+   ]
+  }
+ },
+ {
+  "name": "search in the compact path-grouped text",
+  "call": {
+   "name": "search_files",
+   "args": {
+    "pattern": "TODO",
+    "path": "/home/alice/app/"
+   },
+   "res": {
+    "matches_text": "db/conn.go\n  42: // TODO: retry\n  97: // TODO: close\napi/h.go\n  15: // TODO: validate\n",
+    "total_count": 3
+   }
+  },
+  "want": {
+   "status": "3 matches in 2 files",
+   "lines": [
+    "db/conn.go:42  // TODO: retry"
+   ]
+  }
+ },
+ {
+  "name": "search path missing",
+  "call": {
+   "name": "search_files",
+   "args": {
+    "pattern": "x",
+    "path": "/home/alice/nope"
+   },
+   "result": {
+    "error": "Path not found: /home/alice/nope"
+   },
+   "is_error": true
+  },
+  "want": {
+   "title": "Search failed in /home/alice/nope",
+   "status": "Path not found",
+   "state": "bad"
+  }
+ },
+ {
+  "name": "send a file",
+  "call": {
+   "name": "send_file",
+   "args": {
+    "path": "/home/alice/reports/q3-summary.pdf",
+    "note": "Q3 numbers for review"
+   },
+   "result": {
+    "status": "offered",
+    "file_offer": {
+     "path": "/home/alice/reports/q3-summary.pdf",
+     "name": "Q3 summary.pdf",
+     "size": 217088,
+     "type_label": "PDF document",
+     "mtime": 1794000000,
+     "note": "Q3 numbers for review"
+    }
+   }
+  },
+  "want": {
+   "icon": "file",
+   "title": "Sent q3-summary.pdf",
+   "code": "q3-summary.pdf",
+   "status": "Offered",
+   "more": "212 KB · PDF document",
+   "lines": [
+    "/home/alice/reports/ · Q3 numbers for review"
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "state": "ok",
+   "blocks": [
+    "kv"
+   ]
+  }
+ },
+ {
+  "name": "send running",
+  "call": {
+   "name": "send_file",
+   "args": {
+    "path": "/home/alice/reports/q3-summary.pdf"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Sending q3-summary.pdf",
+   "status": "",
+   "lines": [
+    "/home/alice/reports/"
+   ],
+   "state": "run"
+  }
+ },
+ {
+  "name": "send a missing file",
+  "call": {
+   "name": "send_file",
+   "args": {
+    "path": "/home/alice/reports/q4.pdf"
+   },
+   "result": {
+    "error": "File not found: /home/alice/reports/q4.pdf"
+   },
+   "is_error": true
+  },
+  "want": {
+   "title": "Could not send q4.pdf",
+   "status": "File not found",
+   "lines": [
+    "/home/alice/reports/"
+   ],
+   "state": "bad"
+  }
+ },
+ {
+  "name": "send refused as a secret",
+  "call": {
+   "name": "send_file",
+   "args": {
+    "path": "/home/alice/app/.env"
+   },
+   "result": {
+    "status": "refused",
+    "file_offer": {
+     "path": "/home/alice/app/.env",
+     "name": ".env",
+     "reason": "looks like a secret",
+     "secret": true
+    }
+   },
+   "is_error": true
+  },
+  "want": {
+   "title": "Not sent .env",
+   "status": "Looks like a secret",
+   "tone": "warn",
+   "lines": [
+    "/home/alice/app/"
+   ],
+   "state": "bad"
+  }
+ },
+ {
+  "name": "publish a page",
+  "call": {
+   "name": "page_publish",
+   "args": {
+    "path": "/home/alice/notes/report.html"
+   },
+   "res": {
+    "ok": true,
+    "path": "/opt/data/hermes/cache/pages/s1/page-0123456789abcdef.html",
+    "bytes": 14336,
+    "title": "Weekly report"
+   }
+  },
+  "want": {
+   "title": "Weekly report",
+   "lines": [
+    "report.html · 14 KB"
+   ],
+   "lineStyles": [
+    "dim"
+   ],
+   "status": "",
+   "page": {
+    "path": "/opt/data/hermes/cache/pages/s1/page-0123456789abcdef.html",
+    "title": "Weekly report"
+   },
+   "blocks": [
+    "kv"
+   ]
+  }
+ },
+ {
+  "name": "publish a page with no title",
+  "call": {
+   "name": "page_publish",
+   "args": {
+    "path": "/home/alice/notes/x.html"
+   },
+   "res": {
+    "ok": true,
+    "path": "/opt/data/hermes/cache/pages/s1/page-0123456789abcdef.html",
+    "bytes": 9216,
+    "title": ""
+   }
+  },
+  "want": {
+   "title": "Published a page",
+   "lines": [
+    "x.html · 9 KB"
+   ]
+  }
+ },
+ {
+  "name": "publish running",
+  "call": {
+   "name": "page_publish",
+   "args": {
+    "path": "/home/alice/notes/report.html"
+   },
+   "done": false
+  },
+  "want": {
+   "title": "Publishing a page",
+   "lines": [
+    "report.html"
+   ],
+   "state": "run",
+   "page": null
+  }
+ },
+ {
+  "name": "publish an empty file",
+  "call": {
+   "name": "page_publish",
+   "args": {
+    "path": "/home/alice/notes/empty.html"
+   },
+   "result": {
+    "error": "the file is empty",
+    "code": "bad_page"
+   },
+   "is_error": true
+  },
+  "want": {
+   "title": "Could not publish a page",
+   "status": "The file is empty",
+   "lines": [
+    "empty.html"
+   ],
+   "state": "bad",
+   "blocks": [
+    "kv"
+   ],
+   "page": null
+  }
+ }
+]
