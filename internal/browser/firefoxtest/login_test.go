@@ -36,13 +36,15 @@ const (
 	otherLoginHost = "127.0.0.5"
 	twoLoginHost   = "127.0.0.6"
 	loginUser      = "alice"
-	keyLogins      = "login_hosts"
-	keySensitive   = "sensitive"
-	keySelector    = "selector"
-	keyAwait       = "awaitPromise"
-	keyContext     = "context"
-	keyExpr        = "expression"
-	keyTarget      = "target"
+	// pickerMethod is the label configured for loginHost in browser.autologin-methods.
+	pickerMethod = "w3id Password"
+	keyLogins    = "login_hosts"
+	keySensitive = "sensitive"
+	keySelector  = "selector"
+	keyAwait     = "awaitPromise"
+	keyContext   = "context"
+	keyExpr      = "expression"
+	keyTarget    = "target"
 )
 
 type loginResult struct {
@@ -445,7 +447,7 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	tab := show(rig.mainURL + "/picker")
 	res := rig.login(ctx, t, map[string]any{keyTab: tab, keyGuard: approve(loginHost)})
 	t.Logf("login through a picker: %+v", res)
-	if !res.Filled || !post(res) || res.LandedHost != loginHost || res.Method != "w3id Password" || res.Reason != "" {
+	if !res.Filled || !post(res) || res.LandedHost != loginHost || res.Method != pickerMethod || res.Reason != "" {
 		t.Errorf("login through a picker = %+v", res)
 	}
 	if got := rig.main.clicked(); len(got) != 1 || got[0] != "w3id Password" {
@@ -454,7 +456,7 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 
 	// Nothing configured for this host: the labels come back, nothing is clicked.
 	two := show(rig.twoURL + "/picker")
-	res = rig.login(ctx, t, map[string]any{keyTab: two, keyGuard: approve(twoLoginHost), "timeout_ms": 3000})
+	res = rig.login(ctx, t, map[string]any{keyTab: two, keyGuard: approve(twoLoginHost), keyTimeout: 3000})
 	t.Logf("picker without a configured method: %+v", res)
 	if res.Filled || res.Submitted || !strings.Contains(res.Reason, "no method is configured") ||
 		!slices.Equal(res.MethodsSeen, []string{"w3id Password help", "Passkey", "w3id Password", "IBM Verify"}) {
@@ -470,7 +472,7 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 		{"/picker-dup", "more than one button"},
 	} {
 		tab := show(rig.mainURL + page.path)
-		res = rig.login(ctx, t, map[string]any{keyTab: tab, keyGuard: approve(loginHost), "timeout_ms": 3000})
+		res = rig.login(ctx, t, map[string]any{keyTab: tab, keyGuard: approve(loginHost), keyTimeout: 3000})
 		if res.Filled || res.Submitted || !strings.Contains(res.Reason, page.want) {
 			t.Errorf("%s = %+v, want a reason with %q", page.path, res, page.want)
 		}
@@ -480,7 +482,7 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	}
 	off := show(rig.mainURL + "/picker-offsite")
 	rig.r.refused(ctx, t, "a method button that leads off the autologin hosts", "browser.autologin-hosts", "login",
-		map[string]any{keyTab: off, keyGuard: approve(loginHost), "timeout_ms": 3000})
+		map[string]any{keyTab: off, keyGuard: approve(loginHost), keyTimeout: 3000})
 }
 
 // loginEdges checks a login from a URL, two saved logins, a GET form and
@@ -495,7 +497,7 @@ func loginEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 
 	// Two saved logins: Firefox fills nothing, and the reason says why.
 	twoTab := rig.open(ctx, t, rig.twoURL+"/")
-	res = rig.login(ctx, t, map[string]any{keyTab: twoTab.TabID, keyGuard: approve(twoLoginHost), "timeout_ms": 3000})
+	res = rig.login(ctx, t, map[string]any{keyTab: twoTab.TabID, keyGuard: approve(twoLoginHost), keyTimeout: 3000})
 	t.Logf("login with two saved logins: %+v", res)
 	if res.Filled || res.Submitted || !strings.Contains(res.Reason, "more than one login") {
 		t.Errorf("login with two saved logins = %+v", res)
@@ -563,6 +565,6 @@ func loginRefusals(ctx context.Context, t *testing.T, r *recorded, tabID int) {
 		keyRef: refByName(snap.Snapshot, "Show"), keyGuard: map[string]any{keySensitive: true}})
 	r.refused(ctx, t, "screenshot of the login page", "autologin", "screenshot", map[string]any{keyTab: tabID})
 	r.refused(ctx, t, "selector wait on the login page", "autologin", "wait",
-		map[string]any{keyTab: tabID, keySelector: "input[name=pass]:placeholder-shown", "timeout_ms": 500})
+		map[string]any{keyTab: tabID, keySelector: "input[name=pass]:placeholder-shown", keyTimeout: 500})
 	r.refused(ctx, t, "login without approval", "needs the user's approval", "login", map[string]any{keyTab: tabID})
 }

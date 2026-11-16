@@ -279,7 +279,7 @@ func TestAutologinMethods(t *testing.T) {
 	if def, err := load(map[string]string{hubURLEnv: hubURL}, "{}"); err != nil || len(def.Browser.AutologinMethods) != 0 {
 		t.Errorf("default autologin-methods = %v, %v", def.Browser.AutologinMethods, err)
 	}
-	for name, in := range map[string]string{
+	for name, in := range map[string]string{ //nolint:gosec // labels of sign-in buttons, not credentials
 		"host not listed": "  autologin-methods:\n    other.example.com: w3id Password\n",
 		"empty label":     "  autologin-methods:\n    login.w3.ibm.com: \"\"\n",
 		"passkey":         "  autologin-methods:\n    login.w3.ibm.com: Passkey\n",

@@ -195,7 +195,7 @@ func startFirefox(ctx context.Context, t *testing.T) (*broker.Broker, *bidi.Clie
 	b, err := broker.Listen(broker.Options{Path: sock, ExtensionID: host.ExtensionID,
 		AllowHosts:     []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost},
 		ConfirmHosts:   []string{confirmHost},
-		AutologinHosts: []string{loginHost, twoLoginHost}, AutologinMethods: map[string]string{loginHost: "w3id Password"}, HubURL: e2eHubURL})
+		AutologinHosts: []string{loginHost, twoLoginHost}, AutologinMethods: map[string]string{loginHost: pickerMethod}, HubURL: e2eHubURL})
 	if err != nil {
 		t.Fatal(err)
 	}
