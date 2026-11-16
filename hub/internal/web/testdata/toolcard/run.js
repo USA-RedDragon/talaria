@@ -148,3 +148,47 @@ assert.strictEqual(wrapped("tool_call", "x"), null);
   view.update(Object.assign({}, call, { out: "changed", partial: null }));
   assert.strictEqual(body.children.length, 0, "a closed card drops its blocks on an update and builds them again on opening");
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// The command or code in a title is its own monospace element; the leading
+// words stay plain text. The title string itself is unchanged.
+{
+  const { drawTitle, statusLine } = sandbox.window.HubToolCard;
+  const el = (tag, cls, text) => ({ tag, cls: cls || "", kids: [], textContent: text || "" });
+  const node = el("span", "notice-title");
+  node.replaceChildren = (...k) => { node.kids = k; };
+  const mem = memory();
+  mem.learn("terminal", { command: "npm test", background: true }, { session_id: "proc_283637f9d51" });
+  const draw = (call) => {
+    const d = derive(Object.assign({ done: true, failed: false, out: "", mem, res: null }, call));
+    drawTitle(el, node, d);
+    return { d, kids: node.kids.slice() };
+  };
+  const split = (call, lead, code, title) => {
+    const { d, kids } = draw(call);
+    assert.strictEqual(d.title, title, "the title text is as it was: " + d.title);
+    assert.strictEqual(kids.length, 2, title + ": a lead and a code element");
+    assert.strictEqual(kids[0], lead, title + ": lead");
+    assert.strictEqual(kids[1].tag, "code");
+    assert.strictEqual(kids[1].cls, "tcode");
+    assert.strictEqual(kids[1].textContent, code, title + ": code");
+  };
+  split({ name: "terminal", args: { command: "ls -la /usr/bin/zig; file /usr/bin/zig" }, res: { exit_code: 0 } }, "Ran ", "ls -la /usr/bin/zig; file /usr/bin/zig", "Ran ls -la /usr/bin/zig; file /usr/bin/zig");
+  split({ name: "terminal", args: { command: "sleep 60" }, done: false }, "Running ", "sleep 60", "Running sleep 60");
+  split({ name: "terminal", args: { command: "make -j8", background: true }, res: { session_id: "proc_1" } }, "Started in the background: ", "make -j8", "Started in the background: make -j8");
+  split({ name: "execute_code", args: { code: "import json\nprint(1)" }, res: { output: "1" } }, "execute_code: ", "import json print(1)", "execute_code: import json print(1)");
+  split({ name: "process_manage", args: { action: "wait", session_id: "proc_283637f9d51" }, res: { status: "exited", exit_code: 0 } }, "Waited for background command ", "npm test", "Waited for background command npm test");
+  split({ name: "process_manage", args: { action: "kill", session_id: "proc_283637f9d51" }, res: { status: "killed" } }, "Stopped background command ", "npm test", "Stopped background command npm test");
+  // Titles with no command stay one plain string.
+  for (const call of [{ name: "read_file", args: { path: "/a/b.go" } }, { name: "process_manage", args: { action: "list" } }, { name: "terminal", args: {} }]) {
+    const { kids } = draw(call);
+    assert.strictEqual(kids.length, 1, call.name + ": no code element");
+    assert.strictEqual(typeof kids[0], "string");
+  }
+  // The status line under a subagent, in the Activity panel.
+  const l = statusLine("terminal", "npm test", mem);
+  assert.deepStrictEqual([l.text, l.code], ["Running npm test", "npm test"]);
+  const w = statusLine("process_manage", "wait proc_283637f9d51 180s", mem);
+  assert.deepStrictEqual([w.text, w.code], ["Waiting on background command npm test", "npm test"]);
+  assert.strictEqual(statusLine("process_manage", "list", mem).code, "");
+  assert.strictEqual(statusLine("read_file", "/a/b.go", mem).code, "");
+}

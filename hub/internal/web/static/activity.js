@@ -640,6 +640,13 @@ window.HubActivity = (ctx) => {
   // plain sentence with an icon and how long it has gone on; the line is a
   // button that opens the raw text Hermes sent, with a copy button. Anything
   // else is the subagent's own words.
+  // lblNode is the words of a status line, with its command in monospace.
+  function lblNode(line) {
+    const n = el("span", "lbl");
+    window.HubToolCard.drawTitle(el, n, { title: line.text, code: line.code });
+    return n;
+  }
+
   function nowLine(r) {
     if (!(r.kind === "sub" && r.tool && live.has(r.state) && r.state !== "wait" && r.state !== "hold")) return [el("div", "now", r.now || "")];
     const m = S.minis.get(r.id);
@@ -649,7 +656,7 @@ window.HubActivity = (ctx) => {
     // With only the tool's name there is no raw text worth showing: no box to open.
     if (!r.tool.preview) {
       const d = el("div", "now2");
-      d.append(window.HubIcons.icon(line.icon), el("span", "lbl", line.text));
+      d.append(window.HubIcons.icon(line.icon), lblNode(line));
       const w = r.tool.at ? ago((Date.now() - r.tool.at) / 1000) : "";
       if (w) d.append(el("span", "ago", w));
       return [d];
@@ -659,7 +666,7 @@ window.HubActivity = (ctx) => {
     b.setAttribute("aria-expanded", String(open));
     b.title = "Show the raw text";
     const when = r.tool.at ? ago((Date.now() - r.tool.at) / 1000) : "";
-    b.append(window.HubIcons.icon(line.icon), el("span", "lbl", line.text));
+    b.append(window.HubIcons.icon(line.icon), lblNode(line));
     if (when) b.append(el("span", "ago", when));
     const chev = window.HubIcons.icon("chev");
     chev.classList.add("chev");

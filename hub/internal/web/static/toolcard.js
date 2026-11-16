@@ -151,11 +151,13 @@ window.HubToolCard = (() => {
       case "kill":
         out.icon = "stop";
         out.title = verb(c, "Stopped", "Stopping") + " background command " + cmd;
+        out.code = cmd;
         out.status = res.status === "already_exited" ? exitText : "Stopped";
         break;
       case "wait": {
         out.icon = "clock";
         out.title = verb(c, "Waited for", "Waiting for") + " background command " + cmd;
+        out.code = cmd;
         if (exited) out.status = exitText;
         else if (res.status === "interrupted") out.status = "Interrupted";
         else {
@@ -168,11 +170,13 @@ window.HubToolCard = (() => {
       }
       case "poll":
         out.title = verb(c, "Checked", "Checking") + " background command " + cmd;
+        out.code = cmd;
         out.status = exited ? exitText : "Still running";
         break;
       case "log": {
         out.icon = "list";
         out.title = verb(c, "Read the output of", "Reading the output of") + " background command " + cmd;
+        out.code = cmd;
         const n = typeof res.total_lines === "number" ? res.total_lines : c.partial && c.partial.lines ? c.partial.lines : lines(str(res.output));
         out.status = plural(n, "line");
         break;
@@ -181,15 +185,18 @@ window.HubToolCard = (() => {
       case "submit":
         out.icon = "send";
         out.title = verb(c, "Sent input to", "Sending input to") + " background command " + cmd;
+        out.code = cmd;
         out.status = "Sent";
         break;
       case "close":
         out.title = verb(c, "Closed the input of", "Closing the input of") + " background command " + cmd;
+        out.code = cmd;
         out.status = "Closed";
         break;
       case "handoff":
         out.icon = "send";
         out.title = verb(c, "Handed off", "Handing off") + " background command " + cmd;
+        out.code = cmd;
         out.status = "Handed off";
         break;
       default: {
@@ -372,6 +379,7 @@ window.HubToolCard = (() => {
     const bg = !!a.background || res.status === "yielded_to_background";
     const out = { icon: "terminal", blocks: [] };
     out.title = (bg ? verb(c, "Started in the background: ", "Starting in the background: ") : verb(c, "Ran ", "Running ")) + (short(cmd) || "a command");
+    if (short(cmd)) out.code = short(cmd);
     const exit = exitCode(res);
     if (bg && !c.failed) out.status = "Running in the background";
     else if (exit !== null && exit !== 0) out.status = "Exit " + exit;
@@ -776,6 +784,7 @@ window.HubToolCard = (() => {
       }
     }
     out.title = (c.name || "tool") + (hint ? ": " + cut(hint, 60) : "");
+    if (hint && c.name === "execute_code") out.code = cut(hint, 60);
     out.status = "Done";
     if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
     if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
@@ -841,6 +850,9 @@ window.HubToolCard = (() => {
     if (c.failed && !(name === "terminal" && code !== null && code !== 0)) d.status = failure(c);
     if (!c.done) d.status = d.waiting ? "Waiting for approval" : "";
     d.title = plain(d.title);
+    // The command or code at the end of the title is drawn in monospace.
+    d.code = d.code ? plain(d.code) : "";
+    if (!d.code || !d.title.endsWith(d.code)) d.code = "";
     d.status = plain(d.status);
     d.blocks = d.blocks.filter((b) => b.text);
     for (const b of d.blocks) if (b.text.length > outLen) b.text = b.text.slice(0, outLen) + "\n...";
@@ -888,7 +900,9 @@ window.HubToolCard = (() => {
 
   function statusLine(name, preview, mem) {
     const l = statusLine0(plain(name), plain(preview), mem);
-    return { icon: l.icon, text: plain(l.text) };
+    const text = plain(l.text);
+    const code = l.code ? plain(l.code) : "";
+    return { icon: l.icon, text, code: code && text.endsWith(code) ? code : "" };
   }
 
   function statusLine0(name, preview, mem) {
@@ -906,9 +920,10 @@ window.HubToolCard = (() => {
       const cmd = id && mem ? mem.proc(id) : "";
       if (act === "list" || !act) return { icon: "list", text: "Listing background commands" };
       const [icon, word] = pmWords[act];
-      return { icon, text: word + (cmd ? " background command " + short(cmd) : " a background command") };
+      return { icon, text: word + (cmd ? " background command " + short(cmd) : " a background command"), code: cmd ? short(cmd) : "" };
     }
-    if (name === "terminal") return { icon: "terminal", text: p ? "Running " + short(p) : "Running a command" };
+    if (name === "terminal") return { icon: "terminal", text: p ? "Running " + short(p) : "Running a command", code: p ? short(p) : "" };
+    if (name === "execute_code") return { icon: "terminal", text: p ? "Running code " + short(p) : "Running code", code: p ? short(p) : "" };
     if (name === "read_file") return { icon: "file", text: "Reading " + (base(arg) || "a file") };
     if (name === "write_file" || name === "patch") return { icon: name === "write_file" ? "filenew" : "edit", text: (name === "write_file" ? "Writing " : "Editing ") + (base(arg) || "a file") };
     if (name === "search_files") return { icon: "search", text: "Searching files" + (p ? " for " + short(p) : "") };
@@ -963,6 +978,16 @@ window.HubToolCard = (() => {
     }
     if (!out && p.result !== undefined && p.result !== null) out = typeof p.result === "string" ? p.result : JSON.stringify(p.result, null, 2);
     return { res, failed, out: out || "" };
+  }
+
+  // drawTitle puts a card's title in its element: the words in the UI font,
+  // the command or code after them in a monospace element of its own.
+  function drawTitle(el, node, d) {
+    if (d.code && d.title.endsWith(d.code)) {
+      node.replaceChildren(d.title.slice(0, d.title.length - d.code.length), el("code", "tcode", d.code));
+    } else {
+      node.replaceChildren(d.title);
+    }
   }
 
   // The card of each box, for the one click listener below.
@@ -1212,7 +1237,7 @@ window.HubToolCard = (() => {
       box.dataset.state = d.state;
       box.dataset.tool = c.name || "tool";
       head.replaceChildren(window.HubIcons.icon(d.icon), title, chev, meta);
-      title.textContent = d.title;
+      drawTitle(el, title, d);
       title.title = d.title;
       drawMeta(d, c);
       built = false;
@@ -1247,5 +1272,5 @@ window.HubToolCard = (() => {
   // failed or was blocked is shown as any other.
   const quiet = (name, failed) => name === "ledger" && !failed;
 
-  return { quiet, derive, memory, create, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
+  return { drawTitle, quiet, derive, memory, create, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
 })();

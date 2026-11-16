@@ -49,6 +49,38 @@ async function titles(c, tag) {
   ], tag + ": message titles " + JSON.stringify(from));
 }
 
+
+// The command or code in a title is monospace, the leading word is not, and
+// the title stays on one line.
+async function commands(c, tag) {
+  const { ev } = c;
+  await until(ev, `document.querySelectorAll('.tool[data-tool="execute_code"]').length === 1 && document.querySelectorAll('.tool[data-tool="process_manage"]').length === 1`, tag + ": command cards drawn");
+  const got = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('.tool[data-tool="terminal"], .tool[data-tool="execute_code"], .tool[data-tool="process_manage"]')].filter((x) => x.offsetParent !== null).map((x) => {
+    const t = x.querySelector(".notice-title");
+    const code = t.querySelector("code.tcode");
+    const ts = getComputedStyle(t);
+    const cs = code && getComputedStyle(code);
+    const box = getComputedStyle(document.querySelector(".tool-box, .notice-text.pre") || t);
+    return { tool: x.dataset.tool, text: t.textContent, code: code ? code.textContent : null, mono: !!cs && /mono|Menlo|Consolas|Courier/i.test(cs.fontFamily), same: !!cs && !!document.querySelector(".tool-box") && cs.fontFamily === box.fontFamily,
+      lead: code ? t.firstChild.textContent : null, leadMono: /mono|Menlo/i.test(ts.fontFamily), ratio: cs ? parseFloat(cs.fontSize) / parseFloat(ts.fontSize) : 0, h: t.getBoundingClientRect().height, lh: parseFloat(ts.lineHeight) || parseFloat(ts.fontSize) * 1.5, ellipsis: ts.textOverflow, ws: ts.whiteSpace };
+  }))`));
+  assert.strictEqual(got.length, 4, tag + ": four command cards " + JSON.stringify(got));
+  const lead = { terminal: /^(Ran |Started in the background: )$/, execute_code: /^execute_code: $/, process_manage: /^Waited for background command $/ };
+  for (const g of got) {
+    assert.ok(g.code, tag + ": " + g.tool + " has a code element: " + JSON.stringify(g));
+    assert.ok(g.mono, tag + ": the code is monospace: " + JSON.stringify(g));
+    assert.ok(!g.leadMono, tag + ": the leading word is the UI font: " + JSON.stringify(g));
+    assert.ok(lead[g.tool].test(g.lead), tag + ": lead " + JSON.stringify(g.lead));
+    assert.ok(g.ratio > 0.8 && g.ratio <= 1, tag + ": code size lines up with the title " + g.ratio);
+    assert.ok(g.h < g.lh * 1.6, tag + ": one line " + JSON.stringify(g));
+    assert.ok(g.ellipsis === "ellipsis" && g.ws === "nowrap", tag + ": ellipsizes");
+  }
+  assert.ok(got.some((g) => g.code.startsWith("ls -la /usr/bin/zig")), tag + ": the terminal command");
+  assert.ok(got.some((g) => g.tool === "process_manage" && g.code === "make -j8"), tag + ": the background command");
+  await ev(`document.querySelector('.tool[data-tool="terminal"]').scrollIntoView({ block: "center" })`);
+  await shot(c, tag + "-commands");
+}
+
 // ledger: calls that worked have no card and are not in a fold line; the one
 // that failed is shown as any other.
 async function ledger(c, tag) {
@@ -72,6 +104,7 @@ async function run(c, w, h, touch, dark) {
   await ledger(c, tag);
 
   await ev(`document.querySelectorAll("details.toolgroup").forEach((d) => { d.open = true; })`);
+  await commands(c, tag);
   // Open the first send: the id is in the details, not the title.
   await ev(`${sends}[0].scrollIntoView()`);
   await ev(`${sends}[0].querySelector(".notice-head").click()`);
