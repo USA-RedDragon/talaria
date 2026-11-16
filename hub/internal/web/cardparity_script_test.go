@@ -2,8 +2,6 @@ package web_test
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,9 +87,13 @@ func cardParity(t *testing.T, bin string) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// A result that is text is stored as that text, not as a JSON string.
 		res, err := json.Marshal(c.Result)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if s, ok := c.Result.(string); ok {
+			res = []byte(s)
 		}
 		meta := map[string]any{keyToolOutcome: map[string]any{keyDurationMS: c.DurationMS, "is_error": c.IsError}}
 		rows = append(rows, map[string]any{kRole: roleAssistant, kText: "", kTimestamp: at, kCalls: []map[string]any{{"id": c.ID, fnKey: map[string]any{fieldName: c.Name, ilArgs: string(args)}}}})
@@ -135,15 +137,14 @@ func cardParity(t *testing.T, bin string) {
 		t.Fatal(err)
 	}
 	// The running calls start live, after the page has the chat.
-	poke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	poke := pokeServer(t, func() {
 		e.gw.Publish("s9", "message.start", map[string]any{})
 		for _, c := range list {
 			if c.Running {
-				e.gw.Publish("s9", "tool.start", map[string]any{"tool_id": c.ID, fieldName: c.Name, "args": c.Args})
+				e.gw.Publish("s9", "tool.start", map[string]any{sjToolID: c.ID, fieldName: c.Name, "args": c.Args})
 			}
 		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
+	})
 	t.Cleanup(poke.Close)
 	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "cardparity", "run.js"), bin, e.url, t.TempDir(), string(want), string(meta), poke.URL).CombinedOutput()
 	if err != nil {

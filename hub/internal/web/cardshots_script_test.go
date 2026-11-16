@@ -1,8 +1,6 @@
 package web_test
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,7 +27,7 @@ func TestCardShotsChrome(t *testing.T) {
 	chrome := chromePath(t)
 	e := setupComputers(t)
 	e.svc.SetLoginGrants(e.opts.LoginGrants)
-	msgs := []map[string]any{{kRole: roleUser, kText: "go"}, {kRole: roleAssistant, kText: "on it"}}
+	msgs := []map[string]any{{kRole: roleUser, kText: "go"}, {kRole: roleAssistant, kText: textOnIt}}
 	card := func(id, cmd, desc string, p gateway.Prompt) []gateway.Prompt {
 		p.Kind, p.PromptID, p.Command = gateway.PromptApproval, id, optr(cmd)
 		if desc != "" {
@@ -41,7 +39,7 @@ func TestCardShotsChrome(t *testing.T) {
 		e.gw.AddSession(&gatewaytest.Session{ID: id, Title: title, Live: true, StartedAt: at, Messages: msgs, Prompts: p})
 	}
 	once, deny := gateway.ChoiceOnce, gateway.ChoiceDeny
-	add("c1", "Shot plain approval", 900, card("p1", "rm -rf node_modules && npm ci", "recursive delete", gateway.Prompt{Choices: []string{once, "session", "always", deny}}))
+	add("c1", "Shot plain approval", 900, card("p1", "rm -rf node_modules && npm ci", "recursive delete", gateway.Prompt{Choices: []string{once, choiceSession, "always", deny}}))
 	add("c2", "Shot bare approval", 890, card("p2", "git push --force origin main", "", gateway.Prompt{}))
 	add("c3", "Shot smart approval", 880, card("p3", "bash /opt/data/blocked/retry.sh", "", gateway.Prompt{Choices: []string{once, deny},
 		Rule: optr("Auto-Mode Bypass"), Reason: optr("Runs a saved copy of a command that was blocked a moment ago, retrying it a different way.")}))
@@ -55,16 +53,14 @@ func TestCardShotsChrome(t *testing.T) {
 	grant := func(id, name string) *gateway.LoginGrant {
 		return &gateway.LoginGrant{DeviceID: id, DeviceName: name, Host: "portal.example.com", SavedLogins: &n, Methods: []string{"Password", "Email link"}}
 	}
-	add("c6", "Shot sign-in grant", 850, card("p6", "browser_login", "", gateway.Prompt{Choices: []string{once, "device", deny}, LoginGrant: grant(e.id, pcName)}))
-	add("c7", "Shot sign-in unknown", 840, card("p7", "browser_login", "", gateway.Prompt{Choices: []string{once, "device", deny}, LoginGrant: grant("d_not_mine", "")}))
+	add("c6", "Shot sign-in grant", 850, card("p6", "browser_login", "", gateway.Prompt{Choices: []string{once, gateway.ChoiceDevice, deny}, LoginGrant: grant(e.id, pcName)}))
+	add("c7", "Shot sign-in unknown", 840, card("p7", "browser_login", "", gateway.Prompt{Choices: []string{once, gateway.ChoiceDevice, deny}, LoginGrant: grant("d_not_mine", "")}))
 	e.gw.AddSession(&gatewaytest.Session{ID: "f1", Title: "Shot failed turn", Live: true, StartedAt: 830, Messages: []map[string]any{{kRole: roleUser, kText: "search it"}}})
 	// The failed turn arrives live, after the page has the chat.
-	poke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	poke := pokeServer(t, func() {
 		e.gw.Publish("f1", "message.start", map[string]any{})
-		e.gw.Publish("f1", "message.complete", map[string]any{keyStatus: "error", kText: failCopy})
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(poke.Close)
+		e.gw.Publish("f1", "message.complete", map[string]any{keyStatus: statusError, kText: failCopy})
+	})
 	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "cardshots", "run.js"), chrome, e.url, t.TempDir(), poke.URL)
 	cmd.Env = append(os.Environ(), "SHOT_DIR="+os.Getenv("CARDSHOTS_DIR"))
 	if out, err := cmd.CombinedOutput(); err != nil {

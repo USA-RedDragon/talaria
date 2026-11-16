@@ -16,4 +16,7 @@ const (
 	keyDurationMS  = "duration_ms"
 	keyResultSize  = "result_size"
 	keyToolOutcome = "tool_outcome"
+	choiceSession  = "session"
+	statusError    = "error"
+	textOnIt       = "on it"
 )

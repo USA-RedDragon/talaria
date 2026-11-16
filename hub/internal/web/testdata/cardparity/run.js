@@ -70,6 +70,11 @@ async function takeShots(c, main, mini) {
         for (const want of ["open", "closed"]) {
           const isOpen = await ev(`${sel(id)}.querySelector(".notice-head").getAttribute("aria-expanded") === "true"`);
           if (isOpen !== (want === "open")) await ev(`${sel(id)}.querySelector(".notice-head").click()`);
+          // Images load as they come into view and grow the card: wait for
+          // them, then put the card in view again before the clip is taken.
+          await ev(`${sel(id)}.scrollIntoView({ block: "center" })`);
+          for (let i = 0; i < 40 && !(await ev(`[...${sel(id)}.querySelectorAll("img")].every((m) => m.complete)`)); i++) await sleep(50);
+          await sleep(100);
           await ev(`${sel(id)}.scrollIntoView({ block: "center" })`);
           await sleep(150);
           const r = await ev(`(() => { const b = ${sel(id)}.getBoundingClientRect(); return { x: Math.max(0, b.x - 4), y: Math.max(0, b.y - 4), width: Math.min(b.width + 8, ${w}), height: Math.min(b.height + 8, ${h}) }; })()`);

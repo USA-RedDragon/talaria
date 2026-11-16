@@ -5,13 +5,13 @@
  {"id": "p04", "name": "write_file", "args": {"path": "/etc/app/config.toml", "content": "a = 1\n"}, "result": {"error": "Permission denied"}, "is_error": true},
  {"id": "p05", "name": "patch", "args": {"path": "/home/alice/demo/src/server/handlers.go", "old_string": "\treturn nil", "new_string": "\tif err != nil {\n\t\treturn err\n\t}"}, "result": {"success": true, "diff": "--- a\n+++ b\n-\treturn nil\n+\tif err != nil {\n+\t\treturn err\n+\t}\n"}},
  {"id": "p06", "name": "search_files", "args": {"pattern": "TODO", "path": "/home/alice/app/src"}, "result": {"total_count": 2, "matches": [{"path": "db/conn.go", "line": 42, "content": "// TODO: retry"}, {"path": "api/h.go", "line": 15, "content": "// TODO: validate"}]}},
- {"id": "p07", "name": "web_search", "args": {"query": "go 1.26 release"}, "result": {"data": {"web": [{"title": "Go 1.26 Release Notes", "url": "https://go.dev/doc/go1.26"}, {"title": "Go on GitHub", "url": "https://github.com/golang/go"}]}}},
+ {"id": "p07", "name": "web_search", "args": {"query": "go 1.26 release"}, "result": {"data": {"web": [{"title": "Go 1.26 Release Notes", "url": "https://go.dev/doc/go1.26", "description": "Go 1.26 arrives six months after Go 1.25."}, {"title": "Go on GitHub", "url": "https://github.com/golang/go", "description": "The Go programming language."}]}}},
  {"id": "p08", "name": "process_manage", "args": {"action": "list"}, "result": {"processes": [{"session_id": "proc_1", "command": "npm start", "status": "running"}]}},
  {"id": "p09", "name": "skill_view", "args": {"name": "gitub"}, "result": {"success": false, "error": "Skill 'gitub' not found."}},
  {"id": "p10", "name": "project_memory", "args": {"action": "write", "operations": [{"action": "topic_write", "topic": "testing", "content": "How the suite is run."}]}, "result": {"success": true, "project_name": "relift"}},
  {"id": "p11", "name": "delegate_task", "args": {"action": "transcript", "subagent_id": "sa-0-x"}, "result": {"returned": 20, "total_entries": 63, "running": true, "entries": []}},
- {"id": "p12", "name": "mcp_device_call", "args": {"server": "github", "tool": "search_issues", "arguments": {"repo": "acme/web"}}, "result": {"result": "14 issues match"}},
- {"id": "p13", "name": "acme_lookup", "args": {"kind": "invoices"}, "result": {"rows": 4}},
+ {"id": "p12", "name": "mcp_device_call", "args": {"server": "github", "tool": "search_issues", "arguments": {"repo": "acme/web"}}, "result": {"content": "14 issues match\nacme/web#12 Login fails on Safari\nacme/web#9 Slow search", "is_error": false}},
+ {"id": "p13", "name": "acme_lookup", "args": {"kind": "invoices"}, "result": "INV-1041 paid\nINV-1042 paid\nINV-1043 due Nov 30\nINV-1044 due Dec 15"},
  {"id": "p14", "name": "send_file", "args": {"path": "/home/alice/app/.env"}, "result": {"status": "refused", "reason": "looks like a secret", "file_offer": {"path": "/home/alice/app/.env", "name": ".env", "size": 120}}, "is_error": true},
  {"id": "p15", "name": "execute_code", "args": {"code": "print(len([1,2,3]))"}, "result": {"status": "success", "output": "3\n", "tool_calls_made": 0}, "duration_ms": 300}
 ]
