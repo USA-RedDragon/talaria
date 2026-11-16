@@ -46,6 +46,8 @@ class El {
   append(...k) { for (const n of k) this.childNodes.push(this._adopt(n)); }
   insertBefore(n, ref) { n = this._adopt(n); const i = ref ? this.childNodes.indexOf(ref) : -1; if (i < 0) this.childNodes.push(n); else this.childNodes.splice(i, 0, n); return n; }
   replaceChildren(...k) { for (const n of this.childNodes) n.parentNode = null; this.childNodes = []; this.append(...k); }
+  after(n) { const p = this.parentNode; p.insertBefore(n, this.nextSibling); }
+  replaceChild(n, old) { old.replaceWith(n); return old; }
   replaceWith(n) { const p = this.parentNode; p.insertBefore(n, this); p._drop(this); }
   remove() { if (this.parentNode) this.parentNode._drop(this); }
   setAttribute(k, v) { this.attrs[k] = String(v); }

@@ -13,6 +13,9 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway/gatewaytest"
 )
 
+// visionAnswer is what the model said about the first image.
+const visionAnswer = "The window is titled Example. No error text shows.\nThe OK button looks focused."
+
 // shotPicture is a PNG that looks like a screenshot: a dark window with a
 // title bar and a few lines of text, so a thumbnail and a full screen view
 // differ from a blank square.
@@ -75,15 +78,17 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 		}
 	}
 	call := func(id, args string) map[string]any {
-		return map[string]any{kRole: roleAssistant, kText: "Looking.", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: "vision_analyze", ilArgs: args}}}}
+		return map[string]any{kRole: roleAssistant, kText: "", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: "vision_analyze", ilArgs: args}}}}
 	}
 	result := func(id string) map[string]any {
 		return map[string]any{kRole: stepTool, kCallID: id, fieldName: "vision_analyze", kText: "Image loaded into your context \u2014 you can see it natively now. Use your built-in vision to answer the user.\n\nQuestion: q",
-			kTimestamp: 1763000000.0, "display_metadata": map[string]any{"tool_outcome": map[string]any{"duration_ms": 309}}}
+			kTimestamp: 1763000000.0, keyDisplayMeta: map[string]any{keyToolOutcome: map[string]any{keyDurationMS: 309}}}
 	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Vision", Live: true, StartedAt: 900, Messages: []map[string]any{
 		{kRole: roleUser, kText: "what is on screen?"},
 		call("c1", `{"image_url":"`+seen+`","question":"What is on screen? Describe the window title, any error text and which button looks focused."}`), result("c1"),
+		// What the model said about the image: the card's answer.
+		{kRole: roleAssistant, kText: visionAnswer},
 		call("c2", `{"image_url":"`+gone+`","question":"What is on screen?"}`), result("c2"),
 		call("c3", `{"image_url":"https://example.com/charts/q3.png","question":"Which chart is this?"}`), result("c3"),
 		call("c4", `{"image_url":"`+other+`","question":"Is this device-only image shown?"}`), result("c4"),
@@ -91,7 +96,7 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 		{kRole: roleAssistant, kText: "done"},
 	}})
 	prof := t.TempDir()
-	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "visioncard", "run.js"), chrome, e.url, prof, seen, gone, kept, removed).CombinedOutput()
+	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "visioncard", "run.js"), chrome, e.url, prof, seen, gone, kept, removed, visionAnswer).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

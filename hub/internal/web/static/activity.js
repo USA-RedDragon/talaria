@@ -515,7 +515,7 @@ window.HubActivity = (ctx) => {
   function mini(r) {
     let m = S.minis.get(r.id);
     if (!m) {
-      m = { view: window.HubMiniChat.create({ el, toast, highlight: ctx.highlight, diff: ctx.diff, page: ctx.page }), seq: 0, epoch: null,
+      m = { view: window.HubMiniChat.create({ el, toast, highlight: ctx.highlight, diff: ctx.diff, page: ctx.page, cards: ctx.cards ? ctx.cards() : null }), seq: 0, epoch: null,
         busy: false, done: false, top: 0, end: true };
       S.minis.set(r.id, m);
       m.view.empty("Loading the steps…");
@@ -1023,7 +1023,7 @@ window.HubActivity = (ctx) => {
     const m = S.minis.get(r.id);
     const d = el("dialog", "picker steps");
     d.append(el("h2", "", r.goal || "Subagent"));
-    const v = window.HubMiniChat.create({ el, toast, highlight: ctx.highlight, diff: ctx.diff, page: ctx.page, full: true });
+    const v = window.HubMiniChat.create({ el, toast, highlight: ctx.highlight, diff: ctx.diff, page: ctx.page, cards: ctx.cards ? ctx.cards() : null, full: true });
     const body = el("div", "pbody");
     body.append(v.node);
     const foot = el("div", "pfoot");

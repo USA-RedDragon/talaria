@@ -1640,6 +1640,36 @@ button.link svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; s
 .vis-big + .vis-path { margin-top: .3rem; }
 .vis-link { display: block; font-size: .75rem; color: var(--accent); overflow-wrap: anywhere; }
 .tool-q { overflow-wrap: anywhere; }
+/* The parts every tool card shares (toolcard.js): chips after the title, a
+   line under it, the status, short lines, and the expanded part's key-value
+   rows, lists and the closed Raw toggle. */
+.tool.notice[data-state="bad"] { border-color: color-mix(in srgb, var(--bad) 55%, var(--line)); }
+.tool > .notice-head.chipped { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.tool > .notice-head > .notice-meta, .tool > .notice-head > .tool-sub, .tool > .notice-head > .tool-lines { grid-column: 2 / -1; }
+.tool-chips { display: flex; gap: .3rem; flex-wrap: nowrap; min-width: 0; overflow: hidden; }
+.tchip { display: inline-block; padding: 0 .45rem; border-radius: 999px; background: var(--code); color: var(--accent); font-size: .75rem; font-weight: 600;
+  line-height: 1.45; white-space: nowrap; vertical-align: baseline; }
+.tool-lead .tchip, .tool-line .tchip { margin-right: .2rem; }
+.tool-sub[hidden], .tool-lines[hidden] { display: none; }
+.tool-sub, .tool-lines { min-width: 0; font-weight: 400; }
+.tool-line { margin-top: .15rem; font-size: .86rem; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-line.dim { color: var(--muted); }
+.tool-line.mono, .tool-li.mono, .tool-kv dd.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }
+.tool-line .tcode, .tool-more .tcode, .tool-li .tcode, .tool-kv .tcode { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+.tadd { color: var(--ok); }
+.tdel { color: var(--bad); }
+.tool-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .15rem .8rem; margin: 0; font-size: .88rem; }
+.tool-kv dt { color: var(--muted); }
+.tool-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.tool-list { display: flex; flex-direction: column; gap: .15rem; font-size: .88rem; }
+.tool-li { min-width: 0; overflow-wrap: anywhere; }
+.tool-li.dim { color: var(--muted); }
+.tool-raw { position: relative; margin-bottom: .6rem; font-size: .8rem; }
+.tool-raw[hidden] { display: none; }
+.tool-raw > summary { cursor: pointer; color: var(--muted); font-weight: 600; width: max-content; }
+.tool-raw > pre { margin-top: .3rem; }
+.vis-q > small.vis-ask { display: block; color: var(--muted); font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vis-sec > b { display: block; font-size: .8rem; color: var(--muted); font-weight: 600; margin: .5rem 0 .15rem; }
 .vis[hidden], .vis-sec[hidden] { display: none; }
 
 /* Settings, Agent: the summary point slider */
@@ -1783,3 +1813,40 @@ pre.code .body { display: block; background: transparent; padding: 0 .75rem 0 0;
 .act .subplan.open .sp-line .chev { transform: none; }
 .act .sp-body { padding: 0 .5rem .5rem; }
 .act .sp-wait { font-size: .78rem; color: var(--muted); padding: .2rem .35rem; }
+
+/* Card modules (static/cards/*.js): each keeps its own styles in its own
+   section below, so the modules do not touch each other's lines. */
+
+/* cards/shell.js */
+
+/* end cards/shell.js */
+
+
+/* cards/files.js */
+
+/* end cards/files.js */
+
+
+/* cards/web.js and cards/misc.js */
+
+/* end cards/web.js and cards/misc.js */
+
+
+/* cards/browse.js */
+
+/* end cards/browse.js */
+
+
+/* cards/look.js */
+
+/* end cards/look.js */
+
+
+/* cards/agents.js, approvals.js and questioncard.js */
+
+/* end cards/agents.js */
+
+
+/* cards/notes.js */
+
+/* end cards/notes.js */

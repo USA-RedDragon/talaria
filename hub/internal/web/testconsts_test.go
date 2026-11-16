@@ -10,4 +10,10 @@ const (
 	textHello     = "hello"
 	titleOther    = "Other"
 	todoRezero    = "rezero"
+
+	fileToolCard   = "toolcard.js"
+	keyDisplayMeta = "display_metadata"
+	keyDurationMS  = "duration_ms"
+	keyResultSize  = "result_size"
+	keyToolOutcome = "tool_outcome"
 )

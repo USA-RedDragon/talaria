@@ -69,8 +69,8 @@ func firstSteps() []map[string]any {
 		{kRole: roleAssistant, keyText: "", "reasoning": "I need the schema first.", kTimestamp: 1001.0,
 			"tool_calls": []map[string]any{{"id": "c1", fieldName: toolTerminal, kArgs: map[string]any{kCommand: "ls store"}}}},
 		{kRole: stepTool, fieldName: toolTerminal, "tool_call_id": "c1", kTimestamp: 1003.5, kArgs: map[string]any{kCommand: "ls store"},
-			"result": `{"output": "", "exit_code": 2}`, "result_size": 30,
-			"display_metadata": map[string]any{"tool_outcome": map[string]any{"duration_ms": 2500, "is_error": true}}},
+			"result": `{"output": "", "exit_code": 2}`, keyResultSize: 30,
+			keyDisplayMeta: map[string]any{keyToolOutcome: map[string]any{keyDurationMS: 2500, "is_error": true}}},
 		{kRole: roleAssistant, keyText: "The folder is missing.", kTimestamp: 1004.0},
 	}
 }

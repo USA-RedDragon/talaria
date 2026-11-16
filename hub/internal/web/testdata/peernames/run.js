@@ -65,7 +65,7 @@ async function commands(c, tag) {
       lead: code ? t.firstChild.textContent : null, leadMono: /mono|Menlo/i.test(ts.fontFamily), ratio: cs ? parseFloat(cs.fontSize) / parseFloat(ts.fontSize) : 0, h: t.getBoundingClientRect().height, lh: parseFloat(ts.lineHeight) || parseFloat(ts.fontSize) * 1.5, ellipsis: ts.textOverflow, ws: ts.whiteSpace };
   }))`));
   assert.strictEqual(got.length, 4, tag + ": four command cards " + JSON.stringify(got));
-  const lead = { terminal: /^(Ran |Started in the background: )$/, execute_code: /^execute_code: $/, process_manage: /^Waited for background command $/ };
+  const lead = { terminal: /^(Ran |Started in the background: )$/, execute_code: /^Ran $/, process_manage: /^Waited for background command $/ };
   for (const g of got) {
     assert.ok(g.code, tag + ": " + g.tool + " has a code element: " + JSON.stringify(g));
     assert.ok(g.mono, tag + ": the code is monospace: " + JSON.stringify(g));

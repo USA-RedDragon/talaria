@@ -40,7 +40,7 @@ func TestSubagentMiniChatShowsASteerOnce(t *testing.T) {
 		at := float64(time.Now().Unix() + 2) // after the hub stored the steers
 		e.gw.AddChildRows("s9", subA,
 			map[string]any{kRole: roleAssistant, keyText: "", kTimestamp: at, kCalls: []map[string]any{{"id": "c1", fieldName: toolTerminal, kArgs: map[string]any{kCommand: "ls"}}}},
-			map[string]any{kRole: stepTool, fieldName: toolTerminal, kCallID: "c1", kTimestamp: at, kArgs: map[string]any{kCommand: "ls"}, sjResult: "{}", "result_size": 2},
+			map[string]any{kRole: stepTool, fieldName: toolTerminal, kCallID: "c1", kTimestamp: at, kArgs: map[string]any{kCommand: "ls"}, sjResult: "{}", keyResultSize: 2},
 			map[string]any{kRole: roleUser, keyText: gatewaytest.SteerOpen + "\n" + text + "\n" + gatewaytest.SteerClose, "display_kind": "steer", kTimestamp: at})
 		w.WriteHeader(http.StatusNoContent)
 	}))

@@ -1,0 +1,18 @@
+[
+ {"name": "an unknown tool shows its call and result behind Raw", "call": {"name": "acme_lookup", "args": {"kind": "invoices"}, "result": {"rows": 4}},
+  "want": {"title": "acme_lookup: invoices", "status": "Done", "state": "ok", "blocks": [], "raw": true}},
+ {"name": "a failure only in the result is a failure", "call": {"name": "acme_lookup", "args": {"kind": "x"}, "result": {"success": false, "message": "No such kind"}},
+  "want": {"status": "Failed: No such kind", "state": "bad", "raw": true}},
+ {"name": "a refused status is a failure", "call": {"name": "acme_lookup", "args": {}, "result": {"status": "refused", "reason": "not allowed"}},
+  "want": {"status": "Failed: not allowed", "state": "bad"}},
+ {"name": "delegate transcript is not a new subagent", "learn": [{"name": "delegate_task", "args": {"goal": "fix the parser"}, "res": {"subagent_ids": ["sa-1"], "goals": ["fix the parser"]}}],
+  "call": {"name": "delegate_task", "args": {"action": "transcript", "subagent_id": "sa-1"}, "result": {"returned": 20, "total_entries": 63, "running": true}},
+  "want": {"title": "Read subagent steps: fix the parser", "status": "Last 20 of 63 steps, still running", "state": "ok"}},
+ {"name": "delegate resume", "learn": [{"name": "delegate_task", "args": {"goal": "fix the parser"}, "res": {"subagent_ids": ["sa-1"], "goals": ["fix the parser"]}}],
+  "call": {"name": "delegate_task", "args": {"action": "resume", "subagent_id": "sa-1", "message": "also handle empty input"}, "result": {"status": "dispatched"}},
+  "want": {"title": "Resumed subagent: fix the parser", "state": "ok", "blocks": ["Message"]}},
+ {"name": "project notes topic write", "call": {"name": "project_memory", "args": {"operations": [{"action": "topic_write", "topic": "testing", "content": "How the suite is run."}]}, "result": {"success": true, "project_name": "relift"}},
+  "want": {"title": "Wrote the topic testing in relift", "code": "", "status": "Saved", "state": "ok", "blocks": ["Topic written: testing"]}},
+ {"name": "project notes path note write", "call": {"name": "project_memory", "args": {"operations": [{"action": "path_write", "path_note": "ppu", "paths": ["src/ppu/**"], "content": "Keep timing exact."}]}, "result": {"success": true, "project_name": "relift"}},
+  "want": {"title": "Wrote the path note ppu in relift", "status": "Saved", "blocks": ["Path note: ppu (src/ppu/**)"]}}
+]

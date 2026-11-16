@@ -1,22 +1,53 @@
 "use strict";
-// HubToolCard shows one tool call of a chat as a card with the look of the
-// notice cards (notice.js): a line icon, a one-line title in plain words, a
-// status line that leads with the result, then the time and how long it
-// took, and the raw call and output behind the expansion.
-// derive(c) is the pure part, run against internal/web/testdata/toolcards.json
-// by a Go test: it turns a call (name, args, result) into the icon, title,
-// status and the labeled blocks. memory() keeps what earlier calls of the
-// chat taught (a background command by its session id, a subagent by its
-// id) so that a later call can name it. create(ctx, c) builds the card;
-// its update(c) draws the call again, as it goes from running to done.
+// HubToolCard is the one card component of a tool call. The main chat, a
+// subagent's steps in Activity (minichat.js) and the full steps dialog all
+// draw their cards through mount() and finish() here, so a call looks the
+// same wherever it shows. Nothing else builds a tool card.
+//
+// The card has the look of the notice cards (notice.js): a line icon, a
+// title in plain words (a command or path in it in monospace), chips, a
+// status line that leads with the result and then the time and how long it
+// took, up to three short lines of what matters most, and an expanded part
+// with the bulky detail (output, diffs, file text, lists). Raw JSON shows
+// only where the hub cannot know the format, behind a closed Raw toggle.
+//
+// derive(c) is the pure part: it turns a call c (name, args, res, out,
+// done, failed, ...) into the card model below, through the renderer that
+// a card module registered for the tool (static/cards/*.js). memory()
+// keeps what earlier calls of a chat taught (a background command by its
+// session id, a subagent by its id) so that a later call can name it.
+//
 // c: name, args, result (raw), res (parsed result or null), out (output
 // text), diff (inline diff text), done, failed, error, startedAt and endedAt
-// (Unix ms, 0 when not known), duration (s), computer, mem.
-// ctx: el, highlight(code) (HTML or null), diff(text) (node), toast(text).
+// (Unix ms, 0 when not known), duration (s), answer (what the model said
+// about an image it looked at), pending, partial, mem.
+//
+// The model a renderer returns (every field but title optional):
+//   icon       an icon name of icons.js
+//   title      a string, or parts (below); code: a command at its end
+//   chips      short tags after the title: strings
+//   sub        one line between the title and the status (a folder)
+//   status     the result in words; tone ok, bad, warn or still to color it
+//              (else the state's color); more: parts after it, " · " apart
+//   lines      up to three lines under the status: { parts, dim, mono,
+//              closed (shown only while the card is closed) }
+//   blocks     the expanded part: { label, text, kind } where kind is pre
+//              (default), command, diff, plain, steps (items), page (meta),
+//              kv (rows of { k, v, mono }), list (items of parts), question
+//              (rec, drawn by questioncard.js); copy: false drops the button
+//   raw        text for the closed Raw toggle at the end of the expanded part
+//   vision     { kind, url|path, question } of an image the call looked at
+//   page       { path, title } of a page the call published
+//   statusLast the status line comes after the lines
+//   bad, idle, waiting  the state is bad; the status is muted; it waits
+// Parts are strings or { code }, { chip }, { tone, text } (tone ok, bad,
+// warn, add, del).
 window.HubToolCard = (() => {
   const titleLen = 120;
   const errorLen = 80;
   const outLen = 20000;
+  const lineLen = 160;
+  const maxLines = 3;
 
   const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   const str = (v) => (typeof v === "string" ? v : v == null ? "" : typeof v === "number" || typeof v === "boolean" ? String(v) : "");
@@ -30,10 +61,36 @@ window.HubToolCard = (() => {
     for (const l of str(s).split("\n")) if (l.trim()) return l.trim();
     return "";
   };
+  const last = (s) => {
+    const ls = str(s).split("\n");
+    for (let i = ls.length - 1; i >= 0; i--) if (ls[i].trim()) return ls[i].trim();
+    return "";
+  };
   const plural = (n, one, many) => n + " " + (n === 1 ? one : many || one + "s");
   const base = (p) => str(p).replace(/\/+$/, "").split("/").pop() || str(p);
+  // dir is the folder of a path, with its slash: /home/a/b.go is /home/a/.
+  const dir = (p) => {
+    const s = str(p);
+    const i = s.replace(/\/+$/, "").lastIndexOf("/");
+    return i < 0 ? "" : s.slice(0, i + 1);
+  };
   const lines = (s) => (s ? s.replace(/\n+$/, "").split("\n").length : 0);
   const stripAnsi = (s) => str(s).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  const num = (n) => (typeof n === "number" && Number.isFinite(n) ? n.toLocaleString("en-US") : "");
+  // size writes a byte count: 212 B, 1.3 KB, 4.2 MB.
+  function size(n) {
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "";
+    if (n < 1024) return n + " B";
+    const u = ["KB", "MB", "GB", "TB"];
+    let v = n / 1024;
+    let i = 0;
+    while (v >= 1024 && i < u.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return (v < 10 ? Math.round(v * 10) / 10 : Math.round(v)) + " " + u[i];
+  }
+  const upperFirst = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
   function host(u) {
     try {
@@ -114,239 +171,49 @@ window.HubToolCard = (() => {
     return i < 0 ? null : list.splice(i, 1)[0];
   }
 
-  function counts(diff) {
-    let add = 0;
-    let del = 0;
-    for (const l of stripAnsi(diff).split("\n")) {
-      if (l.startsWith("+") && !l.startsWith("+++")) add++;
-      else if (l.startsWith("-") && !l.startsWith("---")) del++;
-    }
-    return "+" + add + " -" + del;
+  const verb = (c, past, now) => (c.done ? past : now);
+
+  // errorText is the error a result carries in any of the shapes tools use:
+  // error as text or as { message }, else message beside a failed status.
+  function errorText(res) {
+    if (!isObj(res)) return "";
+    if (typeof res.error === "string" && res.error.trim()) return res.error;
+    if (isObj(res.error) && typeof res.error.message === "string") return res.error.message;
+    if (typeof res.message === "string" && failedRes(res)) return res.message;
+    if (typeof res.reason === "string" && failedRes(res)) return res.reason;
+    return "";
   }
 
-  const verb = (c, past, now) => (c.done ? past : now);
+  // badStatus are the status words with which a tool says it did not do
+  // what was asked.
+  const badStatus = new Set(["error", "failed", "failure", "refused", "denied", "blocked", "rejected", "not_found", "invalid", "timeout", "timed_out"]);
+
+  // failedRes says a parsed result reports a failure, whatever the tool:
+  // an error, success or ok false, is_error, or a failing status.
+  function failedRes(res) {
+    if (!isObj(res)) return false;
+    if (typeof res.error === "string" ? res.error.trim() !== "" : isObj(res.error) || res.error === true) return true;
+    if (res.success === false || res.is_error === true) return true;
+    if (typeof res.status === "string" && badStatus.has(res.status.toLowerCase())) return true;
+    return false;
+  }
 
   function failure(c) {
     if (!c.failed) return "";
-    const res = c.res;
-    let e = isObj(res) && typeof res.error === "string" ? res.error : str(c.error);
-    if (!e && isObj(res) && typeof res.message === "string") e = res.message;
+    let e = errorText(c.res) || str(c.error);
     if (!e) e = first(c.out);
     return "Failed: " + (cut(squash(e), errorLen) || "the call did not work");
   }
 
   const exitCode = (res) => (isObj(res) && typeof res.exit_code === "number" ? res.exit_code : null);
 
-  function pm(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const act = str(a.action) || "list";
-    const id = str(a.session_id);
-    const cmd = short(str(res.command) || (c.mem && c.mem.proc(id)) || id);
-    const out = { icon: "activity", blocks: [] };
-    const exited = res.status === "exited" || res.status === "already_exited" || (typeof res.exit_code === "number" && res.status !== "killed");
-    const exit = exitCode(res);
-    const exitText = exit === null ? "Exited" : "Exited " + exit;
-    switch (act) {
-      case "kill":
-        out.icon = "stop";
-        out.title = verb(c, "Stopped", "Stopping") + " background command " + cmd;
-        out.code = cmd;
-        out.status = res.status === "already_exited" ? exitText : "Stopped";
-        break;
-      case "wait": {
-        out.icon = "clock";
-        out.title = verb(c, "Waited for", "Waiting for") + " background command " + cmd;
-        out.code = cmd;
-        if (exited) out.status = exitText;
-        else if (res.status === "interrupted") out.status = "Interrupted";
-        else {
-          // The timeout asked for is not how long it waited; the card's own
-          // duration is. A wait that has not finished is not a success.
-          out.status = "Still running" + (typeof c.duration === "number" && c.duration >= 1 ? " after waiting " + span(c.duration) : "");
-          out.idle = true;
-        }
-        break;
-      }
-      case "poll":
-        out.title = verb(c, "Checked", "Checking") + " background command " + cmd;
-        out.code = cmd;
-        out.status = exited ? exitText : "Still running";
-        break;
-      case "log": {
-        out.icon = "list";
-        out.title = verb(c, "Read the output of", "Reading the output of") + " background command " + cmd;
-        out.code = cmd;
-        const n = typeof res.total_lines === "number" ? res.total_lines : c.partial && c.partial.lines ? c.partial.lines : lines(str(res.output));
-        out.status = plural(n, "line");
-        break;
-      }
-      case "write":
-      case "submit":
-        out.icon = "send";
-        out.title = verb(c, "Sent input to", "Sending input to") + " background command " + cmd;
-        out.code = cmd;
-        out.status = "Sent";
-        break;
-      case "close":
-        out.title = verb(c, "Closed the input of", "Closing the input of") + " background command " + cmd;
-        out.code = cmd;
-        out.status = "Closed";
-        break;
-      case "handoff":
-        out.icon = "send";
-        out.title = verb(c, "Handed off", "Handing off") + " background command " + cmd;
-        out.code = cmd;
-        out.status = "Handed off";
-        break;
-      default: {
-        out.icon = "list";
-        out.title = verb(c, "Listed", "Listing") + " background commands";
-        const list = Array.isArray(res.processes) ? res.processes : null;
-        out.status = list ? plural(list.length, "command") : "Done";
-      }
-    }
-    if (res.status === "not_found") out.status = "No such command";
-    out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function delegate(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const act = str(a.action) || "spawn";
-    const out = { icon: "bot", blocks: [] };
-    const id = str(a.subagent_id) || str(res.subagent_id);
-    const goalOf = () => short((c.mem && c.mem.sub(id)) || id) || "a subagent";
-    if (act === "list") {
-      out.icon = "list";
-      out.title = verb(c, "Listed", "Listing") + " subagents";
-      out.status = Array.isArray(res.subagents) ? plural(res.subagents.length, "subagent") + " running" : "Done";
-    } else if (act === "steer") {
-      out.icon = "compass";
-      out.title = verb(c, "Message to subagent: ", "Sending a message to subagent: ") + goalOf();
-      out.status = res.status === "queued" ? "Delivered at its next step" : str(res.status) ? squash(res.status) : "Delivered at its next step";
-      if (a.message) out.blocks.push({ label: "Message", text: str(a.message), pre: true });
-    } else if (act === "stop") {
-      out.icon = "stop";
-      out.title = verb(c, "Stopped", "Stopping") + " subagent: " + goalOf();
-      out.status = "Stopped";
-    } else {
-      const tasks = Array.isArray(a.tasks) ? a.tasks.filter(isObj) : [];
-      const goals = tasks.length ? tasks.map((t) => str(t.goal)) : [str(a.goal)];
-      out.title = tasks.length > 1 ? verb(c, "Started", "Starting") + " " + tasks.length + " subagents" : verb(c, "Started", "Starting") + " subagent: " + (short(goals[0]) || "a task");
-      out.status = Array.isArray(res.results) ? plural(res.results.length, "result") : "Running in the background";
-      out.blocks.push({ label: goals.length > 1 ? "Goals" : "Goal", text: goals.filter(Boolean).join("\n\n"), pre: true });
-      if (a.context) out.blocks.push({ label: "Context", text: str(a.context), pre: true });
-    }
-    if (c.failed) out.status = failure(c);
-    if (act === "list" || act === "stop") out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out && !out.blocks.some((b) => b.label === "Output")) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function edit(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    let path = str(a.path) || str(a.file_path);
-    if (!path && typeof a.patch === "string") {
-      const m = /^\*\*\* (?:Update|Add|Delete) File: (.+)$/m.exec(a.patch);
-      if (m) path = m[1].trim();
-    }
-    const wrote = c.name === "write_file";
-    const out = { icon: wrote ? "filenew" : "edit", blocks: [] };
-    out.title = (wrote ? verb(c, "Wrote", "Writing") : verb(c, "Edited", "Editing")) + " " + (path || "a file");
-    const diff = c.diff || str(res.diff);
-    if (diff) out.status = counts(diff);
-    else if (wrote) out.status = "+" + lines(str(a.content)) + " -0";
-    else if (typeof a.old_string === "string" || typeof a.new_string === "string") out.status = "+" + lines(str(a.new_string)) + " -" + lines(str(a.old_string));
-    else out.status = "Done";
-    if (diff) out.blocks.push({ label: "Diff", text: diff, kind: "diff" });
-    else if (wrote && a.content) out.blocks.push({ label: "Content", text: str(a.content), pre: true });
-    else if (typeof a.old_string === "string") {
-      out.blocks.push({ label: "Diff", text: stripAnsi(["--- " + path, "+++ " + path].concat(str(a.old_string).split("\n").map((l) => "-" + l), str(a.new_string).split("\n").map((l) => "+" + l)).join("\n")), kind: "diff" });
-    } else if (typeof a.patch === "string") out.blocks.push({ label: "Patch", text: a.patch, pre: true });
-    if (c.out && !diff) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function search(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "search", blocks: [] };
-    const where = str(a.path);
-    out.title = verb(c, "Searched", "Searching") + " files for " + (short(str(a.pattern)) || "files") + (where ? " in " + where : "");
-    const list = Array.isArray(res.matches) ? res.matches : Array.isArray(res.files) ? res.files : null;
-    if (list) {
-      const paths = new Set(list.map((m) => (isObj(m) ? str(m.path || m.file) : str(m))).filter(Boolean));
-      const n = typeof res.total_count === "number" ? res.total_count : list.length;
-      out.status = Array.isArray(res.matches) ? n + (n === 1 ? " match" : " matches") + " in " + plural(paths.size, "file") : plural(n, "file");
-    } else if (typeof res.total_count === "number") {
-      out.status = plural(res.total_count, "match", "matches");
-    } else {
-      out.status = "Done";
-    }
-    out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Matches", text: c.out, pre: true });
-    return out;
-  }
-
-  function read(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "file", blocks: [] };
-    const path = str(a.path) || str(a.file_path);
-    out.title = verb(c, "Read", "Reading") + " " + (base(path) || "a file");
-    const n = c.partial && c.partial.lines ? c.partial.lines : typeof res.content === "string" ? lines(res.content) : lines(c.out);
-    out.status = plural(n, "line");
-    out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: typeof res.content === "string" ? res.content : c.out, pre: true });
-    return out;
-  }
-
-  function web(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "globe", blocks: [] };
-    if (c.name === "web_search") {
-      out.title = verb(c, "Searched", "Searching") + " the web for " + (short(str(a.query)) || "a query");
-      const list = isObj(res.data) && Array.isArray(res.data.web) ? res.data.web : Array.isArray(res.results) ? res.results : Array.isArray(res.web) ? res.web : null;
-      out.status = list ? plural(list.length, "result") : "Done";
-      // Each result's title and link, the way the search card reads: Hermes's search and Claude's own one
-      // (server-side, talaria-hermes 0125) give the same result shape.
-      const found = (list || []).filter((r) => isObj(r) && str(r.url));
-      if (found.length) {
-        out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-        out.blocks.push({ label: "Results", text: found.map((r) => (str(r.title) || str(r.url)) + "\n" + str(r.url)).join("\n\n") });
-        return out;
-      }
-    } else {
-      const urls = Array.isArray(a.urls) ? a.urls.map(str).filter(Boolean) : a.url ? [str(a.url)] : [];
-      const h = urls.length ? host(urls[0]) : "a page";
-      out.title = verb(c, "Read", "Reading") + " " + h + (urls.length > 1 ? " and " + (urls.length - 1) + " more" : "");
-      const list = Array.isArray(res.results) ? res.results : null;
-      out.status = plural(list ? list.length : urls.length || 1, "page");
-    }
-    out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function send(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "mail", blocks: [] };
-    // The hub names the peer in the result ("chat 'name' (session id)",
-    // "subagent sa-..."); the title says it in words: a subagent by its goal,
-    // a chat by its title. The raw id goes in the details.
-    const peer = who(str(res.to) || str(a.to), c.mem);
-    out.title = verb(c, "Sent a message to ", "Sending a message to ") + peer.label;
-    out.status = str(res.delivery) ? upperFirst(squash(res.delivery)) : "Sent";
-    if (a.text) out.blocks.push({ label: "Message", text: str(a.text), pre: true });
-    if (peer.id) out.blocks.push({ label: { sub: "Subagent", cron: "Scheduled job" }[peer.kind] || "Chat", text: peer.id, pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
+  // span writes a length of time: 45 s, 3 min, 1 h 5 min.
+  function span(s) {
+    s = Math.round(s);
+    if (s < 60) return s + " s";
+    if (s < 3600) return Math.round(s / 60) + " min";
+    const m = Math.round((s % 3600) / 60);
+    return Math.floor(s / 3600) + " h" + (m ? " " + m + " min" : "");
   }
 
   // who names a peer from what the chat learned, then from the page's names.
@@ -360,60 +227,6 @@ window.HubToolCard = (() => {
     });
   }
 
-  // agentPeers and agentName are the tools that list the user's chats and
-  // name this one.
-  function agentPeers(c) {
-    const out = { icon: "list", blocks: [], status: "Done" };
-    out.title = verb(c, "Listed", "Listing") + " your chats";
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function agentName(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const name = short(str(a.name));
-    const out = { icon: "edit", blocks: [], status: "Done" };
-    out.title = name ? verb(c, "Named this chat ", "Naming this chat ") + name : verb(c, "Cleared", "Clearing") + " this chat's name";
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  const upperFirst = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
-
-  function terminal(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const cmd = str(a.command);
-    const bg = !!a.background || res.status === "yielded_to_background";
-    const out = { icon: "terminal", blocks: [] };
-    out.title = (bg ? verb(c, "Started in the background: ", "Starting in the background: ") : verb(c, "Ran ", "Running ")) + (short(cmd) || "a command");
-    if (short(cmd)) out.code = short(cmd);
-    const exit = exitCode(res);
-    if (bg && !c.failed) out.status = "Running in the background";
-    else if (exit !== null && exit !== 0) out.status = "Exit " + exit;
-    else if (exit === 0) out.status = "Exit 0";
-    else out.status = "Done";
-    if (exit !== null && !bg && c.computer) out.status += " on " + c.computer;
-    if (cmd) out.blocks.push({ label: "Command", text: cmd, kind: "command" });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  const browserWords = {
-    browser_navigate: ["globe", "Opened", "Opening", (a) => host(str(a.url))],
-    browser_click: ["cursor", "Clicked", "Clicking", (a, t) => t],
-    browser_type: ["cursor", "Typed into", "Typing into", (a, t) => t],
-    browser_press: ["cursor", "Pressed", "Pressing", (a) => keyName(a.key)],
-    browser_scroll: ["eye", "Scrolled the page", "Scrolling the page", () => ""],
-    browser_back: ["eye", "Went back a page", "Going back a page", () => ""],
-    browser_snapshot: ["eye", "Read the page", "Reading the page", () => ""],
-    browser_screenshot: ["camera", "Took a screenshot", "Taking a screenshot", () => ""],
-    browser_vision: ["eye", "Looked at the page", "Looking at the page", () => ""],
-    browser_hover: ["cursor", "Hovered over", "Hovering over", (a, t) => t],
-    browser_tabs: ["tabs", "Used the browser tabs", "Using the browser tabs", () => ""],
-    browser_eval: ["globe", "Ran a script in the page", "Running a script in the page", () => ""],
-  };
-
   // keyName is a pressed key in words: Enter, Tab, Ctrl+A. Anything that is
   // not a key name (a stray digit, a ref) is left out.
   function keyName(k) {
@@ -421,452 +234,110 @@ window.HubToolCard = (() => {
     return t.length > 1 || /^[A-Za-z]$/.test(t) ? t : "";
   }
 
-  // targetName is what the device plugin said the call acted on: the label
-  // the page gave the element, else its role. A ref is never shown.
-  function targetName(c) {
-    const t = isObj(c.res) && isObj(c.res.target) ? c.res.target : null;
-    if (!t) return "";
-    return str(t.name) ? short(t.name) : str(t.role) ? "the " + short(t.role) : "";
+  // toolLabel is a tool's name in plain words: get_thing is "get thing".
+  function toolLabel(name) {
+    return plain(name).replace(/[_-]+/g, " ").trim() || "a tool";
   }
 
-  const hostOfUrl = (u) => (str(u) ? host(str(u)) : "");
-
-  // batchStep is one step of a browser_batch result: its words, state and
-  // the outcome shown beside it. A result from a plugin that sends no
-  // details falls back to its step lines.
-  function batchSteps(res) {
-    if (Array.isArray(res.details) && res.details.length) {
-      return res.details.filter(isObj).map((d) => ({
-        text: short(d.text) || "Step " + str(d.step),
-        state: str(d.state) || "done",
-        outcome: d.state === "failed" ? "Failed: " + (short(d.error) || "the step did not work") : d.state === "not_run" ? "Not run" : "Done" + (str(d.approved) ? " · approved " + short(d.approved) : ""),
-        form: d.action === "type" || d.action === "select",
-      }));
-    }
-    if (Array.isArray(res.steps)) {
-      return res.steps.map((l) => {
-        const t = str(l).replace(/^\d+\.\s*/, "");
-        const failed = /^Failed:/.test(t);
-        const skipped = /^Not run:/.test(t);
-        return { text: short(t.replace(/^(Failed|Not run):\s*/, "")), state: failed ? "failed" : skipped ? "not_run" : "done", outcome: failed ? "Failed" : skipped ? "Not run" : "Done", form: /^(Typed into|Selected)/.test(t) };
-      });
-    }
-    return [];
-  }
-
-  // askedStep is one step the agent asked for, in plain words, from the
-  // call's arguments: the element's label, else its role, else its ref. What
-  // would be typed is never shown.
-  function askedStep(x) {
-    if (!isObj(x)) return "A step that is not an object";
-    const act = str(x.action).toLowerCase();
-    const el = str(x.name) ? '"' + short(x.name) + '"' : str(x.role) ? "the " + short(x.role) : str(x.ref) ? "element " + short(x.ref) : "";
-    switch (act) {
-      case "click": return "Click " + (el || "an element");
-      case "hover": return "Hover over " + (el || "an element");
-      case "type": case "fill": return "Type into " + (el || "an element");
-      case "select": return (str(x.value) ? "Select " + short(x.value) + " in " : "Choose an option in ") + (el || "a list");
-      case "press": case "key": return "Press " + (short(x.key) || "a key") + (el ? " on " + el : "");
-      case "scroll": return "Scroll " + (str(x.to_text) ? "to " + short(x.to_text) : el ? "to " + el : str(x.direction) ? short(x.direction) : "the page");
-      case "wait_for": case "wait": return "Wait for " + (short(x.text) || short(x.selector) || "something on the page");
-      case "navigate": case "goto": case "open": return "Open " + (hostOfUrl(x.url) || short(x.url) || "a page");
-      default: return act ? "Step: " + short(act) : "A step with no action";
+  // json writes a value for the Raw toggle.
+  function json(v) {
+    if (v === undefined) return "";
+    if (typeof v === "string") return v;
+    try {
+      return JSON.stringify(v, null, 2);
+    } catch (_) {
+      return "";
     }
   }
 
-  // batchRefused is the card of a batch that came back with an error and no
-  // step results: it never ran (the plugin refused it before the first step,
-  // or the browser was not there). The body is the whole error and the steps
-  // the agent asked for, each marked not run, the one the error names marked
-  // failed.
-  function batchRefused(c, a, res) {
-    let e = str(res.error) || str(res.message) || str(c.error) || first(c.out);
-    e = e.trim();
-    const given = Array.isArray(a.steps) ? a.steps : [];
-    const m = /\bstep (\d+)\b/i.exec(e);
-    const at = m && +m[1] >= 1 && +m[1] <= given.length ? +m[1] : 0;
-    const out = { icon: "list", bad: true, blocks: [] };
-    out.title = given.length ? "Browser steps not run: " + given.length : "Browser steps not run";
-    out.status = at ? "Not run: step " + at + " is not valid" : "Not run";
-    out.blocks.push({ label: "Error", plain: true, text: e || "The call did not work." });
-    const items = given.map((x, i) => ({ text: askedStep(x), state: i + 1 === at ? "failed" : "not_run", outcome: i + 1 === at ? "Not valid" : "Not run", form: false }));
-    if (items.length) out.blocks.push({ label: "Steps asked for", kind: "steps", items, text: items.map((x, i) => (i + 1) + ". " + x.text + " (" + x.outcome + ")").join("\n") });
+  // The renderers of the tools: card modules register theirs. A name with
+  // no renderer of its own goes to the first fallback whose test matches
+  // it, else to the generic card.
+  const handlers = Object.create(null);
+  const fallbacks = [];
+  let generic = null;
+  function register(map, opts) {
+    for (const [k, fn] of Object.entries(map || {})) handlers[k] = fn;
+    if (opts && typeof opts.match === "function" && typeof opts.fn === "function") fallbacks.push(opts);
+    if (opts && typeof opts.generic === "function") generic = opts.generic;
+  }
+
+  // basic is the card of a tool nobody registered a renderer for: its name
+  // in plain words, and its call and result behind Raw, since the hub does
+  // not know their format.
+  function basic(c) {
+    const out = { icon: "tool", title: verb(c, "Used ", "Using ") + toolLabel(c.name), status: "Done", blocks: [] };
+    out.raw = rawOf(c);
     return out;
   }
 
-  function batch_(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    if (c.done && (c.failed || str(res.error)) && !batchSteps(res).length) return batchRefused(c, a, res);
-    const out = { icon: "list", blocks: [] };
-    const given = Array.isArray(a.steps) ? a.steps : [];
-    const steps = c.done ? batchSteps(res) : [];
-    // Steps the result does not list (the batch ran out of time) were not run.
-    if (c.done && steps.length && steps.length < given.length) {
-      for (let i = steps.length; i < given.length; i++) steps.push({ text: askedStep(given[i]), state: "not_run", outcome: "Not run", form: false });
-    }
-    const total = steps.length || (typeof res.total === "number" ? res.total : given.length);
-    const page = isObj(res.page) ? res.page : null;
-    const site = hostOfUrl(page && page.url) || hostOfUrl((given.find((x) => isObj(x) && x.url) || {}).url);
-    const form = steps.some((x) => x.form) || given.some((x) => isObj(x) && (x.action === "type" || x.action === "fill" || x.action === "select"));
-    const done = steps.filter((x) => x.state === "done").length;
-    const stopped = steps.findIndex((x) => x.state !== "done");
-    const bad = c.done && (res.ok === false || stopped >= 0) && !c.failed;
-    const count = bad ? done + " of " + total + " steps" : plural(total, "step");
-    const on = site ? " on " + site : "";
-    if (!c.done) {
-      out.title = (form ? "Filling the form" : "Running " + plural(total || 1, "browser step")) + on;
-    } else if (form) {
-      out.title = "Filled the form" + on + ": " + count;
-    } else if (steps.length && steps.length <= 3 && !bad) {
-      out.title = steps.map((x) => x.text).join(", then ").replace(/^./, (m) => m);
-    } else {
-      out.title = "Ran " + (bad ? count : plural(total, "browser step")) + on;
-    }
-    if (bad) {
-      out.bad = true;
-      const at = stopped >= 0 ? stopped + 1 : isObj(res.failed) ? res.failed.step : 0;
-      out.status = at ? "Stopped at step " + at : "Stopped";
-    } else {
-      out.status = "Done";
-    }
-    if (steps.length) out.blocks.push({ label: "Steps", kind: "steps", items: steps, text: steps.map((x, i) => (i + 1) + ". " + x.text + " (" + x.outcome + ")").join("\n") });
-    if (page && (str(page.snapshot) || str(page.text))) {
-      const meta = [str(page.title), site, Number.isFinite(page.element_count) ? plural(page.element_count, "element") : ""].filter(Boolean).join(" · ");
-      out.blocks.push({ label: "Page read at the end", kind: "page", meta, text: str(page.snapshot) || str(page.text) });
-    } else if (str(res.page_error)) {
-      out.blocks.push({ label: "Page read at the end", plain: true, text: str(res.page_error) });
-    }
-    return out;
+  // rawOf is the call and its result as JSON, for the Raw toggle.
+  function rawOf(c) {
+    const parts = [];
+    if (isObj(c.args) && Object.keys(c.args).length) parts.push(json(c.args));
+    if (c.res !== null && c.res !== undefined) parts.push(json(c.res));
+    else if (c.out) parts.push(c.out);
+    return parts.join("\n\n");
   }
 
-  function browser(c) {
-    const a = isObj(c.args) ? c.args : {};
-    if (c.name === "browser_batch") return batch_(c);
-    const w = browserWords[c.name];
-    const out = { icon: w ? w[0] : "globe", blocks: [] };
-    if (w) {
-      const arg = w[3](a, targetName(c));
-      out.title = (c.done ? w[1] : w[2]) + (arg ? " " + short(arg) : "");
-    }
-    else out.title = verb(c, "Used", "Using") + " the browser: " + c.name.replace(/^browser_/, "").replace(/_/g, " ");
-    out.status = "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
+  // part normalizes one part of a title or line.
+  function part(p) {
+    if (typeof p === "string" || typeof p === "number") return String(p).replace(emojiRe, "");
+    if (!isObj(p)) return "";
+    if (p.code !== undefined) return { code: plain(str(p.code)) };
+    if (p.chip !== undefined) return { chip: plain(str(p.chip)) };
+    if (p.tone !== undefined) return { tone: str(p.tone), text: plain(str(p.text)) };
+    return "";
   }
+  const partsOf = (v) => (Array.isArray(v) ? v : v === undefined || v === null ? [] : [v]).map(part).filter((p) => p !== "" && !(isObj(p) && !(p.code || p.chip || p.text)));
+  const textOf = (parts) => parts.map((p) => (typeof p === "string" ? p : p.code || p.chip || p.text || "")).join("");
 
-  // Hermes requires approval before it saves some notes. A result that says so, or a
-  // call the page marked pending, is waiting for the user.
-  const pendingWords = new Set(["pending", "pending_approval", "awaiting_approval", "approval_required", "needs_approval", "waiting_for_approval"]);
-  function waiting(c) {
-    if (c.pending) return true;
-    const res = isObj(c.res) ? c.res : {};
-    return pendingWords.has(str(res.status)) || res.pending_approval === true || res.staged === true || res.approval_pending === true || res.requires_approval === true;
-  }
-
-  function noteBlocks(ops) {
-    const blocks = [];
-    for (const o of ops) {
-      const act = str(o.action);
-      if (act === "add") blocks.push({ label: "Added note", text: str(o.content), pre: true });
-      else if (act === "remove") blocks.push({ label: "Removed note", text: str(o.old_text) || str(o.content), pre: true });
-      else if (act === "replace" || act === "patch") {
-        blocks.push({ label: "Edited note", text: str(o.content), pre: true });
-        if (o.old_text) blocks.push({ label: act === "patch" ? "Text that changed" : "Note it replaced", text: str(o.old_text), pre: true });
-      }
-    }
-    return blocks;
-  }
-
-  const noteWord = (n) => (n === 1 ? "a project note" : n + " project notes");
-
-  // projectName is the project in plain words: the name the plugin sends,
-  // else the repo or folder name read out of its key. The raw key (root:<sha>,
-  // folder:<device>:<path>, host/owner/repo) never reaches a title.
-  function projectName(res, c) {
-    const fromKey = (k) => {
-      k = str(k);
-      if (/^root:[0-9a-f]{8,}$/i.test(k)) return "";
-      const m = k.match(/^folder:[^:]*:(.*)$/);
-      if (m) return base(m[1]);
-      return /\/|:/.test(k) ? base(k) : k;
-    };
-    return short(str(res.project_name) || fromKey(res.project) || str(res.name) || base(str(res.folder) || str(res.path) || str(res.project_path) || str(res.root)) || fromKey(c.project));
-  }
-
-  function projectMemory(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    let ops = Array.isArray(a.operations) ? a.operations.filter(isObj) : [];
-    if (!ops.length && ["add", "patch", "replace", "remove"].includes(str(a.action))) ops = [a];
-    const out = { icon: "database", blocks: [] };
-    const name = projectName(res, c);
-    const count = (...k) => ops.filter((o) => k.includes(str(o.action))).length;
-    const added = count("add");
-    const edited = count("replace", "patch");
-    const removed = count("remove");
-    const kinds = [added, edited, removed].filter(Boolean).length;
-    if (!ops.length) {
-      out.title = verb(c, "Read", "Reading") + " the notes of " + (name || "this project");
-      const list = Array.isArray(res.entries) ? res.entries : Array.isArray(res.notes) ? res.notes : null;
-      out.status = list ? plural(list.length, "note") : "Done";
-    } else {
-      let head;
-      if (kinds > 1) head = verb(c, "Changed ", "Changing ") + noteWord(ops.length) + (name ? " in " + name : "");
-      else if (added) head = verb(c, "Added ", "Adding ") + noteWord(added) + (name ? " to " + name : "");
-      else if (edited) head = verb(c, "Edited ", "Editing ") + noteWord(edited) + (name ? " in " + name : "");
-      else head = verb(c, "Removed ", "Removing ") + noteWord(removed) + (name ? " from " + name : "");
-      if (c.done && c.failed) head = head.replace(/^Added /, "Could not add ").replace(/^Edited /, "Could not edit ").replace(/^Removed /, "Could not remove ").replace(/^Changed /, "Could not change ").replace(/ (to|from|in) /, (m, w) => " " + w + " ");
-      out.title = head;
-      out.status = "Saved";
-      out.blocks.push(...noteBlocks(ops));
-    }
-    if (waiting(c)) {
-      out.status = "Waiting for approval";
-      out.waiting = true;
-    }
-    if (c.out && (waiting(c) || c.failed || !ops.length)) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function memoryTool(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const act = str(a.action);
-    const user = str(a.target) === "user";
-    const what = user ? "your profile" : "memory";
-    const out = { icon: "database", blocks: [] };
-    if (act === "add") out.title = verb(c, "Saved a note to ", "Saving a note to ") + what;
-    else if (act === "remove") out.title = verb(c, "Removed a note from ", "Removing a note from ") + what;
-    else if (act === "replace") out.title = verb(c, "Updated a note in ", "Updating a note in ") + what;
-    else out.title = verb(c, "Used ", "Using ") + what;
-    out.status = act === "add" || act === "remove" || act === "replace" ? "Saved" : "Done";
-    out.blocks.push(...noteBlocks(act ? [a] : []));
-    if (waiting(c)) {
-      out.status = "Waiting for approval";
-      out.waiting = true;
-    }
-    if (!out.blocks.length && Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out && (waiting(c) || c.failed || !out.blocks.length)) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function sessionSearch(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "search", blocks: [] };
-    const q = short(str(a.query));
-    out.title = q ? verb(c, "Searched", "Searching") + " past chats for " + q : verb(c, "Looked through", "Looking through") + " recent chats";
-    const list = Array.isArray(res.results) ? res.results : Array.isArray(res.sessions) ? res.sessions : Array.isArray(res.matches) ? res.matches : null;
-    out.status = list ? plural(list.length, "session") : "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  const secretKey = /pass|secret|token|code|cvc|card|number|otp|key/i;
-  function scrub(v) {
-    if (Array.isArray(v)) return v.map(scrub);
-    if (!isObj(v)) return v;
-    const o = {};
-    for (const [k, x] of Object.entries(v)) o[k] = secretKey.test(k) && typeof x !== "boolean" ? "(hidden)" : scrub(x);
-    return o;
-  }
-
-  function vault(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "key", blocks: [] };
-    const where = host(str(a.url) || str(a.host) || str(a.domain) || str(res.host) || str(res.url));
-    const looking = !str(a.action) || str(a.action) === "list";
-    out.title = (looking ? verb(c, "Looked for", "Looking for") : verb(c, "Used", "Using")) + " a saved login" + (where ? " on " + where : "");
-    const list = Array.isArray(res.logins) ? res.logins : Array.isArray(res.entries) ? res.entries : Array.isArray(res.items) ? res.items : null;
-    out.status = list ? plural(list.length, "login") : "Done";
-    // Never show what the vault returned: it may hold a secret.
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(scrub(a), null, 2), pre: true });
-    return out;
-  }
-
-  function mcpCall(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const out = { icon: "plug", blocks: [] };
-    const tool = [str(a.server), str(a.tool)].filter(Boolean).join(".") || str(a.name);
-    if (c.name === "mcp_device_call") out.title = verb(c, "Called ", "Calling ") + (short(tool) || "a tool") + " on your computer";
-    else if (c.name === "mcp_device_tools") out.title = verb(c, "Looked up", "Looking up") + " the tools of " + (short(str(a.server)) || "a server") + " on your computer";
-    else out.title = verb(c, "Looked up", "Looking up") + " the servers on your computer";
-    out.status = "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function toolLookup(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "search", blocks: [] };
-    out.title = verb(c, "Looked up", "Looking up") + " a tool";
-    const list = Array.isArray(res.tools) ? res.tools : Array.isArray(res.matches) ? res.matches : Array.isArray(res.results) ? res.results : null;
-    out.status = list ? plural(list.length, "match", "matches") : "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function wrapper(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const list = wrapped(c.name, a);
-    const out = { icon: "tool", blocks: [] };
-    out.title = list && list.length ? verb(c, "Ran ", "Running ") + plural(list.length, "tool") + " in one call" : verb(c, "Used", "Using") + " a deferred tool";
-    out.status = "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  function skill(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const out = { icon: "book", blocks: [] };
-    const name = str(a.name) || (Array.isArray(a.operations) && isObj(a.operations[0]) ? str(a.operations[0].name) : "");
-    if (c.name === "skills_list") out.title = verb(c, "Listed", "Listing") + " skills";
-    else if (c.name === "skill_view") out.title = verb(c, "Read", "Reading") + " skill" + (name ? " " + name : "");
-    else out.title = verb(c, "Edited", "Editing") + " skill" + (name ? " " + name : "");
-    out.status = "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  // vision is vision_analyze and browser_vision: the card shows the image the
-  // call looked at (d.vision) with the question as a plain line. A path the
-  // hub may serve is a thumbnail, a data: URL is shown as it is, a web link
-  // is a link and never loaded, and the rest is a placeholder. The generic
-  // "Image loaded into your context" output is dropped; any other stays.
-  const dataImage = /^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/i;
-  const imageExt = /\.(png|jpe?g|gif|webp)$/i;
-  function imageFile(p) {
-    return p.length > 1 && p.length < 4096 && p[0] === "/" && !/[\x00-\x1f\x7f]/.test(p) && imageExt.test(p) &&
-      !p.slice(1).split("/").some((x) => x === "" || x === "." || x === "..");
-  }
-  function visionSource(a, res) {
-    let u = str(a.image_url).trim();
-    if (!u && Array.isArray(res.content)) {
-      for (const part of res.content) {
-        const v = isObj(part) ? (isObj(part.image_url) ? part.image_url.url : part.image_url) : "";
-        if (typeof v === "string" && dataImage.test(v)) {
-          u = v;
-          break;
-        }
-      }
-    }
-    if (dataImage.test(u)) return { kind: "data", url: u };
-    if (/^https?:\/\//i.test(u)) return { kind: "link", url: u };
-    if (imageFile(u)) return { kind: "file", path: u };
-    // browser_vision keeps the screenshot it looked at and names it in its result
-    if (!u && typeof res.path === "string" && imageFile(res.path)) return { kind: "file", path: res.path };
-    return { kind: "none", path: u[0] === "/" ? u : "" };
-  }
-  function vision(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const page = c.name === "browser_vision";
-    const out = { icon: "eye", blocks: [], status: "Done" };
-    out.title = page ? verb(c, "Looked at", "Looking at") + " the page" : verb(c, "Looked at", "Looking at") + " an image";
-    const q = str(a.question).trim();
-    out.vision = Object.assign(visionSource(a, res), { question: q });
-    if (q) out.blocks.push({ label: "Question", text: q, plain: true });
-    const shown = Object.assign({}, a);
-    if (dataImage.test(str(shown.image_url))) shown.image_url = "data:" + shown.image_url.slice(5, shown.image_url.indexOf(";")) + " (image data)";
-    if (Object.keys(shown).length) out.blocks.push({ label: "Call", text: JSON.stringify(shown, null, 2), pre: true });
-    const text = c.out || "";
-    if (text && !/^Image loaded into your context/.test(text) && !text.includes("data:image/")) out.blocks.push({ label: "Output", text, pre: true });
-    return out;
-  }
-
-  function generic(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const out = { icon: "tool", blocks: [] };
-    let hint = "";
-    for (const v of Object.values(a)) {
-      const s = typeof v === "string" ? v : typeof v === "number" ? String(v) : Array.isArray(v) ? v.filter((x) => typeof x === "string").join(", ") : "";
-      if (s) {
-        hint = short(s);
-        break;
-      }
-    }
-    out.title = (c.name || "tool") + (hint ? ": " + cut(hint, 60) : "");
-    if (hint && c.name === "execute_code") out.code = cut(hint, 60);
-    out.status = "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  // pagePublish is page_publish, which writes an HTML page for the user. A
-  // finished call that made a page names it in page ({ path, title }), so
-  // the card can show the page itself; the call and its output stay as
-  // blocks for a card that cannot.
-  function pagePublish(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const res = isObj(c.res) ? c.res : {};
-    const out = { icon: "file", blocks: [] };
-    out.title = c.failed ? "Could not publish a page" : verb(c, "Published", "Publishing") + " a page";
-    out.status = "Done";
-    const p = str(res.path);
-    if (c.done && !c.failed && res.ok !== false && p[0] === "/" && /\.html?$/i.test(p)) out.page = { path: p, title: short(str(res.title)) };
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  const handlers = {
-    page_publish: pagePublish, vision_analyze: vision, browser_vision: vision, terminal, process_manage: pm, delegate_task: delegate, agent_send: send, agent_peers: agentPeers, agent_set_name: agentName, search_files: search,
-    read_file: read, write_file: edit, patch: edit, web_search: web, web_extract: web,
-    memory: memoryTool, project_memory: projectMemory, skills_list: skill, skill_view: skill, skill_manage: skill,
-    session_search: sessionSearch, browser_vault: vault, mcp_device_call: mcpCall, mcp_device_servers: mcpCall, mcp_device_tools: mcpCall,
-    tool_search: toolLookup, tool_describe: toolLookup, tool_call: wrapper,
-  };
-
-  // span writes a length of time: 45 s, 3 min, 1 h 5 min.
-  function span(s) {
-    s = Math.round(s);
-    if (s < 60) return s + " s";
-    if (s < 3600) return Math.round(s / 60) + " min";
-    const m = Math.round((s % 3600) / 60);
-    return Math.floor(s / 3600) + " h" + (m ? " " + m + " min" : "");
-  }
-
-  function todo(c) {
-    const a = isObj(c.args) ? c.args : {};
-    const out = { icon: "checkcircle", blocks: [] };
-    out.title = verb(c, "Updated", "Updating") + " the to-do list";
-    out.status = Array.isArray(a.todos) ? plural(a.todos.length, "item") : "Done";
-    if (Object.keys(a).length) out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
-    if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
-    return out;
-  }
-
-  // derive gives the icon, title, status, state ("run", "ok" or "bad") and
-  // blocks of a call. A running call has no status.
+  // derive gives the card model of a call (see the top of this file) with
+  // state ("run", "ok" or "bad"), title (the plain text of the title) and
+  // titleParts. A running call has no status unless it waits.
   function derive(c) {
-    const name = str(c.name) || "tool";
+    const name = plain(str(c.name)) || "tool";
     c = Object.assign({}, c, { name });
-    let d;
-    if (handlers[name]) d = handlers[name](c);
-    else if (name.startsWith("browser_")) d = browser(c);
-    else if (name === "todo" || name === "todo_list") d = todo(c);
-    else d = generic(c);
+    let fn = handlers[name];
+    if (!fn) {
+      const f = fallbacks.find((x) => x.match(name));
+      fn = f ? f.fn : generic || basic;
+    }
+    const d = fn(c) || basic(c);
+    if (!d.blocks) d.blocks = [];
     d.state = !c.done ? "run" : c.failed || d.bad ? "bad" : "ok";
-    const code = exitCode(isObj(c.res) ? c.res : null);
-    if (c.failed && !(name === "terminal" && code !== null && code !== 0)) d.status = failure(c);
-    if (!c.done) d.status = d.waiting ? "Waiting for approval" : "";
-    d.title = plain(d.title);
-    // The command or code at the end of the title is drawn in monospace.
-    d.code = d.code ? plain(d.code) : "";
-    if (!d.code || !d.title.endsWith(d.code)) d.code = "";
+    if (c.failed && d.state === "bad" && !d.ownFailure) d.status = failure(c) || d.status;
+    if (!c.done && !d.keepRunStatus) d.status = d.waiting ? "Waiting for approval" : "";
     d.status = plain(d.status);
-    d.blocks = d.blocks.filter((b) => b.text);
-    for (const b of d.blocks) if (b.text.length > outLen) b.text = b.text.slice(0, outLen) + "\n...";
+    // The title: parts, or a string with the command at its end in code.
+    let tp;
+    if (Array.isArray(d.title)) tp = partsOf(d.title);
+    else {
+      const t = plain(d.title);
+      const code = d.code ? plain(d.code) : "";
+      tp = code && t.endsWith(code) && code !== t ? [t.slice(0, t.length - code.length), { code }] : [t];
+      if (code && t === code) tp = [{ code }];
+    }
+    d.titleParts = tp.filter((p) => p !== "");
+    d.title = textOf(d.titleParts);
+    const tail = d.titleParts[d.titleParts.length - 1];
+    d.code = isObj(tail) && tail.code ? tail.code : "";
+    d.chips = (d.chips || []).map((x) => plain(str(x))).filter(Boolean);
+    d.more = partsOf(d.more);
+    d.sub = d.sub ? normLine(d.sub) : null;
+    d.lines = (d.lines || []).map(normLine).filter(Boolean).slice(0, maxLines);
+    d.blocks = d.blocks.filter((b) => b && (b.text || (b.items && b.items.length) || (b.rows && b.rows.length) || b.rec));
+    for (const b of d.blocks) if (typeof b.text === "string" && b.text.length > outLen) b.text = b.text.slice(0, outLen) + "\n...";
+    d.raw = typeof d.raw === "string" && d.raw.trim() ? (d.raw.length > outLen ? d.raw.slice(0, outLen) + "\n..." : d.raw) : "";
     return d;
+  }
+
+  function normLine(l) {
+    if (!l) return null;
+    const o = typeof l === "string" || Array.isArray(l) || !isObj(l) || l.parts === undefined ? { parts: l } : l;
+    const parts = partsOf(o.parts).map((p) => (typeof p === "string" ? cut(p.replace(/\s*\n\s*/g, " "), lineLen) : p));
+    if (!textOf(parts).trim()) return null;
+    return { parts, dim: !!o.dim, mono: !!o.mono, closed: !!o.closed };
   }
 
   // plain drops the emoji and variation selectors that Hermes puts in its
@@ -892,20 +363,25 @@ window.HubToolCard = (() => {
 
   // statusLine turns what Hermes says a subagent is doing now (the tool name
   // and a short preview, which is a string and not the call's arguments)
-  // into one plain sentence and an icon. A background command is named from
-  // earlier calls through mem. A tool it does not know is "Using <name>",
-  // never the raw text.
+  // into one plain sentence and an icon. Card modules add their tools'
+  // words with lineWords(map): name -> [icon, words] or fn(preview, mem).
   const pmWords = {
     wait: ["clock", "Waiting on"], poll: ["activity", "Checking"], log: ["list", "Reading the output of"], kill: ["stop", "Stopping"],
     write: ["send", "Sending input to"], submit: ["send", "Sending input to"], close: ["activity", "Closing the input of"], handoff: ["send", "Handing off"],
   };
-  const lineWords = {
+  const words = {
     todo: ["checkcircle", "Updating the to-do list"], todo_list: ["checkcircle", "Updating the to-do list"],
     memory: ["database", "Saving to memory"], project_memory: ["database", "Updating the project notes"],
     delegate_task: ["bot", "Starting a subagent"], agent_send: ["mail", "Sending a message"], agent_peers: ["list", "Listing your chats"], agent_set_name: ["edit", "Naming this chat"],
     skills_list: ["book", "Looking at skills"], skill_view: ["book", "Reading a skill"], skill_manage: ["book", "Editing a skill"],
     tool_search: ["search", "Looking up a tool"], tool_describe: ["search", "Looking up a tool"],
     mcp_device_servers: ["plug", "Looking up the servers on your computer"], mcp_device_tools: ["plug", "Looking up tools on your computer"],
+  };
+  const browserNow = {
+    browser_navigate: ["globe", "Opening"], browser_click: ["cursor", "Clicking"], browser_type: ["cursor", "Typing into"], browser_press: ["cursor", "Pressing"],
+    browser_scroll: ["eye", "Scrolling the page"], browser_back: ["eye", "Going back a page"], browser_snapshot: ["eye", "Reading the page"],
+    browser_screenshot: ["camera", "Taking a screenshot"], browser_vision: ["eye", "Looking at the page"], browser_hover: ["cursor", "Hovering over"],
+    browser_tabs: ["tabs", "Using the browser tabs"], browser_eval: ["globe", "Running a script in the page"],
   };
 
   function statusLine(name, preview, mem) {
@@ -921,7 +397,6 @@ window.HubToolCard = (() => {
     if (b && (!name || name === "tool_call" || name === "tool")) name = "tool_call";
     const p = squash(preview);
     const arg = (p.split(" ")[0] || "");
-    const tail = (t) => (t ? " " + short(t) : "");
     if (!name) return { icon: "tool", text: "Working" };
     if (name === "process_manage") {
       const w = p.split(" ");
@@ -948,19 +423,14 @@ window.HubToolCard = (() => {
       const list = b && b.names.length ? ": " + b.names.join(", ") : "";
       return { icon: "tool", text: n !== 1 ? "Running " + n + " tools" + list : "Running a tool" };
     }
-    if (lineWords[name]) return { icon: lineWords[name][0], text: lineWords[name][1] };
-    if (browserWords[name]) {
-      const w = browserWords[name];
-      return { icon: w[0], text: w[2] + (name === "browser_navigate" ? tail(w[3]({ url: arg }, "")) : "") };
+    if (words[name]) return { icon: words[name][0], text: words[name][1] };
+    if (browserNow[name]) {
+      const w = browserNow[name];
+      return { icon: w[0], text: w[1] + (name === "browser_navigate" && arg ? " " + short(host(arg)) : "") };
     }
     if (name === "browser_batch") return { icon: "list", text: "Running browser steps" };
     if (name.startsWith("browser_")) return { icon: "globe", text: "Using the browser" };
     return { icon: "tool", text: "Using " + toolLabel(name) };
-  }
-
-  // toolLabel is a tool's name in plain words: get_thing is "get thing".
-  function toolLabel(name) {
-    return plain(name).replace(/[_-]+/g, " ").trim() || "a tool";
   }
 
   function parse(r) {
@@ -975,11 +445,13 @@ window.HubToolCard = (() => {
 
   // outcome reads a finished call's result p (result, is_error, error,
   // result_text): the parsed result, whether it failed, and the output to
-  // show (a command's output with its error and exit code).
+  // show (a command's output with its error and exit code). A result fails
+  // when the event says so or when the result itself does (an error, success
+  // or ok false, a failing status, a nonzero exit code).
   function outcome(name, p) {
     const res = parse(p.result);
     const exit = res && typeof res.exit_code === "number" ? res.exit_code : null;
-    const failed = !!(p.is_error || p.error || (res && res.error) || (exit !== null && exit !== 0));
+    const failed = !!(p.is_error || (p.error && p.error !== false) || failedRes(res) || (exit !== null && exit !== 0));
     let out = p.result_text;
     if (!out && res && name === "terminal" && "output" in res) {
       out = String(res.output || "");
@@ -990,19 +462,33 @@ window.HubToolCard = (() => {
     return { res, failed, out: out || "" };
   }
 
+  // drawParts puts parts in a node: text, code in monospace, chips, tones.
+  function drawParts(el, node, parts) {
+    node.replaceChildren(...parts.map((p) => {
+      if (typeof p === "string") return p;
+      if (p.code !== undefined) return el("code", "tcode", p.code);
+      if (p.chip !== undefined) return el("span", "tchip", p.chip);
+      const cls = { ok: "notice-ok", bad: "notice-bad", warn: "notice-wait", add: "tadd", del: "tdel" }[p.tone] || "";
+      return el("span", cls, p.text);
+    }));
+  }
+
   // drawTitle puts a card's title in its element: the words in the UI font,
-  // the command or code after them in a monospace element of its own.
+  // the commands, code and paths in it in monospace elements of their own.
   function drawTitle(el, node, d) {
-    if (d.code && d.title.endsWith(d.code)) {
-      node.replaceChildren(d.title.slice(0, d.title.length - d.code.length), el("code", "tcode", d.code));
-    } else {
-      node.replaceChildren(d.title);
-    }
+    if (Array.isArray(d.titleParts)) return drawParts(el, node, d.titleParts);
+    if (d.code && d.title.endsWith(d.code)) node.replaceChildren(d.title.slice(0, d.title.length - d.code.length), el("code", "tcode", d.code));
+    else node.replaceChildren(d.title);
   }
 
   // The card of each box, for the one click listener below.
   const cards = new WeakMap();
 
+  // create builds the card of call c0 and returns its view: node, body (a
+  // place for things a caller adds under the blocks), live (things shown
+  // while it runs), update(c) to draw it again, toggle(), answer(text).
+  // ctx: el, toast(text), highlight(code), diff(text), page(page), image(path),
+  // zoom(src, name), more(call) (fetch the rest of a cut output).
   function create(ctx, c0) {
     const { el } = ctx;
     const T = window.HubTimes;
@@ -1012,30 +498,36 @@ window.HubToolCard = (() => {
     head.setAttribute("aria-expanded", "false");
     const title = el("span", "notice-title");
     const meta = el("div", "notice-meta");
+    const sub = el("div", "tool-sub");
+    const lineBox = el("div", "tool-lines");
     const wrap = el("div", "notice-body-wrap");
     wrap.hidden = true;
     const blocks = el("div", "notice-body");
+    const raw = el("details", "tool-raw");
+    raw.hidden = true;
     const extra = el("div", "tool-extra");
     const live = el("div", "tool-live");
     const visBig = el("div", "notice-sec vis-sec");
     visBig.hidden = true;
-    wrap.append(visBig, blocks, extra);
+    wrap.append(visBig, blocks, raw, extra);
     const chev = window.HubIcons.icon("chev");
     chev.classList.add("notice-chev");
-    // The click on a head or a copy button is handled once for the page (see
-    // the end of this file), not by a listener on each card.
     let pending = false;
+    const isOpen = () => head.getAttribute("aria-expanded") === "true";
     function toggle() {
-      const open = head.getAttribute("aria-expanded") !== "true";
+      const open = !isOpen();
       head.setAttribute("aria-expanded", open ? "true" : "false");
       wrap.hidden = !open;
       if (open && !built) build();
-      if (view.derived) drawVision(view.derived);
+      if (view.derived) {
+        drawLines(view.derived);
+        drawVision(view.derived);
+      }
       // A snapshot sent only the start of a long output: fetch the rest as
       // the card opens.
       if (open && view.cur && view.cur.partial && ctx.more && !pending) {
         pending = true;
-        Promise.resolve(ctx.more(view.cur)).catch(() => {}).finally(() => { pending = false; });
+        Promise.resolve(ctx.more(view.cur, box)).catch(() => {}).finally(() => { pending = false; });
       }
     }
     const vis = el("div", "vis");
@@ -1048,7 +540,16 @@ window.HubToolCard = (() => {
     let built = false;
     function build() {
       built = true;
-      blocks.replaceChildren(...(view.derived ? view.derived.blocks : []).map(drawBlock));
+      const d = view.derived;
+      blocks.replaceChildren(...(d ? d.blocks : []).map(drawBlock));
+      raw.hidden = !(d && d.raw);
+      raw.open = false;
+      raw.replaceChildren();
+      if (d && d.raw) {
+        const pre = el("pre", "tool-box");
+        pre.textContent = d.raw;
+        raw.append(el("summary", "", "Raw"), pre, copyButton(d.raw));
+      }
     }
     // A page_publish card that made a page shows the page card in place of
     // the usual card, so the page opens from the chat. It is not a step
@@ -1076,7 +577,7 @@ window.HubToolCard = (() => {
       box.classList.toggle("tool-page", on);
       head.hidden = on;
       live.hidden = on;
-      wrap.hidden = on || head.getAttribute("aria-expanded") !== "true";
+      wrap.hidden = on || !isOpen();
       if (on) {
         box.setAttribute("aria-label", d.title);
         if (pageNode.parentNode !== box) box.append(pageNode);
@@ -1095,8 +596,9 @@ window.HubToolCard = (() => {
 
     function drawBlock(b) {
       const sec = el("div", "notice-sec tool-sec");
-      sec.append(el("b", "", b.label));
+      if (b.label) sec.append(el("b", "", b.label));
       let body;
+      let copy = b.copy !== false;
       if (b.kind === "steps") {
         body = el("ol", "steps");
         for (const x of b.items) {
@@ -1104,6 +606,26 @@ window.HubToolCard = (() => {
           li.append(el("span", "st", x.text), el("span", x.state === "failed" ? "notice-bad" : x.state === "not_run" ? "notice-still" : "notice-ok", x.outcome));
           body.append(li);
         }
+      } else if (b.kind === "kv") {
+        body = el("dl", "tool-kv");
+        for (const r of b.rows) {
+          const dd = el("dd", r.mono ? "mono" : "");
+          drawParts(el, dd, partsOf(r.v));
+          body.append(el("dt", "", plain(str(r.k))), dd);
+        }
+        copy = false;
+      } else if (b.kind === "list") {
+        body = el("div", "tool-list");
+        for (const it of b.items) {
+          const o = isObj(it) && it.parts !== undefined ? it : { parts: it };
+          const row = el("div", "tool-li" + (o.dim ? " dim" : "") + (o.mono ? " mono" : ""));
+          drawParts(el, row, partsOf(o.parts));
+          body.append(row);
+        }
+        copy = false;
+      } else if (b.kind === "question" && window.HubQuestion) {
+        body = window.HubQuestion.view({ el, clock: (ms) => window.HubTimes.clock(ms) }, b.rec);
+        copy = false;
       } else if (b.plain) {
         body = el("div", "tool-q", b.text);
       } else if (b.kind === "page") {
@@ -1127,13 +649,31 @@ window.HubToolCard = (() => {
           body.textContent = b.text;
         }
       }
-      sec.append(body, copyButton(b.text));
+      sec.append(body);
+      if (copy && typeof b.text === "string" && b.text) sec.append(copyButton(b.text));
       return sec;
     }
 
+    // drawLines draws the line under the title and the short lines under
+    // the status; a line marked closed shows only while the card is closed.
+    function drawLines(d) {
+      const open = isOpen();
+      const row = (l) => {
+        const n = el("div", "tool-line" + (l.dim ? " dim" : "") + (l.mono ? " mono" : ""));
+        drawParts(el, n, l.parts);
+        return n;
+      };
+      sub.hidden = !d.sub;
+      sub.replaceChildren(...(d.sub ? [row(d.sub)] : []));
+      const shown = d.lines.filter((l) => !(open && l.closed));
+      lineBox.hidden = !shown.length;
+      lineBox.replaceChildren(...shown.map(row));
+    }
+
     // drawVision shows the image of a vision call: a thumbnail beside the
-    // question while the card is closed, the image (tap for full screen) and
-    // its path when it is open. An image that cannot be shown, or that fails
+    // model's answer (or the question, while there is none) while the card
+    // is closed, the image (tap for full screen), the question and the whole
+    // answer when it is open. An image that cannot be shown, or that fails
     // to load, is a dashed placeholder, never a broken image.
     let seen = { key: "", broken: false };
     function gone() {
@@ -1164,7 +704,7 @@ window.HubToolCard = (() => {
     }
     function drawVision(d) {
       const v = d.vision;
-      const open = head.getAttribute("aria-expanded") === "true";
+      const open = isOpen();
       if (!v) {
         vis.hidden = visBig.hidden = true;
         return;
@@ -1172,7 +712,8 @@ window.HubToolCard = (() => {
       let src = "";
       if (v.kind === "data") src = v.url;
       else if (v.kind === "file" && ctx.image) src = ctx.image(v.path) || "";
-      const key = v.kind + "|" + (v.path || "") + "|" + src.length + "|" + v.question + "|" + open + "|" + d.state;
+      const answer = str(v.answer);
+      const key = v.kind + "|" + (v.path || "") + "|" + src.length + "|" + v.question + "|" + answer + "|" + open + "|" + d.state;
       if (key === seen.key) return;
       const keep = seen.broken && seen.src === src;
       seen = { key, broken: keep, src };
@@ -1183,9 +724,7 @@ window.HubToolCard = (() => {
       };
       const shown = src && !seen.broken && !!ctx.zoom;
       const name = v.path ? base(v.path) : "image";
-      const q = el("div", "vis-q");
-      if (v.question) q.append(el("span", "qt", v.question));
-      const path = v.path ? el("span", "vis-path", v.path) : null;
+      const path = v.path && !v.hidePath ? el("span", "vis-path", v.path) : null;
       vis.replaceChildren();
       visBig.replaceChildren();
       if (open) {
@@ -1196,16 +735,23 @@ window.HubToolCard = (() => {
           if (path) visBig.append(path);
         } else if (v.kind === "link") {
           visBig.append(link(v.url));
-        } else {
+        } else if (v.kind !== "nothing") {
           visBig.append(el("span", "vis-note", missing(v)));
           if (path) visBig.append(path);
         }
+        if (v.question) visBig.append(el("b", "", "Question"), el("div", "tool-q", v.question));
+        if (answer) visBig.append(el("b", "", "Answer"), el("div", "tool-q vis-answer", answer));
         return;
       }
       visBig.hidden = true;
       vis.hidden = false;
+      const q = el("div", "vis-q");
+      if (answer) q.append(el("span", "qt", first(answer)));
+      if (v.question) q.append(el(answer ? "small" : "span", answer ? "vis-ask" : "qt", v.question));
       if (shown) {
         vis.append(picture(src, name, "vis-thumb", broken), q);
+      } else if (v.kind === "nothing") {
+        vis.append(q);
       } else {
         vis.append(gone(), q);
         if (v.kind === "link") q.append(link(v.url));
@@ -1231,20 +777,33 @@ window.HubToolCard = (() => {
 
     function drawMeta(d, c) {
       meta.replaceChildren();
+      const more = () => {
+        if (!d.more.length) return null;
+        const s = el("span", "tool-more");
+        drawParts(el, s, d.more);
+        return s;
+      };
       if (d.state === "run") {
         const lead = el("span", d.waiting ? "notice-wait" : "notice-run", d.status || "Running");
         meta.append(lead);
+        const m = more();
+        if (m) meta.append(" · ", m);
         if (T && T.valid(c.startedAt)) {
           meta.append(" · started ", T.stamp(el("span"), c.startedAt), " · ", T.ticking(el("span"), c.startedAt));
         }
         return;
       }
-      const lead = d.status ? el("span", "notice-" + (d.waiting ? "wait" : d.idle ? "still" : d.state), d.status) : null;
-      if (T) {
-        T.finished(meta, c.endedAt, c.duration, lead || undefined);
-      } else if (lead) {
-        meta.append(lead);
+      const tone = d.waiting ? "wait" : d.tone === "warn" ? "wait" : d.tone || (d.idle ? "still" : d.state);
+      let lead = d.status ? el("span", "notice-" + tone, d.status) : null;
+      const m = more();
+      if (m) {
+        const w = el("span", "tool-lead");
+        if (lead) w.append(lead, " · ");
+        w.append(m);
+        lead = w;
       }
+      if (T) T.finished(meta, c.endedAt, c.duration, lead || undefined);
+      else if (lead) meta.append(lead);
     }
 
     view.update = (c) => {
@@ -1253,16 +812,37 @@ window.HubToolCard = (() => {
       view.cur = c;
       box.dataset.state = d.state;
       box.dataset.tool = c.name || "tool";
-      head.replaceChildren(window.HubIcons.icon(d.icon), title, chev, meta);
+      const kids = [window.HubIcons.icon(d.icon || "tool"), title];
+      if (d.chips.length) {
+        const chips = el("span", "tool-chips");
+        chips.append(...d.chips.map((x) => el("span", "tchip", x)));
+        kids.push(chips);
+      }
+      kids.push(chev);
+      if (d.statusLast) kids.push(sub, lineBox, meta);
+      else kids.push(sub, meta, lineBox);
+      head.replaceChildren(...kids);
+      head.classList.toggle("chipped", d.chips.length > 0);
       drawTitle(el, title, d);
       title.title = d.title;
       drawMeta(d, c);
+      drawLines(d);
       built = false;
-      if (head.getAttribute("aria-expanded") === "true") build();
-      else blocks.replaceChildren();
+      if (isOpen()) build();
+      else {
+        blocks.replaceChildren();
+        raw.replaceChildren();
+        raw.hidden = true;
+      }
       drawPage(d);
       drawVision(d);
       return d;
+    };
+    // answer keeps what the model said about the image the call looked at.
+    view.answer = (text) => {
+      if (!view.cur || view.cur.answer === text) return;
+      view.cur.answer = text;
+      view.update(view.cur);
     };
     view.update(c0);
     return view;
@@ -1289,5 +869,157 @@ window.HubToolCard = (() => {
   // failed or was blocked is shown as any other.
   const quiet = (name, failed) => name === "ledger" && !failed;
 
-  return { drawTitle, quiet, derive, memory, create, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
+  // mount builds the card of a call that started, for any log: the main
+  // chat, a subagent's steps, the steps dialog. s: key (unique in the log),
+  // name, args, startedAt (ms), batch (the id of the tool_call it ran in),
+  // mem (the log's memory()). ctx is create's, plus what the log can do:
+  // activity { opens(name, args), open(name, args, result) } (Show in
+  // Activity), background(key) (the Run in background buttons of a
+  // command, only where the hub can move it), media(paths) (a row of
+  // images), fileCard(offer) (the card of a file offered), refusal(node,
+  // text) (an agent message that was refused), question() (a question card
+  // replaced its tool card).
+  function mount(ctx, s) {
+    const { el } = ctx;
+    const call = { name: s.name || "tool", args: s.args === undefined ? null : s.args, res: null, out: "", done: false, failed: false,
+      startedAt: s.startedAt || 0, endedAt: 0, duration: undefined, mem: s.mem || memory(), batch: s.batch || "" };
+    const view = create(ctx, call);
+    const node = view.node;
+    node.view = view;
+    node.call = call;
+    node.toolName = call.name;
+    node.batch = call.batch;
+    node.classList.toggle("quiet", quiet(call.name, false));
+    node.dataset.ukey = "t:" + s.key;
+    node.classList.add("running");
+    if (ctx.activity && ctx.activity.opens(call.name, call.args)) {
+      const open = el("button", "link tool-open", "Show in Activity");
+      open.type = "button";
+      open.onclick = async () => {
+        if (ctx.more && node.call.partial) await ctx.more(node.call, node);
+        ctx.activity.open(call.name, call.args, node.result);
+      };
+      view.body.append(open);
+    }
+    if (ctx.background && call.name === "terminal" && isObj(call.args) && typeof call.args.command === "string" && !call.args.background) {
+      const acts = ctx.background(s.key);
+      if (acts) view.live.append(acts);
+    }
+    return node;
+  }
+
+  // finish shows the end of a call on its card. p: result (raw), result_text,
+  // is_error, error, inline_diff, duration (s), endedAt (ms, 0 when not
+  // known), cut ({ row, call, size, lines } of an output the snapshot cut),
+  // size (the whole result's length, when the result is its start), args
+  // (when the start did not carry them).
+  function finish(ctx, node, p) {
+    if (!node.classList.contains("running") && node.finished) return;
+    node.finished = true;
+    const { el } = ctx;
+    const call = node.call;
+    if (!call.args && p.args) call.args = p.args;
+    if (node.toolName === "clarify" && questionCard(ctx, node, p)) return;
+    node.view.live.replaceChildren();
+    if (p.result !== undefined) node.result = p.result;
+    node.classList.remove("running");
+    const { res, failed, out } = outcome(node.toolName, p);
+    node.failed = failed;
+    node.classList.toggle("failed", failed);
+    node.classList.toggle("quiet", quiet(node.toolName, failed));
+    call.done = true;
+    call.partial = p.cut && (p.cut.row > 0 || p.cut.call) ? p.cut : null;
+    call.res = res;
+    call.failed = failed;
+    call.error = typeof p.error === "string" ? p.error : "";
+    const whole = typeof p.size === "number" && typeof p.result === "string" && p.size > p.result.length;
+    call.out = (out || "") + (whole ? "\n… (" + p.size + " characters in all)" : "");
+    call.diff = typeof p.inline_diff === "string" ? p.inline_diff : "";
+    call.endedAt = p.endedAt || 0;
+    // How long it ran: as the event says, else from its start and end when
+    // both are known. A duration of 0 is no measure.
+    let dur;
+    if (typeof p.duration === "number") dur = p.duration > 0 ? p.duration : undefined;
+    else if (call.startedAt > 0 && call.endedAt > call.startedAt) dur = (call.endedAt - call.startedAt) / 1000;
+    node.duration = dur;
+    call.duration = dur;
+    call.mem.learn(call.name, call.args, res);
+    node.view.update(call);
+    if (node.toolName === "agent_send" && ctx.refusal) ctx.refusal(node, call.out + " " + call.error);
+    if (node.toolName === "browser_screenshot" && !failed && res && typeof res.path === "string" && ctx.media) {
+      const row = ctx.media([res.path]);
+      if (row) node.view.body.append(row);
+    }
+    // A refused offer is a failed call that still shows its file card.
+    if (node.toolName === "send_file" && ctx.fileCard) fileOffer(ctx, node, res, call.endedAt);
+    void el;
+  }
+
+  // questionCard draws the finished clarify call as the card of its
+  // questions, from the stored result: every choice that was offered with the
+  // answer checked, and when and where it was answered. A result stored
+  // before Hermes kept that stays the plain tool card (false).
+  function questionCard(ctx, node, p) {
+    let res = p.result !== undefined ? p.result : p.result_text;
+    if (typeof res === "string") {
+      try { res = JSON.parse(res); } catch (_) { return false; }
+    }
+    const Q = window.HubQuestion;
+    const rec = Q && Q.fromResult(res);
+    if (!rec || !node.parentNode) return false;
+    const q = Q.view({ el: ctx.el, clock: (ms) => window.HubTimes.clock(ms) }, rec);
+    if (node.dataset.ukey) q.dataset.ukey = node.dataset.ukey;
+    node.parentNode.replaceChild(q, node);
+    node.qcard = q;
+    if (ctx.question) ctx.question();
+    return true;
+  }
+
+  // fileOffer shows the file card of a send_file result next to its tool
+  // card. The card is no .tool box, so folding the finished cards stops
+  // at it and it stays in view.
+  function fileOffer(ctx, node, res, at) {
+    const o = res && res.file_offer;
+    if (!o || typeof o.path !== "string" || (res.status !== "offered" && res.status !== "refused")) return;
+    const card = ctx.fileCard(Object.assign({}, o, { status: res.status, at: at || 0 }));
+    if (!card) return;
+    const box = ctx.el("div", "file-offer");
+    box.append(card);
+    if (node.parentNode) node.after(box);
+    else node.view.body.append(box);
+  }
+
+  // answers ties the model's words about an image to the card of the call
+  // that looked at it: after a vision call ends, the first block of thinking
+  // or reply that follows is its answer. A new tool call, or a second block,
+  // ends the wait. tool(node) is called as a card finishes, start() as a
+  // call starts, text(kind, chunk, more) as thinking ("think") or reply
+  // ("say") text arrives (more: chunk adds to the block, else it is all).
+  const visionTools = new Set(["vision_analyze", "browser_vision"]);
+  function answers() {
+    let wait = null;
+    return {
+      tool(node) {
+        wait = node && node.view && visionTools.has(node.toolName) && !node.failed ? { node, kind: "", text: "" } : null;
+      },
+      start() {
+        wait = null;
+      },
+      text(kind, chunk, more) {
+        if (!wait) return;
+        if (wait.kind && wait.kind !== kind) {
+          wait = null;
+          return;
+        }
+        wait.kind = kind;
+        wait.text = more ? wait.text + str(chunk) : str(chunk);
+        const t = wait.text.trim();
+        if (t) wait.node.view.answer(t);
+      },
+    };
+  }
+
+  const util = { isObj, str, cut, squash, short, first, last, plural, base, dir, lines, stripAnsi, host, verb, failure, errorText, failedRes, exitCode, span, upperFirst, who, keyName, toolLabel, json, rawOf, num, size, plain };
+
+  return { register, util, drawTitle, quiet, derive, memory, create, mount, finish, answers, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
 })();

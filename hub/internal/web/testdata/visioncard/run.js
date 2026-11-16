@@ -10,7 +10,7 @@
 // screenshots.
 const assert = require("assert");
 const fs = require("fs");
-const [bin, url, dir, seen, gone, kept, removed] = process.argv.slice(2);
+const [bin, url, dir, seen, gone, kept, removed, answer] = process.argv.slice(2);
 
 const { proc, connect } = require("../cdp.js").launch(bin, dir);
 const { until } = require("../cdp.js");
@@ -69,8 +69,9 @@ async function run(c, w, h, touch, dark) {
   assert.strictEqual(await ev(`${card(0)}.querySelector(".notice-title").textContent`), "Looked at an image", tag + ": title");
   assert.ok(/^Done/.test(await ev(`${card(0)}.querySelector(".notice-meta").textContent`)), tag + ": status line " + await ev(`${card(0)}.querySelector(".notice-meta").textContent`));
   const q = await ev(`(() => { const s = ${card(0)}.querySelector(".vis-q .qt"); const lh = parseFloat(getComputedStyle(s).lineHeight); return { h: s.getBoundingClientRect().height, lh, text: s.textContent }; })()`);
-  assert.ok(q.h <= q.lh * 2 + 2, tag + ": the question is clamped to 2 lines " + JSON.stringify(q));
-  assert.ok(/Describe the window title/.test(q.text), tag + ": the question is the whole text, clamped by CSS");
+  assert.ok(q.h <= q.lh * 2 + 2, tag + ": the answer is clamped to 2 lines " + JSON.stringify(q));
+  assert.strictEqual(q.text, answer.split("\n")[0], tag + ": the first line of the model's answer is next to the thumbnail");
+  assert.ok(/Describe the window title/.test(await ev(`${card(0)}.querySelector(".vis-q .vis-ask").textContent`)), tag + ": the question under it");
   assert.ok(await ev(`${card(0)}.querySelector(".notice-body-wrap").hidden`), tag + ": the body is closed");
   await c.poll(async () => { await ev(`${card(0)}.scrollIntoView({ block: "center" })`); await c.frames(3); return ev(`(() => { const b = ${card(0)}.getBoundingClientRect(); return b.top > 60 && b.bottom < window.innerHeight; })()`); }, tag + ": the first card in view");
   await shot(c, tag + "-collapsed");
@@ -103,10 +104,11 @@ async function run(c, w, h, touch, dark) {
   const big = await ev(`(() => { const i = ${card(0)}.querySelector(".vis-big img"); const f = parseFloat(getComputedStyle(document.documentElement).fontSize); return { h: i.getBoundingClientRect().height / f, w: i.getBoundingClientRect().width, ok: i.complete && i.naturalWidth === 640 }; })()`);
   assert.ok(big.ok && big.h <= 14.05, tag + ": the open image is at most 14rem tall " + JSON.stringify(big));
   assert.strictEqual(await ev(`${card(0)}.querySelector(".vis-path").textContent`), seen, tag + ": the path");
-  const labels = await ev(`[...${card(0)}.querySelectorAll(".notice-body-wrap .tool-sec > b")].map((b) => b.textContent).join(",")`);
-  assert.strictEqual(labels, "Question,Call", tag + ": blocks " + labels);
+  const labels = await ev(`[...${card(0)}.querySelectorAll(".notice-body-wrap .vis-sec > b")].map((b) => b.textContent).join(",")`);
+  assert.strictEqual(labels, "Question,Answer", tag + ": blocks " + labels);
+  assert.strictEqual(await ev(`${card(0)}.querySelector(".vis-answer").textContent`), answer, tag + ": the whole answer");
   assert.ok(!/Image loaded into your context/.test(await ev(`${card(0)}.innerText`)), tag + ": no generic output");
-  assert.ok((await ev(`${card(0)}.querySelector(".notice-body-wrap pre.tool-box").textContent`)).includes('"image_url"'), tag + ": the Call JSON");
+  assert.ok(await ev(`!${card(0)}.querySelector(".notice-body-wrap pre.tool-box")`), tag + ": no Call JSON");
   await ev(`${card(0)}.scrollIntoView()`);
   await shot(c, tag + "-expanded");
   await press(c, touch, `.tool[data-tool="vision_analyze"] .vis-big`, `!!document.querySelector(".lightbox img")`);

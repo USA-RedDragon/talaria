@@ -1092,6 +1092,7 @@
         tn.text = null;
       }
       this.follow(() => { tn.reasoning.lastChild.textContent += text; });
+      if (this.answers) this.answers.text("think", text, true);
     }
 
     // assistantText adds to the reply. A streamed delta renders at most
@@ -1105,6 +1106,7 @@
         if (tn.reasoning) ui.closeUnlessKept(tn.reasoning);
       }
       tn.raw += text;
+      if (this.answers) this.answers.text("say", text, true);
       const node = tn.text;
       node.raw = tn.raw;
       if (!streamed) {
@@ -1413,39 +1415,44 @@
       }
     }
 
-    computerName() {
-      const p = placeOf({ backend_id: this.backend, id: this.session });
-      return p && p.kind === "computer" && p.mine ? p.name || "" : "";
+    // cardCtx is what the tool cards of this chat may use, wherever they
+    // show: in the chat, or in a subagent's steps in Activity (subCtx). The
+    // chat's own cards can also fetch a cut output and move a command to
+    // the background (mainCtx); a subagent's calls are not the chat's rows.
+    cardCtx() {
+      if (!this.cctx) {
+        this.cctx = { el, toast, highlight: highlightBash, diff: diffView, page: (p) => this.publishedPage(p),
+          image: (p) => (mediaPath(p) && imagePath(p) ? mediaURL(this.base, p) : ""), zoom: openImage,
+          media: (paths) => (paths.every((p) => mediaPath(p)) ? mediaRow(this.base, paths, "shot") : null),
+          fileCard: (o) => fileCard(this.base, o),
+          activity: { opens: (n, a) => activity.opens(n, a), open: (n, a, r) => activity.fromTool(n, a, r) } };
+      }
+      return this.cctx;
+    }
+
+    subCtx() {
+      return this.cardCtx();
+    }
+
+    mainCtx() {
+      if (!this.mctx) {
+        this.mctx = Object.assign({}, this.cardCtx(), {
+          more: (call, node) => this.loadOutput(node || [...this.tools.values()].find((c) => c.call === call)),
+          background: (key) => (this.canBackground ? this.backgroundActs(key) : null),
+          refusal: (node, text) => worksWith.refusal(node, text, this.backend, this.session),
+          question: () => this.cards.retire(),
+        });
+      }
+      return this.mctx;
     }
 
     toolCard(id, name, args) {
       let card = this.tools.get(id);
       if (card) return card;
       if (!this.known) this.known = window.HubToolCard.memory();
-      const call = { name: name || "tool", args, res: null, out: "", done: false, failed: false, startedAt: this.at, endedAt: 0,
-        duration: undefined, computer: this.computerName(), mem: this.known };
-      const view = window.HubToolCard.create({ el, toast, highlight: highlightBash, diff: diffView, page: (p) => this.publishedPage(p),
-        image: (p) => (mediaPath(p) && imagePath(p) ? mediaURL(this.base, p) : ""), zoom: openImage,
-        more: () => this.loadOutput(card) }, call);
-      card = view.node;
-      card.view = view;
-      card.call = call;
-      card.toolName = call.name;
-      card.classList.toggle("quiet", window.HubToolCard.quiet(call.name, false));
-      card.dataset.ukey = "t:" + id;
-      card.classList.add("running");
-      if (activity.opens(name, args)) {
-        const open = el("button", "link tool-open", "Show in Activity");
-        open.type = "button";
-        open.onclick = async () => {
-          await this.loadOutput(card);
-          activity.fromTool(name, args, card.result);
-        };
-        view.body.append(open);
-      }
-      if (name === "terminal" && args && typeof args.command === "string" && this.canBackground && !args.background) {
-        view.live.append(this.backgroundActs(id));
-      }
+      if (!this.answers) this.answers = window.HubToolCard.answers();
+      this.answers.start();
+      card = window.HubToolCard.mount(this.mainCtx(), { key: id, name: name || "tool", args, startedAt: this.at, mem: this.known });
       this.tools.set(id, card);
       this.endText();
       // A card ends the thinking before it and the reply text: what comes
@@ -1462,7 +1469,7 @@
     // loadOutput fetches the rest of a tool output that the snapshot cut, and
     // draws the card again with it.
     async loadOutput(card) {
-      const cut = card.call.partial;
+      const cut = card && card.call.partial;
       if (!cut) return;
       const q = cut.row > 0 ? "row=" + cut.row : "call=" + encodeURIComponent(cut.call);
       try {
@@ -1588,68 +1595,13 @@
 
     // toolDone shows a finished tool card. at is when it finished: the time
     // of the event or row that says so, 0 for a card that no event closed.
+    // toolDone shows a finished tool card through the one card component
+    // (toolcard.js), as a subagent's steps do. at is when it finished: the
+    // time of the event or row that says so, 0 for a card that no event closed.
     toolDone(card, p, at = this.at) {
-      if (!card.classList.contains("running") && card.finished) return;
-      card.finished = true;
-      if (card.toolName === "clarify" && this.questionCard(card, p)) return;
-      card.view.live.replaceChildren();
-      if (p.result !== undefined) card.result = p.result;
-      card.classList.remove("running");
-      const call = card.call;
-      const { res, failed, out } = window.HubToolCard.outcome(card.toolName, p);
-      card.failed = failed;
-      if (failed) card.classList.add("failed");
-      card.classList.toggle("quiet", window.HubToolCard.quiet(card.toolName, failed));
-      call.done = true;
-      call.partial = p.cut && (p.cut.row > 0 || p.cut.call) ? p.cut : null;
-      call.res = res;
-      call.failed = failed;
-      call.error = typeof p.error === "string" ? p.error : "";
-      call.out = out || "";
-      call.diff = typeof p.inline_diff === "string" ? p.inline_diff : "";
-      call.endedAt = at || 0;
-      if (typeof p.duration_s === "number") {
-        card.duration = p.duration_s;
-        call.duration = p.duration_s;
-      }
-      this.known.learn(call.name, call.args, res);
-      card.view.update(call);
-      if (card.toolName === "agent_send") worksWith.refusal(card, call.out + " " + call.error, this.backend, this.session);
-      if (card.toolName === "browser_screenshot" && !failed && res && typeof res.path === "string" && mediaPath(res.path)) {
-        card.view.body.append(mediaRow(this.base, [res.path], "shot"));
-      }
-      if (card.toolName === "send_file" && !failed) this.fileOffer(card, res, at);
-    }
-
-    // questionCard draws the finished clarify call as the card of its
-    // questions, from the stored result: every choice that was offered with the
-    // answer checked, and when and where it was answered. A result stored
-    // before Hermes kept that stays the plain tool card (false).
-    questionCard(card, p) {
-      let res = p.result !== undefined ? p.result : p.result_text;
-      if (typeof res === "string") {
-        try { res = JSON.parse(res); } catch (_) { return false; }
-      }
-      const rec = window.HubQuestion.fromResult(res);
-      if (!rec || !card.parentNode) return false;
-      const node = window.HubQuestion.view({ el, clock: (ms) => window.HubTimes.clock(ms) }, rec);
-      if (card.dataset.ukey) node.dataset.ukey = card.dataset.ukey;
-      card.parentNode.replaceChild(node, card);
-      card.qcard = node;
-      this.cards.retire();
-      return true;
-    }
-
-    // fileOffer shows the file card of a send_file result next to its tool
-    // card. The card is no .tool box, so folding the finished cards stops
-    // at it and it stays in view.
-    fileOffer(card, res, at) {
-      const o = res && res.file_offer;
-      if (!o || typeof o.path !== "string" || (res.status !== "offered" && res.status !== "refused")) return;
-      const box = el("div", "file-offer");
-      box.append(fileCard(this.base, Object.assign({}, o, { status: res.status, at: at || 0 })));
-      if (card.parentNode) card.after(box);
-      else card.view.body.append(box);
+      window.HubToolCard.finish(this.mainCtx(), card, { result: p.result, result_text: p.result_text, is_error: p.is_error, error: p.error,
+        inline_diff: p.inline_diff, duration: typeof p.duration_s === "number" ? p.duration_s : undefined, endedAt: at || 0, cut: p.cut });
+      if (this.answers) this.answers.tool(card);
     }
 
     // groupTools folds each run of finished tool cards into one line that
@@ -2054,7 +2006,7 @@
           if (typeof args === "string") {
             try { args = JSON.parse(args); } catch (_) { args = { arguments: args }; }
           }
-          const call = { name: fn.name, args };
+          const call = { name: fn.name, args, at: this.at };
           const inner = window.HubToolCard.wrapped(fn.name, args);
           if (inner) {
             call.inner = inner;
@@ -2080,13 +2032,18 @@
           const one = window.HubToolCard.take(call.inner, m.name || m.tool_name);
           if (one) call = Object.assign(one, { unwrapped: true, batch: call.batchSize > 1 ? m.tool_call_id || "" : "" });
         }
+        // The card starts when the call was asked for (the assistant row's
+        // time) and ends at the result's; the row's tool outcome says how
+        // long it ran and whether it failed.
         const at = this.at;
-        this.at = 0;
+        this.at = call.at || 0;
         const card = this.toolCard(m.tool_call_id && !call.unwrapped ? m.tool_call_id : "row" + m.row_id, m.name || m.tool_name || call.name, m.args || call.args);
         if (call.batch) this.tagBatch(card, call.batch);
         this.at = at;
         const cut = m.output_size ? { row: Number.isInteger(m.row_id) ? m.row_id : 0, call: m.tool_call_id || "", size: m.output_size, lines: m.output_lines || 0 } : null;
-        this.toolDone(card, { result: m.content != null ? m.content : text, cut });
+        const oc = toolOutcome(m.display_metadata);
+        this.toolDone(card, { result: m.content != null ? m.content : text, cut, is_error: oc.is_error === true,
+          duration_s: typeof oc.duration_ms === "number" ? oc.duration_ms / 1000 : undefined });
         return;
       }
       if (text) this.add(el("div", "note", text));
@@ -2223,6 +2180,16 @@
   const extOf = (p) => { const b = baseName(p); const i = b.lastIndexOf("."); return i >= 0 ? b.slice(i + 1).toLowerCase() : ""; };
   const imagePath = (p) => imageExts.has(extOf(p));
   const utf8 = new TextEncoder();
+
+  // toolOutcome is the tool_outcome of a stored tool row's display metadata
+  // ({ duration_ms, is_error }), or {}.
+  function toolOutcome(md) {
+    if (typeof md === "string") {
+      try { md = JSON.parse(md); } catch (_) { md = null; }
+    }
+    const o = md && typeof md === "object" ? md.tool_outcome : null;
+    return o && typeof o === "object" ? o : {};
+  }
 
   // mediaPath says whether p is an absolute path the media route may serve.
   // A MEDIA directive needs a known extension; a link in a reply (any) does
@@ -4437,7 +4404,7 @@
   },
     closeSide: () => openSide(false) });
   const activity = window.HubActivity({ api, el, showText, drawn: () => drawSubs(), highlight: highlightBash, diff: diffView,
-    page: (p) => (view ? pageCard(view.base, p) : null) });
+    page: (p) => (view ? pageCard(view.base, p) : null), cards: () => (view ? view.subCtx() : null) });
   // The names of the other end of an agent message: a subagent by its goal
   // (from the Activity list), a chat by its title (from the sidebar's list).
   window.HubPeer.names = {

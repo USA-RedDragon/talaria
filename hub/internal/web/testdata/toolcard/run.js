@@ -3,10 +3,17 @@ const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
 
+const path = require("path");
 const [script, cases, peer] = process.argv.slice(2);
+// load runs toolcard.js and the card modules beside it (static/cards) in ctx.
+const cardDir = path.join(path.dirname(script), "cards");
+const load = (ctx) => {
+  vm.runInNewContext(fs.readFileSync(script, "utf8"), ctx);
+  for (const f of fs.readdirSync(cardDir).filter((x) => x.endsWith(".js")).sort()) vm.runInNewContext(fs.readFileSync(path.join(cardDir, f), "utf8"), ctx);
+};
 const sandbox = { window: {} };
 vm.runInNewContext(fs.readFileSync(peer, "utf8"), sandbox);
-vm.runInNewContext(fs.readFileSync(script, "utf8"), sandbox);
+load(sandbox);
 const { derive, memory } = sandbox.window.HubToolCard;
 for (const c of JSON.parse(fs.readFileSync(cases, "utf8"))) {
   const mem = memory();
@@ -124,7 +131,7 @@ assert.strictEqual(wrapped("tool_call", "x"), null);
 (async () => {
   const { el } = require("../fakedom.js");
   const box = { window: { HubIcons: { icon: () => el("span"), button: () => el("button") } } };
-  vm.runInNewContext(fs.readFileSync(script, "utf8"), box);
+  load(box);
   const asked = [];
   const call = { name: "terminal", args: { command: "make" }, res: null, out: "start of it\u2026", done: true, failed: false, partial: { row: 7, call: "c1", size: 90000 }, mem: box.window.HubToolCard.memory() };
   const view = box.window.HubToolCard.create({ el, toast() {}, diff: () => el("pre"), more: (c) => { asked.push(c.partial.row); } }, call);
@@ -175,7 +182,7 @@ assert.strictEqual(wrapped("tool_call", "x"), null);
   split({ name: "terminal", args: { command: "ls -la /usr/bin/zig; file /usr/bin/zig" }, res: { exit_code: 0 } }, "Ran ", "ls -la /usr/bin/zig; file /usr/bin/zig", "Ran ls -la /usr/bin/zig; file /usr/bin/zig");
   split({ name: "terminal", args: { command: "sleep 60" }, done: false }, "Running ", "sleep 60", "Running sleep 60");
   split({ name: "terminal", args: { command: "make -j8", background: true }, res: { session_id: "proc_1" } }, "Started in the background: ", "make -j8", "Started in the background: make -j8");
-  split({ name: "execute_code", args: { code: "import json\nprint(1)" }, res: { output: "1" } }, "execute_code: ", "import json print(1)", "execute_code: import json print(1)");
+  split({ name: "execute_code", args: { code: "import json\nprint(1)" }, res: { output: "1" } }, "Ran ", "import json", "Ran import json");
   split({ name: "process_manage", args: { action: "wait", session_id: "proc_283637f9d51" }, res: { status: "exited", exit_code: 0 } }, "Waited for background command ", "npm test", "Waited for background command npm test");
   split({ name: "process_manage", args: { action: "kill", session_id: "proc_283637f9d51" }, res: { status: "killed" } }, "Stopped background command ", "npm test", "Stopped background command npm test");
   // Titles with no command stay one plain string.

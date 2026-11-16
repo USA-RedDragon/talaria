@@ -38,7 +38,8 @@ sandbox.window.HubIcons = { icon: (name) => el("svg", "ico i-" + name), button: 
 sandbox.window.HubPeer = { names: { sub: () => "" }, who(ref, names) { return { name: names.sub(ref) }; } };
 vm.createContext(sandbox);
 const dir = process.argv[2];
-for (const f of ["times.js", "toolcard.js", "toolgroup.js", "minichat.js", "todo.js", "activity.js"]) vm.runInContext(fs.readFileSync(dir + "/" + f, "utf8"), sandbox);
+const cardFiles = ["toolcard.js", ...fs.readdirSync(dir + "/cards").filter((f) => f.endsWith(".js")).sort().map((f) => "cards/" + f)];
+for (const f of ["times.js", ...cardFiles, "toolgroup.js", "minichat.js", "todo.js", "activity.js"]) vm.runInContext(fs.readFileSync(dir + "/" + f, "utf8"), sandbox);
 
 // What the hub answers to the sidebar's reads.
 let list = [];

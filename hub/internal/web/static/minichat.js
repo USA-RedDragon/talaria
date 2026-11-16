@@ -118,7 +118,12 @@ window.HubMiniChat = (() => {
     jump.hidden = true;
     jump.append(window.HubIcons.icon("chev"), el("span"));
     box.append(jump);
-    const st = { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, ended: false, info: {}, endNode: null, known: null, started: null };
+    const st = { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, ended: false, info: {}, endNode: null, known: null, started: null,
+      answers: window.HubToolCard.answers() };
+    // cards is the card context of the chat the subagent belongs to: its
+    // cards are drawn by the same component, with the same context, as the
+    // chat's own (toolcard.js mount and finish).
+    const cards = ctx.cards || { el, toast: ctx.toast || (() => {}), highlight: ctx.highlight, diff: ctx.diff || ((t) => el("pre", "", t)), page: ctx.page };
     // memory is what the steps taught so far: a background command by its
     // session id, for naming it in the row's status line.
     const view = { node: box, events: () => st.events.slice(), memory: () => st.known };
@@ -149,45 +154,23 @@ window.HubMiniChat = (() => {
     function card(e, o) {
       o = o || {};
       if (!st.known) st.known = window.HubToolCard.memory();
-      const call = { name: e.name || "tool", args: e.args || null, res: null, out: "", done: false, failed: false,
-        startedAt: ms(e.ts), endedAt: 0, duration: undefined, mem: st.known, batch: o.batch || "" };
-      const v = window.HubToolCard.create({ el, toast: ctx.toast || (() => {}), highlight: ctx.highlight, diff: ctx.diff || ((t) => el("pre", "", t)), page: ctx.page }, call);
-      const node = v.node;
-      node.view = v;
-      node.call = call;
-      node.toolName = call.name;
-      node.classList.toggle("quiet", window.HubToolCard.quiet(call.name, false));
-      node.dataset.ukey = "t:" + (o.key || e.call_id || "s" + e.seq);
-      node.batch = o.batch || "";
-      node.classList.add("running");
-      const c = { node, call };
+      st.answers.start();
+      const node = window.HubToolCard.mount(cards, { key: o.key || e.call_id || "s" + e.seq, name: e.name || "tool", args: e.args || null,
+        startedAt: ms(e.ts), batch: o.batch || "", mem: st.known });
+      const c = { node, call: node.call };
       if (e.call_id && !o.key) st.calls.set(e.call_id, c);
       put(node);
       return c;
     }
 
+    // finish ends a card through the same code as the chat's cards. No
+    // time is shown when it is not known or 0.
     function finish(c, e) {
       const { node, call } = c;
-      const { res, failed, out } = window.HubToolCard.outcome(call.name, { result: e.result, is_error: e.error });
-      if (!call.args && e.args) call.args = e.args;
-      call.done = true;
-      call.res = res;
-      call.failed = failed;
-      call.out = out + (e.result_size > (e.result || "").length ? "\n… (" + e.result_size + " characters in all)" : "");
-      call.endedAt = ms(e.ts);
-      // No time is shown when it is not known or 0.
-      let sec;
-      if (typeof e.duration_ms === "number" && e.duration_ms > 0) sec = e.duration_ms / 1000;
-      else if (!(typeof e.duration_ms === "number") && call.startedAt && call.endedAt > call.startedAt) sec = (call.endedAt - call.startedAt) / 1000;
-      call.duration = sec;
-      node.duration = sec;
-      node.failed = failed;
-      node.finished = true;
-      node.classList.remove("running");
-      node.classList.toggle("failed", failed);
-      node.classList.toggle("quiet", window.HubToolCard.quiet(call.name, failed));
-      st.known.learn(call.name, call.args, res);
-      node.view.update(call);
+      window.HubToolCard.finish(cards, node, { result: e.result, is_error: e.error, endedAt: ms(e.ts),
+        duration: typeof e.duration_ms === "number" ? e.duration_ms / 1000 : undefined,
+        size: typeof e.result_size === "number" ? e.result_size : undefined, args: e.args });
+      st.answers.tool(node);
     }
 
     // open draws the calls a tool_call carries as the cards of the tools
@@ -323,6 +306,7 @@ window.HubMiniChat = (() => {
           s.append(stamp(e.ts));
           d.append(s, el("div", "body", e.text || ""));
           put(d);
+          st.answers.text("think", e.text || "", false);
           break;
         }
         case "message": {
@@ -332,6 +316,7 @@ window.HubMiniChat = (() => {
           else body.textContent = e.text || "";
           m.append(body, stamp(e.ts));
           put(m);
+          st.answers.text("say", e.text || "", false);
           break;
         }
         case "tool_start": {
@@ -410,7 +395,7 @@ window.HubMiniChat = (() => {
     // reset drops everything drawn, for a transcript Hermes rewrote.
     view.reset = () => {
       for (const n of Array.from(box.children)) if (n !== jump) n.remove();
-      Object.assign(st, { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, endNode: null, known: null, started: null });
+      Object.assign(st, { events: [], calls: new Map(), steers: [], rows: [], unseen: 0, endNode: null, known: null, started: null, answers: window.HubToolCard.answers() });
       showJump();
     };
 
