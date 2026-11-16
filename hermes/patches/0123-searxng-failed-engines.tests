@@ -1,0 +1,4 @@
+# Upstream tests of the SearXNG provider and the web search plugins the patch changes
+tests/tools/test_web_providers_searxng.py
+tests/plugins/web/test_web_search_provider_plugins.py
+tests/tools/test_web_keyless_rescue.py

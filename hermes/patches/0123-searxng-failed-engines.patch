@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 06:55:44 +0000
+Subject: [PATCH] fix(web): SearXNG search fails when its engines failed and
+ nothing came back
+
+SearXNG answers 200 with an empty result list when every engine it
+queries is rate limited or blocked, and names them in
+unresponsive_engines. The provider ignored that field, so web_search
+returned success with an empty list and the agent concluded nothing
+exists.
+
+An empty result with unresponsive engines is now a failure that names
+each engine and its reason. A short result (fewer than the limit) with
+unresponsive engines stays a success and carries a note naming them. An
+empty result with no failed engines is unchanged.
+---
+ plugins/web/searxng/provider.py           | 27 +++++++++++++++-
+ tests/tools/test_web_providers_searxng.py | 39 +++++++++++++++++++++++
+ 2 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/plugins/web/searxng/provider.py b/plugins/web/searxng/provider.py
+index b3d18ba2..861fc4a4 100644
+--- a/plugins/web/searxng/provider.py
++++ b/plugins/web/searxng/provider.py
+@@ -14,6 +14,21 @@ from plugins.web._common import BaseWebSearchProvider, http_get_json, provider_e
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _unresponsive_engines(data: Any) -> str:
++    """Name each engine SearXNG reports as unresponsive with its reason, e.g. ``brave (too many requests)``."""
++    rows = data.get("unresponsive_engines") if isinstance(data, dict) else None
++    if not isinstance(rows, list):
++        return ""
++    parts = []
++    for row in rows:
++        if isinstance(row, (list, tuple)) and row:
++            reason = f" ({row[1]})" if len(row) > 1 and row[1] else ""
++            parts.append(f"{row[0]}{reason}")
++        elif isinstance(row, str) and row:
++            parts.append(row)
++    return ", ".join(parts)
++
++
+ class SearXNGWebSearchProvider(BaseWebSearchProvider):
+     """Search via a user-hosted SearXNG instance."""
+ 
+@@ -36,7 +51,17 @@ class SearXNGWebSearchProvider(BaseWebSearchProvider):
+         sorted_results = sorted(raw_results, key=lambda r: float(r.get("score", 0)), reverse=True)[:limit]
+         web_results = titled_rows(sorted_results, "content")
+         logger.info("SearXNG search '%s': %d results (from %d raw, limit %d)", query, len(web_results), len(raw_results), limit)
+-        return search_ok(web_results)
++        failed = _unresponsive_engines(data)
++        if failed and not web_results:
++            # An empty list with failed engines means the search did not run, not that nothing exists.
++            return search_fail(
++                f"SearXNG returned no results because its engines failed: {failed}. "
++                "This is not proof that nothing exists; retry later or use another source."
++            )
++        result = search_ok(web_results)
++        if failed and len(web_results) < limit:
++            result["note"] = f"SearXNG engines failed, so there may be more results than these: {failed}."
++        return result
+ 
+     def get_setup_schema(self) -> dict[str, Any]:
+         return setup_schema(
+diff --git a/tests/tools/test_web_providers_searxng.py b/tests/tools/test_web_providers_searxng.py
+index ed78a43a..249e2ae0 100644
+--- a/tests/tools/test_web_providers_searxng.py
++++ b/tests/tools/test_web_providers_searxng.py
+@@ -88,6 +88,45 @@ class TestSearXNGSearchProviderSearch:
+         assert result["data"]["web"][1]["title"] == "Mid"
+         assert result["data"]["web"][2]["title"] == "Low"
+ 
++    def _search(self, monkeypatch, payload, limit=5):
++        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
++        from plugins.web.searxng.provider import SearXNGWebSearchProvider
++        with patch("httpx.get", return_value=self._make_mock_response(payload)):
++            return SearXNGWebSearchProvider().search("query", limit=limit)
++
++    def test_no_results_with_failed_engines_is_a_failure(self, monkeypatch):
++        result = self._search(monkeypatch, {
++            "results": [],
++            "unresponsive_engines": [["brave", "too many requests"], ["duckduckgo", "CAPTCHA"]],
++        })
++        assert result["success"] is False
++        assert "brave (too many requests)" in result["error"]
++        assert "duckduckgo (CAPTCHA)" in result["error"]
++        assert "not proof that nothing exists" in result["error"]
++
++    def test_no_results_without_failed_engines_stays_empty_success(self, monkeypatch):
++        result = self._search(monkeypatch, {"results": [], "unresponsive_engines": []})
++        assert result == {"success": True, "data": {"web": []}}
++
++    def test_few_results_with_failed_engines_carry_a_note(self, monkeypatch):
++        result = self._search(monkeypatch, {
++            "results": [{"title": "A", "url": "https://a.example.com", "content": "x", "score": 1}],
++            "unresponsive_engines": [["google cse", "Suspended: too many requests"]],
++        })
++        assert result["success"] is True
++        assert len(result["data"]["web"]) == 1
++        assert "google cse (Suspended: too many requests)" in result["note"]
++
++    def test_full_results_with_failed_engines_have_no_note(self, monkeypatch):
++        rows = [{"title": f"R{i}", "url": f"https://{i}.example.com", "content": "", "score": 1} for i in range(5)]
++        result = self._search(monkeypatch, {"results": rows, "unresponsive_engines": [["brave", "CAPTCHA"]]})
++        assert result["success"] is True
++        assert "note" not in result
++
++    def test_malformed_unresponsive_engines_are_ignored(self, monkeypatch):
++        result = self._search(monkeypatch, {"results": [], "unresponsive_engines": "broken"})
++        assert result == {"success": True, "data": {"web": []}}
++
+ 
+     def test_trailing_slash_stripped_from_url(self, monkeypatch):
+         """Base URL trailing slash should not produce double-slash in endpoint."""
