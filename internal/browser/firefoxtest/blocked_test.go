@@ -73,7 +73,7 @@ func newContext(ctx context.Context, t *testing.T, bc *bidi.Client, url string) 
 	if err := json.Unmarshal(res, &c); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bc.Call(ctx, "browsingContext.navigate", map[string]any{"context": c.Context, "url": url, "wait": "complete"}); err != nil {
+	if _, err := bc.Call(ctx, "browsingContext.navigate", map[string]any{keyContext: c.Context, "url": url, "wait": "complete"}); err != nil {
 		t.Fatal(err)
 	}
 	return c.Context
@@ -82,7 +82,7 @@ func newContext(ctx context.Context, t *testing.T, bc *bidi.Client, url string) 
 func evalAsync(ctx context.Context, t *testing.T, bc *bidi.Client, browsingContext, expr string) {
 	t.Helper()
 	if _, err := bc.Call(ctx, "script.evaluate", map[string]any{
-		"expression": expr, "awaitPromise": true, "userActivation": true, "target": map[string]any{"context": browsingContext},
+		"expression": expr, "awaitPromise": true, "userActivation": true, "target": map[string]any{keyContext: browsingContext},
 	}); err != nil {
 		t.Fatal(err)
 	}

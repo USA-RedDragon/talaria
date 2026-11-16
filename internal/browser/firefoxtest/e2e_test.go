@@ -525,7 +525,7 @@ func evalInTab(ctx context.Context, bc *bidi.Client, urlPart, expr string) strin
 			continue
 		}
 		out, err := bc.Call(ctx, "script.evaluate", map[string]any{
-			"expression": expr, "awaitPromise": false, "target": map[string]any{"context": c.Context},
+			"expression": expr, "awaitPromise": false, "target": map[string]any{keyContext: c.Context},
 		})
 		if err != nil {
 			return err.Error()

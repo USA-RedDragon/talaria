@@ -132,7 +132,7 @@ func openContext(ctx context.Context, t *testing.T, bc *bidi.Client, url string,
 	if err := json.Unmarshal(res, &c); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bc.Call(ctx, "browsingContext.navigate", map[string]any{"context": c.Context, "url": url, "wait": "complete"}); err != nil {
+	if _, err := bc.Call(ctx, "browsingContext.navigate", map[string]any{keyContext: c.Context, "url": url, "wait": "complete"}); err != nil {
 		t.Fatalf("open %s: %v", url, err)
 	}
 	return c.Context
