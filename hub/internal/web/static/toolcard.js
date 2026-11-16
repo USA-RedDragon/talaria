@@ -313,6 +313,14 @@ window.HubToolCard = (() => {
       out.title = verb(c, "Searched", "Searching") + " the web for " + (short(str(a.query)) || "a query");
       const list = isObj(res.data) && Array.isArray(res.data.web) ? res.data.web : Array.isArray(res.results) ? res.results : Array.isArray(res.web) ? res.web : null;
       out.status = list ? plural(list.length, "result") : "Done";
+      // Each result's title and link, the way the search card reads: Hermes's search and Claude's own one
+      // (server-side, talaria-hermes 0125) give the same result shape.
+      const found = (list || []).filter((r) => isObj(r) && str(r.url));
+      if (found.length) {
+        out.blocks.push({ label: "Call", text: JSON.stringify(a, null, 2), pre: true });
+        out.blocks.push({ label: "Results", text: found.map((r) => (str(r.title) || str(r.url)) + "\n" + str(r.url)).join("\n\n") });
+        return out;
+      }
     } else {
       const urls = Array.isArray(a.urls) ? a.urls.map(str).filter(Boolean) : a.url ? [str(a.url)] : [];
       const h = urls.length ? host(urls[0]) : "a page";
