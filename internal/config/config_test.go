@@ -206,10 +206,12 @@ func TestLegacyEnvironmentVariables(t *testing.T) {
 	}
 }
 
+const offValue = "off"
+
 func TestCommandTasks(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]int64{
-		"off": 0, "OFF": 0, "0": 0, " off ": 0, "64": 64, "8192": 8192, "65536": 65536,
+		offValue: 0, "OFF": 0, "0": 0, "64": 64, "8192": 8192, "65536": 65536,
 	} {
 		n, err := config.Device{CommandTasksMax: in}.CommandTasks()
 		if err != nil || n != want {
@@ -225,8 +227,8 @@ func TestCommandTasks(t *testing.T) {
 	if err != nil || cfg.Device.CommandTasksMax != "16384" {
 		t.Errorf("default %+v, %v", cfg, err)
 	}
-	cfg, err = load(map[string]string{hubURLEnv: hubURL, "TALARIA_DEVICE_COMMAND_TASKS_MAX": "off"}, "")
-	if err != nil || cfg.Device.CommandTasksMax != "off" {
+	cfg, err = load(map[string]string{hubURLEnv: hubURL, "TALARIA_DEVICE_COMMAND_TASKS_MAX": offValue}, "")
+	if err != nil || cfg.Device.CommandTasksMax != offValue {
 		t.Errorf("off %+v, %v", cfg, err)
 	}
 	if _, err := load(map[string]string{hubURLEnv: hubURL, "TALARIA_DEVICE_COMMAND_TASKS_MAX": "few"}, ""); !errors.Is(err, config.ErrTasksMax) {

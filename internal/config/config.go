@@ -324,7 +324,7 @@ const MinCommandMemory = 16 << 20
 func (d Device) CommandMemory() (int64, error) {
 	v := strings.TrimSpace(strings.ToLower(d.CommandMemoryMax))
 	switch v {
-	case "off", "0", "auto":
+	case offValue, "0", "auto":
 		return 0, nil
 	}
 	shift := 0
@@ -342,6 +342,9 @@ func (d Device) CommandMemory() (int64, error) {
 	return n << shift, nil
 }
 
+// offValue is the setting that turns a command limit off.
+const offValue = "off"
+
 // MinCommandTasks is the smallest task limit that device.command-tasks-max
 // accepts. Below it a shell could not run a pipeline.
 const MinCommandTasks = 64
@@ -351,7 +354,7 @@ const MinCommandTasks = 64
 func (d Device) CommandTasks() (int64, error) {
 	v := strings.TrimSpace(strings.ToLower(d.CommandTasksMax))
 	switch v {
-	case "off", "0":
+	case offValue, "0":
 		return 0, nil
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
