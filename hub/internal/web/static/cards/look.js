@@ -82,6 +82,19 @@
     return info;
   }
 
+  // modelLine says whether a tool output is only the generic line meant for
+  // the model, bare or as {"result": "..."}.
+  function modelLine(t) {
+    let x = str(t).trim();
+    if (x[0] === "{") {
+      try {
+        const j = JSON.parse(x);
+        if (isObj(j) && Object.keys(j).length === 1 && typeof j.result === "string") x = j.result.trim();
+      } catch (_) { /* not JSON */ }
+    }
+    return /^Image loaded into your context/.test(x);
+  }
+
   const keptShot = /\/cache\/screenshots\//;
 
   function vision(c) {
@@ -137,8 +150,8 @@
       if (folder) out.lines.push({ parts: folder, dim: true });
     }
     if (rows.length) out.blocks.push({ kind: "kv", rows });
-    const text = c.out || "";
-    if (text && !/^Image loaded into your context/.test(text) && !text.includes("data:image/") && !page) out.blocks.push({ label: "Output", text, pre: true });
+    const text = modelLine(c.out || "") ? "" : c.out || "";
+    if (text && !text.includes("data:image/") && !page) out.blocks.push({ label: "Output", text, pre: true });
     return out;
   }
 

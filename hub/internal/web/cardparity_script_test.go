@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway"
@@ -90,6 +91,14 @@ func cardParity(t *testing.T, bin string) {
 	}
 	e := setup(t)
 	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
+	// A call that kept a screenshot has its file on the hub's computer.
+	for _, c := range list {
+		if r, ok := c.Result.(map[string]any); ok {
+			if p, ok := r["path"].(string); ok && strings.HasSuffix(p, ".png") {
+				e.gw.SetFile(p, shotPicture(t))
+			}
+		}
+	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Parity", Live: true, StartedAt: 900, Messages: rows,
 		Subagents: []gateway.SubagentRow{{SubagentID: subA, Goal: goal, Status: optr(statusRunning), AcceptingSteer: optr(true)}}})
 	e.gw.AddChildRows("s9", subA, child...)

@@ -483,6 +483,10 @@
 
   // Tabs, the browser's state and the choice of its computer ---------------
 
+  // away says whether a computer is not the chat's own; c.here is "" when
+  // the own name is unknown, and then every computer is named.
+  const away = (c, name) => !!str(name) && (!str(c.here) || str(name) !== str(c.here));
+
   const firefoxState = { connected: "Firefox connected", "not running": "Firefox closed, can start it", "not connected": "Firefox not connected" };
 
   function tabName(t) {
@@ -569,7 +573,8 @@
       out.bad = false;
     } else {
       const name = (str(res.browser).split(" ")[0]) || "";
-      out.title = "Checked the browser" + (str(res.device) ? ": " + (name || "Firefox") + " on " + short(res.device) : "");
+      // The computer is named only when it is not the chat's own.
+      out.title = "Checked the browser" + (str(res.device) ? ": " + (name || "Firefox") + (away(c, res.device) ? " on " + short(res.device) : "") : "");
     }
     const list = Array.isArray(res.tabs) ? res.tabs : null;
     const others = (Array.isArray(res.devices) ? res.devices : []).filter((d) => isObj(d) && d.selected !== true);
@@ -578,7 +583,7 @@
       out.lines.push({ parts: bits.join(" · "), dim: true });
     }
     const rows = [];
-    if (str(res.device)) rows.push({ k: "Computer", v: short(res.device) });
+    if (away(c, res.device)) rows.push({ k: "Computer", v: short(res.device) });
     if (str(res.why)) rows.push({ k: "Chosen because", v: upper(str(res.why)) });
     if (list) rows.push({ k: "Agent tabs", v: String(list.length) });
     if (rows.length) out.blocks.push({ kind: "kv", rows });
@@ -592,7 +597,7 @@
     const out = { icon: "globe", blocks: [], lines: [] };
     const dev = str(res.device) || (str(a.device) !== "default" ? str(a.device) : "");
     if (str(a.device) === "default") out.title = verb(c, "Went back to", "Going back to") + " the default browser computer";
-    else out.title = verb(c, "Chose", "Choosing") + (dev ? " " + short(dev) : " a computer") + " for the " + (str(a.job_id) ? "scheduled job" : "browser");
+    else out.title = verb(c, "Chose", "Choosing") + (dev ? (away(c, dev) ? " " + short(dev) : " this computer") : " a computer") + " for the " + (str(a.job_id) ? "scheduled job" : "browser");
     if (!c.done) return out;
     if (fail(c, out, "Failed: ")) {
       out.raw = opaque(c);
