@@ -1,0 +1,14 @@
+# New: a subagent's children run in the background and wake it; bounded waits (tests/tools/test_subagent_children_background.py)
+# Changed: tests/gateway/test_session_subagent_live.py (an orchestrator's delegate_task returns at once)
+# The delegation dispatch, child run, waiting, restart handoff and process wait it changes
+tests/tools/test_delegate.py
+tests/tools/test_delegate_child_wait.py
+tests/tools/test_delegate_wait_wake.py
+tests/tools/test_delegate_depth_prompt.py
+tests/tools/test_delegate_resume_action.py
+tests/tools/test_delegation_restart_handoff.py
+tests/tools/test_subagent_job_watch.py
+tests/tools/test_subagent_steer.py
+tests/tools/test_delegate_capacity_queue.py
+tests/tools/test_delegate_parallel_interrupt_join.py
+tests/agent/test_quiet_end.py
