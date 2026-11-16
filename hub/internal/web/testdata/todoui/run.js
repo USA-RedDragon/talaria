@@ -92,7 +92,7 @@ const { connect } = open;
   };
 
   await goto(url + "/auth/login?next=/", `document.getElementById("sessions") && document.getElementById("sessions").children.length > 0`);
-  await ev(`location.hash = "#/s/pc/s1"; 1`);
+  await ev(`(location.hash = "#/s/pc/s1", 1)`);
   await until(chatReady("s1"), "chat s1");
 
   // The strip above the message box: the first item in progress, how far, and no panel yet on a phone.
@@ -176,19 +176,19 @@ const { connect } = open;
   assert.strictEqual((await plan()).count, "7 of 15 done");
 
   // A chat with no list shows none of it, and the list is back on return.
-  await ev(`location.hash = "#/s/pc/s2"; 1`);
+  await ev(`(location.hash = "#/s/pc/s2", 1)`);
   await until(chatReady("s2"), "chat s2");
   await sleep(800);
   assert.strictEqual(await strip(), null, "no strip in a chat with no list");
   assert.strictEqual(await plan(), null, "no plan in a chat with no list");
   // An older agent server: nothing and no error.
-  await ev(`location.hash = "#/s/pc/s3"; 1`);
+  await ev(`(location.hash = "#/s/pc/s3", 1)`);
   await until(chatReady("s3"), "chat s3");
   await sleep(800);
   assert.strictEqual(await strip(), null);
   assert.strictEqual(await plan(), null);
   assert.ok(!/Could not load activity/.test(await ev(`document.getElementById("actsum").textContent`)), "no error on an older server");
-  await ev(`location.hash = "#/s/pc/s1"; 1`);
+  await ev(`(location.hash = "#/s/pc/s1", 1)`);
   await until(chatReady("s1"), "chat s1 again");
   await until(`document.getElementById("todostrip") && !document.getElementById("todostrip").hidden`, "the strip on return");
   assert.strictEqual((await strip()).cnt, "7 of 15");
