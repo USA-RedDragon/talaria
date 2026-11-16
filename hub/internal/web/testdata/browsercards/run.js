@@ -52,7 +52,7 @@ async function run(c, w, h, touch, dark) {
   assert.deepStrictEqual(titles, [
     "Filled the form on support.example.com: 4 steps",
     "Filled the form on support.example.com: 2 of 4 steps",
-    "Typed into Search", "Pressed Enter", "Clicked Save", "Hovered over Account menu",
+    "Typed into Search", "Pressed Enter in Search", "Clicked Save", "Hovered over Account menu",
     "Browser steps not run: 3", "Ran 1 of 3 steps"], tag + ": titles " + JSON.stringify(titles));
   assert.ok(!/\be\d+\b/.test(titles.join(" ")), tag + ": no ref in a title");
   const metas = await ev(`${cards}.map((x) => x.querySelector(".notice-meta").textContent)`);
