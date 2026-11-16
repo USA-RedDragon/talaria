@@ -1,0 +1,556 @@
+From a77a01d9125eda4f083ac5031ff66dd12ebcb68c Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 14:17:42 -0600
+Subject: [PATCH] feat(approval): a plugin approval can ask for a sign-in grant
+
+---
+ gateway/session_pending_controls.py           |   6 +
+ hermes_cli/plugins.py                         |  15 +-
+ .../tools/test_plugin_login_grant_approval.py | 285 ++++++++++++++++++
+ tools/approval.py                             |  98 +++++-
+ tools/approval_gateway_wait.py                |   2 +-
+ 5 files changed, 393 insertions(+), 13 deletions(-)
+ create mode 100644 tests/tools/test_plugin_login_grant_approval.py
+
+diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
+index 5ef6e735..6c4ae3f4 100644
+--- a/gateway/session_pending_controls.py
++++ b/gateway/session_pending_controls.py
+@@ -84,6 +84,12 @@ class PendingControls:
+                     prompt[part] = _redact_approval_command(str(data[part]))
+             if data.get('grant_source'):
+                 prompt['grant_source'] = _redact_approval_command(str(data['grant_source']))
++            if data.get('login_grant') is not None:
++                # A device plugin asks to use a saved login: a human-only card. ``device`` approves this one call
++                # (nothing is stored here); the hub signs and delivers the grant before it answers.
++                from tools.approval import sanitize_login_grant
++                prompt['login_grant'] = sanitize_login_grant(data['login_grant'])
++                prompt['choices'] = ['once', 'device', 'deny']
+             if 'edit' in data:
+                 prompt['edit'] = deepcopy(data['edit'])
+                 prompt['choices'] = ['once', 'deny']
+diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
+index c9ce20f6..5af38535 100644
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -1108,6 +1108,9 @@ class _PreToolCallDirective:
+     message: Optional[str] = None
+     rule_key: Optional[str] = None
+     modified_args: Optional[dict[str, Any]] = None
++    # An approve directive may carry a ``login_grant`` dict (a device plugin asking to use a saved login on a
++    # host). It makes the approval a human-only card with the choices once/device/deny.
++    login_grant: Optional[dict[str, Any]] = None
+ 
+ 
+ def set_thread_tool_whitelist(
+@@ -1144,7 +1147,7 @@ def _get_pre_tool_call_directive_details(
+         api_request_id=api_request_id, middleware_trace=list(middleware_trace or []), conversation_id=conversation_id,
+     )
+     modified_args: Optional[dict[str, Any]] = None
+-    first_approve: Optional[tuple[Optional[str], Optional[str]]] = None  # (message, rule_key)
++    first_approve: Optional[tuple[Optional[str], Optional[str], Optional[dict[str, Any]]]] = None  # (message, rule_key, login_grant)
+     for result in hook_results:
+         if not isinstance(result, dict):
+             continue
+@@ -1170,10 +1173,12 @@ def _get_pre_tool_call_directive_details(
+         # approve is held back until the whole list has been scanned for a veto.
+         if first_approve is None:
+             rule_key = result.get("rule_key")
+-            first_approve = (message, (rule_key.strip() or None) if isinstance(rule_key, str) else None)
++            login_grant = result.get("login_grant")
++            first_approve = (message, (rule_key.strip() or None) if isinstance(rule_key, str) else None,
++                             dict(login_grant) if isinstance(login_grant, dict) else None)
+     if first_approve is not None:
+         return _PreToolCallDirective(action="approve", message=first_approve[0], rule_key=first_approve[1],
+-                                     modified_args=modified_args)
++                                     modified_args=modified_args, login_grant=first_approve[2])
+     return _PreToolCallDirective(modified_args=modified_args)
+ 
+ 
+@@ -1220,7 +1225,9 @@ def _resolve_block_from_details(
+             approval_tokens = set_current_observability_context(
+                 turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id)
+         try:
+-            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name)
++            extra = {"login_grant": details.login_grant} if details.login_grant is not None else {}
++            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name,
++                                           **extra)
+         finally:
+             if approval_tokens is not None:
+                 with suppress(Exception):
+diff --git a/tests/tools/test_plugin_login_grant_approval.py b/tests/tools/test_plugin_login_grant_approval.py
+new file mode 100644
+index 00000000..17a27e86
+--- /dev/null
++++ b/tests/tools/test_plugin_login_grant_approval.py
+@@ -0,0 +1,285 @@
++"""A device plugin's approval can carry a ``login_grant`` (ask to use a saved login on a host).
++
++  1. The approve directive of ``pre_tool_call`` keeps the ``login_grant`` dict and hands it to the gate.
++  2. The pending card carries the sanitized object and the choices once/device/deny.
++  3. ``device`` approves this one call like ``once`` and writes nothing; it is refused on a normal prompt.
++  4. Only a human answers: yolo, approvals.mode off, smart approval and allowlisted rules do not skip the card;
++     with no human the call is blocked.
++"""
++import threading
++import time
++from unittest.mock import patch
++
++import pytest
++
++import tools.approval as approval_mod
++from tools import approval_context
++
++KEY = "login-grant-session"
++GRANT = {"device_id": "d_abc", "device_name": "upstairs-pc", "host": "portal.example.com", "saved_logins": 1,
++         "methods": ["Password", "Email link"], "method": "", "existing": "", "job_id": ""}
++
++
++@pytest.fixture()
++def gateway(monkeypatch):
++    """A gateway session whose cards are recorded; the test answers them."""
++    cards = []
++    monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": KEY)
++    monkeypatch.setattr(approval_mod, "_presence", lambda cb=None: (None, False, True, False))
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
++    monkeypatch.setattr(approval_mod, "_yolo_active", lambda: False)
++    saved_session = {k: set(v) for k, v in approval_mod._session_approved.items()}
++    saved_permanent = set(approval_mod._permanent_approved)
++    approval_mod.register_gateway_notify(KEY, cards.append)
++    yield cards
++    approval_mod.unregister_gateway_notify(KEY)
++    approval_mod._session_approved.clear()
++    approval_mod._session_approved.update(saved_session)
++    approval_mod._permanent_approved.clear()
++    approval_mod._permanent_approved.update(saved_permanent)
++
++
++def _ask(**kwargs):
++    """Run the gate on a worker thread: ``(thread, result dict)``."""
++    result = {}
++
++    def run():
++        result["value"] = approval_mod.request_tool_approval(
++            "browser_login", "Sign in on portal.example.com", rule_key="browser:login-grant:d_abc:portal.example.com",
++            login_grant=dict(GRANT), **kwargs)
++
++    worker = threading.Thread(target=run)
++    worker.start()
++    return worker, result
++
++
++def _wait_card(cards, limit=10.0):
++    end = time.monotonic() + limit
++    while not cards and time.monotonic() < end:
++        time.sleep(0.02)
++    assert cards, "no approval card was raised"
++    return cards[0]
++
++
++def _persisted():
++    return (any(approval_mod._session_approved.values()), bool(approval_mod._permanent_approved))
++
++
++# --- 1. the directive ------------------------------------------------------------------------------------
++
++def _directive(hook_result):
++    from hermes_cli.plugins import _get_pre_tool_call_directive_details
++    with patch("hermes_cli.lifecycle.invoke_hook", return_value=[hook_result]):
++        return _get_pre_tool_call_directive_details("browser_login", {"url": "https://portal.example.com"})
++
++
++def test_directive_carries_login_grant():
++    details = _directive({"action": "approve", "message": "m", "rule_key": "k", "login_grant": GRANT})
++    assert details.action == "approve" and details.rule_key == "k"
++    assert details.login_grant == GRANT
++
++
++def test_directive_without_login_grant_has_none():
++    assert _directive({"action": "approve", "message": "m"}).login_grant is None
++    assert _directive({"action": "approve", "message": "m", "login_grant": "x"}).login_grant is None
++
++
++def test_resolve_hands_login_grant_to_the_gate():
++    from hermes_cli.plugins import _resolve_block_from_details
++    details = _directive({"action": "approve", "message": "m", "rule_key": "k", "login_grant": GRANT})
++    seen = {}
++
++    def fake(tool_name, reason, **kwargs):
++        seen.update(kwargs)
++        return {"approved": True}
++
++    with patch("tools.approval.request_tool_approval", fake):
++        assert _resolve_block_from_details(details, "browser_login") is None
++    assert seen == {"rule_key": "k", "login_grant": GRANT}
++
++
++def test_resolve_without_login_grant_keeps_the_old_call():
++    from hermes_cli.plugins import _resolve_block_from_details
++    details = _directive({"action": "approve", "message": "m", "rule_key": "k"})
++    seen = {}
++
++    def fake(tool_name, reason, **kwargs):
++        seen.update(kwargs)
++        return {"approved": True}
++
++    with patch("tools.approval.request_tool_approval", fake):
++        _resolve_block_from_details(details, "browser_login")
++    assert seen == {"rule_key": "k"}
++
++
++# --- sanitizing -----------------------------------------------------------------------------------------
++
++def test_sanitize_keeps_only_known_bounded_keys():
++    raw = {**GRANT, "evil": "x", "saved_logins": 3, "host": "h" * 1000, "methods": ["a" * 200, 5, "b"] + ["c"] * 20,
++           "device_name": ["nope"], "job_id": None}
++    out = approval_mod.sanitize_login_grant(raw)
++    assert set(out) <= {"device_id", "device_name", "host", "saved_logins", "methods", "method", "existing", "job_id"}
++    assert len(out["host"]) == 256 and out["saved_logins"] == 3
++    assert len(out["methods"]) == 12 and out["methods"][0] == "a" * 80 and 5 not in out["methods"]
++    assert "device_name" not in out and "job_id" not in out
++    assert approval_mod.sanitize_login_grant({"saved_logins": True}) == {}
++    assert approval_mod.sanitize_login_grant("x") == {}
++
++
++# --- 2. the card ----------------------------------------------------------------------------------------
++
++def test_card_has_the_object_and_three_choices(gateway):
++    worker, result = _ask()
++    card = _wait_card(gateway)
++    assert card["login_grant"] == GRANT and card["allow_session"] is False and card["allow_permanent"] is False
++    from gateway.session_pending_controls import PendingControls
++
++    class _Events:
++        lock = threading.RLock()
++
++        def publish(self, *a, **k):
++            pass
++
++    controls = PendingControls(_Events())
++    controls.register("s", object(), 1, {**card, "login_grant": {**GRANT, "evil": 1}})
++    prompt = controls.pending[card["request_id"]][1]
++    assert prompt["choices"] == ["once", "device", "deny"]
++    assert prompt["login_grant"] == GRANT
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++    assert result["value"]["approved"] is False
++
++
++def test_normal_prompt_has_no_device_choice():
++    from gateway.session_pending_controls import PendingControls
++
++    class _Events:
++        lock = threading.RLock()
++
++        def publish(self, *a, **k):
++            pass
++
++    controls = PendingControls(_Events())
++    controls.register("s", object(), 1, {"request_id": "r", "command": "c", "description": "d"})
++    prompt = controls.pending["r"][1]
++    assert "device" not in prompt["choices"] and "login_grant" not in prompt
++
++
++# --- 3. device ------------------------------------------------------------------------------------------
++
++@pytest.mark.parametrize("choice", ["once", "device"])
++def test_once_and_device_approve_one_call_and_persist_nothing(gateway, choice):
++    worker, result = _ask()
++    card = _wait_card(gateway)
++    assert approval_mod.resolve_gateway_approval(KEY, choice, request_id=card["request_id"]) == 1
++    worker.join(30)
++    assert result["value"]["approved"] is True
++    assert _persisted() == (False, False)
++    # the next call asks again
++    gateway.clear()
++    worker, result = _ask()
++    _wait_card(gateway)
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=gateway[0]["request_id"])
++    worker.join(30)
++    assert result["value"]["approved"] is False
++
++
++@pytest.mark.parametrize("choice", ["session", "always", "source", "bogus"])
++def test_login_grant_card_refuses_other_choices(gateway, choice):
++    worker, result = _ask()
++    card = _wait_card(gateway)
++    approval_mod.resolve_gateway_approval(KEY, choice, request_id=card["request_id"])
++    worker.join(30)
++    assert result["value"]["approved"] is False
++    assert _persisted() == (False, False)
++
++
++def test_device_is_refused_on_a_normal_prompt(gateway):
++    result = {}
++
++    def run():
++        result["value"] = approval_mod.request_tool_approval("some_tool", "needs a human", rule_key="r")
++
++    worker = threading.Thread(target=run)
++    worker.start()
++    card = _wait_card(gateway)
++    assert "login_grant" not in card
++    # the resolver leaves the prompt pending
++    assert approval_mod.resolve_gateway_approval(KEY, "device", request_id=card["request_id"]) == 0
++    assert approval_mod.resolve_gateway_approval(KEY, "device") == 0
++    assert approval_mod.resolve_gateway_approval(KEY, "device", resolve_all=True) == 0
++    assert worker.is_alive()
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++    assert result["value"]["approved"] is False
++
++
++def test_normal_gate_denies_a_device_answer_that_gets_through(monkeypatch):
++    """A client that smuggles ``device`` past the resolver still approves nothing."""
++    monkeypatch.setattr(approval_mod, "_presence", lambda cb=None: (lambda *a, **k: "device", True, False, False))
++    monkeypatch.setattr(approval_mod, "_yolo_active", lambda: False)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
++    monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": KEY)
++    result = approval_mod.request_tool_approval("some_tool", "needs a human", rule_key="r2")
++    assert result["approved"] is False
++
++
++# --- 4. human only --------------------------------------------------------------------------------------
++
++def test_yolo_mode_off_and_smart_do_not_skip_the_card(gateway, monkeypatch):
++    monkeypatch.setattr(approval_mod, "_yolo_active", lambda: True)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
++    monkeypatch.setattr(approval_mod, "_smart_verdict", lambda *a, **k: "approve")
++    worker, result = _ask()
++    card = _wait_card(gateway)
++    assert "value" not in result
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++    assert result["value"]["approved"] is False
++
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "smart")
++    gateway.clear()
++    worker, result = _ask()
++    card = _wait_card(gateway)
++    assert "value" not in result
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++
++
++def test_allowlisted_rule_does_not_skip_the_card(gateway):
++    rule = "browser:login-grant:d_abc:portal.example.com"
++    for key in (f"plugin_rule:{rule}", "plugin_login_grant:d_abc:portal.example.com", "plugin_rule:browser_login"):
++        approval_mod.approve_session(KEY, key)
++        approval_mod._permanent_approved.add(key)
++    worker, result = _ask()
++    card = _wait_card(gateway)
++    assert "value" not in result
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++    assert result["value"]["approved"] is False
++
++
++def test_cli_prompt_offers_once_and_deny_only(monkeypatch):
++    seen = {}
++
++    def callback(command, description, **kwargs):
++        seen.update(kwargs)
++        return "once"
++
++    monkeypatch.setattr(approval_mod, "_presence", lambda cb=None: (callback, True, False, False))
++    monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": KEY)
++    result = approval_mod.request_tool_approval("browser_login", "r", login_grant=dict(GRANT))
++    assert result["approved"] is True
++    assert seen.get("allow_permanent") is False and seen.get("allow_session") is False
++    assert _persisted() == (False, False)
++
++
++@pytest.mark.parametrize("mode", ["off", "manual", "smart"])
++def test_no_human_is_blocked(monkeypatch, mode):
++    monkeypatch.setattr(approval_mod, "_presence", lambda cb=None: (None, False, False, False))
++    monkeypatch.setattr(approval_mod, "_yolo_active", lambda: True)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: mode)
++    monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": KEY)
++    result = approval_mod.request_tool_approval("browser_login", "r", login_grant=dict(GRANT))
++    assert result["approved"] is False
++    assert "BLOCKED" in result["message"] and "portal.example.com" in result["message"]
+diff --git a/tools/approval.py b/tools/approval.py
+index 93510560..0d01ce54 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -183,6 +183,15 @@ def resolve_gateway_approval(session_key: str, choice: str,
+         queue = _gateway_queues.get(session_key)
+         if not queue:
+             return 0
++        if choice == "device":
++            # ``device`` answers only a sign-in grant card (one call, nothing stored). Whatever this call would
++            # resolve must all be such cards; otherwise it resolves nothing and the prompts stay pending.
++            if request_id:
++                wanted = [entry for entry in queue if entry.data.get("request_id") == request_id]
++            else:
++                wanted = list(queue) if resolve_all else queue[:1]
++            if any(entry.data.get("login_grant") is None for entry in wanted):
++                return 0
+         if request_id:
+             targets = [entry for entry in queue if entry.data.get("request_id") == request_id]
+             if not targets:
+@@ -954,11 +963,14 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+                     pattern_key: str, pattern_keys: list[str],
+                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
+                     is_ask: bool, smart: bool = False, pending_body=None,
+-                    review_blocked: bool = False, card_extra: dict | None = None, on_choice=None) -> dict:
++                    review_blocked: bool = False, card_extra: dict | None = None, on_choice=None,
++                    login_grant: dict | None = None) -> dict:
+     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
+ 
+     ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
+-    owner override reduces every surface to once/deny and persists nothing. ``pending_body`` is a thunk, built only once a human is
++    owner override reduces every surface to once/deny and persists nothing. ``login_grant`` (a sanitized
++    sign-in grant request) makes the prompt once/device/deny: ``device`` approves this one call like ``once``,
++    and nothing is ever persisted. ``pending_body`` is a thunk, built only once a human is
+     actually asked, so a smart APPROVE never pays for redacting a large script.
+     """
+     from agent.redact import redact_approval_display
+@@ -970,7 +982,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+         if result is not None:
+             return result
+     pending_body = pending_body() if pending_body else None
+-    allow_permanent = not smart_denied
++    allow_permanent = not smart_denied and login_grant is None
++    one_shot = smart_denied or login_grant is not None  # nothing persists; no session/always scope is offered
+ 
+     def deny(template: str, outcome: str, **fmt) -> dict:
+         breaker = ""
+@@ -983,10 +996,18 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+                        outcome=outcome, noun=spec.noun, **extra)
+ 
+     def grant(choice: str) -> dict:
++        if login_grant is None and choice == "device":
++            # ``device`` answers a sign-in grant card only; a client sending it elsewhere approves nothing.
++            return _denied("BLOCKED: unsupported answer for this approval. The user has NOT consented.",
++                           pattern_key=pattern_key, description=description, outcome="denied", noun=spec.noun)
++        if login_grant is not None and choice not in ("once", "device"):
++            return _denied("BLOCKED: unsupported answer for this sign-in approval. The user has NOT consented.",
++                           pattern_key=pattern_key, description=description, outcome="denied", noun=spec.noun)
+         if on_choice is not None:
+             on_choice(choice)
+         # A smart-DENY owner override is always one operation, even if an older client returns "session" or "always".
+-        if not smart_denied and choice in ("once", "session", "always"):
++        # A sign-in grant answer (once or device) is one operation too: no allowlist is written.
++        if not one_shot and choice in ("once", "session", "always"):
+             _persist_choice(session_key, choice, pattern_keys)
+         if spec.user_approved:
+             return _user_approved(session_key, description)
+@@ -1021,11 +1042,13 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+             data = {
+                 "command": display_command, "pattern_key": pattern_key,
+                 "pattern_keys": pattern_keys, "description": display_description,
+-                "allow_permanent": not smart_denied,
+-                "allow_session": not smart_denied,
++                "allow_permanent": not one_shot,
++                "allow_session": not one_shot,
+             }
+             if smart_denied:
+                 data["smart_denied"] = True
++            if login_grant is not None:
++                data["login_grant"] = login_grant
+             data.update(card_extra or {})
+             decision = _await_gateway_decision(session_key, notify_cb, data, surface="gateway")
+             if decision.get("notify_failed"):
+@@ -1072,8 +1095,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+     hook_kwargs = dict(command=prompt_command, description=prompt_description, pattern_key=pattern_key,
+                        pattern_keys=list(pattern_keys), session_key=session_key, surface="cli")
+     approval_context._fire_approval_hook("pre_approval_request", **hook_kwargs)
++    # A sign-in grant card cannot show ``device`` here: the CLI offers once/deny only.
+     choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=allow_permanent,
+-                                       smart_denied=smart_denied, approval_callback=approval_callback)
++                                       smart_denied=smart_denied, approval_callback=approval_callback,
++                                       **({"allow_session": False} if login_grant is not None else {}))
+     approval_context._fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
+     if choice == "timeout":
+         return deny(spec.cli_timeout, "timeout")
+@@ -1423,7 +1448,58 @@ def check_dangerous_command(command: str, env_type: str,
+     )
+ 
+ 
+-def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", approval_callback=None) -> dict:
++_LOGIN_GRANT_STR_KEYS = ("device_id", "device_name", "host", "method", "existing", "job_id")
++_LOGIN_GRANT_STR_MAX = 256
++_LOGIN_GRANT_METHODS_MAX = 12
++_LOGIN_GRANT_METHOD_MAX = 80
++
++
++def sanitize_login_grant(raw) -> dict:
++    """The sign-in grant request of a plugin approval, cut down to what a card may show: only the keys
++    ``device_id``, ``device_name``, ``host``, ``method``, ``existing``, ``job_id`` (strings, at most 256
++    characters), ``saved_logins`` (an int, -1 when unknown) and ``methods`` (at most 12 strings of at most
++    80 characters). Anything else, or a value of another type, is dropped. Always a dict."""
++    raw = raw if isinstance(raw, dict) else {}
++    out: dict = {}
++    for key in _LOGIN_GRANT_STR_KEYS:
++        value = raw.get(key)
++        if isinstance(value, str):
++            out[key] = value[:_LOGIN_GRANT_STR_MAX]
++    saved = raw.get("saved_logins")
++    if isinstance(saved, int) and not isinstance(saved, bool):
++        out["saved_logins"] = saved
++    methods = raw.get("methods")
++    if isinstance(methods, (list, tuple)):
++        out["methods"] = [m[:_LOGIN_GRANT_METHOD_MAX] for m in methods
++                          if isinstance(m, str)][:_LOGIN_GRANT_METHODS_MAX]
++    return out
++
++
++def _login_grant_approval(tool_name: str, reason: str, login_grant: dict, approval_callback=None) -> dict:
++    """The human-only card of a plugin's sign-in grant request. Only a human answer approves it: yolo,
++    ``approvals.mode`` off, the smart judge, cron/unattended auto-approve and the session and permanent
++    allowlists are not consulted, and nothing is written to them. No human present: blocked."""
++    description = reason or f"Plugin asks to use a saved login for {tool_name}"
++    host = login_grant.get("host") or "?"
++    pattern_key = f"plugin_login_grant:{login_grant.get('device_id') or '?'}:{host}"
++    subject = f"Tool '{tool_name}' asks to sign in on {host} ({description})"
++    approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
++    if not (is_cli or is_gateway or is_ask):
++        logger.warning("plugin sign-in grant request for '%s' on %s: no interactive user or gateway; BLOCKED.",
++                       tool_name, host)
++        return _blocked(f"BLOCKED: {subject} but no interactive user or gateway is present to approve it. "
++                        "Signing in on a site needs the user's own answer.",
++                        pattern_key=pattern_key, description=description)
++    return _human_decision(
++        _ACTION_GATE, command=f"<{tool_name}> sign in on {host}", description=description,
++        pattern_key=pattern_key, pattern_keys=[pattern_key], session_key=get_current_session_key(),
++        approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
++        login_grant=login_grant,
++    )
++
++
++def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", approval_callback=None,
++                          login_grant: dict | None = None) -> dict:
+     """Escalate an arbitrary tool call to the human-approval gate.
+ 
+     Entry point for a plugin ``pre_tool_call`` hook returning ``{"action": "approve", ...}``:
+@@ -1433,7 +1509,13 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
+     context without an approval bridge fails CLOSED. ``rule_key`` controls the ``[a]lways``
+     allowlist grain; when empty it is ``tool_name`` + a hash of ``reason`` so DISTINCT reasons
+     on the same tool persist independently. Returns the ``check_dangerous_command`` result shape.
++
++    ``login_grant`` (a dict) turns it into a sign-in grant request: always a human card (once/device/deny),
++    never skipped or stored by yolo, mode off, smart approval, cron/unattended mode or the allowlists;
++    blocked when no human is present. See :func:`_login_grant_approval`.
+     """
++    if login_grant is not None:
++        return _login_grant_approval(tool_name, reason, sanitize_login_grant(login_grant), approval_callback)
+     description = reason or f"Plugin requires approval for {tool_name}"
+     if not rule_key:
+         rule_key = f"{tool_name}:{hashlib.sha256(description.encode('utf-8')).hexdigest()[:12]}"
+diff --git a/tools/approval_gateway_wait.py b/tools/approval_gateway_wait.py
+index 6dcff9c0..24827d9a 100644
+--- a/tools/approval_gateway_wait.py
++++ b/tools/approval_gateway_wait.py
+@@ -172,7 +172,7 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
+     else:
+         choice = leader.result
+         resolved = choice is not None
+-    if choice == "once":
++    if choice in ("once", "device"):  # ``device`` (a sign-in grant card) approves one call, like ``once``
+         # The post hook fires for the fresh prompt's own lifecycle, not here.
+         return None
+     extra = {"cancelled": cancelled} if cancelled else {}
+-- 
+2.56.0
+

@@ -1,0 +1,7 @@
+# The plugin approval gate, the approval card and its prompt controls that the sign-in grant extends
+tests/tools/test_approval.py
+tests/tools/test_approval_plugin_hooks.py
+tests/tools/test_smart_provenance_chat_grants.py
+tests/tools/test_smart_provenance_source_grants.py
+tests/gateway/test_exec_approval_source_choice.py
+tests/gateway/test_exec_approval_template.py
