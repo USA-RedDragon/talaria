@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	firefox "github.com/USA-RedDragon/talaria/extension/firefox"
+	"github.com/USA-RedDragon/talaria/internal/config"
 )
 
 func TestValidVersion(t *testing.T) {
@@ -201,5 +202,18 @@ func TestWriteIncludesIcons(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "icons", "icon-96.png")); err != nil {
 		t.Error(err)
+	}
+}
+
+// The extension and the config check refuse the same sign-in method labels.
+func TestRefusedMethodPatternMatchesConfig(t *testing.T) {
+	t.Parallel()
+	src, err := firefox.Files.ReadFile("background.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "const REFUSED_METHOD = /" + config.RefusedMethodPattern + "/i;"
+	if !strings.Contains(string(src), want) {
+		t.Errorf("background.js lacks %s", want)
 	}
 }

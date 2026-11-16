@@ -151,7 +151,7 @@ func TestFirefoxEndToEnd(t *testing.T) { //nolint:paralleltest // one Firefox at
 	pages, rec := frameFlow(ctx, t, b, tab.TabID)
 	loginFlow(ctx, t, b, bc, tab.TabID)
 	if _, err := b.Call(ctx, "navigate", map[string]any{keyTab: tab.TabID, keyURL: e2eHubURL + "/device/pair",
-		keyGuard: map[string]any{keyVisit: []string{e2eHubHost}}}); err == nil || !strings.Contains(err.Error(), "Hermes hub") {
+		keyGuard: map[string]any{keyVisit: []string{e2eHubHost}}}); err == nil || !strings.Contains(err.Error(), "Talaria hub") {
 		t.Errorf("navigate an agent tab to the hub: err = %v", err)
 	}
 	t.Run("plugin", func(t *testing.T) { pluginLayer(ctx, t, b, srv.URL, pages, rec) })
@@ -195,7 +195,7 @@ func startFirefox(ctx context.Context, t *testing.T) (*broker.Broker, *bidi.Clie
 	b, err := broker.Listen(broker.Options{Path: sock, ExtensionID: host.ExtensionID,
 		AllowHosts:     []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost},
 		ConfirmHosts:   []string{confirmHost},
-		AutologinHosts: []string{loginHost, twoLoginHost}, HubURL: e2eHubURL})
+		AutologinHosts: []string{loginHost, twoLoginHost}, AutologinMethods: map[string]string{loginHost: "w3id Password"}, HubURL: e2eHubURL})
 	if err != nil {
 		t.Fatal(err)
 	}

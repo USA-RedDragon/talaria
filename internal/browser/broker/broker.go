@@ -68,10 +68,14 @@ type Message struct {
 	// AutologinHosts are exact hosts where browser_login may submit the
 	// login form Firefox filled (docs/browser.md section 7.4).
 	AutologinHosts []string `json:"autologin_hosts,omitempty"`
-	ExtensionID    string   `json:"extension_id,omitempty"`
-	HostPID        int      `json:"host_pid,omitempty"`
-	Version        string   `json:"version,omitempty"`
-	Browser        string   `json:"browser,omitempty"`
+	// AutologinMethods maps an autologin host to the visible text of the
+	// sign-in method button browser_login clicks when the page shows a
+	// method picker instead of a password form (section 7.4).
+	AutologinMethods map[string]string `json:"autologin_methods,omitempty"`
+	ExtensionID      string            `json:"extension_id,omitempty"`
+	HostPID          int               `json:"host_pid,omitempty"`
+	Version          string            `json:"version,omitempty"`
+	Browser          string            `json:"browser,omitempty"`
 	// HubURL is the daemon's hub.url. The extension keeps agent tabs off
 	// the hub.
 	HubURL string `json:"hub_url,omitempty"`
@@ -112,6 +116,9 @@ type Options struct {
 	// AutologinHosts are exact host names where browser_login may submit
 	// the login form that Firefox filled from its saved logins.
 	AutologinHosts []string
+	// AutologinMethods maps an autologin host to the label of the method
+	// button the extension clicks on a sign-in method picker.
+	AutologinMethods map[string]string
 	// HelloTimeout bounds the handshake. Defaults to 10 seconds.
 	HelloTimeout time.Duration
 	// HubURL is the daemon's hub.url, which agent tabs may not open.
@@ -277,7 +284,7 @@ func (b *Broker) drop(cn *conn) {
 
 func (b *Broker) configLocked() Message {
 	return Message{Type: TypeConfig, AllowHosts: b.opts.AllowHosts, ConfirmHosts: b.opts.ConfirmHosts,
-		AutologinHosts: b.opts.AutologinHosts, HubURL: b.opts.HubURL, DeviceID: b.deviceID}
+		AutologinHosts: b.opts.AutologinHosts, AutologinMethods: b.opts.AutologinMethods, HubURL: b.opts.HubURL, DeviceID: b.deviceID}
 }
 
 // SetDeviceID records the id the hub gave this device and sends the config

@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -50,12 +51,44 @@ type loginResult struct {
 	Submitted  bool   `json:"submitted"`
 	LandedHost string `json:"landed_host"`
 	Reason     string `json:"reason"`
+	Method     string `json:"method"`
+	// MethodsSeen holds the labels of a sign-in method picker.
+	MethodsSeen []string `json:"methods_seen"`
 }
 
 // loginServer records the posts it gets.
 type loginServer struct {
-	mu    sync.Mutex
-	posts []string
+	mu     sync.Mutex
+	posts  []string
+	clicks []string
+}
+
+func (l *loginServer) clicked() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.clicks...)
+}
+
+// pickerPage mimics IBM w3id: buttons to choose how to sign in, and the
+// password form only after "w3id Password" is chosen. Every button tells the
+// server which one was clicked.
+func pickerPage(buttons ...string) string {
+	var b strings.Builder
+	b.WriteString(`<!doctype html><title>Sign in</title><div id="root"><h1>Choose how to sign in</h1>` +
+		`<p>Not sure? Use w3id Password if you have one.</p><a href="#help">w3id Password help</a>`)
+	for _, label := range buttons {
+		b.WriteString(`<button type="button" onclick="pick(this.textContent)">` + label + `</button>`)
+	}
+	b.WriteString(`</div><script>
+function pick(m) {
+  fetch("/clicked?m=" + encodeURIComponent(m), {method: "POST"});
+  if (m !== "w3id Password") { return; }
+  setTimeout(() => { document.getElementById("root").innerHTML = '<form method="post" action="/login">' +
+    '<label>Email <input name="user" autocomplete="username"></label>' +
+    '<label>Password <input type="password" name="pass" autocomplete="current-password"></label>' +
+    '<button type="submit">Sign in</button></form>'; }, 400);
+}</script>`)
+	return b.String()
 }
 
 func (l *loginServer) got() []string {
@@ -84,6 +117,18 @@ func (l *loginServer) handler(other string) http.HandlerFunc {
 			_, _ = io.WriteString(w, form("/bounce", "post"))
 		case "/get-form":
 			_, _ = io.WriteString(w, form("/login", "get"))
+		case "/picker":
+			_, _ = io.WriteString(w, pickerPage("Passkey", "w3id Password", "IBM Verify"))
+		case "/picker-nomatch":
+			_, _ = io.WriteString(w, pickerPage("Passkey", "IBM Verify", "Other options"))
+		case "/picker-dup":
+			_, _ = io.WriteString(w, pickerPage("w3id Password", "w3id Password"))
+		case "/picker-offsite":
+			_, _ = io.WriteString(w, `<!doctype html><title>Sign in</title><a href="https://evil.example/login">w3id Password</a>`)
+		case "/clicked":
+			l.mu.Lock()
+			l.clicks = append(l.clicks, r.URL.Query().Get("m"))
+			l.mu.Unlock()
 		case "/confirm":
 			_, _ = io.WriteString(w, `<!doctype html><title>Confirm</title><form method="post" action="/login">`+
 				`<input type="password" name="pass" autocomplete="current-password"><button>Confirm</button></form>`)
@@ -382,6 +427,62 @@ func (g *loginRig) login(ctx context.Context, t *testing.T, args map[string]any)
 
 func approve(host string) map[string]any { return map[string]any{keyLogins: []string{host}} }
 
+// pickerEdges checks the sign-in method picker step of browser_login: the
+// configured button is clicked and nothing else, then Firefox fills the
+// password form; without a configured label the answer lists the labels; a
+// label that no button has exactly, two buttons with the label, a button
+// that leads off the autologin hosts and a page with a password field
+// already click nothing.
+func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
+	t.Helper()
+	// Each page loads in the same agent tab with navigate.
+	show := func(u string) int {
+		host := strings.Split(strings.TrimPrefix(u, "https://"), ":")[0]
+		rig.r.must(ctx, t, "navigate", map[string]any{keyTab: tabID, keyURL: u, keyGuard: map[string]any{keyVisit: []string{host}}}, nil)
+		return tabID
+	}
+	post := func(res loginResult) bool { return res.Submitted }
+	tab := show(rig.mainURL + "/picker")
+	res := rig.login(ctx, t, map[string]any{keyTab: tab, keyGuard: approve(loginHost)})
+	t.Logf("login through a picker: %+v", res)
+	if !res.Filled || !post(res) || res.LandedHost != loginHost || res.Method != "w3id Password" || res.Reason != "" {
+		t.Errorf("login through a picker = %+v", res)
+	}
+	if got := rig.main.clicked(); len(got) != 1 || got[0] != "w3id Password" {
+		t.Errorf("buttons clicked = %q, want only w3id Password", got)
+	}
+
+	// Nothing configured for this host: the labels come back, nothing is clicked.
+	two := show(rig.twoURL + "/picker")
+	res = rig.login(ctx, t, map[string]any{keyTab: two, keyGuard: approve(twoLoginHost), "timeout_ms": 3000})
+	t.Logf("picker without a configured method: %+v", res)
+	if res.Filled || res.Submitted || !strings.Contains(res.Reason, "no method is configured") ||
+		!slices.Equal(res.MethodsSeen, []string{"w3id Password help", "Passkey", "w3id Password", "IBM Verify"}) {
+		t.Errorf("picker without a configured method = %+v", res)
+	}
+	if got := rig.two.clicked(); len(got) != 0 {
+		t.Errorf("unconfigured picker clicked %q", got)
+	}
+
+	before := len(rig.main.clicked())
+	for _, page := range []struct{ path, want string }{
+		{"/picker-nomatch", "none has exactly"},
+		{"/picker-dup", "more than one button"},
+	} {
+		tab := show(rig.mainURL + page.path)
+		res = rig.login(ctx, t, map[string]any{keyTab: tab, keyGuard: approve(loginHost), "timeout_ms": 3000})
+		if res.Filled || res.Submitted || !strings.Contains(res.Reason, page.want) {
+			t.Errorf("%s = %+v, want a reason with %q", page.path, res, page.want)
+		}
+	}
+	if got := rig.main.clicked(); len(got) != before {
+		t.Errorf("a label that did not match exactly clicked %q", got[before:])
+	}
+	off := show(rig.mainURL + "/picker-offsite")
+	rig.r.refused(ctx, t, "a method button that leads off the autologin hosts", "browser.autologin-hosts", "login",
+		map[string]any{keyTab: off, keyGuard: approve(loginHost), "timeout_ms": 3000})
+}
+
 // loginEdges checks a login from a URL, two saved logins, a GET form and
 // a 307 redirect to another host.
 func loginEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
@@ -402,6 +503,8 @@ func loginEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	if got := rig.two.got(); len(got) != 0 {
 		t.Errorf("unfilled login posted: %q", got)
 	}
+
+	pickerEdges(ctx, t, rig, tabID)
 
 	// A GET form would put the password into the address.
 	rig.r.must(ctx, t, "navigate", map[string]any{keyTab: tabID, keyURL: rig.mainURL + "/get-form"}, nil)

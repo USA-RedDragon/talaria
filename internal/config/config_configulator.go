@@ -73,14 +73,15 @@ type reconnectShadow struct {
 }
 
 type browserShadow struct {
-	Enabled        *bool     `json:"enabled"         toml:"enabled"         yaml:"enabled"`
-	AllowHosts     *[]string `json:"allow-hosts"     toml:"allow-hosts"     yaml:"allow-hosts"`
-	ConfirmHosts   *[]string `json:"confirm-hosts"   toml:"confirm-hosts"   yaml:"confirm-hosts"`
-	AutologinHosts *[]string `json:"autologin-hosts" toml:"autologin-hosts" yaml:"autologin-hosts"`
-	StartFirefox   *bool     `json:"start-firefox"   toml:"start-firefox"   yaml:"start-firefox"`
-	Headless       *bool     `json:"headless"        toml:"headless"        yaml:"headless"`
-	ProfileDir     *string   `json:"profile-dir"     toml:"profile-dir"     yaml:"profile-dir"`
-	FirefoxCommand *string   `json:"firefox-command" toml:"firefox-command" yaml:"firefox-command"`
+	Enabled          *bool              `json:"enabled"           toml:"enabled"           yaml:"enabled"`
+	AllowHosts       *[]string          `json:"allow-hosts"       toml:"allow-hosts"       yaml:"allow-hosts"`
+	ConfirmHosts     *[]string          `json:"confirm-hosts"     toml:"confirm-hosts"     yaml:"confirm-hosts"`
+	AutologinHosts   *[]string          `json:"autologin-hosts"   toml:"autologin-hosts"   yaml:"autologin-hosts"`
+	AutologinMethods *map[string]string `json:"autologin-methods" toml:"autologin-methods" yaml:"autologin-methods"`
+	StartFirefox     *bool              `json:"start-firefox"     toml:"start-firefox"     yaml:"start-firefox"`
+	Headless         *bool              `json:"headless"          toml:"headless"          yaml:"headless"`
+	ProfileDir       *string            `json:"profile-dir"       toml:"profile-dir"       yaml:"profile-dir"`
+	FirefoxCommand   *string            `json:"firefox-command"   toml:"firefox-command"   yaml:"firefox-command"`
 }
 
 type mCPServerShadow struct {
@@ -385,6 +386,10 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 		if s.Browser.AutologinHosts != nil {
 			cfg.Browser.AutologinHosts = *s.Browser.AutologinHosts
 			set("browser.autologin-hosts", configulator.LayerFile, file)
+		}
+		if s.Browser.AutologinMethods != nil {
+			cfg.Browser.AutologinMethods = *s.Browser.AutologinMethods
+			set("browser.autologin-methods", configulator.LayerFile, file)
 		}
 		if s.Browser.StartFirefox != nil {
 			cfg.Browser.StartFirefox = *s.Browser.StartFirefox
@@ -2509,6 +2514,41 @@ func (s *browserShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 				}
 				s.AutologinHosts = &out
 			}
+		case "autologin-methods":
+			if dec.PeekKind() == jsontext.KindNull {
+				if _, err := dec.ReadToken(); err != nil {
+					return err
+				}
+			} else {
+				open, err := dec.ReadToken()
+				if err != nil {
+					return err
+				}
+				if open.Kind() != jsontext.KindBeginObject {
+					return configJSONError(path+".autologin-methods", open, fmt.Errorf("expected an object, got %v", open.Kind()))
+				}
+				out := map[string]string{}
+				for dec.PeekKind() != jsontext.KindEndObject {
+					kt, err := dec.ReadToken()
+					if err != nil {
+						return err
+					}
+					key := kt.String()
+					v, err := dec.ReadToken()
+					if err != nil {
+						return err
+					}
+					if v.Kind() != jsontext.KindString {
+						return configJSONError(path+".autologin-methods"+"."+configQuoteKey(key), v, fmt.Errorf("expected a string, got %v", v.Kind()))
+					}
+					el := v.String()
+					out[key] = el
+				}
+				if _, err := dec.ReadToken(); err != nil {
+					return err
+				}
+				s.AutologinMethods = &out
+			}
 		case "start-firefox":
 			v, err := dec.ReadToken()
 			if err != nil {
@@ -2983,6 +3023,7 @@ func (c Config) PrintConfig() string {
 	fmt.Fprintf(&b, "browser.allow-hosts = %v\n", c.Browser.AllowHosts)
 	fmt.Fprintf(&b, "browser.confirm-hosts = %v\n", c.Browser.ConfirmHosts)
 	fmt.Fprintf(&b, "browser.autologin-hosts = %v\n", c.Browser.AutologinHosts)
+	fmt.Fprintf(&b, "browser.autologin-methods = %v\n", c.Browser.AutologinMethods)
 	fmt.Fprintf(&b, "browser.start-firefox = %v\n", c.Browser.StartFirefox)
 	fmt.Fprintf(&b, "browser.headless = %v\n", c.Browser.Headless)
 	fmt.Fprintf(&b, "browser.profile-dir = %v\n", c.Browser.ProfileDir)

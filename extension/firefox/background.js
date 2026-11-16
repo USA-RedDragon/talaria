@@ -59,6 +59,10 @@ let confirmHosts = [];
 // login form that Firefox filled from its saved logins (docs/browser.md
 // section 7.4). The plugin cannot change this list.
 let autologinHosts = new Set();
+// Per autologin host, the visible label of the sign-in method button that
+// browser_login clicks on a method picker (section 7.4). Set only by the
+// device config; the plugin cannot change it.
+let autologinMethods = new Map();
 // loginGuards holds, per tab, the hosts a login submit may post to while
 // browser_login waits for the result (docs/browser.md section 7.4).
 const loginGuards = new Map();
@@ -148,6 +152,9 @@ async function onMessage(msg) {
     allowHosts = new Set((msg.allow_hosts || []).map((h) => h.toLowerCase()));
     confirmHosts = (msg.confirm_hosts || []).map((h) => String(h).toLowerCase().replace(/\.$/, "")).filter(Boolean);
     autologinHosts = new Set((msg.autologin_hosts || []).map((h) => String(h).toLowerCase().replace(/\.$/, "")).filter(Boolean));
+    autologinMethods = new Map(Object.entries(msg.autologin_methods || {})
+      .map(([h, l]) => [String(h).toLowerCase().replace(/\.$/, ""), String(l)])
+      .filter(([h, l]) => h && l && autologinHosts.has(h)));
     hubHost = hostPortOf(msg.hub_url);
     hubURL = hubHost ? new URL(msg.hub_url).origin : "";
     deviceID = typeof msg.device_id === "string" ? msg.device_id : "";
@@ -930,6 +937,153 @@ function pageLogin(hosts, tabHost, submit) {
     form.requestSubmit();
   }
   return Object.assign(out, { submitted: true });
+}
+
+// Labels of sign-in methods that browser_login never clicks, whatever the
+// config says: passkeys, security keys and approvals on another device.
+// The daemon's config check uses the same words.
+const REFUSED_METHOD = /passkey|pass key|security key|verify|push|approve|authenticator|biometric|fingerprint|face id|touch id|sms|text message|one-time|otp/i;
+
+// pageMethod handles a sign-in method picker: a page of an autologin host
+// with no password field that offers the ways to sign in as buttons or
+// links. It lists their labels and, with a label and click, clicks the one
+// element whose whole visible text is that label. It does nothing when the
+// page has a password field, when the label names a passkey or an approval
+// on another device, when no element or more than one has exactly that text
+// (a paragraph or a longer text that only contains it is not a match), and
+// when the click would leave the autologin hosts. It never returns more than
+// labels. It is self-contained, so nothing a page left in this world is used.
+function pageMethod(hosts, tabHost, label, click, refusedSource) {
+  const allowed = new Set(hosts);
+  if (location.protocol !== "https:") {
+    return { error: "the page is not https" };
+  }
+  const here = location.hostname.toLowerCase();
+  if (here !== tabHost || !allowed.has(here)) {
+    return { error: "the page's host " + here + " is not the tab's autologin host" };
+  }
+  const shown = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) {
+      return false;
+    }
+    const s = getComputedStyle(el);
+    return s.visibility !== "hidden" && s.display !== "none";
+  };
+  const passwords = [...document.querySelectorAll("input[type=password]")].filter(shown).length;
+  if (passwords > 0) {
+    return { passwords, labels: [], matched: 0, clicked: false };
+  }
+  const norm = (t) => String(t || "").replace(/\s+/g, " ").trim();
+  const textOf = (el) => norm(el.tagName === "INPUT" ? el.value : (el.innerText || el.textContent)) || norm(el.getAttribute("aria-label"));
+  const choices = [...document.querySelectorAll(
+    "button, a[href], input[type=button], input[type=submit], [role=button], [role=link], [role=radio], [role=option], [role=tab], [role=menuitem]")]
+    .filter((el) => shown(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true")
+    .map((el) => ({ el, text: textOf(el) }))
+    .filter((c) => c.text !== "" && c.text.length <= 80);
+  // An outer element with the same text as one inside it is one choice.
+  const own = choices.filter((c) => !choices.some((d) => d !== c && c.el.contains(d.el) && d.text.toLowerCase() === c.text.toLowerCase()));
+  const labels = [...new Set(own.map((c) => c.text))].slice(0, 12);
+  const out = { passwords: 0, labels, matched: 0, clicked: false };
+  if (!click || !label) {
+    return out;
+  }
+  if (new RegExp(refusedSource, "i").test(label)) {
+    return Object.assign(out, { error: "the configured sign-in method names a passkey or an approval on another device, which browser_login never chooses" });
+  }
+  const want = norm(label).toLowerCase();
+  const hits = own.filter((c) => c.text.toLowerCase() === want);
+  out.matched = hits.length;
+  if (hits.length !== 1) {
+    return out;
+  }
+  const el = hits[0].el;
+  // Where the click would go must stay on the autologin hosts.
+  let target = null;
+  if (el.tagName === "A") {
+    target = el.href;
+  } else if (el.form) {
+    const own = (name) => Reflect.apply(Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, name).get, el.form, []);
+    target = el.hasAttribute("formaction") ? el.formAction : String(own("action"));
+  }
+  if (target) {
+    let to;
+    try {
+      to = new URL(target, location.href);
+    } catch (e) {
+      return Object.assign(out, { error: "the method button has no usable target" });
+    }
+    const samePage = to.origin === location.origin && to.pathname === location.pathname && to.search === location.search;
+    if (!samePage && (to.protocol !== "https:" || !allowed.has(to.hostname.toLowerCase()))) {
+      return Object.assign(out, { error: "the method button leads to " + to.hostname + ", which is not in browser.autologin-hosts" });
+    }
+  }
+  el.click();
+  return Object.assign(out, { clicked: true });
+}
+
+// chooseMethod runs the picker step of browser_login on a tab of an
+// autologin host that has no password field. It returns { state, method }
+// once the page shows a password field after the configured button was
+// clicked, or { result } with the answer of browser_login when it stops:
+// no method is configured for the host (the answer names the labels the
+// page offers), the button is not there or is not one element, or the
+// password form did not come.
+async function chooseMethod(tabId, host, hosts, timeoutMs) {
+  const label = autologinMethods.get(host) || "";
+  const limit = Math.max(1000, Math.min(Number(timeoutMs) || LOGIN_FILL_MS, MAX_LOGIN_FILL_MS));
+  const start = Date.now();
+  const stop = (reason, extra) => ({ result: Object.assign({ tab_id: tabId, filled: false, submitted: false, landed_host: host, reason }, extra) });
+  let seen = [];
+  let clicked = false;
+  for (;;) {
+    const tab = await browser.tabs.get(tabId);
+    const here = hostOf(tab.url);
+    if (!/^https:/.test(tab.url || "") || !autologinHost(here)) {
+      return stop("the page left the autologin hosts (" + (here || "no page") + ") while browser_login chose a sign-in method");
+    }
+    let s;
+    try {
+      s = await inPage(tabId, pageMethod, [hosts, here, label, Boolean(label) && !clicked, REFUSED_METHOD.source]);
+    } catch (e) {
+      s = null; // the page is loading
+    }
+    if (s && s.error) {
+      throw new Refused(s.error);
+    }
+    if (s && s.passwords > 0) {
+      const state = await inPage(tabId, pageLogin, [hosts, here, false]);
+      if (state.error) {
+        throw new Refused(state.error);
+      }
+      return { state, method: clicked ? label : "" };
+    }
+    if (s) {
+      seen = s.labels.length ? s.labels : seen;
+      if (s.clicked) {
+        clicked = true;
+      } else if (!clicked && seen.length) {
+        if (!label) {
+          return stop("the page asks how to sign in (it offers: " + seen.map((l) => JSON.stringify(l)).join(", ") + ") and no " +
+            "method is configured for " + here + ". The user can add one to the device config, for example " +
+            "browser.autologin-methods: {" + here + ": " + JSON.stringify(seen[0]) + "}, naming the button for a password " +
+            "sign-in. browser_login never picks a passkey or an approval on another device.", { methods_seen: seen });
+        }
+        if (s.matched === 0 && Date.now() - start >= Math.min(limit, 5000)) {
+          return stop("the page offers sign-in methods (" + seen.map((l) => JSON.stringify(l)).join(", ") + ") but none has exactly the " +
+            "configured text " + JSON.stringify(label) + " in browser.autologin-methods for " + here, { methods_seen: seen });
+        }
+        if (s.matched > 1) {
+          return stop("more than one button has the configured text " + JSON.stringify(label) + ", so none was clicked", { methods_seen: seen });
+        }
+      }
+    }
+    if (Date.now() - start >= limit) {
+      return stop(clicked ? "the password form did not appear after the " + JSON.stringify(label) + " button was clicked" :
+        "the page shows no password field and no sign-in method to choose", seen.length ? { methods_seen: seen } : {});
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
 }
 
 const NOT_FILLED = "Firefox did not fill the login form. Likely causes: no login is saved for this host in this " +
@@ -2047,7 +2201,7 @@ const OPS = {
       if (tab.status === "loading") {
         tab = await waitComplete(tabId);
       }
-      const host = hostOf(tab.url);
+      let host = hostOf(tab.url);
       if (!/^https:/.test(tab.url || "") || !autologinHost(host)) {
         throw new Refused("browser_login works only on an https page whose host is in this device's " +
           "browser.autologin-hosts; tab " + tabId + " shows " + (host || "no page"));
@@ -2059,17 +2213,38 @@ const OPS = {
         throw new Refused("this tab ran a script; open the login page in a new tab with browser_navigate");
       }
       const hosts = [...autologinHosts];
-      const state = await inPage(tabId, pageLogin, [hosts, host, false]);
+      let state = await inPage(tabId, pageLogin, [hosts, host, false]);
       if (state.error) {
         throw new Refused(state.error);
       }
+      let method = "";
+      if (state.passwords === 0) {
+        // A method picker (IBM w3id offers Passkey, w3id Password and IBM
+        // Verify) comes before the password form. The device config names
+        // the button to click; nothing else is ever clicked.
+        before = await activate(tab);
+        const step = await chooseMethod(tabId, host, hosts, timeout_ms);
+        if (step.result) {
+          return step.result;
+        }
+        method = step.method;
+        state = step.state;
+        tab = await browser.tabs.get(tabId);
+        if (hostOf(tab.url) !== host) {
+          host = hostOf(tab.url);
+          if (!approved.has(host)) {
+            throw new Refused("browser_login on " + host + " needs the user's approval");
+          }
+        }
+      }
+      const noted = (r) => (method ? Object.assign(r, { method }) : r);
       if (state.passwords !== 1 || state.new_password || !state.username_present) {
         const why = !state.passwords ? "no password field" : state.passwords > 1 || state.new_password ?
           "more than one password field, or a new password field" : "no username field next to its password field";
-        return { tab_id: tabId, filled: false, submitted: false, landed_host: host,
-          reason: "the page has " + why + ", so it is not a simple login form" };
+        return noted({ tab_id: tabId, filled: false, submitted: false, landed_host: host,
+          reason: "the page has " + why + ", so it is not a simple login form" });
       }
-      before = await activate(tab);
+      before = before || await activate(tab);
       const limit = Math.max(1000, Math.min(Number(timeout_ms) || LOGIN_FILL_MS, MAX_LOGIN_FILL_MS));
       const start = Date.now();
       let now = state;
@@ -2090,7 +2265,7 @@ const OPS = {
           if (now.password_filled && now.username_present && !now.username_filled) {
             out.reason = "Firefox filled the password but not the username field. " + NOT_FILLED;
           }
-          return out;
+          return noted(out);
         }
         await new Promise((r) => setTimeout(r, 250));
       }
@@ -2101,11 +2276,11 @@ const OPS = {
       const sent = await inPage(tabId, pageLogin, [hosts, host, true]);
       if (sent.error || !sent.submitted) {
         loginGuards.delete(tabId);
-        return { tab_id: tabId, filled: true, submitted: false, landed_host: host, reason: sent.error || "not submitted" };
+        return noted({ tab_id: tabId, filled: true, submitted: false, landed_host: host, reason: sent.error || "not submitted" });
       }
       await Promise.race([loaded, new Promise((r) => setTimeout(r, LOAD_TIMEOUT_MS))]);
       const after = await settle(tabId).catch(() => browser.tabs.get(tabId));
-      return { tab_id: tabId, filled: true, submitted: true, landed_host: hostOf(after.url) };
+      return noted({ tab_id: tabId, filled: true, submitted: true, landed_host: hostOf(after.url) });
     } finally {
       // The redirect rule stays a while for a post that is still pending.
       const g = loginGuards.get(tabId);

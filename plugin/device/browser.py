@@ -2240,6 +2240,11 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     res = call(conn, "login", req, LOGIN_TIMEOUT_S)
     res = res if isinstance(res, dict) else {}
     out = {k: res[k] for k in ("tab_id", "filled", "submitted", "landed_host", "reason") if k in res}
+    if isinstance(res.get("method"), str):
+        out["method"] = res["method"][:80]  # the button the extension clicked, from the device config
+    seen = res.get("methods_seen")
+    if isinstance(seen, list):  # labels only, from a sign-in method picker
+        out["methods_seen"] = [x[:80] for x in seen if isinstance(x, str)][:12]
     if not out.get("submitted"):
         out["note"] = "The sign-in did not happen. Do not try to type the password; report that it needs the user."
     return _ok(out)

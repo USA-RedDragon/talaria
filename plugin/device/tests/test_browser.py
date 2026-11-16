@@ -632,6 +632,16 @@ class ToolTests(BrowserBase):
         self.assertEqual(out, {"tab_id": 7, "filled": True, "submitted": True, "landed_host": "app.example.com"},
                          "only the known result fields reach the model")
 
+    def test_login_method_picker_fields_reach_the_model(self):
+        self.login_page()
+        self.fake.login_result = {"filled": False, "submitted": False, "landed_host": "login.example.com",
+                                  "reason": "no method configured", "methods_seen": ["Passkey", "w3id Password", 5],
+                                  "method": "w3id Password", "password": "x"}
+        out = self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(out["methods_seen"], ["Passkey", "w3id Password"])
+        self.assertEqual(out["method"], "w3id Password")
+        self.assertNotIn("password", out)
+
     def test_login_refused_off_the_list(self):
         self.login_page(listed=False)
         out = self.run_tool("browser_login", tab_id=7)

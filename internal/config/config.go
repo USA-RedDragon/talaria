@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -74,14 +75,15 @@ type ACPHost struct {
 
 // Browser is Firefox browser control (docs/browser.md).
 type Browser struct {
-	Enabled        bool     `name:"enabled" default:"false" description:"Serve the Talaria Firefox extension on a private socket in the state directory and offer browser control to the plugin, so the agent can use tabs in its tab group. Run talaria browser install once"`
-	AllowHosts     []string `name:"allow-hosts" description:"Loopback or private network host names the agent may open. All other loopback, private, link-local and CGNAT addresses are blocked in agent tabs"`
-	ConfirmHosts   []string `name:"confirm-hosts" description:"Sites where every click and every Enter or Space key press asks the user each time and scripts may only read. Host names; each covers its subdomains. The plugin cannot change this list"`
-	AutologinHosts []string `name:"autologin-hosts" description:"Exact host names where browser_login may submit the login form that Firefox fills from its own saved login, so a scheduled job can sign in without the agent seeing the password. Only https pages whose top-level host is listed; no subdomains. Scripts are refused there, and clicks, typing, key presses and screenshots on its login pages. Example: login.w3.ibm.com. The plugin cannot change this list"`
-	StartFirefox   bool     `name:"start-firefox" default:"true" description:"Let the agent start Firefox, with the user's default profile, in the user's graphical session when the extension is not connected, so a scheduled job works after Firefox was closed. Not used with headless"`
-	Headless       bool     `name:"headless" default:"false" description:"Run a Firefox of the daemon's own with no display, on a profile of its own, with the Talaria extension installed in it, and keep it running (docs/browser.md section 5.2). For a device that has no desktop, such as the sandbox image, which turns it on. Needs browser.enabled. It replaces start-firefox, and the profile holds only the logins of that device"`
-	ProfileDir     string   `name:"profile-dir" description:"Where the headless Firefox keeps its profile, so cookies and logins survive restarts. Default: firefox-profile in the state directory"`
-	FirefoxCommand string   `name:"firefox-command" default:"firefox" description:"Command that starts Firefox for start-firefox: a name on PATH or an absolute path"`
+	Enabled          bool              `name:"enabled" default:"false" description:"Serve the Talaria Firefox extension on a private socket in the state directory and offer browser control to the plugin, so the agent can use tabs in its tab group. Run talaria browser install once"`
+	AllowHosts       []string          `name:"allow-hosts" description:"Loopback or private network host names the agent may open. All other loopback, private, link-local and CGNAT addresses are blocked in agent tabs"`
+	ConfirmHosts     []string          `name:"confirm-hosts" description:"Sites where every click and every Enter or Space key press asks the user each time and scripts may only read. Host names; each covers its subdomains. The plugin cannot change this list"`
+	AutologinHosts   []string          `name:"autologin-hosts" description:"Exact host names where browser_login may submit the login form that Firefox fills from its own saved login, so a scheduled job can sign in without the agent seeing the password. Only https pages whose top-level host is listed; no subdomains. Scripts are refused there, and clicks, typing, key presses and screenshots on its login pages. Example: login.w3.ibm.com. The plugin cannot change this list"`
+	AutologinMethods map[string]string `name:"autologin-methods" description:"Per autologin host, the visible text of the sign-in method button that browser_login clicks when the page shows a method picker instead of a password form, such as login.w3.ibm.com: w3id Password. Only that exact label is clicked, only on a host in autologin-hosts and only while the page has no password field. Passkey and push approval methods are never chosen for you. Config file only. The plugin cannot change this"`
+	StartFirefox     bool              `name:"start-firefox" default:"true" description:"Let the agent start Firefox, with the user's default profile, in the user's graphical session when the extension is not connected, so a scheduled job works after Firefox was closed. Not used with headless"`
+	Headless         bool              `name:"headless" default:"false" description:"Run a Firefox of the daemon's own with no display, on a profile of its own, with the Talaria extension installed in it, and keep it running (docs/browser.md section 5.2). For a device that has no desktop, such as the sandbox image, which turns it on. Needs browser.enabled. It replaces start-firefox, and the profile holds only the logins of that device"`
+	ProfileDir       string            `name:"profile-dir" description:"Where the headless Firefox keeps its profile, so cookies and logins survive restarts. Default: firefox-profile in the state directory"`
+	FirefoxCommand   string            `name:"firefox-command" default:"firefox" description:"Command that starts Firefox for start-firefox: a name on PATH or an absolute path"`
 }
 
 // MCP is the MCP servers the agent may use on this device
@@ -150,6 +152,7 @@ var (
 	ErrMissing         = errors.New("missing setting")
 	ErrMaxProcesses    = errors.New("acp-host.max-processes must be at least 1")
 	ErrResume          = errors.New("device.resume-buffer must be at least 4096 and device.max-grace must not be negative")
+	ErrAutologinMethod = errors.New("invalid browser.autologin-methods entry")
 	ErrMCPServer       = errors.New("invalid mcp.servers entry")
 	ErrUpdateInterval  = errors.New("update.interval must be at least 1h")
 	ErrMemorySize      = errors.New("device.command-memory-max must be off, 0, auto, or a size such as 4G")
@@ -212,6 +215,9 @@ func (c Config) Validate() error {
 		return ErrUpdateInterval
 	}
 	if err := c.MCP.validate(); err != nil {
+		return err
+	}
+	if err := c.Browser.validateMethods(); err != nil {
 		return err
 	}
 	return checkLoopback(c.Gateway.Listen)
@@ -309,6 +315,37 @@ func (m MCP) validate() error {
 			if k == "" || strings.ContainsAny(k, "=\x00") {
 				return fmt.Errorf("%w: mcp.servers.%s.env has an invalid name %q", ErrMCPServer, name, k)
 			}
+		}
+	}
+	return nil
+}
+
+// refusedMethodRE matches sign-in method labels that browser_login never
+// clicks: passkeys, security keys and anything that waits for the user on
+// another device. The extension checks the same words.
+var refusedMethodRE = regexp.MustCompile("(?i)" + RefusedMethodPattern)
+
+// RefusedMethodPattern is the pattern of refusedMethodRE without its flags.
+// extension/firefox/background.js must carry the same pattern.
+const RefusedMethodPattern = `passkey|pass key|security key|verify|push|approve|authenticator|biometric|fingerprint|face id|touch id|sms|text message|one-time|otp`
+
+// validateMethods checks browser.autologin-methods: every host is in
+// browser.autologin-hosts, every label is short visible text, and no label
+// names a passkey or an approval on another device.
+func (b Browser) validateMethods() error {
+	listed := map[string]bool{}
+	for _, h := range b.AutologinHosts {
+		listed[strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))] = true
+	}
+	for host, label := range b.AutologinMethods {
+		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+		switch {
+		case !listed[key]:
+			return fmt.Errorf("%w: %q is not in browser.autologin-hosts", ErrAutologinMethod, host)
+		case strings.TrimSpace(label) == "" || len([]rune(label)) > 80:
+			return fmt.Errorf("%w: the label for %q must be 1 to 80 characters", ErrAutologinMethod, host)
+		case refusedMethodRE.MatchString(label):
+			return fmt.Errorf("%w: %q for %q names a passkey or an approval on another device, which browser_login never chooses", ErrAutologinMethod, label, host)
 		}
 	}
 	return nil
