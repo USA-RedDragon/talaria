@@ -272,8 +272,10 @@
   const secretTarget = /pass(word|code)?\b|secret|otp|one[- ]?time|\bcvc\b|\bcvv\b|card number|credit card|\bpin\b|token/i;
 
   // hiddenText says a typed value must not be shown: the field looks like a
-  // password, code or card field. The plugin sends no secret flag.
+  // password, code or card field. The plugin's secret flag says it for a
+  // password field; the name of the target covers the other kinds.
   function hiddenText(c) {
+    if (isObj(c.res) && c.res.secret === true) return "password field";
     const t = targetOf(c);
     if (!t) return "";
     const what = str(t.name) + " " + str(t.role);
@@ -342,6 +344,11 @@
       } else if (res.at_bottom === true && (dirn === "down" || dirn === "bottom")) out.lines.push("Reached the bottom of the page");
       else if (res.at_top === true && (dirn === "up" || dirn === "top")) out.lines.push("Reached the top of the page");
       else if (res.at_bottom === false && dirn === "down") out.lines.push({ parts: "Not at the end yet", dim: true });
+    }
+    // The page changed because of the action (the plugin says so with navigated).
+    if (res.navigated === true && op !== "scroll" && op !== "hover") {
+      const now = pageLine(res.title, url);
+      if (now) out.lines.push("Page now: " + now);
     }
     const rows = [];
     const kind = targetKind(c);
@@ -489,6 +496,8 @@
     const out = { icon: "tabs", blocks: [], lines: [] };
     const site = hostOfUrl(a.url);
     const where = site ? [{ code: site }] : [];
+    // The title of the tab, when the plugin sent it with a close, keep or release.
+    const named = c.done && !c.failed && str(res.title) ? ": " + short(res.title) : "";
     if (c.failed && refusal(c) === "") {
       // Firefox was closed and is being started: the call tries again.
       if (isObj(c.res) && str(c.res.code) === "started") {
@@ -503,9 +512,9 @@
       case "open":
         out.title = [c.failed ? "Could not open a tab" : verb(c, "Opened", "Opening") + " a tab", ...(site ? [": "] : []), ...where];
         break;
-      case "close": out.title = c.failed ? "Could not close a tab" : verb(c, "Closed", "Closing") + " a tab"; break;
-      case "keep": out.title = c.failed ? "Could not keep a tab open" : verb(c, "Kept", "Keeping") + " a tab open"; break;
-      case "release": out.title = c.failed ? "Could not let a tab close" : verb(c, "Let", "Letting") + " a tab close on its own"; break;
+      case "close": out.title = c.failed ? "Could not close a tab" : verb(c, "Closed", "Closing") + " a tab" + named; break;
+      case "keep": out.title = c.failed ? "Could not keep a tab open" : verb(c, "Kept", "Keeping") + " a tab open" + named; break;
+      case "release": out.title = c.failed ? "Could not let a tab close" : verb(c, "Let", "Letting") + " a tab close on its own" + named; break;
       default: out.title = c.failed ? "Could not list browser tabs" : verb(c, "Listed", "Listing") + " browser tabs";
     }
     if (!c.done) return out;
