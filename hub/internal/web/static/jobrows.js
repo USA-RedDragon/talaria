@@ -117,8 +117,8 @@
       top.append(el("span", "name", g.job.name));
       col.append(top);
       const where = "Scheduled, " + g.job.schedule + " \u00B7 " + g.job.runs_in + (many ? " \u00B7 " + g.job.backend : "");
-      // The count sits at the end of the second line, so the name keeps the
-      // width of the whole line and the time stays at the end of the row.
+      // The count sits at the end of the second line, and the time
+      // follows it, so the name keeps the width of the whole line.
       const sub = el("span", "jobsub");
       sub.append(el("span", "where", where));
       if (g.unread) {
@@ -126,11 +126,11 @@
         b.title = g.unread + (g.unread === 1 ? " run" : " runs") + " you have not opened";
         sub.append(b);
       }
-      col.append(sub);
-      a.append(col);
       const w = el("span", "when", ctx.ago(g.newest.updated_at));
       if (w.textContent) w.title = new Date(g.newest.updated_at).toLocaleString();
-      a.append(w);
+      sub.append(w);
+      col.append(sub);
+      a.append(col);
       a.setAttribute("aria-label", g.job.name + ", scheduled job" + (g.unread ? ", " + g.unread + " new" : ""));
       a.onclick = () => ctx.opened();
       const tog = el("button", "more jobtoggle");
