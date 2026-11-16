@@ -8,3 +8,5 @@ tests/tools/test_completed_process_results.py
 tests/tools/test_hub_stop_notice.py
 tests/tools/test_terminal_background_spawn_failure.py
 tests/tools/test_terminal_yield_to_background.py
+# The background launch result (spawn handles without a start time)
+tests/tools/test_terminal_task_cwd.py

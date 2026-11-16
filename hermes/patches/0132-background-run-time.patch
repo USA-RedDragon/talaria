@@ -224,12 +224,15 @@ diff --git a/tools/terminal_tool_background.py b/tools/terminal_tool_background.
 index 1b9def38..94d956a0 100644
 --- a/tools/terminal_tool_background.py
 +++ b/tools/terminal_tool_background.py
-@@ -183,6 +183,10 @@ def spawn_background_process(
+@@ -183,6 +183,13 @@ def spawn_background_process(
          )
          result_data = {"output": "Background process started", "session_id": proc_session.id,
                         "pid": proc_session.pid, "exit_code": 0, "error": None}
-+        if proc_session.started_at:
-+            result_data["started_at"] = proc_session.started_at  # Unix seconds
++        # A spawn handle need not carry the start time (backends and fakes
++        # return only id and pid): read it without failing the launch.
++        started_at = getattr(proc_session, "started_at", None)
++        if started_at:
++            result_data["started_at"] = started_at  # Unix seconds
 +        if effective_cwd:
 +            result_data["cwd"] = str(effective_cwd)
          if persist_on_release:
