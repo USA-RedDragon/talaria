@@ -1,6 +1,6 @@
 "use strict";
 // HubToast is the page's one toast: a short note that says an action went
-// through or failed, in the top right under the header. show(text) keeps the
+// through or failed, just above the message box, centered over the chat column. show(text) keeps the
 // old toast(text) signature; show(text, {bad: true}) is for an error,
 // {ok: true} for a finished action, and {name} fills "{name}" in the text
 // with a target name clamped to about 40 characters, in bold, whose full
@@ -104,6 +104,7 @@ window.HubToast = (() => {
       const n = nodes.get(it);
       if (n) n.remove();
       nodes.delete(it);
+      watch();
       return;
     }
     if (kind === "refresh") {
@@ -137,7 +138,39 @@ window.HubToast = (() => {
     n.addEventListener("focusout", () => model.release(it));
     nodes.set(it, n);
     box.prepend(n);
+    place();
+    watch();
   }
+
+  // place anchors the box just above the composer (or above the Jump to
+  // latest pill when it shows), centered over the chat column so it never
+  // covers the Activity panel, and above the on-screen keyboard on a phone.
+  // The stack then grows upward from there.
+  function place() {
+    if (!box) return;
+    const main = document.querySelector("section.main");
+    const vv = window.visualViewport;
+    const vw = document.documentElement.clientWidth;
+    const vh = vv ? vv.offsetTop + vv.height : window.innerHeight;
+    const col = main ? main.getBoundingClientRect() : { left: 0, right: vw, bottom: vh };
+    const shown = (e) => { if (!e || e.hidden) return null; const r = e.getBoundingClientRect(); return r.height > 0 ? r : null; };
+    const lead = shown(document.getElementById("tobottom")) || shown(document.getElementById("composer"));
+    const edge = Math.min(vh, lead ? lead.top : col.bottom - 16);
+    const left = Math.max(0, col.left);
+    const width = Math.max(0, Math.min(col.right, vw) - left);
+    const s = box.style;
+    s.left = left + "px";
+    s.width = width + "px";
+    s.bottom = Math.max(0, window.innerHeight - edge + 8) + "px";
+  }
+  let tick = 0;
+  function watch() {
+    const live = nodes.size > 0;
+    if (live && !tick) tick = setInterval(place, 200);
+    if (!live && tick) { clearInterval(tick); tick = 0; }
+  }
+  if (window.addEventListener) window.addEventListener("resize", place);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", place);
 
   const cls = (it) => "toast" + (it.bad ? " bad" : it.ok ? " ok" : "");
 

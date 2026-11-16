@@ -2,9 +2,9 @@
 // Drives the real hub page in headless Chrome over the DevTools protocol.
 // usage: node browser.js CHROME HUB_URL PROFILE_DIR
 // At 412 and 1280 px, light and dark, with a chat open: a toast (one, and a
-// stack of three with a long name and an error) sits under the header, inside
-// the window, at the right on a desktop and centered full width on a phone,
-// and never overlaps the composer or the send button; an error is role=alert
+// stack of three with a long name and an error) sits just above the composer,
+// centered over the chat column, never over the Activity panel (open or closed),
+// the Jump to latest pill (a phone shows Activity as a drawer over the chat), the composer or the send button; an error is role=alert
 // and the others role=status; the x closes it; and a toast waits while the
 // pointer is on it, then stays 2 s or more. TOAST_SHOT=dir writes
 // toast-build-{412,1280}-{light,dark}-{one,stack}.png.
@@ -40,23 +40,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await sleep(300);
         fs.writeFileSync(`${process.env.TOAST_SHOT}/toast-build-${tag}-${n}.png`, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"));
       };
-      // A toast is under the header, in the window, and clear of the composer.
+      // A toast sits in the chat column, above the composer (and above the
+      // Jump to latest pill when it shows), clear of the Activity panel.
       const clear = async (what) => {
         const comp = await ev(rect("#composer"));
         const sendb = await ev(rect("#send"));
-        const bar = await ev(rect("header.bar"));
+        const col = await ev(rect("section.main"));
+        const act = await ev(`(() => { const e = document.getElementById("act"); if (!e || getComputedStyle(e).display === "none") return null; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? { l: r.left, t: r.top, r: r.right, b: r.bottom } : null; })()`);
+        const pill = await ev(`(() => { const e = document.getElementById("tobottom"); if (!e || e.hidden) return null; const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; })()`);
         const boxes = await ev(`[...document.querySelectorAll("#toasts .toast")].map((e) => { const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; })`);
         assert.ok(boxes.length > 0, `${tag} ${what}: a toast is shown`);
         for (const b of boxes) {
           assert.ok(!hit(b, comp), `${tag} ${what}: overlaps the composer ${JSON.stringify([b, comp])}`);
           assert.ok(!hit(b, sendb), `${tag} ${what}: overlaps the send button`);
-          assert.ok(b.t >= bar.b - 2, `${tag} ${what}: under the header (${b.t} vs ${bar.b})`);
-          assert.ok(b.l >= 0 && b.r <= w, `${tag} ${what}: inside the window ${JSON.stringify(b)}`);
-          if (mobile) assert.ok(Math.abs((b.l + b.r) / 2 - w / 2) < 2 && b.r - b.l >= w - 24, `${tag} ${what}: centered full width ${JSON.stringify(b)}`);
-          else assert.ok(w - b.r < 24 && b.r - b.l <= 460, `${tag} ${what}: at the right ${JSON.stringify(b)}`);
+          assert.ok(b.b <= comp.t + 1 && (b.b < Math.max(...boxes.map((x) => x.b)) || comp.t - b.b < (pill ? 90 : 40)), `${tag} ${what}: just above the composer ${JSON.stringify([b, comp])}`);
+          assert.ok(b.l >= col.l - 1 && b.r <= col.r + 1, `${tag} ${what}: inside the chat column ${JSON.stringify([b, col])}`);
+          assert.ok(b.l >= 0 && b.r <= w && b.t >= 0, `${tag} ${what}: inside the window ${JSON.stringify(b)}`);
+          assert.ok(Math.abs((b.l + b.r) / 2 - (col.l + col.r) / 2) < 2, `${tag} ${what}: centered over the chat column ${JSON.stringify([b, col])}`);
+          assert.ok(b.r - b.l <= 460, `${tag} ${what}: at most 28rem wide`);
+          if (mobile) assert.ok(b.r - b.l >= w - 24 - 2, `${tag} ${what}: full width on a phone ${JSON.stringify(b)}`);
+          if (act && !mobile) assert.ok(!hit(b, act), `${tag} ${what}: overlaps the Activity panel ${JSON.stringify([b, act])}`);
+          if (pill) assert.ok(!hit(b, pill) && b.b <= pill.t + 1, `${tag} ${what}: overlaps the Jump to latest pill ${JSON.stringify([b, pill])}`);
         }
         return boxes;
       };
+      // Activity open or closed, pill shown or not: one toast each time.
+      for (const [actOpen, pillOn] of [[true, false], [false, false], [true, true], [false, true]]) {
+        await ev(`document.getElementById("app").classList.toggle("act-closed", ${!actOpen}); document.getElementById("app").classList.remove("act-none"); document.getElementById("tobottom").hidden = ${!pillOn}`);
+        await ev(`HubToast.show("Sent. Read after the current step.", { ok: true })`);
+        await until(ev, `document.querySelectorAll("#toasts .toast").length === 1`, tag + ": a toast");
+        await sleep(300);
+        await clear(`act ${actOpen ? "open" : "closed"} pill ${pillOn}`);
+        if (actOpen && !pillOn) await shot("act-open");
+        if (!actOpen && pillOn) await shot("pill");
+        await ev(`document.querySelector("#toasts .toast .x").click()`);
+      }
+      await ev(`document.getElementById("app").classList.add("act-closed"); document.getElementById("tobottom").hidden = true`);
 
       // One toast.
       await ev(`HubToast.show("Copied", { ok: true })`);
