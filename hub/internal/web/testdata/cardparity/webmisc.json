@@ -1,0 +1,188 @@
+[
+ {
+  "id": "w01",
+  "name": "web_search",
+  "args": {
+   "query": "go 1.26 release"
+  },
+  "result": {
+   "data": {
+    "web": [
+     {
+      "title": "Go 1.26 Release Notes",
+      "url": "https://go.dev/doc/go1.26"
+     },
+     {
+      "title": "golang/go: milestone 1.26",
+      "url": "https://github.com/golang/go/milestone/1"
+     },
+     {
+      "title": "What is new in Go 1.26",
+      "url": "https://lwn.net/Articles/1"
+     },
+     {
+      "title": "Go 1.26 blog",
+      "url": "https://go.dev/blog/go1.26"
+     },
+     {
+      "title": "Go 1.26 discussion",
+      "url": "https://github.com/golang/go/issues/1"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "w02",
+  "name": "web_search",
+  "args": {
+   "query": "go 1.26 release"
+  },
+  "result": {
+   "error": "No search provider is set up"
+  },
+  "is_error": true
+ },
+ {
+  "id": "w03",
+  "name": "web_extract",
+  "args": {
+   "urls": [
+    "https://docs.example.com/install",
+    "https://blog.example.com/changelog"
+   ]
+  },
+  "result": {
+   "results": [
+    {
+     "url": "https://docs.example.com/install",
+     "title": "Install guide",
+     "content": "## Install\nRun it."
+    },
+    {
+     "url": "https://blog.example.com/changelog",
+     "title": "Changelog",
+     "error": "connection timed out"
+    }
+   ]
+  }
+ },
+ {
+  "id": "w04",
+  "name": "mcp_device_call",
+  "args": {
+   "server": "github",
+   "tool": "get_issue",
+   "arguments": {
+    "repo": "acme/web",
+    "number": 9999
+   }
+  },
+  "result": {
+   "is_error": true,
+   "content": "Not found: acme/web#9999"
+  }
+ },
+ {
+  "id": "w05",
+  "name": "mcp_device_tools",
+  "args": {
+   "server": "github",
+   "query": "issue"
+  },
+  "result": {
+   "total": 12,
+   "matched": 2,
+   "tools": [
+    {
+     "name": "search_issues",
+     "description": "Search issues",
+     "read_only": true
+    },
+    {
+     "name": "get_issue",
+     "description": "Get one issue"
+    }
+   ]
+  }
+ },
+ {
+  "id": "w06",
+  "name": "tool_search",
+  "args": {
+   "queries": [
+    "gmail send"
+   ]
+  },
+  "result": {
+   "tools": [
+    {
+     "name": "gmail_send",
+     "description": "Send an email"
+    }
+   ]
+  }
+ },
+ {
+  "id": "w07",
+  "name": "tool_describe",
+  "args": {
+   "names": [
+    "gmail_send"
+   ]
+  },
+  "result": {
+   "tools": [
+    {
+     "name": "gmail_send",
+     "parameters": {
+      "properties": {
+       "to": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "to"
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "id": "w08",
+  "name": "text_to_speech",
+  "args": {
+   "text": "Welcome to the weekly update."
+  },
+  "result": {
+   "success": true,
+   "file_path": "/home/alice/.hermes/audio/tts_1.mp3",
+   "provider": "edge"
+  }
+ },
+ {
+  "id": "w09",
+  "name": "image_generate",
+  "args": {
+   "prompt": "A lighthouse at dusk",
+   "aspect_ratio": "16:9"
+  },
+  "result": {
+   "success": true,
+   "image": "/home/alice/.hermes/images/a.png"
+  }
+ },
+ {
+  "id": "w10",
+  "name": "video_generate",
+  "args": {
+   "prompt": "Waves at sunrise",
+   "duration": 8
+  },
+  "result": {
+   "error": "No video backend is set up"
+  },
+  "is_error": true
+ }
+]
