@@ -71,7 +71,7 @@ func setupComputers(t *testing.T) *computersEnv {
 			t.Fatal(err)
 		}
 		t.Cleanup(d.Drain)
-		opts.Devices, opts.DeviceAPI, opts.Computers = st, d.Handler(), d
+		opts.Devices, opts.DeviceAPI, opts.Computers, opts.LoginGrants = st, d.Handler(), d, d
 	})
 	plugin := devicetest.NewPlugin(e.gw, "pc", pub)
 	ctx := context.Background()

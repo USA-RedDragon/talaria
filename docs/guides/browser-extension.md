@@ -60,6 +60,8 @@ The agent asks before it does anything you cannot easily undo. The question appe
 | Click or type on a page with a password, payment or one-time code field | Every time, also for each step of a batch |
 | Run a script on a page | Once per site per session, every time on a page with secret fields |
 
+Signing in with the login Firefox saved (`browser_login`) on a site that is not in `browser.autologin-hosts` asks you with a card that names the site and the computer. Allow once or Allow on the computer; Settings, Computers lists and revokes what you allowed. See [Sign-in cards](approvals-and-trust.md#sign-in-cards).
+
 A site is the host name without a leading `www.`, so `accounts.example.com` and `example.com` are asked about separately. You can answer once, for the session, always, or deny.
 
 Two settings make this stricter, and only the config file on your computer can change them, so the server cannot weaken them:

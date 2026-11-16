@@ -121,6 +121,8 @@ type Plugin struct {
 	gw *gatewaytest.Gateway
 	// fr is the state of the stat and stream routes (files.go).
 	fr *fileRoutes
+	// lg is the state of the sign-in grant routes (logingrants.go).
+	lg loginGrants
 }
 
 // NewPlugin mounts a fake plugin for backendID on gw. It accepts
@@ -147,6 +149,7 @@ func NewPlugin(gw *gatewaytest.Gateway, backendID string, key ed25519.PublicKey)
 	gw.Handle("GET "+base+"/sessions/{session}/changes", http.HandlerFunc(p.getChanges), true)
 	gw.Handle("GET "+protocol.PluginExecPath, http.HandlerFunc(p.exec), false)
 	p.mountFileRoutes(base)
+	p.mountLoginGrants(base)
 	return p
 }
 

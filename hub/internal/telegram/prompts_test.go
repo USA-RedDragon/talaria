@@ -593,3 +593,58 @@ func TestQuestionCardsOfEndedQuestions(t *testing.T) {
 		})
 	}
 }
+
+func loginCard(methods ...string) map[string]any {
+	return map[string]any{kPromptID: "lg1", kKind: "approval", kCommand: "browser_login", "description": "pod text that is not shown",
+		kChoices:      []string{hub.ChoiceOnce, hub.ChoiceDevice, hub.ChoiceDeny},
+		"login_grant": map[string]any{"device_id": "d1", "device_name": "upstairs-pc", "host": "portal.example.com", "saved_logins": 3, "methods": methods}}
+}
+
+// A sign-in card says the site, the computer and how many saved logins
+// Firefox has, with three buttons; Allow once sends the choice with no method.
+func TestLoginGrantCard(t *testing.T) {
+	t.Parallel()
+	h := startBot(t, nil)
+	sid := h.startTurn(t)
+	h.hub.emit(t, sid, hub.KindApprovalRequest, loginCard())
+	req := h.tg.wait(mSend, "Sign in with the saved login on portal.example.com?")
+	for _, want := range []string{"upstairs-pc", "Firefox has 3 saved logins for this site and fills none of them"} {
+		if !strings.Contains(req.text(), want) {
+			t.Fatalf("card %q lacks %q", req.text(), want)
+		}
+	}
+	if strings.Contains(req.text(), "pod text") {
+		t.Fatalf("card shows the pod's text: %q", req.text())
+	}
+	if got := labels(req); !slices.Equal(got, []string{"Allow once", "Allow on upstairs-pc", "Deny"}) {
+		t.Fatalf("labels = %v", got)
+	}
+	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(req.buttons()[0]))
+	got := h.hub.waitAnswer(t)
+	if got.Answer.Choice != hub.ChoiceOnce || got.Answer.Method != "" || got.Via != hub.AnsweredInTelegram {
+		t.Fatalf("answer = %+v", got)
+	}
+}
+
+// With methods on the card, an allowing button asks which method first, and
+// the answer carries the one picked. Deny asks nothing.
+func TestLoginGrantMethodPicker(t *testing.T) {
+	t.Parallel()
+	h := startBot(t, nil)
+	sid := h.startTurn(t)
+	h.hub.emit(t, sid, hub.KindApprovalRequest, loginCard("Password", "Email link"))
+	req := h.tg.wait(mSend, "Sign in with the saved login")
+	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(req.buttons()[1]))
+	marks := h.tg.wait(mMarkup, "")
+	if got := labels(marks); !slices.Equal(got, []string{"No preference", "Password", "Email link"}) {
+		t.Fatalf("method labels = %v", got)
+	}
+	if got := h.hub.answersCopy(); len(got) != 0 {
+		t.Fatalf("answered before the method: %+v", got)
+	}
+	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(marks.buttons()[2]))
+	got := h.hub.waitAnswer(t)
+	if got.Answer.Choice != hub.ChoiceDevice || got.Answer.Method != "Email link" {
+		t.Fatalf("answer = %+v", got)
+	}
+}

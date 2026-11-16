@@ -133,6 +133,8 @@ type Service struct {
 	uploads chan struct{}
 	// notify takes the notices of every subscribed session.
 	notify atomic.Pointer[func(hub.Notice)]
+	// loginGrants signs sign-in grants (see SetLoginGrants).
+	loginGrants atomic.Pointer[hub.LoginGrants]
 	// turnErrors takes the failed turns of every subscribed session.
 	turnErrors atomic.Pointer[func(TurnError)]
 	// subagentLocks orders the reads of each subagent's transcript.
@@ -746,9 +748,13 @@ func (s *Service) AnswerPrompt(ctx context.Context, user, backendID, sessionID, 
 	defer ls.unpin()
 	ls.mu.Lock()
 	p, ok := ls.prompts[promptID]
+	title := ls.title
 	ls.mu.Unlock()
 	if !ok {
 		return hub.ErrUnknownApproval
+	}
+	if a.Method != "" && (p.Kind != gateway.PromptApproval || p.LoginGrant == nil) {
+		return fmt.Errorf("%w: only a sign-in card takes a method", hub.ErrBadValue)
 	}
 	var (
 		method string
@@ -758,6 +764,11 @@ func (s *Service) AnswerPrompt(ctx context.Context, user, backendID, sessionID, 
 	case gateway.PromptApproval:
 		if !slices.Contains(p.Choices, a.Choice) {
 			return fmt.Errorf("%w: this approval does not offer %q", hub.ErrBadValue, a.Choice)
+		}
+		if p.LoginGrant != nil {
+			if err := s.answerLoginGrant(ctx, user, backendID, sessionID, title, p, a); err != nil {
+				return err
+			}
 		}
 		method, params = gateway.MethodApproval, gateway.ApprovalParams{SessionID: ls.id, ExecutionGeneration: p.ExecutionGeneration,
 			PromptID: p.PromptID, Choice: a.Choice}

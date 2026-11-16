@@ -67,6 +67,8 @@ type Options struct {
 	// Computers lets users start and move chats on their computers. Nil
 	// when device.enabled is off.
 	Computers hub.Computers
+	// LoginGrants lists and revokes the sign-in grants of computers. Nil: none.
+	LoginGrants hub.LoginGrants
 	// Memory serves the Memory page. Nil: the hub has no Memory page.
 	Memory hub.Memory
 	// Models connects model providers to Hermes from Settings > Models.
@@ -165,6 +167,7 @@ type Server struct {
 	onRevoke     func(string)
 	sandboxes    func(context.Context, string) []hub.Sandbox
 	computers    hub.Computers
+	loginGrants  hub.LoginGrants
 	memory       hub.Memory
 	models       hub.ModelSetup
 	insights     hub.Insights
@@ -254,7 +257,7 @@ func New(cfg *config.Config, opts Options) (*Server, error) {
 		agent: opts.Agent, agentAdmins: agentAdmins, telegram: opts.Telegram, updates: opts.Updates,
 		snapshot: opts.Snapshot, scratch: opts.Scratch, hubKeys: hubKeys(cfg), started: opts.Started,
 		authState: st,
-		devices:   opts.Devices, deviceAPI: opts.DeviceAPI, onRevoke: opts.OnRevoke, sandboxes: opts.Sandboxes, computers: opts.Computers, memory: opts.Memory, models: opts.Models,
+		devices:   opts.Devices, deviceAPI: opts.DeviceAPI, onRevoke: opts.OnRevoke, sandboxes: opts.Sandboxes, computers: opts.Computers, loginGrants: opts.LoginGrants, memory: opts.Memory, models: opts.Models,
 		insights: opts.Insights, files: opts.Files,
 		notices: opts.Notices, notifier: opts.Notifier, claude: opts.Claude, scheduled: opts.Scheduled,
 		claudeCode: opts.ClaudeCode, subagents: opts.Subagents, chats: opts.Chats, marksKeep: opts.MarksKeep, prompts: opts.Prompts,
@@ -482,6 +485,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/places", s.api(s.handlePlaces))
 	mux.Handle("GET /api/computers", s.api(s.lastAnswer(s.handleComputers)))
 	mux.Handle("GET /api/computers/{device}/folders", s.api(s.handleFolders))
+	mux.Handle("GET /api/computers/{device}/login-grants", s.api(s.handleLoginGrants))
+	mux.Handle("DELETE /api/computers/{device}/login-grants/{host}", s.api(s.handleRevokeLoginGrant))
 	s.memoryRoutes(mux)
 	s.modelRoutes(mux)
 	s.insightRoutes(mux)

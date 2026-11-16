@@ -345,6 +345,7 @@ func (ls *live) setPrompts(ps []gateway.Prompt, announce bool) {
 	ls.prompts = map[string]gateway.Prompt{}
 	for _, p := range ps {
 		if p.Kind == gateway.PromptApproval || p.Kind == gateway.PromptClarify {
+			ls.b.svc.vetLoginGrant(ls.b.cfg.ID, &p)
 			ls.prompts[p.PromptID] = p
 			ls.promptNotice(p)
 			if _, known := old[p.PromptID]; announce && !known {
@@ -398,7 +399,8 @@ func promptInfo(p gateway.Prompt) hub.PromptInfo {
 		return *s
 	}
 	return hub.PromptInfo{ID: p.PromptID, Kind: p.Kind, Choices: append([]string(nil), p.Choices...), Multi: p.MultiSelect,
-		Command: str(p.Command), Description: str(p.Description), Subagent: str(p.Subagent), GrantSource: str(p.GrantSource), Rule: str(p.Rule), Reason: str(p.Reason), Question: str(p.Question), Timeout: p.Timeout}
+		Command: str(p.Command), Description: str(p.Description), Subagent: str(p.Subagent), GrantSource: str(p.GrantSource), Rule: str(p.Rule), Reason: str(p.Reason), Question: str(p.Question), Timeout: p.Timeout,
+		LoginGrant: loginGrantCard(p.LoginGrant)}
 }
 
 // promptNotice announces a pending prompt. ls.mu is held.
@@ -547,6 +549,9 @@ func (ls *live) apply(ev gateway.Event) {
 				p.Kind = gateway.PromptClarify
 			case p.Kind == "":
 				p.Kind = gateway.PromptApproval
+			}
+			if ls.b.svc.vetLoginGrant(ls.b.cfg.ID, &p) {
+				ev.Payload = withLoginGrant(ev.Payload, p.LoginGrant)
 			}
 			ls.prompts[p.PromptID] = p
 			ls.promptNotice(p)

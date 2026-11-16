@@ -392,6 +392,9 @@ const (
 	// ChoiceSource is smart approval's "Always allow code from this source
 	// in this chat": a grant kept with the chat that covers its subagents.
 	ChoiceSource = "source"
+	// ChoiceDevice is a sign-in grant card's "Allow on <computer>": the
+	// grant stays on the computer until the user revokes it.
+	ChoiceDevice = "device"
 )
 
 // PromptInfo is a pending approval or question. Choices are the approval
@@ -419,7 +422,36 @@ type PromptInfo struct {
 	// Timeout is how many seconds Hermes waits for the answer, 0 when
 	// it did not say.
 	Timeout float64 `json:"timeout_s,omitempty"`
+	// LoginGrant is set on the card that asks to sign in with a saved
+	// login on a site: the card is drawn from it, not from the text.
+	LoginGrant *LoginGrantCard `json:"login_grant,omitempty"`
 }
+
+// LoginGrantCard is the part of a sign-in grant card. Hermes and the device
+// plugin made it, so only DeviceID and Host are signed, and only after the
+// hub checked them; the rest is shown as it came.
+type LoginGrantCard struct {
+	DeviceID string `json:"device_id"`
+	// DeviceName is the hub's own name for the computer, "" when DeviceID
+	// is not a computer the hub knows.
+	DeviceName string `json:"device_name,omitempty"`
+	Host       string `json:"host"`
+	// SavedLogins is how many logins Firefox saved for the site, -1 when
+	// that is not known.
+	SavedLogins int `json:"saved_logins"`
+	// Methods are the sign-in methods the page offered.
+	Methods []string `json:"methods,omitempty"`
+	// Method is the method the grant already has, "" for none.
+	Method string `json:"method,omitempty"`
+	// Existing is "device" when the computer already has a grant for the
+	// site, so the card changes its method.
+	Existing string `json:"existing,omitempty"`
+	JobID    string `json:"job_id,omitempty"`
+}
+
+// LoginGrantExistingDevice is LoginGrantCard.Existing for a computer that
+// already has a grant for the site.
+const LoginGrantExistingDevice = "device"
 
 // Answer answers a PromptInfo. For an approval Choice is one of its
 // Choices. For a question Text is free text or one of its Choices, Picks
@@ -429,6 +461,9 @@ type Answer struct {
 	Text   string   `json:"text,omitempty"`
 	Picks  []string `json:"picks,omitempty"`
 	Skip   bool     `json:"skip,omitempty"`
+	// Method is the sign-in method picked on a sign-in grant card: "" or
+	// one of the card's methods. No other prompt takes it.
+	Method string `json:"method,omitempty"`
 }
 
 // Prompter is the optional part of a Service that answers approvals and

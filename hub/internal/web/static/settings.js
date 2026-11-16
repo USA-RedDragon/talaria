@@ -42,6 +42,8 @@ window.HubSettings = (ctx) => {
   let confirming = "";
   let busy = false;
   let note = "";
+  // grants are the sign-in grants of each open computer by device id: {state, data, msg}.
+  const grants = {};
   // inPane is true on a phone while a section shows instead of the list.
   let inPane = false;
 
@@ -199,6 +201,7 @@ window.HubSettings = (ctx) => {
     head.append(top, meta);
     head.onclick = () => {
       open[d.id] = !open[d.id];
+      if (open[d.id]) loadGrants(d);
       if (!open[d.id] && editing === d.id) editing = "";
       drawDevices();
     };
@@ -235,8 +238,100 @@ window.HubSettings = (ctx) => {
     add("Works with", d.backend_name);
     box.append(dl);
     if (d.last_close) box.append(el("p", "hint", closeText(d.last_close)));
+    if (d.paired) box.append(grantsSection(d));
     box.append(editing === d.id ? renameForm(d) : confirming === d.id ? removeConfirm(d) : rowActs(d));
     return box;
+  }
+
+  // loadGrants reads what the computer allows to sign in with a saved login. The computer answers it, so an
+  // offline computer or an older talaria says so instead of an empty list.
+  async function loadGrants(d) {
+    if (d.kind === "sandbox" || !d.paired) return;
+    grants[d.id] = { state: "loading" };
+    try {
+      grants[d.id] = { state: "ok", data: await api("GET", "/api/computers/" + encodeURIComponent(d.id) + "/login-grants") };
+    } catch (e) {
+      const st = e && e.status;
+      grants[d.id] = { state: st === 409 ? "offline" : st === 501 ? "old" : "error", msg: (e && e.message) || "" };
+    }
+    if (dlg.open) drawDevices();
+  }
+
+  async function revokeGrant(d, host) {
+    busy = true;
+    try {
+      await api("DELETE", "/api/computers/" + encodeURIComponent(d.id) + "/login-grants/" + encodeURIComponent(host));
+    } catch (e) {
+      note = "Could not take back the sign-in on " + host + ": " + e.message;
+    }
+    busy = false;
+    await loadGrants(d);
+  }
+
+  function ago(sec) {
+    return sec ? new Date(sec * 1000).toLocaleString() : "";
+  }
+
+  // grantsSection lists the sites where the agent may sign in with the browser's saved login on this computer.
+  function grantsSection(d) {
+    const sec = el("div", "set-grants");
+    sec.append(el("h3", "", "Sign-in on saved logins"));
+    const g = grants[d.id];
+    if (!g || g.state === "loading") {
+      sec.append(el("p", "hint", "Loading..."));
+      return sec;
+    }
+    if (g.state === "offline") {
+      sec.append(el("p", "hint", "Computer is offline"));
+      return sec;
+    }
+    if (g.state === "old") {
+      sec.append(el("p", "hint", "This computer's talaria is too old to keep sign-in grants. Update talaria on it."));
+      return sec;
+    }
+    if (g.state === "error") {
+      sec.append(el("p", "err", "Could not load the sign-in list" + (g.msg ? ": " + g.msg : "")));
+      return sec;
+    }
+    const items = g.data.grants || [];
+    const config = g.data.config_hosts || [];
+    if (!items.length && !config.length) {
+      sec.append(el("p", "hint", "No site is allowed. When the agent asks to sign in with a saved login, the card in the chat lets you allow it."));
+      return sec;
+    }
+    const rows = el("div", "set-rows");
+    for (const x of items) {
+      const row = el("div", "set-row set-grant");
+      const top = el("span", "set-top");
+      top.append(el("span", "nm", x.host), el("span", "pill", x.scope === "once" ? "Once" : "Always on this computer"));
+      const meta = el("span", "meta");
+      if (x.method) meta.append(el("span", "", "Method: " + x.method));
+      const allowed = el("span", "", "allowed " + ago(x.granted_at) + " in ");
+      if (x.session_id && d.backend_id) {
+        const a = el("a", "", x.chat_title || "a chat");
+        a.href = "#/s/" + encodeURIComponent(d.backend_id) + "/" + encodeURIComponent(x.session_id);
+        allowed.append(a);
+      } else {
+        allowed.append(x.chat_title || "a chat");
+      }
+      meta.append(allowed, el("span", "", x.last_used ? "last used " + ago(x.last_used) : "never used"));
+      const acts = el("div", "acts");
+      acts.append(button("danger-text", "Revoke", () => revokeGrant(d, x.host)));
+      row.append(top, meta, acts);
+      rows.append(row);
+    }
+    for (const c of config) {
+      const row = el("div", "set-row set-grant");
+      const top = el("span", "set-top");
+      top.append(el("span", "nm", c.host));
+      const meta = el("span", "meta");
+      if (c.method) meta.append(el("span", "", "Method: " + c.method));
+      meta.append(el("span", "", "set in this computer's config"));
+      row.append(top, meta);
+      rows.append(row);
+    }
+    sec.append(rows);
+    return sec;
   }
 
   function rowActs(d) {

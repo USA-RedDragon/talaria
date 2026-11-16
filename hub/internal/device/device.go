@@ -179,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/device/pair", s.handlePair)
 	mux.HandleFunc("POST /api/device/pair/token", s.handlePairToken)
 	mux.Handle("GET /api/device/whoami", s.authed(s.handleWhoami))
+	mux.Handle("GET /api/device/hub-keys", s.authed(s.handleHubKeys))
 	mux.Handle("PUT /api/device/sessions/{session}/binding", s.authed(s.exceptService(s.handleBind)))
 	mux.Handle("DELETE /api/device/sessions/{session}/binding", s.authed(s.exceptService(s.handleUnbind)))
 	mux.Handle("GET /api/device/exec", s.authed(s.handleExec))

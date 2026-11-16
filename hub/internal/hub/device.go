@@ -258,3 +258,75 @@ var (
 	ErrNotOnComputer   = errors.New("session is not on a computer")
 	ErrInheritedPlace  = errors.New("session follows the computer of the session it came from")
 )
+
+// Sign-in grant errors.
+var (
+	// ErrLoginGrantsUnsupported is a computer whose talaria is too old to
+	// keep sign-in grants.
+	ErrLoginGrantsUnsupported = errors.New("computer does not keep sign-in grants")
+	// ErrLoginGrantRefused is a grant the computer refused. The error wraps
+	// its reason.
+	ErrLoginGrantRefused = errors.New("sign-in grant refused")
+)
+
+// LoginGrantRequest asks the hub to sign a grant for user and send it to the
+// computer.
+type LoginGrantRequest struct {
+	User      string
+	BackendID string
+	DeviceID  string
+	Host      string
+	// Method is "" or a sign-in method label.
+	Method string
+	// Scope is logingrant.ScopeOnce or logingrant.ScopeDevice.
+	Scope     string
+	SessionID string
+	ChatTitle string
+	// Via is "web" or "telegram".
+	Via string
+}
+
+// LoginGrant is one sign-in grant of a computer, as the device keeps it.
+type LoginGrant struct {
+	Host      string `json:"host"`
+	Method    string `json:"method"`
+	Scope     string `json:"scope"`
+	GrantedAt int64  `json:"granted_at"`
+	SessionID string `json:"session_id"`
+	ChatTitle string `json:"chat_title"`
+	Via       string `json:"via"`
+	User      string `json:"user"`
+	// LastUsed is 0 for a grant that was never used.
+	LastUsed  int64 `json:"last_used"`
+	ExpiresAt int64 `json:"expires_at,omitempty"`
+}
+
+// LoginGrantHost is a site the computer's own config allows.
+type LoginGrantHost struct {
+	Host   string `json:"host"`
+	Method string `json:"method"`
+}
+
+// LoginGrantList is what a computer allows.
+type LoginGrantList struct {
+	DeviceID    string           `json:"device_id"`
+	Grants      []LoginGrant     `json:"grants"`
+	ConfigHosts []LoginGrantHost `json:"config_hosts"`
+}
+
+// LoginGrants signs sign-in grants and keeps them on computers. Every method
+// checks that user owns the computer.
+type LoginGrants interface {
+	// GrantLogin signs a grant and sends it to the computer. It returns
+	// only when the computer took it: ErrUnknownDevice for a computer that
+	// is not user's (or of another backend), ErrComputerOffline,
+	// ErrLoginGrantsUnsupported or ErrLoginGrantRefused otherwise.
+	GrantLogin(ctx context.Context, req LoginGrantRequest) error
+	// LoginGrants lists what a computer allows.
+	LoginGrants(ctx context.Context, user, deviceID string) (LoginGrantList, error)
+	// RevokeLoginGrant takes back the grant of a host.
+	RevokeLoginGrant(ctx context.Context, user, deviceID, host string) (bool, error)
+	// ComputerName is the hub's name for the computer deviceID on
+	// backendID, "" when the hub has no such computer.
+	ComputerName(backendID, deviceID string) string
+}

@@ -171,6 +171,10 @@ func computerError(w http.ResponseWriter, err error) bool {
 		errorJSON(w, http.StatusNotFound, "No such computer. It may have been removed")
 	case errors.Is(err, hub.ErrComputerOffline):
 		errorJSON(w, http.StatusConflict, "That computer is offline. Turn it on and check that talaria runs on it, then try again")
+	case errors.Is(err, hub.ErrLoginGrantsUnsupported):
+		errorJSON(w, http.StatusNotImplemented, "That computer's talaria is too old to keep sign-in grants. Update talaria on it")
+	case errors.Is(err, hub.ErrLoginGrantRefused):
+		errorJSON(w, http.StatusBadRequest, reason())
 	case errors.Is(err, hub.ErrFolderRefused):
 		errorJSON(w, http.StatusBadRequest, reason())
 	case errors.Is(err, hub.ErrCannotMove):
@@ -185,4 +189,36 @@ func computerError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	return true
+}
+
+const msgNoLoginGrants = "sign-in grants are not turned on in this hub"
+
+// handleLoginGrants lists what one of the user's computers allows to sign
+// in with a saved login.
+func (s *Server) handleLoginGrants(w http.ResponseWriter, r *http.Request) {
+	if s.loginGrants == nil {
+		errorJSON(w, http.StatusNotFound, msgNoLoginGrants)
+		return
+	}
+	l, err := s.loginGrants.LoginGrants(r.Context(), userFrom(r), r.PathValue("device"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, l)
+}
+
+// handleRevokeLoginGrant takes back the grant of a site on one of the
+// user's computers.
+func (s *Server) handleRevokeLoginGrant(w http.ResponseWriter, r *http.Request) {
+	if s.loginGrants == nil {
+		errorJSON(w, http.StatusNotFound, msgNoLoginGrants)
+		return
+	}
+	revoked, err := s.loginGrants.RevokeLoginGrant(r.Context(), userFrom(r), r.PathValue("device"), r.PathValue("host"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": revoked})
 }

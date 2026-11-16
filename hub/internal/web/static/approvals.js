@@ -74,6 +74,14 @@ window.HubApprovals = (() => {
   //   words(key) for the fixed texts, banner(text, bad), add(node) to put a
   //   card in the chat, setTimeout/clearTimeout, ackMs (how long an answer
   //   may wait for Hermes to confirm it before the card offers a retry).
+  // savedLogins says how many logins Firefox keeps for the site. It never shows a name.
+  function savedLogins(n) {
+    if (n === 1) return "Firefox has one saved login for this site";
+    if (n === 0) return "Firefox has no saved login for this site";
+    if (Number.isInteger(n) && n > 1) return "Firefox has " + n + " saved logins for this site and fills none of them";
+    return "Whether Firefox has a saved login here is not known";
+  }
+
   function create(deps) {
     const { el, api, base, words, banner, add } = deps;
     const setT = deps.setTimeout || setTimeout;
@@ -149,12 +157,44 @@ window.HubApprovals = (() => {
       if (!id || cards.has(id)) return;
       const box = el("div", "approval");
       const clarify = p.kind === "clarify";
-      box.append(el("b", "", clarify ? "Question" : words("approval")));
+      // A sign-in card (the agent asks to sign in with the saved login on a site) is drawn from the fields the hub
+      // checked, never from the agent's text.
+      const lg = !clarify && p.login_grant && typeof p.login_grant === "object" ? p.login_grant : null;
+      const computer = lg ? lg.device_name || "" : "";
+      let method = "";
+      box.append(el("b", "", clarify ? "Question" : lg ? "Sign in with the saved login on " + String(lg.host || "") + "?" : words("approval")));
       // A smart approval card comes in parts (Hermes sends rule, reason, the subagent's goal and the source as
       // fields of their own): who asks, then Rule, Why and Source as a list, then the command. A Hermes that
       // sends only the description gets the one-sentence card below.
-      const parted = !clarify && (p.rule || p.reason);
-      if (parted) {
+      const buttons = [];
+      const parted = !lg && !clarify && (p.rule || p.reason);
+      if (lg) {
+        const list = el("dl", "parts");
+        list.append(el("dt", "", "Site"), el("dd", "", String(lg.host || "")));
+        list.append(el("dt", "", "Computer"), el("dd", "", computer || "A computer this hub does not know"));
+        list.append(el("dt", "", "Saved login"), el("dd", "", savedLogins(lg.saved_logins)));
+        box.append(list);
+        if (lg.existing === "device") box.append(el("div", "", "This computer already allows sign-in here. Pick a method to change it."));
+        const methods = Array.isArray(lg.methods) ? lg.methods : [];
+        if (methods.length) {
+          const pick = el("div", "picks");
+          pick.append(el("div", "", "Sign-in method"));
+          const group = "method-" + id;
+          for (const [value, label] of [["", "No preference"], ...methods.map((m) => [m, m])]) {
+            const row = el("label", "pick");
+            const r = el("input");
+            r.type = "radio";
+            r.name = group;
+            r.value = value;
+            r.checked = value === "";
+            r.onchange = () => { method = value; };
+            buttons.push(r);
+            row.append(r, el("span", "", label));
+            pick.append(row);
+          }
+          box.append(pick);
+        }
+      } else if (parted) {
         if (p.subagent) {
           const by = el("div", "by");
           const goal = el("span", "goal", p.subagent);
@@ -199,10 +239,10 @@ window.HubApprovals = (() => {
       }
       if (p.question) box.append(el("div", clarify ? "q" : "", clarify ? Q.plain(p.question, p.subagent) : p.question));
       const actions = el("div", "actions");
-      const buttons = [];
       const card = { id, box, actions, buttons, state: "open", timer: null, note: null, body: null, clarify, prompt: p };
       cards.set(id, card);
-      const enable = (on) => { for (const b of buttons) b.disabled = !on; };
+      const locked = new Set();
+      const enable = (on) => { for (const b of buttons) b.disabled = !on || locked.has(b); };
 
       const send = async (body) => {
         card.body = body;
@@ -248,7 +288,18 @@ window.HubApprovals = (() => {
         return b;
       };
       const choices = Array.isArray(p.choices) ? p.choices : [];
-      if (!clarify && !choices.length) {
+      if (lg) {
+        // The method goes with the allowing choices only; a denied sign-in has none.
+        const allow = (c) => () => (method ? { choice: c, method } : { choice: c });
+        const known = !!computer;
+        const once = button("primary", "Allow once", allow("once"));
+        const dev = button("", "Allow on " + (computer || "this computer"), allow("device"));
+        if (!known) { locked.add(once); locked.add(dev); once.disabled = dev.disabled = true; }
+        if (!choices.includes("once")) once.hidden = true;
+        if (!choices.includes("device")) dev.hidden = true;
+        actions.append(once, dev, button("danger", words("deny"), { choice: "deny" }));
+        if (!known) box.append(el("div", "sendnote bad", "This computer is not one of yours in this hub, so a sign-in cannot be allowed here."));
+      } else if (!clarify && !choices.length) {
         actions.append(button("primary", words("allow"), { allow: true }), button("danger", words("deny"), { allow: false }));
       } else if (!clarify) {
         const names = { once: words("allow"), session: "Allow in this chat", always: "Always allow", source: p.grant_source ? "Allow code from " + p.grant_source + " in this chat" : "Allow code from this source in this chat", deny: words("deny") };

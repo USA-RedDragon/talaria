@@ -126,8 +126,9 @@ func run(cmd *cobra.Command, cfg *config.Config) error {
 	}
 	if devices != nil {
 		svc.SetFiles(devices)
+		svc.SetLoginGrants(devices)
 		webOpts.Devices, webOpts.DeviceAPI, webOpts.OnRevoke = st, devices.Handler(), devices.CloseDevice
-		webOpts.Sandboxes, webOpts.Computers, webOpts.Files = devices.Sandboxes, devices, devices
+		webOpts.Sandboxes, webOpts.Computers, webOpts.Files, webOpts.LoginGrants = devices.Sandboxes, devices, devices, devices
 		router := agents.New(agents.Options{Backends: cfg.Backends, Sessions: svc, Places: devices, Store: st,
 			Plugin: func(id string) agents.Plugin {
 				if p := devices.Plugin(id); p != nil {

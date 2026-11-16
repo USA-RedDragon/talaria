@@ -77,6 +77,8 @@ const (
 const (
 	ChoiceOnce = "once"
 	ChoiceDeny = "deny"
+	// ChoiceDevice is the sign-in grant card's grant for a computer.
+	ChoiceDevice = "device"
 )
 
 // Event is the params of one "event" notification
@@ -177,6 +179,24 @@ type Prompt struct {
 	// Timeout is how many seconds Hermes waits for the answer, 0 when it
 	// did not say.
 	Timeout float64 `json:"timeout_s,omitempty"`
+	// LoginGrant is set on a card that asks to sign in with a saved login
+	// on a site: its choices are once, device and deny.
+	LoginGrant *LoginGrant `json:"login_grant,omitempty"`
+}
+
+// LoginGrant is the device plugin's description of a sign-in request, as
+// Hermes passes it in a prompt. Everything but DeviceID and Host is a hint
+// to show.
+type LoginGrant struct {
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name,omitempty"`
+	Host       string `json:"host"`
+	// SavedLogins is nil when the plugin did not say.
+	SavedLogins *int     `json:"saved_logins,omitempty"`
+	Methods     []string `json:"methods,omitempty"`
+	Method      string   `json:"method,omitempty"`
+	Existing    string   `json:"existing,omitempty"`
+	JobID       string   `json:"job_id,omitempty"`
 }
 
 // Prompt kinds.

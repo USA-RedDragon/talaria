@@ -64,6 +64,38 @@ type shownNotice struct {
 // show outcomes of messages it sent.
 const keepShown = 24 * time.Hour
 
+// loginGrantBody is the card that asks to sign in with a saved login. It
+// comes from the fields the hub checked, never from the agent's text, and
+// names no user name.
+func loginGrantBody(g *hub.LoginGrantCard) string {
+	computer := g.DeviceName
+	if computer == "" {
+		computer = "a computer this hub does not know"
+	}
+	lines := []string{
+		"<b>Sign in with the saved login on " + escapeHTML(truncate(g.Host, 120)) + "?</b>",
+		"<b>Computer:</b> " + escapeHTML(truncate(computer, 80)),
+		"<b>Saved login:</b> " + loginGrantSaved(g.SavedLogins),
+	}
+	if g.Existing == hub.LoginGrantExistingDevice {
+		lines = append(lines, "This computer already allows sign-in here. Pick a method to change it.")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// loginGrantSaved says how many logins Firefox keeps for a site.
+func loginGrantSaved(n int) string {
+	switch {
+	case n == 1:
+		return "Firefox has one saved login for this site"
+	case n == 0:
+		return "Firefox has no saved login for this site"
+	case n > 1:
+		return fmt.Sprintf("Firefox has %d saved logins for this site and fills none of them", n)
+	}
+	return "Whether Firefox has a saved login here is not known"
+}
+
 // approvalLabel names an approval choice on its button.
 func approvalLabel(choice string) string {
 	switch choice {
@@ -75,6 +107,8 @@ func approvalLabel(choice string) string {
 		return "Always"
 	case hub.ChoiceSource:
 		return sourceLabel("")
+	case hub.ChoiceDevice:
+		return "Allow on this computer"
 	case hub.ChoiceDeny:
 		return "Deny"
 	}
@@ -101,6 +135,8 @@ func approvalVerdict(choice string) string {
 		return "Always approved"
 	case hub.ChoiceSource:
 		return "Approved code from this source in this chat"
+	case hub.ChoiceDevice:
+		return "Allowed on this computer"
 	case hub.ChoiceDeny:
 		return "Denied"
 	}
@@ -123,6 +159,8 @@ func outcomeHead(o hub.ApprovalOutcome) string {
 		head = "Allowed always"
 	case o.Choice == hub.ChoiceSource:
 		head = "Allowed for this source in this chat"
+	case o.Choice == hub.ChoiceDevice:
+		head = "Allowed on the computer"
 	}
 	switch o.Via {
 	case hub.AnsweredInHub:
@@ -165,6 +203,9 @@ func (b *Bot) recordedAnswer(ctx context.Context, backendID, promptID string) (h
 func promptBody(p *hub.PromptInfo) string {
 	if p == nil {
 		return ""
+	}
+	if p.LoginGrant != nil && p.Kind != hub.PromptClarify {
+		return loginGrantBody(p.LoginGrant)
 	}
 	var parts []string
 	parted := p.Kind != hub.PromptClarify && (p.Rule != "" || p.Reason != "")
@@ -405,6 +446,9 @@ const maxButtons = 10
 func promptKeyboard(prefix, key string, p hub.PromptInfo, picks []bool) *InlineKeyboard {
 	cb := func(tok string) string { return prefix + ":" + key + ":" + tok }
 	var rows [][]InlineButton
+	if p.Kind != hub.PromptClarify && p.LoginGrant != nil {
+		return loginGrantKeyboard(cb, p)
+	}
 	if p.Kind != hub.PromptClarify {
 		choices := approvalChoices(p)
 		row := make([]InlineButton, 0, len(choices))
@@ -462,6 +506,116 @@ func promptKeyboard(prefix, key string, p hub.PromptInfo, picks []bool) *InlineK
 	}
 	last = append(last, InlineButton{Text: other, CallbackData: cb(tokOther)}, InlineButton{Text: "Skip", CallbackData: cb(tokSkip)})
 	return &InlineKeyboard{InlineKeyboard: append(rows, last)}
+}
+
+// loginGrantLabel names a choice of a sign-in card.
+func loginGrantLabel(g *hub.LoginGrantCard, choice string) string {
+	switch choice {
+	case hub.ChoiceOnce:
+		return "Allow once"
+	case hub.ChoiceDevice:
+		return "Allow on " + truncate(g.DeviceName, 30)
+	}
+	return approvalLabel(choice)
+}
+
+// loginGrantKeyboard is the buttons of a sign-in card: the allowing choices
+// only for a computer the hub knows, and Deny always.
+func loginGrantKeyboard(cb func(string) string, p hub.PromptInfo) *InlineKeyboard {
+	var rows [][]InlineButton
+	for i, c := range approvalChoices(p) {
+		if c == hub.ChoiceDeny || p.LoginGrant.DeviceName == "" {
+			continue
+		}
+		rows = append(rows, []InlineButton{{Text: loginGrantLabel(p.LoginGrant, c), CallbackData: cb(strconv.Itoa(i))}})
+	}
+	for i, c := range approvalChoices(p) {
+		if c == hub.ChoiceDeny {
+			rows = append(rows, []InlineButton{{Text: approvalLabel(c), CallbackData: cb(strconv.Itoa(i))}})
+		}
+	}
+	return &InlineKeyboard{InlineKeyboard: rows}
+}
+
+// tokMethod separates a choice from a method in a button's token: "1m2" is
+// the second choice with the first method, "1m0" with none.
+const tokMethod = "m"
+
+// loginGrantMethodKeyboard asks which sign-in method choice i should use.
+func loginGrantMethodKeyboard(cb func(string) string, g *hub.LoginGrantCard, i int) *InlineKeyboard {
+	rows := make([][]InlineButton, 0, 1+len(g.Methods))
+	rows = append(rows, []InlineButton{{Text: "No preference", CallbackData: cb(strconv.Itoa(i) + tokMethod + "0")}})
+	for j, m := range g.Methods {
+		rows = append(rows, []InlineButton{{Text: truncate(m, 40), CallbackData: cb(strconv.Itoa(i) + tokMethod + strconv.Itoa(j+1))}})
+	}
+	return &InlineKeyboard{InlineKeyboard: rows}
+}
+
+// loginGrantPress turns a button of a sign-in card with a method picker. It
+// returns the answer when the token completes one. When the token only
+// picks the choice, it shows the method buttons and returns false.
+func (b *Bot) loginGrantPress(ctx context.Context, q *CallbackQuery, user string, t promptTarget, tok string) (hub.Answer, string, bool) {
+	p := t.prompt
+	g := p.LoginGrant
+	choices := approvalChoices(p)
+	head, method, picked := strings.Cut(tok, tokMethod)
+	i, err := strconv.Atoi(head)
+	if err != nil || i < 0 || i >= len(choices) {
+		b.answer(ctx, q.ID, "")
+		return hub.Answer{}, "", false
+	}
+	c := choices[i]
+	if c == hub.ChoiceDeny {
+		if picked {
+			b.answer(ctx, q.ID, "")
+			return hub.Answer{}, "", false
+		}
+		return hub.Answer{Choice: c}, approvalVerdict(c), true
+	}
+	if g.DeviceName == "" {
+		b.answer(ctx, q.ID, "This computer is not one of yours in this hub.")
+		return hub.Answer{}, "", false
+	}
+	if !picked && len(g.Methods) > 0 {
+		if !b.mayAnswer(ctx, user, t) {
+			b.answer(ctx, q.ID, msgNotYours)
+			return hub.Answer{}, "", false
+		}
+		b.answer(ctx, q.ID, "Pick a sign-in method")
+		cb := func(tok string) string { return t.prefix + ":" + t.key + ":" + tok }
+		if err := b.api.EditMarkup(ctx, t.to.chat, q.Message.MessageID, loginGrantMethodKeyboard(cb, g, i)); err != nil {
+			b.logger.Warn("Failed to show the sign-in methods", "error", err)
+		}
+		return hub.Answer{}, "", false
+	}
+	a := hub.Answer{Choice: c}
+	if picked {
+		j, err := strconv.Atoi(method)
+		if err != nil || j < 0 || j > len(g.Methods) {
+			b.answer(ctx, q.ID, "")
+			return hub.Answer{}, "", false
+		}
+		if j > 0 {
+			a.Method = g.Methods[j-1]
+		}
+	}
+	return a, approvalVerdict(c), true
+}
+
+// loginGrantErr says why a sign-in grant did not go through, or "" for an
+// error that is not about the grant.
+func loginGrantErr(err error) string {
+	switch {
+	case errors.Is(err, hub.ErrComputerOffline):
+		return "That computer is offline. Turn it on and check that talaria runs on it, then try again."
+	case errors.Is(err, hub.ErrUnknownDevice):
+		return "That computer is not one of yours in this hub."
+	case errors.Is(err, hub.ErrLoginGrantsUnsupported):
+		return "That computer's talaria is too old to keep sign-in grants. Update it."
+	case errors.Is(err, hub.ErrLoginGrantRefused):
+		return "The computer refused the grant. Try again."
+	}
+	return ""
 }
 
 // approvalChoices are the choices of an approval, or allow and deny when
@@ -791,6 +945,13 @@ func (b *Bot) pressPrompt(ctx context.Context, q *CallbackQuery, user string, t 
 			break
 		}
 		choices := approvalChoices(p)
+		if p.LoginGrant != nil {
+			var ok bool
+			if a, verdict, ok = b.loginGrantPress(ctx, q, user, t, tok); !ok {
+				return
+			}
+			break
+		}
 		if err != nil || i < 0 || i >= len(choices) {
 			b.answer(ctx, q.ID, "")
 			return
@@ -833,6 +994,9 @@ func (b *Bot) submitAnswer(ctx context.Context, callbackID, user string, t promp
 	case errors.Is(err, hub.ErrUnknownApproval), errors.Is(err, hub.ErrUnknownSession):
 		b.dropPrompt(t)
 		b.reply(ctx, callbackID, t.to, msgNotPending)
+		return false
+	case t.prompt.LoginGrant != nil && loginGrantErr(err) != "":
+		b.reply(ctx, callbackID, t.to, loginGrantErr(err))
 		return false
 	case errors.Is(err, hub.ErrBadValue):
 		b.reply(ctx, callbackID, t.to, "The agent did not take that answer.")

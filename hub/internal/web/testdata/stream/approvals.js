@@ -376,6 +376,40 @@ async function questionCards() {
     assert.ok(old.shown[0].text().includes("Asked by a subagent: relift chunk") && old.shown[0].text().includes("asks: Smart approval rule"));
     assert.strictEqual(old.shown[0].querySelector("parts"), null);
   }
+  // A sign-in card: drawn from the hub's fields, with the computer's name, the saved-login line without a name, a
+  // method picker, and three buttons. The picked method goes with the allowing choices only.
+  {
+    const lgPrompt = (over) => Object.assign({ kind: "approval", prompt_id: "lg", command: "browser_login", description: "pod text that is not shown",
+      choices: ["once", "device", "deny"], login_grant: { device_id: "d1", device_name: "upstairs-pc", host: "portal.example.com", saved_logins: 1, methods: ["Password", "Email link"] } }, over || {});
+    const { tracker, shown, log } = harness();
+    tracker.offer(lgPrompt());
+    const card = shown[0];
+    assert.ok(card.text().includes("Sign in with the saved login on portal.example.com?"));
+    assert.ok(card.text().includes("upstairs-pc") && card.text().includes("Firefox has one saved login for this site"));
+    assert.ok(!card.text().includes("pod text"));
+    assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow once", "Allow on upstairs-pc", "Deny"]);
+    const radios = []; card.walk((n) => { if (n.tag === "input" && n.attrs !== undefined && n.type === "radio") radios.push(n); });
+    assert.deepStrictEqual(radios.map((r) => r.value), ["", "Password", "Email link"]);
+    radios[2].onchange();
+    card.buttons()[1].onclick();
+    await flush();
+    assert.deepStrictEqual(log[0], { method: "POST", path: "/api/sessions/b/s/prompts/lg/answer", body: { choice: "device", method: "Email link" } });
+    const deny = harness();
+    deny.tracker.offer(lgPrompt({ prompt_id: "lg2" }));
+    deny.shown[0].buttons()[2].onclick();
+    await flush();
+    assert.deepStrictEqual(deny.log[0].body, { choice: "deny" });
+    // Saved login lines.
+    for (const [n, text] of [[0, "Firefox has no saved login for this site"], [3, "Firefox has 3 saved logins for this site and fills none of them"], [-1, "Whether Firefox has a saved login here is not known"]]) {
+      const x = harness();
+      x.tracker.offer(lgPrompt({ prompt_id: "n" + n, login_grant: { device_id: "d1", device_name: "pc", host: "a.example.com", saved_logins: n } }));
+      assert.ok(x.shown[0].text().includes(text), text);
+    }
+    // A computer the hub does not know cannot be allowed.
+    const unk = harness();
+    unk.tracker.offer(lgPrompt({ prompt_id: "u", login_grant: { device_id: "dx", host: "a.example.com", saved_logins: 1 } }));
+    assert.ok(unk.shown[0].buttons()[0].disabled && unk.shown[0].buttons()[1].disabled && !unk.shown[0].buttons()[2].disabled);
+  }
   await questionCards();
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

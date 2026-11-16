@@ -767,6 +767,8 @@ The user revokes a device on the hub page. The hub then refuses the token (secti
 
 Service devices (section 8.10) may call whoami too. Their `user` is `service`.
 
+`GET /api/device/hub-keys` with the device token (a service device may call it too) answers `200` `{"keys": ["<base64>"]}`: the standard base64 of the raw 32-byte Ed25519 public key that the hub signs with, the key that also signs the device assertions of section 3. A device uses these keys to check the sign-in grants the hub signs for it (`logingrant` package, token prefix `lg1.`) and trusts nothing else for them. An older hub answers `404`.
+
 `hermes_version`, `plugin_version` and `placeholder` come from the plugin's `GET /info` (section 9); if the backend is unreachable the hub answers `502` `{"error": "backend_unavailable"}`. When `chat` runs `chat.hermes` instead of the managed build (5.7), it compares `hermes_version` with the first line of the local `hermes --version` (`Hermes Agent v<version> (<date>)`), exactly after removing a leading `v`, and refuses to start on a mismatch (the local TUI and the server must be the same release).
 
 ### 7.4 Session binding
