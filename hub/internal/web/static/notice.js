@@ -252,7 +252,8 @@ window.HubNotice = (() => {
     if (!m) return null;
     const co = commandAndOutput(t, "Output:");
     if (!co) return null;
-    const n = { kind: "command", title: "Background command finished: " + short(co.cmd), goal: co.cmd, result: co.out };
+    const verb = m[2].startsWith("stopped by ") ? "stopped" : "finished";
+    const n = { kind: "command", title: "Background command " + verb + ": " + short(co.cmd), goal: co.cmd, result: co.out };
     const exit = m[3] === "?" ? "Exit unknown" : "Exit " + m[3];
     n.meta = m[2] === "completed normally" || m[2] === "exited" ? [exit] : [upperFirst(m[2]), exit];
     n.state = m[3] === "0" && m[2] === "completed normally" ? "ok" : "bad";

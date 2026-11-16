@@ -412,7 +412,11 @@ func parseProcess(t string) *Notice {
 	if !ok {
 		return nil
 	}
-	n := &Notice{Kind: KindCommand, Title: "Background command finished: " + short(cmd), Goal: cmd, Result: out}
+	verb := "finished"
+	if strings.HasPrefix(m[2], "stopped by ") {
+		verb = "stopped" // the user stopped it from the hub
+	}
+	n := &Notice{Kind: KindCommand, Title: "Background command " + verb + ": " + short(cmd), Goal: cmd, Result: out}
 	exit := "Exit " + m[3]
 	if m[3] == "?" {
 		exit = "Exit unknown"
