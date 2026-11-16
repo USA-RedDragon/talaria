@@ -400,10 +400,16 @@ def ask_chat(session_id: str, rule: str, tool_name: str) -> str:
     if not chat or agents is None or not agents.BUS.connected() or not br.choices().mark_ask(job_id, rule):
         return ""
     kind, site = rule.split(":", 2)[1:]
-    text = (f"Scheduled job {job_id} could not run {tool_name} because the user has not approved \"{kind}\" on "
-            f"{site} with \"always\" (rule {rule}), and nobody can answer an approval in a run. Tell the user, "
-            f"and if they want it, call {ALLOW_TOOL} with rule \"{rule}\" and job_id \"{job_id}\": it asks the user, "
-            f"and an \"Always\" answer lets the job's later runs do it. This message is sent once.")
+    if kind == "login":
+        text = (f"Scheduled job {job_id} could not run {tool_name}: signing in on {site} with Firefox's saved login has "
+                f"not been allowed by the user on its computer, and nobody can answer a card in a run. Tell the user, "
+                f"and if they want it, call {ALLOW_TOOL} with rule \"{rule}\" and job_id \"{job_id}\": it shows the "
+                f"user a sign-in card (allow once, allow on that computer, or deny). This message is sent once.")
+    else:
+        text = (f"Scheduled job {job_id} could not run {tool_name} because the user has not approved \"{kind}\" on "
+                f"{site} with \"always\" (rule {rule}), and nobody can answer an approval in a run. Tell the user, "
+                f"and if they want it, call {ALLOW_TOOL} with rule \"{rule}\" and job_id \"{job_id}\": it asks the user, "
+                f"and an \"Always\" answer lets the job's later runs do it. This message is sent once.")
     caller = agents.caller_of(session_id)
 
     def send() -> None:
@@ -428,6 +434,10 @@ def allow_gate(args: dict) -> Optional[dict]:
     kind, site = rule.split(":", 2)[1:]
     if br.no_user():
         return {"action": "block", "message": f"{ALLOW_TOOL} was not run: only the user can allow this, in a chat."}
+    if kind == "login" and job:
+        card = _login_grant_for_job(job, site, in_hook=True)
+        if card is not None:
+            return card
     what = {"visit": "open", "submit": "submit forms on", "script": "run read-only scripts on",
             "script-write": "run scripts that change data on", "login": "sign in with the saved login on",
             "click": "click on"}[kind]
@@ -435,6 +445,31 @@ def allow_gate(args: dict) -> Optional[dict]:
             "message": (f"Let the agent {what} {site} in your Firefox with your logins"
                         f"{f', for scheduled job {job}' if job else ''}? Only \"Always\" also covers scheduled runs, "
                         f"where nobody is watching; it is not asked again.")}
+
+
+def _job_device(job: str) -> tuple[str, str]:
+    rec = _br().choices().job(job) or {}
+    return str(rec.get("device_id") or ""), str(rec.get("name") or "")
+
+
+def _login_grant_for_job(job: str, site: str, in_hook: bool) -> Optional[dict]:
+    """Signing in on ``site`` needs a sign-in grant on the computer the job runs on (docs/browser.md
+    section 7.4), which only the user's answer on the hub card can give. The approval to return:
+    that card, a block when the computer cannot be asked, or None when the plain rule is what the
+    user decides (the host has a grant or is in the config; an older daemon; no computer)."""
+    br, core = _br(), _core()
+    device_id, name = _job_device(job)
+    if not device_id:
+        return None
+    conn = core.hub().device(device_id)
+    if conn is None or core.CAPABILITY_BROWSER not in conn.capabilities:
+        return {"action": "block", "message": (
+            f"{ALLOW_TOOL} was not run: the computer {name or device_id} that job {job} runs on is not connected with "
+            f"browser control, so the sign-in on {site} cannot be allowed now. Try again when it is.")}
+    status = br._status(conn, site, in_hook=in_hook)
+    if status is None or status.get("config") or status.get("grant"):
+        return None
+    return br.login_grant_card(conn, site, status, job_id=job)
 
 
 def permanent(rule: str) -> bool:
@@ -451,6 +486,18 @@ def allow_site(args: dict, task_id: str = "", session_id: str = "", **_kwargs) -
     if not RULE_RE.fullmatch(rule):
         return json.dumps({"error": "rule must be a browser rule such as browser:visit:example.com, as the job's "
                                     "message names it", "code": "bad_arguments"})
+    job = str((args or {}).get("job_id") or "").strip()[:64]
+    kind, site = rule.split(":", 2)[1:]
+    if kind == "login" and job:
+        device_id, name = _job_device(job)
+        conn = _core().hub().device(device_id) if device_id else None
+        status = _br()._status(conn, site, in_hook=False) if conn is not None else None
+        if status is not None:
+            granted = bool(status.get("config") or status.get("grant"))
+            return json.dumps({"ok": granted, "rule": rule, "granted": granted, "note": (
+                f"{name or device_id} may sign in on {site} now." if granted else
+                f"The user did not allow signing in on {site} on {name or device_id}, so scheduled runs still cannot.")},
+                ensure_ascii=False)
     always = permanent(rule)
     return json.dumps({"ok": True, "rule": rule, "always": always, "note": (
         "Scheduled runs may do it now." if always else

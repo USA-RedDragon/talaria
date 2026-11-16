@@ -67,6 +67,59 @@ def device_dirs(device_id: str, path: str = ""):
     return {"path": resolved, "entries": [{"name": n} for n in names]}
 
 
+# --- sign-in grants (docs/browser.md section 7.4) ----------------------------------------------
+#
+# The hub lists and revokes a computer's grants here and hands over the token it signed after the
+# user answered a sign-in card. The plugin forwards the token and checks nothing: the device verifies
+# the hub's signature itself, so these routes cannot create a grant on their own.
+
+def _browser():
+    return _core()._load_sibling("hermes_device_browser", "browser.py")
+
+
+async def _grants_call(device_id: str, req: dict, key: str, extra: Optional[dict] = None):
+    core, browser = _core(), _browser()
+    conn = core.hub().device(device_id)
+    if conn is None or core.CAPABILITY_BROWSER not in conn.capabilities:
+        return _error(409, "not_connected", f"device {device_id} is not connected with browser control")
+    try:
+        res = await asyncio.to_thread(browser.grants_op, device_id, req)
+    except browser.GrantsUnsupported:
+        return _error(501, "unsupported", "this device's talaria is too old for sign-in grants; update it")
+    except core.BrowserError as exc:
+        if exc.code == core.BROWSER_NOT_CONNECTED:
+            return _error(409, "not_connected", str(exc))
+        if exc.code == core.BROWSER_REFUSED:
+            return _error(400, "refused", str(exc))
+        return _error(502, exc.code or "failed", str(exc))
+    out = dict(extra or {})
+    if key == "":
+        out.update({k: res.get(k) for k in ("grants", "config_hosts")})
+        out["grants"], out["config_hosts"] = out["grants"] or [], out["config_hosts"] or []
+    else:
+        out[key] = res.get(key)
+    return out
+
+
+@router.get("/devices/{device_id}/login-grants")
+async def login_grants_list(device_id: str):
+    return await _grants_call(device_id, {"action": "list"}, "", {"device_id": device_id})
+
+
+@router.post("/devices/{device_id}/login-grants")
+async def login_grants_add(device_id: str, request: Request):
+    body = await _json_body(request)
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token:
+        return _error(400, "bad_request", 'the body must be {"token": <string>}')
+    return await _grants_call(device_id, {"action": "add", "token": token}, "grant")
+
+
+@router.delete("/devices/{device_id}/login-grants/{host}")
+async def login_grants_revoke(device_id: str, host: str):
+    return await _grants_call(device_id, {"action": "revoke", "host": host.lower()}, "revoked")
+
+
 @router.get("/bindings")
 def bindings() -> dict:
     core = _core()

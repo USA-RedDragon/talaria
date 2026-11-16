@@ -700,18 +700,112 @@ def _hook_timeout() -> float:
         return 30.0
 
 
-def inspect_in_hook(conn: Any, req: dict) -> Any:
-    """``inspect`` from the pre_tool_call hook, which must end well inside Hermes's hook timeout:
-    a call past it makes Hermes block every tool call the hook sees, in every session, for a
-    while. The whole wait, the device's own timeout and the slack after it, takes at most half
-    of that timeout."""
+def _hook_call(device_id: str, op: str, req: dict) -> Any:
+    """One browser operation from the pre_tool_call hook, which must end well inside Hermes's hook
+    timeout: a call past it makes Hermes block every tool call the hook sees, in every session,
+    for a while. The whole wait, the device's own timeout and the slack after it, takes at most
+    half of that timeout."""
     core = _core()
     total = INSPECT_TIMEOUT_S + core.BROWSER_SLACK_S
     cap = _hook_timeout()
     if cap > 0:
         total = min(total, cap / 2)
     timeout = max(1.0, total * 0.6)
-    return core.hub().browser_call(conn.device_id, "inspect", req, timeout, slack=max(0.0, total - timeout))
+    return core.hub().browser_call(device_id, op, req, timeout, slack=max(0.0, total - timeout))
+
+
+def inspect_in_hook(conn: Any, req: dict) -> Any:
+    """``inspect`` from the pre_tool_call hook (see _hook_call)."""
+    return _hook_call(conn.device_id, "inspect", req)
+
+
+# --- sign-in grants (docs/browser.md section 7.4) ----------------------------------------------
+#
+# browser_login works on a host the device config lists or the user allowed with a sign-in grant:
+# the hub signs it after the user answered a card, the device checks the signature and keeps it.
+# This module only asks the device (the login_grants operation) and raises the card; it never
+# creates a grant, and a grant is never given to the device by anything but the hub's token.
+
+LOGIN_GRANTS_OP = "login_grants"
+GRANT_TIMEOUT_S = 15
+MAX_GRANT_METHODS = 12
+MAX_METHOD_LEN = 80
+# The same pattern as logingrant.RefusedMethodPattern and REFUSED_METHOD in the extension.
+REFUSED_METHOD = re.compile(
+    r"passkey|pass key|security key|verify|verification|push|approve|approval|authenticator|biometric|"
+    r"fingerprint|face id|touch id|windows hello|sms|text message|one-time|otp|phone|notification|"
+    r"another device|other device", re.I)
+
+
+class GrantsUnsupported(Exception):
+    """The device runs a daemon that does not know the login_grants operation."""
+
+
+def grants_op(device_id: str, req: dict, in_hook: bool = False) -> dict:
+    """Run a login_grants request on the device. Raises GrantsUnsupported for an older daemon and
+    core.BrowserError for anything else (not connected, refused, failed)."""
+    core = _core()
+    try:
+        res = (_hook_call(device_id, LOGIN_GRANTS_OP, req) if in_hook
+               else core.hub().browser_call(device_id, LOGIN_GRANTS_OP, req, GRANT_TIMEOUT_S))
+    except core.BrowserError as exc:
+        if exc.code == core.BROWSER_REFUSED and "unknown browser operation" in str(exc):
+            raise GrantsUnsupported(str(exc)) from None
+        raise
+    return res if isinstance(res, dict) else {}
+
+
+def grant_methods(seen: Any) -> list[str]:
+    """Sign-in method labels that may go on a card: short visible text, no passkey or approval
+    on another device, no repeats, at most MAX_GRANT_METHODS."""
+    out: list[str] = []
+    for label in seen if isinstance(seen, list) else []:
+        if (isinstance(label, str) and label.strip() and label == label.strip() and len(label) <= MAX_METHOD_LEN
+                and not any(c in label for c in "\r\n\t") and not REFUSED_METHOD.search(label) and label not in out):
+            out.append(label)
+    return out[:MAX_GRANT_METHODS]
+
+
+def _saved_logins_line(n: int) -> str:
+    if n == 1:
+        return "Firefox has one saved login for this site."
+    if n == 0:
+        return "Firefox has no saved login for this site."
+    if n > 1:
+        return f"Firefox has {n} saved logins for this site and fills none of them."
+    return "Whether Firefox has a saved login for this site is not known."
+
+
+def login_grant_card(conn: Any, host: str, status: dict, job_id: str = "", existing: str = "") -> dict:
+    """The approve request for a sign-in grant: the hub shows its own card from ``login_grant``
+    and answers once, device or deny, after it has given the device the grant."""
+    saved = status.get("saved_logins")
+    saved = saved if isinstance(saved, int) and not isinstance(saved, bool) and saved >= -1 else -1
+    methods = grant_methods(status.get("methods_seen")) if existing or status.get("methods_seen") else []
+    name = str(conn.name or conn.device_id)
+    return {
+        "action": "approve", "rule_key": _rule("login-grant", f"{conn.device_id}:{host}"),
+        "message": (f"Sign in with the saved login on {host}? Computer: {name}. {_saved_logins_line(saved)} "
+                    f"Firefox fills the form and the agent submits it; the password is never shown to the agent."),
+        "login_grant": {"device_id": conn.device_id, "device_name": name, "host": host, "saved_logins": saved,
+                        "methods": methods, "method": "", "existing": existing, "job_id": job_id},
+    }
+
+
+def _status(conn: Any, host: str, in_hook: bool = True) -> Optional[dict]:
+    """The device's grant status of ``host``; None when the device cannot tell (an older daemon,
+    not connected, failed): the caller then falls back to the device config alone."""
+    try:
+        return grants_op(conn.device_id, {"action": "status", "host": host}, in_hook=in_hook)
+    except GrantsUnsupported:
+        return None
+    except _core().BrowserError as exc:
+        _core().logger.info("device-browser: login_grants status for %s failed: %s", host, exc)
+        return None
+
+
+def allowed_by_grant(status: Optional[dict]) -> bool:
+    return bool(status) and bool(status.get("config") or status.get("grant"))
 
 
 # --- sites and approvals (docs/browser.md section 7) -------------------------------------------
@@ -814,8 +908,10 @@ def _tab_id(args: dict) -> Optional[int]:
 
 def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dict]]:
     """browser_login (docs/browser.md section 7.4): only on an https page whose top-level host,
-    as the browser reports it, is in the device's browser.autologin-hosts. The approval names
-    the exact host and covers nothing else there."""
+    as the browser reports it, is in the device's browser.autologin-hosts or has a sign-in grant
+    (the extension's list holds both). A host with neither raises the sign-in grant card: only the
+    user's answer on the hub can make the device take the grant. The approval names the exact
+    host and covers nothing else there."""
     tab = _tab_id(args)
     url = str(args.get("url") or "").strip()
     if tab is None and not url:
@@ -824,11 +920,27 @@ def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dic
     info = info if isinstance(info, dict) else {}
     host = str((info.get("top_host") if tab is not None else info.get("url_host")) or "").lower()
     listed = bool(info.get("top_autologin") if tab is not None else info.get("url_autologin"))
-    if not host or not listed:
+    shown = str((info.get("url") if tab is not None else url) or "")
+    if host and shown and not shown.lower().startswith("https:"):
+        return {}, {"action": "block", "message": (
+            f"browser_login: {host} is not an https page, so Firefox's saved login is not used there. Report that this "
+            f"sign-in needs the user.")}
+    status = _status(conn, host) if host else None
+    if host and not listed and status is not None and not status.get("config") and not status.get("grant"):
+        return {"login_hosts": [host]}, login_grant_card(conn, host, status)
+    if not host or not (listed or allowed_by_grant(status)):
         return {}, {"action": "block", "message": (
             f"browser_login: {host or 'this page'} is not an https host in the browser.autologin-hosts of device "
             f"{conn.name}, so Firefox's saved login is not used there. Report that this sign-in needs the user.")}
-    return {"login_hosts": [host]}, {
+    grant: dict = {"login_hosts": [host]}
+    mine = (status or {}).get("grant")
+    if isinstance(mine, dict) and mine.get("scope") == "device":
+        grant["device_grant"] = True  # the user allowed this host on this computer from a hub card
+        if not mine.get("method") and not status.get("method"):
+            methods = grant_methods(status.get("methods_seen"))
+            if methods:  # the page showed a sign-in method picker and no method is chosen yet
+                return grant, login_grant_card(conn, host, status, existing="device")
+    return grant, {
         "action": "approve", "rule_key": _rule("login", host),
         "message": (f"Sign in on {host} in {where} with the login Firefox has saved for it. Firefox fills the form "
                     f"and the agent submits it; the password is never shown to the agent. Approving always lets scheduled "
@@ -1138,7 +1250,10 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
                 f"{tool_name} was not run: {grant.get('confirm_text') or 'it needs the user'} This asks the user "
                 f"every time, and no user is present in this run (a scheduled job or a one-shot query). Do not "
                 f"retry it; report that this step needs the user.")}
-        if approval and not approved(approval.get("rule_key") or ""):
+        if approval and approval.get("login_grant"):
+            _take_grant(key)
+            return _login_grant_unattended(session_id, approval["login_grant"], tool_name)
+        if approval and not approved(approval.get("rule_key") or "") and not grant.get("device_grant"):
             _take_grant(key)
             try:
                 told = _jobs().ask_chat(_session(session_id), str(approval.get("rule_key") or ""), tool_name)
@@ -1151,6 +1266,20 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
                 f"as \"always\" count here. Do not retry it; report that the user must approve it once with "
                 f"\"always\" in a chat, or add plugin_rule:{approval.get('rule_key')} to command_allowlist.{told}")}
     return approval
+
+
+def _login_grant_unattended(session_id: str, card: dict, tool_name: str) -> dict:
+    """No user can answer the sign-in card in this run (a scheduled job, a one-shot query)."""
+    host, name = card.get("host"), card.get("device_name")
+    try:
+        told = _jobs().ask_chat(_session(session_id), _rule("login", str(host)), tool_name)
+    except Exception:
+        _core().logger.warning("device-browser: could not tell the job's chat", exc_info=True)
+        told = ""
+    return {"action": "block", "message": (
+        f"{tool_name} was not run: signing in on {host} with Firefox's saved login on {name} has not been allowed by "
+        f"the user, only the user can allow it, and no user is present in this run (a scheduled job or a one-shot "
+        f"query). Do not retry it; report that the user can allow it from the job's chat.{told}")}
 
 
 def _confirm(text: str) -> bool:
@@ -2299,7 +2428,23 @@ def _check(args: dict, conn: Any, _sid: str) -> str:
     if tab is not None:
         req["tab_id"] = tab
     res = call(conn, "check", req)
-    return _ok(res if isinstance(res, dict) else {})
+    res = dict(res) if isinstance(res, dict) else {}
+    res["login_grants"] = _grants_view(res.get("login_grants"), conn)
+    return _ok(res)
+
+
+def _grants_view(listed: Any, conn: Any) -> dict:
+    """The device's sign-in grants for browser_check: from its check answer, or asked of it."""
+    if not isinstance(listed, dict):
+        try:
+            listed = grants_op(conn.device_id, {"action": "list"})
+        except (GrantsUnsupported, _core().BrowserError):
+            return {"grants": [], "config_hosts": [], "note": "this device does not report sign-in grants"}
+    keep = ("host", "method", "scope", "granted_at", "session_id", "chat_title", "via", "user", "last_used", "expires_at")
+    grants = [{k: g[k] for k in keep if k in g} for g in (listed.get("grants") or []) if isinstance(g, dict)]
+    hosts = [{"host": str(h.get("host") or ""), "method": str(h.get("method") or "")}
+             for h in (listed.get("config_hosts") or []) if isinstance(h, dict)]
+    return {"grants": grants[:50], "config_hosts": hosts[:50]}
 
 
 def _shot(conn: Any, args: dict, tab: int, lossless: bool = False) -> dict:

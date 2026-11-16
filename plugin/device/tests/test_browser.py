@@ -43,7 +43,41 @@ class FakeBrowser:
         self.autologin: set[str] = set()
         self.outline = '- link "Learn more" [ref=e1]'
         self.scopes = True
+        self.grants: dict[str, dict] = {}
+        self.config_hosts: set[str] = set()
+        self.grants_unsupported = False
+        self.grants_in_check = True
+        self.saved_logins = 1
+        self.methods_seen: list[str] = []
         self.login_result = {"filled": True, "submitted": True, "landed_host": "app.example.com", "password": "hunter2"}
+
+    def login_grants(self, args: dict) -> dict:
+        """The daemon's login_grants operation. A token is added as a grant for the host after ``host=`` in it
+        unless it is ``bad``: the real device checks the hub's signature, which these tests do not repeat."""
+        if self.grants_unsupported:
+            return {"ok": False, "code": "refused", "error": "device pc refused: unknown browser operation 'login_grants'"}
+        action, host = args.get("action"), str(args.get("host") or "")
+        if action == "status":
+            grant = self.grants.get(host)
+            return {"ok": True, "result": {"host": host, "config": host in self.config_hosts, "grant": grant,
+                                           "once": bool(grant and grant["scope"] == "once"),
+                                           "method": (grant or {}).get("method", ""), "saved_logins": self.saved_logins,
+                                           "methods_seen": list(self.methods_seen)}}
+        if action == "list":
+            return {"ok": True, "result": {"grants": list(self.grants.values()), "config_hosts": [
+                {"host": h, "method": ""} for h in sorted(self.config_hosts)]}}
+        if action == "add":
+            if args.get("token") == "bad":
+                return {"ok": False, "code": "refused", "error": "login: sign-in grant signature does not verify"}
+            tok = str(args.get("token") or "")
+            host, _, scope = tok.partition("@")
+            grant = {"host": host, "method": "", "scope": scope or "device", "granted_at": 1, "session_id": "s",
+                     "chat_title": "c", "via": "web", "user": "alice", "last_used": 0}
+            self.grants[host] = grant
+            return {"ok": True, "result": {"grant": grant}}
+        if action == "revoke":
+            return {"ok": True, "result": {"revoked": self.grants.pop(host, None) is not None}}
+        return {"ok": False, "code": "refused", "error": "unknown action"}
 
     def answer(self, msg: dict) -> dict | None:
         self.requests.append(msg)
@@ -85,9 +119,14 @@ class FakeBrowser:
                                            "read_only": not args.get("allow_writes"), "result": {"n": 2}, "secret": "x"}}
         if op == "login":
             return {"ok": True, "result": dict(self.login_result, tab_id=args.get("tab_id", 8))}
+        if op == "login_grants":
+            return self.login_grants(args)
         if op == "check":
-            return {"ok": True, "result": {"tab_id": 7, "after_activate": {"visibility": "visible"},
-                                           "screen_lock": {"known": True, "locked": True}}}
+            res = {"tab_id": 7, "after_activate": {"visibility": "visible"}, "screen_lock": {"known": True, "locked": True}}
+            if self.grants_in_check:
+                res["login_grants"] = {"grants": list(self.grants.values()), "config_hosts": [
+                    {"host": h, "method": ""} for h in sorted(self.config_hosts)]}
+            return {"ok": True, "result": res}
         if op == "screenshot":
             return {"ok": True, "result": {"tab_id": args["tab_id"], "url": "https://example.com/",
                                            "title": "Example Domain", "data_url": "data:image/png;base64," + PNG}}
@@ -635,19 +674,135 @@ class ToolTests(BrowserBase):
     def test_login_method_picker_fields_reach_the_model(self):
         self.login_page()
         self.fake.login_result = {"filled": False, "submitted": False, "landed_host": "login.example.com",
-                                  "reason": "no method configured", "methods_seen": ["Passkey", "w3id Password", 5],
-                                  "method": "w3id Password", "password": "x"}
+                                  "reason": "no method configured", "methods_seen": ["Passkey", "Password", 5],
+                                  "method": "Password", "password": "x"}
         out = self.run_tool("browser_login", tab_id=7)
-        self.assertEqual(out["methods_seen"], ["Passkey", "w3id Password"])
-        self.assertEqual(out["method"], "w3id Password")
+        self.assertEqual(out["methods_seen"], ["Passkey", "Password"])
+        self.assertEqual(out["method"], "Password")
         self.assertNotIn("password", out)
 
-    def test_login_refused_off_the_list(self):
+    def test_login_refused_off_the_list_on_an_old_daemon(self):
         self.login_page(listed=False)
+        self.fake.grants_unsupported = True
         out = self.run_tool("browser_login", tab_id=7)
         self.assertEqual(self.decision["action"], "block")
         self.assertIn("browser.autologin-hosts", out["error"])
         self.assertFalse([r for r in self.fake.requests if r["op"] == "login"])
+
+    def test_login_off_the_list_raises_the_sign_in_card(self):
+        self.login_page(listed=False)
+        self.answer = False
+        out = self.run_tool("browser_login", tab_id=7)
+        d = self.decision
+        self.assertEqual(d["action"], "approve")
+        cid = self.device.conn.device_id
+        self.assertEqual(d["rule_key"], f"browser:login-grant:{cid}:login.example.com")
+        self.assertTrue(d["message"].startswith("Sign in with the saved login on login.example.com?"))
+        self.assertIn(self.device.conn.name, d["message"])
+        self.assertIn("one saved login", d["message"])
+        self.assertEqual(d["login_grant"], {
+            "device_id": cid, "device_name": self.device.conn.name, "host": "login.example.com", "saved_logins": 1,
+            "methods": [], "method": "", "existing": "", "job_id": ""})
+        self.assertIn("denied", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "login"])
+        # An approved card sends the login with the host in the guard; the device decides with its grant.
+        self.answer = True
+        self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(self.last("login")["args"]["guard"], {"login_hosts": ["login.example.com"]})
+
+    def test_login_card_saved_login_lines(self):
+        self.login_page(listed=False)
+        for n, text in ((0, "no saved login"), (3, "3 saved logins"), (-1, "not known")):
+            self.fake.saved_logins = n
+            self.run_tool("browser_login", tab_id=7)
+            self.assertIn(text, self.decision["message"])
+            self.assertEqual(self.decision["login_grant"]["saved_logins"], n)
+
+    def test_login_granted_host_keeps_the_normal_approval(self):
+        self.login_page()  # the extension lists it: config or grant
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "Password", "scope": "device"}
+        self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
+        self.assertNotIn("login_grant", self.decision)
+        self.fake.grants.clear()
+        self.fake.config_hosts = {"login.example.com"}
+        self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
+
+    def test_login_grant_without_method_asks_again_after_a_picker(self):
+        self.login_page()
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "", "scope": "device"}
+        self.fake.methods_seen = ["Passkey", "Password", "Approve on phone", "Email link", "Password", "x" * 81, 5]
+        self.run_tool("browser_login", tab_id=7)
+        d = self.decision
+        self.assertEqual(d["rule_key"], f"browser:login-grant:{self.device.conn.device_id}:login.example.com")
+        self.assertEqual(d["login_grant"]["methods"], ["Password", "Email link"])
+        self.assertEqual(d["login_grant"]["existing"], "device")
+        # A grant that has a method does not ask again.
+        self.fake.grants["login.example.com"]["method"] = "Password"
+        self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
+
+    def test_login_card_never_lists_refused_methods(self):
+        self.assertEqual(browser.grant_methods(["Passkey", "Security key", "Verify", "Phone", "Password", "Use SMS", "  Pad ",
+                                                "Email link"] + [f"m{i}" for i in range(20)]),
+                         ["Password", "Email link"] + [f"m{i}" for i in range(10)])
+
+    def test_login_card_without_a_user_blocks_and_tells_the_chat(self):
+        self.login_page(listed=False)
+        told = []
+        jobs = browser._jobs()
+        with mock.patch.object(browser, "no_user", lambda: True), \
+                mock.patch.object(jobs, "ask_chat", lambda sid, rule, tool: told.append((rule, tool)) or " The job's chat was told."):
+            out = self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(self.decision["action"], "block")
+        self.assertIn("login.example.com", out["error"])
+        self.assertIn(self.device.conn.name, out["error"])
+        self.assertIn("job's chat", out["error"])
+        self.assertEqual(told, [("browser:login:login.example.com", "browser_login")])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "login"])
+
+    def test_login_with_a_device_grant_runs_in_a_job(self):
+        self.login_page()
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "Password", "scope": "device"}
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: False):
+            out = self.run_tool("browser_login", tab_id=7)
+        self.assertTrue(out["submitted"])
+        # A once grant is not a standing approval.
+        self.fake.grants["login.example.com"]["scope"] = "once"
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: False):
+            out = self.run_tool("browser_login", tab_id=7)
+        self.assertIn("plugin_rule:browser:login:login.example.com", out["error"])
+
+    def test_login_over_http_is_refused_without_a_card(self):
+        self.login_page(listed=False)
+        self.fake.inspect["url"] = "http://login.example.com/"
+        out = self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(self.decision["action"], "block")
+        self.assertIn("https", out["error"])
+
+    def test_check_reports_the_grants(self):
+        self.fake.grants["a.example.com"] = {"host": "a.example.com", "method": "", "scope": "device", "granted_at": 5,
+                                             "secret": "dropped"}
+        self.fake.config_hosts = {"b.example.com"}
+        out = self.run_tool("browser_check")
+        lg = out["login_grants"]
+        self.assertEqual(lg["grants"], [{"host": "a.example.com", "method": "", "scope": "device", "granted_at": 5}])
+        self.assertEqual(lg["config_hosts"], [{"host": "b.example.com", "method": ""}])
+        # An older daemon's check has none: the plugin asks, and says when the device cannot tell.
+        self.fake.grants_in_check = False
+        self.assertEqual(self.run_tool("browser_check")["login_grants"]["grants"][0]["host"], "a.example.com")
+        self.fake.grants_unsupported = True
+        self.assertIn("does not report", self.run_tool("browser_check")["login_grants"]["note"])
+
+    def test_refused_pattern_matches_the_device(self):
+        src = Path(__file__).resolve().parents[3] / "logingrant" / "logingrant.go"
+        if not src.exists():
+            self.skipTest("the Go source is not next to the plugin")
+        m = re.search(r"const RefusedMethodPattern = `([^`]+)`", src.read_text())
+        self.assertEqual(browser.REFUSED_METHOD.pattern, m.group(1))
+        self.assertTrue(browser.REFUSED_METHOD.flags & re.I)
+
 
     def test_login_from_url(self):
         self.fake.autologin = {"login.example.com"}
@@ -1854,6 +2009,68 @@ class HubBrowserTests(unittest.TestCase):
             self.hub.browser_call("d_pc", "snapshot", {}, timeout=1)
         self.assertIn("does not offer browser control", str(ctx.exception))
         self.assertEqual(self.dev.sent, [])
+
+
+class LoginGrantRoutes(BrowserBase):
+    """The hub's routes for a computer's sign-in grants: the plugin forwards the hub's token and never
+    makes a grant itself."""
+
+    def setUp(self):
+        super().setUp()
+        app = FastAPI()
+        app.include_router(plugin_api.router, prefix="/api/plugins/device")
+        self.client = TestClient(app)
+        self.url = f"/api/plugins/device/devices/{self.device.conn.device_id}/login-grants"
+
+    def test_list_add_revoke(self):
+        r = self.client.get(self.url)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"device_id": self.device.conn.device_id, "grants": [], "config_hosts": []})
+        r = self.client.post(self.url, json={"token": "portal.example.com@once"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["grant"]["scope"], "once")
+        self.assertEqual(self.last("login_grants")["args"], {"action": "add", "token": "portal.example.com@once"})
+        self.fake.config_hosts = {"cfg.example.com"}
+        got = self.client.get(self.url).json()
+        self.assertEqual([g["host"] for g in got["grants"]], ["portal.example.com"])
+        self.assertEqual(got["config_hosts"], [{"host": "cfg.example.com", "method": ""}])
+        r = self.client.delete(self.url + "/Portal.Example.com")
+        self.assertEqual((r.status_code, r.json()), (200, {"revoked": True}))
+        self.assertEqual(self.last("login_grants")["args"], {"action": "revoke", "host": "portal.example.com"})
+        self.assertEqual(self.client.delete(self.url + "/portal.example.com").json(), {"revoked": False})
+
+    def test_a_refused_token_is_a_400(self):
+        r = self.client.post(self.url, json={"token": "bad"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["error"], "refused")
+        self.assertIn("signature", r.json()["message"])
+        self.assertEqual(self.fake.grants, {})
+
+    def test_bad_bodies(self):
+        for body in ({}, {"token": 5}, {"token": ""}):
+            self.assertEqual(self.client.post(self.url, json=body).status_code, 400)
+        self.assertEqual(self.client.post(self.url, content=b"x").status_code, 400)
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "login_grants"])
+
+    def test_not_connected_and_unsupported(self):
+        r = self.client.get("/api/plugins/device/devices/d_nope/login-grants")
+        self.assertEqual((r.status_code, r.json()["error"]), (409, "not_connected"))
+        self.device.conn.capabilities = frozenset()
+        r = self.client.get(self.url)
+        self.assertEqual((r.status_code, r.json()["error"]), (409, "not_connected"))
+        self.device.conn.capabilities = frozenset({core.CAPABILITY_BROWSER})
+        self.fake.grants_unsupported = True
+        for call in (lambda: self.client.get(self.url), lambda: self.client.post(self.url, json={"token": "x"}),
+                     lambda: self.client.delete(self.url + "/a.example.com")):
+            r = call()
+            self.assertEqual((r.status_code, r.json()["error"]), (501, "unsupported"))
+
+    def test_the_plugin_has_no_way_to_add_a_grant_itself(self):
+        """Nothing in the plugin sends an add except the forwarded token."""
+        src = (Path(__file__).resolve().parents[1])
+        for name in ("browser.py", "jobs.py", "core.py", "batch.py"):
+            for n, line in enumerate((src / name).read_text().splitlines(), 1):
+                self.assertNotIn('"action": "add"', line, f"{name}:{n}")
 
 
 class NegotiationTests(unittest.TestCase):

@@ -312,6 +312,85 @@ class JobDeviceTests(tb.BrowserDeviceTests):
         self.assertFalse(json.loads(jobs.allow_site({"rule": "browser:visit:chosozo.com"}))["always"])
 
 
+    # --- sign-in grants in runs ------------------------------------------------------------------
+
+    def job_on_pc(self):
+        browser.choices().set_job("job1", {"device_id": "d_pc", "name": "pc", "user": "alice", "session_id": "s", "at": 0})
+
+    def test_allow_site_login_raises_the_sign_in_card_for_the_jobs_computer(self):
+        self.job_on_pc()
+        args = {"rule": "browser:login:portal.example.com", "job_id": "job1"}
+        r = browser.pre_tool_call(tool_name="browser_allow_site", args=args, session_id="sess-1")
+        self.assertEqual(r["action"], "approve")
+        self.assertEqual(r["rule_key"], "browser:login-grant:d_pc:portal.example.com")
+        self.assertEqual(r["login_grant"]["job_id"], "job1")
+        self.assertEqual((r["login_grant"]["host"], r["login_grant"]["device_id"]), ("portal.example.com", "d_pc"))
+        self.assertTrue(r["message"].startswith("Sign in with the saved login on portal.example.com?"))
+        # A host with a grant, or in the config, needs only the plain rule; so does a visit rule.
+        self.fake.grants["portal.example.com"] = {"host": "portal.example.com", "method": "", "scope": "device"}
+        r = browser.pre_tool_call(tool_name="browser_allow_site", args=args, session_id="sess-1")
+        self.assertEqual(r["rule_key"], "browser:login:portal.example.com")
+        r = browser.pre_tool_call(tool_name="browser_allow_site", args=dict(args, rule="browser:visit:portal.example.com"),
+                                  session_id="sess-1")
+        self.assertEqual(r["rule_key"], "browser:visit:portal.example.com")
+        # Without a job, the plain rule as before; an old daemon too.
+        self.fake.grants.clear()
+        r = browser.pre_tool_call(tool_name="browser_allow_site", args={"rule": args["rule"]}, session_id="sess-1")
+        self.assertEqual(r["rule_key"], "browser:login:portal.example.com")
+        self.fake.grants_unsupported = True
+        r = browser.pre_tool_call(tool_name="browser_allow_site", args=args, session_id="sess-1")
+        self.assertEqual(r["rule_key"], "browser:login:portal.example.com")
+        # Nobody to answer: blocked, no card.
+        self.fake.grants_unsupported = False
+        with mock.patch.object(browser, "no_user", lambda: True):
+            self.assertEqual(browser.pre_tool_call(tool_name="browser_allow_site", args=args, session_id="sess-1")["action"],
+                             "block")
+
+    def test_allow_site_login_with_the_computer_offline_blocks(self):
+        self.job_on_pc()
+        self.device.conn.browser = dict(self.device.conn.browser, connected=False)
+        self.device.conn.capabilities = frozenset()
+        r = browser.pre_tool_call(tool_name="browser_allow_site",
+                                  args={"rule": "browser:login:portal.example.com", "job_id": "job1"}, session_id="sess-1")
+        self.assertEqual(r["action"], "block")
+        self.assertIn("not connected", r["message"])
+
+    def test_allow_site_handler_reports_whether_the_grant_exists(self):
+        self.job_on_pc()
+        args = {"rule": "browser:login:portal.example.com", "job_id": "job1"}
+        out = json.loads(jobs.allow_site(args))
+        self.assertFalse(out["ok"])
+        self.assertIn("did not allow", out["note"])
+        self.fake.grants["portal.example.com"] = {"host": "portal.example.com", "method": "", "scope": "device"}
+        out = json.loads(jobs.allow_site(args))
+        self.assertTrue(out["ok"] and out["granted"])
+
+    def test_run_needing_a_sign_in_grant_tells_the_chat_once_with_the_card_tool(self):
+        self.bound_chat()
+        self.cron(action="create", prompt="p", schedule="every 3h")
+        agents = core._load_sibling("hermes_device_agents", "agents.py")
+        sent, done = [], threading.Event()
+
+        def call(op, caller, args, timeout=0):
+            sent.append(args)
+            done.set()
+            return {"ok": True}
+        self.run_of("job1")
+        self.fake.inspect = {"url": "https://portal.example.com/login", "host": "portal.example.com",
+                             "top_host": "portal.example.com", "sensitive": ["password"], "autologin": False,
+                             "top_autologin": False}
+        with mock.patch.object(agents.BUS, "call", call), mock.patch.object(agents.BUS, "connected", lambda: True), \
+                mock.patch.object(browser, "no_user", lambda: True):
+            out = self.run_tool("browser_login", tab_id=7)
+            self.assertTrue(done.wait(5))
+        self.assertIn("portal.example.com", out["error"])
+        self.assertIn("pc", out["error"])
+        self.assertIn("job's chat was told once", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "login"])
+        self.assertIn('browser_allow_site with rule "browser:login:portal.example.com" and job_id "job1"', sent[0]["text"])
+        self.assertIn("sign-in card", sent[0]["text"])
+
+
 # Run only the tests defined here, not the inherited BrowserDeviceTests ones.
 for _name in [n for n in dir(tb.BrowserDeviceTests) if n.startswith("test_") and n not in JobDeviceTests.__dict__]:
     setattr(JobDeviceTests, _name, None)
