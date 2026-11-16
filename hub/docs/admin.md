@@ -69,7 +69,7 @@ dashboard:
     secret: "<32 or more random bytes>"
 ```
 
-Give each person their own backend when you want separate memory: a backend has one `MEMORY.md`, one `USER.md` and one Honcho user, so everyone on a shared backend sees the same memory.
+Give each person their own backend when you want separate memory: a backend has one `MEMORY.md`, and one `USER.md`, so everyone on a shared backend sees the same memory.
 
 What a backend needs beyond stock Hermes, and what you lose without it, is in the [README](../README.md#set-up-a-hermes-backend). The hub detects missing parts when it starts to use them and hides the feature, so a stock Hermes works with fewer features.
 

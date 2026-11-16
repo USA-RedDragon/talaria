@@ -151,7 +151,7 @@ func run(cmd *cobra.Command, cfg *config.Config) error {
 	}
 	cs := newClaude(cfg, svc, notifier, dialers)
 	webOpts.Models = newModels(cfg, svc, cs, dialers)
-	webOpts.Insights = newInsights(cfg, svc, webOpts.Memory, dialers)
+	webOpts.Insights = newInsights(cfg, svc, dialers)
 	if cs != nil {
 		svc.SetTurnErrors(cs.TurnFailed)
 		webOpts.Claude = cs
@@ -385,7 +385,7 @@ func updateSources(cfg *config.Config, st *store.Store, devices *device.Server) 
 
 // newInsights returns the core of chat search and the Usage page, or nil
 // when there is no backend.
-func newInsights(cfg *config.Config, svc *service.Service, mem hub.Memory, dialers map[string]*gateway.Dialer) hub.Insights {
+func newInsights(cfg *config.Config, svc *service.Service, dialers map[string]*gateway.Dialer) hub.Insights {
 	if len(cfg.Backends) == 0 {
 		return nil
 	}
@@ -394,9 +394,6 @@ func newInsights(cfg *config.Config, svc *service.Service, mem hub.Memory, diale
 		rs[id] = d
 	}
 	opts := insights.Options{Access: svc, Requesters: rs, Observer: svc}
-	if b, ok := mem.(insights.Backlogs); ok {
-		opts.Backlogs = b
-	}
 	if cfg.Usage.PrometheusURL != "" {
 		opts.GPU = insights.NewGPU(cfg.Usage.PrometheusURL, &http.Client{Timeout: 15 * time.Second})
 	}

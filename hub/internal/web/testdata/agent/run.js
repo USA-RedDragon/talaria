@@ -11,8 +11,8 @@ const A = sandbox.window.HubAgent;
 const eq = (a, b, msg) => assert.deepStrictEqual(JSON.parse(JSON.stringify(a)), b, msg);
 
 // The health check's report (the agent's doctor output).
-eq(A.doctorSummary(["Checking...", "✓ config ok", "✓ model reachable", "⚠ data folder 91% full", "✗ honcho unreachable"]),
-  { passed: 2, look: ["data folder 91% full", "honcho unreachable"], optional: 0 });
+eq(A.doctorSummary(["Checking...", "✓ config ok", "✓ model reachable", "⚠ data folder 91% full", "✗ model unreachable"]),
+  { passed: 2, look: ["data folder 91% full", "model unreachable"], optional: 0 });
 eq(A.doctorSummary([]), { passed: 0, look: [], optional: 0 });
 // Providers and tools nobody set up are not problems: they are counted, not listed.
 eq(A.doctorSummary([

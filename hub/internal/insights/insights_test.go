@@ -85,15 +85,6 @@ func (observer) Observed(ctx context.Context, user, id string) (hub.Observed, ti
 	return hub.Observed{Limits: []hub.ProviderLimits{{Provider: "openrouter"}}}, time.Unix(100, 0), nil
 }
 
-type backlogs struct{}
-
-func (backlogs) Backlog(_ context.Context, _, id string) (hub.Backlog, error) {
-	if id == "pc" {
-		return hub.Backlog{}, hub.ErrNoMemory
-	}
-	return hub.Backlog{Total: 5, Pending: 2}, nil
-}
-
 func newService(t *testing.T, prom http.Handler) *insights.Service {
 	t.Helper()
 	pc := jsonHandler(map[string]any{
@@ -106,7 +97,7 @@ func newService(t *testing.T, prom http.Handler) *insights.Service {
 	})
 	home := jsonHandler(map[string]any{searchPath: http.StatusTooManyRequests})
 	bobs := jsonHandler(map[string]any{searchPath: map[string]any{"results": []any{map[string]any{keySessionID: "bob-secret"}}}})
-	opts := insights.Options{Access: access{}, Observer: observer{}, Backlogs: backlogs{},
+	opts := insights.Options{Access: access{}, Observer: observer{},
 		Requesters: map[string]device.Requester{"pc": requester{pc}, "home": requester{home}, "bobs": requester{bobs}}}
 	if prom != nil {
 		srv := httptest.NewServer(prom)
@@ -164,14 +155,14 @@ func TestUsage(t *testing.T) {
 		u.Sessions[0].CostUSD != 0 || len(u.Models) != 1 || u.TokensError != "" {
 		t.Fatalf("usage = %+v, %v", u, err)
 	}
-	if u.Backlog != nil || u.BacklogError != "" || len(u.Observed.Limits) != 1 || u.ObservedSince.IsZero() {
+	if len(u.Observed.Limits) != 1 || u.ObservedSince.IsZero() {
 		t.Fatalf("usage extras = %+v", u)
 	}
 	if len(u.GPU) != 3 || u.GPU[0].Busy != 120 || u.GPU[0].People != 60 || u.GPU[0].Background != 30 || u.GPU[0].Requests != 120 {
 		t.Fatalf("gpu = %+v", u.GPU)
 	}
 	u, err = s.Usage(ctx, alice, "home", 7)
-	if err != nil || u.Backlog == nil || u.Backlog.Pending != 2 || !strings.Contains(u.TokensError, "older Talaria") {
+	if err != nil || !strings.Contains(u.TokensError, "older Talaria") {
 		t.Fatalf("home usage = %+v, %v", u, err)
 	}
 	if _, err := s.Usage(ctx, alice, "bobs", 7); !errors.Is(err, hub.ErrForbidden) {

@@ -132,8 +132,7 @@ window.HubSearch = (ctx) => {
 
 // HubUsage builds the Usage page: the Claude accounts (from ctx.claudePanel),
 // Claude Code's tokens on the user's computers (from ctx.claudeCodePanel),
-// tokens by day, chat and model, rate limits, the local GPU's time and
-// Honcho's backlog.
+// tokens by day, chat and model, rate limits, and the local GPU's time.
 window.HubUsage = (ctx) => {
   const { api, el } = ctx;
   const root = document.getElementById("usage");
@@ -388,18 +387,6 @@ window.HubUsage = (ctx) => {
       gpu.append(el("p", "none", "Not set up on this hub. Whoever runs the hub can turn it on."));
     }
     out.push(gpu);
-
-    const mem = section("Memory backlog", "Messages Honcho has not yet turned into memory. Its background work runs only when the GPU is free of people's requests.");
-    if (r.backlog) {
-      const b = r.backlog;
-      mem.append(table([{ label: "Waiting", num: true }, { label: "Working on", num: true }, { label: "Done", num: true }, { label: "Total", num: true }],
-        [[hubFmt.n(b.pending), hubFmt.n(b.in_progress), hubFmt.n(b.completed), hubFmt.n(b.total)]]));
-    } else if (r.backlog_error) {
-      mem.append(el("p", "err", r.backlog_error));
-    } else {
-      mem.append(el("p", "none", "This agent server does not use learned memory (Honcho)."));
-    }
-    out.push(mem);
     return out;
   }
 

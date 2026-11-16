@@ -306,54 +306,17 @@ func TestMaxFileBytes(t *testing.T) {
 	}
 }
 
-func TestHoncho(t *testing.T) {
+// TestRetiredMemoryBlock: a config from before the memory service was
+// retired still loads; the loader skips the backend's old block.
+func TestRetiredMemoryBlock(t *testing.T) {
 	t.Parallel()
-	keyFile := filepath.Join(t.TempDir(), "honcho-key")
-	if err := os.WriteFile(keyFile, []byte("file-key\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	honcho := func(extra string) string {
-		return file + "    honcho:\n      url: http://honcho.example.test:8000/\n      workspace: bob\n      user_peer: bob\n" + extra
-	}
-	cfg, err := load(t, secrets(), honcho("      api_key_file: "+keyFile+"\n"))
+	old := file + "    honcho:\n      url: http://memory.example.test:8000\n      workspace: bob\n      user_peer: bob\n      api_key: k\n"
+	cfg, err := load(t, secrets(), old)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("a config with the retired block: %v", err)
 	}
-	h := cfg.Backends[1].Honcho
-	if h.URL != "http://honcho.example.test:8000" || h.AIPeer != "hermes" || cfg.Backends[0].Honcho.URL != "" {
-		t.Fatalf("honcho = %+v", h)
-	}
-	if k, err := h.Key(); err != nil || k != "file-key" {
-		t.Fatalf("key = %q, %v", k, err)
-	}
-	cfg, err = load(t, secrets(), honcho("      api_key: inline-key\n      ai_peer: bot_1\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if k, _ := cfg.Backends[1].Honcho.Key(); k != "inline-key" || cfg.Backends[1].Honcho.AIPeer != "bot_1" {
-		t.Fatalf("honcho = %+v", cfg.Backends[1].Honcho)
-	}
-	for _, bad := range []string{
-		"",
-		"      api_key_file: " + filepath.Join(t.TempDir(), "missing") + "\n",
-		"      api_key_env: HUB_TEST_UNSET_HONCHO_KEY\n",
-		"      api_key: k\n      ai_peer: bob\n",
-		"      api_key: k\n      ai_peer: a/b\n",
-	} {
-		if _, err := load(t, secrets(), honcho(bad)); !errors.Is(err, config.ErrBackend) {
-			t.Errorf("%q: err = %v", bad, err)
-		}
-	}
-	if _, err := load(t, secrets(), file+"    honcho:\n      url: http://honcho.example.test\n      user_peer: bob\n      api_key: k\n"); !errors.Is(err, config.ErrBackend) {
-		t.Errorf("no workspace: %v", err)
-	}
-}
-
-func TestHonchoKeyEnv(t *testing.T) {
-	t.Setenv("KEY_ENV", " env-key ")
-	h := config.Honcho{APIKey: "inline", APIKeyEnv: "KEY_ENV"}
-	if k, err := h.Key(); err != nil || k != "env-key" {
-		t.Fatalf("key = %q, %v", k, err)
+	if len(cfg.Backends) < 2 {
+		t.Fatalf("backends = %+v", cfg.Backends)
 	}
 }
 

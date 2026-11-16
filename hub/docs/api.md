@@ -36,7 +36,7 @@ Errors are JSON, `{"error": "..."}`, with the usual status: `401` when the login
 | Files and pages | per chat `media`, `page`, `folder`, `file`, `diff`, `changes` |
 | Chats that work together | `GET` and `POST /api/backends/{backend}/partners`, `DELETE /api/backends/{backend}/partners/{a}/{b}` |
 | Saved prompts | `GET /api/prompts`, `POST /api/prompts`, `PUT` and `DELETE /api/prompts/{name}` |
-| Memory | `/api/memory` and `/api/memory/{backend}/notes`, `projects`, `learned` |
+| Memory | `/api/memory` and `/api/memory/{backend}/notes`, `projects` |
 | Scheduled jobs | `/api/scheduled` and the jobs routes under it |
 | Search and usage | `GET /api/search`, `GET /api/usage/{backend}` |
 | Notifications | `/api/notify`, `/api/notify/settings`, `/api/notify/push` and `/api/notify/test` |

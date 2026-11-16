@@ -113,7 +113,7 @@ func TestPushSubscriptionsArePerUser(t *testing.T) {
 	if resp, _ := post(t, alice, e.url+"/api/notify/push", "", "", sub); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("subscribe without CSRF = %d", resp.StatusCode)
 	}
-	internal := map[string]any{kEndpoint: "https://honcho.internal.svc/v3", kKeys: map[string]string{kP256dh: p256dh, kAuth: auth}}
+	internal := map[string]any{kEndpoint: "https://example.internal.svc/v3", kKeys: map[string]string{kP256dh: p256dh, kAuth: auth}}
 	if resp, _ := post(t, alice, e.url+"/api/notify/push", am.CSRF, "", internal); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("internal endpoint = %d", resp.StatusCode)
 	}

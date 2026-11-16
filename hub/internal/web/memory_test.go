@@ -17,9 +17,7 @@ import (
 )
 
 const (
-	honchoKey    = "honcho-jwt-for-tests"
 	fieldContent = "content"
-	fieldIDs     = "ids"
 )
 
 type lateAccess struct{ e **hubEnv }
@@ -35,11 +33,10 @@ func (l lateAccess) Backends(ctx context.Context, user string) ([]hub.Backend, e
 type memoryEnv struct {
 	*hubEnv
 	pc, home *memorytest.Plugin
-	honcho   *memorytest.Honcho
 }
 
 // setupMemory gives backend pc (alice's) notes and backend home (the
-// family group's, so bob's) notes and Honcho.
+// family group's, so bob's) notes.
 func setupMemory(t *testing.T) *memoryEnv {
 	t.Helper()
 	notes := func(entry string) hub.Notes {
@@ -51,11 +48,8 @@ func setupMemory(t *testing.T) *memoryEnv {
 	pc, home := memorytest.NewPlugin(notes("alice's note")), memorytest.NewPlugin(notes("bob's note"))
 	t.Cleanup(pc.Close)
 	t.Cleanup(home.Close)
-	h := memorytest.NewHoncho("bob", honchoKey)
-	t.Cleanup(h.Close)
 	var e *hubEnv
 	e = setupWith(t, func(cfg *config.Config, opts *web.Options, _ *store.Store) {
-		cfg.Backends[1].Honcho = config.Honcho{URL: h.URL(), Workspace: "bob", UserPeer: userBob, APIKey: honchoKey}
 		if err := cfg.Validate(); err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +60,7 @@ func setupMemory(t *testing.T) *memoryEnv {
 		}
 		opts.Memory = m
 	})
-	return &memoryEnv{hubEnv: e, pc: pc, home: home, honcho: h}
+	return &memoryEnv{hubEnv: e, pc: pc, home: home}
 }
 
 func TestMemoryAPI(t *testing.T) {
@@ -80,7 +74,7 @@ func TestMemoryAPI(t *testing.T) {
 	}
 	var bs []hub.MemoryBackend
 	if code := apiJSON(t, c, http.MethodGet, e.url+"/api/memory", m.CSRF, nil, &bs); code != http.StatusOK || len(bs) != 1 ||
-		bs[0].ID != "pc" || bs[0].Pending != 1 || !bs[0].Notes || bs[0].Learned {
+		bs[0].ID != "pc" || bs[0].Pending != 1 || !bs[0].Notes {
 		t.Fatalf("alice memory = %d %+v", code, bs)
 	}
 	var n hub.Notes
@@ -101,9 +95,6 @@ func TestMemoryAPI(t *testing.T) {
 	var errm map[string]any
 	if code := apiJSON(t, c, http.MethodPost, e.url+"/api/memory/pc/approval", m.CSRF, map[string]string{}, &errm); code != http.StatusBadRequest {
 		t.Fatalf("approval without enabled = %d", code)
-	}
-	if code := apiJSON(t, c, http.MethodGet, e.url+"/api/memory/pc/learned", "", nil, &errm); code != http.StatusNotFound {
-		t.Fatalf("learned on pc = %d", code)
 	}
 }
 
@@ -208,7 +199,7 @@ func TestMemoryAccess(t *testing.T) {
 	e.is.as("sub-bob", userBob, "family")
 	m := login(t, e.hubEnv, c)
 	var bs []hub.MemoryBackend
-	if code := apiJSON(t, c, http.MethodGet, e.url+"/api/memory", "", nil, &bs); code != http.StatusOK || len(bs) != 1 || bs[0].ID != backendHome || !bs[0].Learned {
+	if code := apiJSON(t, c, http.MethodGet, e.url+"/api/memory", "", nil, &bs); code != http.StatusOK || len(bs) != 1 || bs[0].ID != backendHome {
 		t.Fatalf("bob memory = %d %+v", code, bs)
 	}
 	before := len(e.pc.Requests())
@@ -240,78 +231,9 @@ func TestMemoryAccess(t *testing.T) {
 	if code := apiJSON(t, c, http.MethodPost, e.url+"/api/memory/home/notes/memory/add", "", map[string]string{fieldContent: "x"}, &errm); code != http.StatusForbidden {
 		t.Fatalf("add without CSRF = %d", code)
 	}
-	resp, _ := post(t, c, e.url+"/api/memory/home/learned/delete", m.CSRF, "https://evil.example.com", map[string]any{fieldIDs: []string{"c1"}})
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("cross-origin delete = %d", resp.StatusCode)
-	}
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, e.url+"/api/memory/home/learned/export", nil)
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	r2, err := c.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = r2.Body.Close()
-	if r2.StatusCode != http.StatusForbidden {
-		t.Fatalf("cross-site export = %d", r2.StatusCode)
-	}
 	for _, r := range e.home.Requests() {
 		if strings.Contains(r.Path, "/add") {
 			t.Fatalf("a refused add reached Hermes: %+v", r)
-		}
-	}
-	if n := len(e.honcho.Requests()); n != 0 {
-		t.Fatalf("honcho got %d requests from refused calls", n)
-	}
-}
-
-func TestLearnedAPI(t *testing.T) {
-	t.Parallel()
-	e := setupMemory(t)
-	c := client(t)
-	e.is.as("sub-bob", userBob, "family")
-	m := login(t, e.hubEnv, c)
-	a := e.honcho.Add("hermes", userBob, "Prefers restic.", "s1")
-	e.honcho.Add(userBob, userBob, "<script>alert(1)</script>", "")
-	other := e.honcho.Add("hermes", "hermes", "Runs on a GPU.", "")
-	var p hub.LearnedPage
-	if code := apiJSON(t, c, http.MethodGet, e.url+"/api/memory/home/learned?view=hermes&show=all", "", nil, &p); code != http.StatusOK ||
-		len(p.Items) != 1 || p.Items[0].ID != a || p.Items[0].SessionID != "s1" {
-		t.Fatalf("hermes view = %d %+v", code, p)
-	}
-	if code := apiJSON(t, c, http.MethodGet, e.url+"/api/memory/home/learned?view=hermes", "", nil, &p); code != http.StatusOK ||
-		len(p.Items) != 0 || p.Hidden != 1 {
-		t.Fatalf("condensed hermes view = %d %+v", code, p)
-	}
-	var info hub.LearnedInfo
-	if code := apiJSON(t, c, http.MethodGet, e.url+"/api/memory/home/learned/info", "", nil, &info); code != http.StatusOK || info.Total != 2 {
-		t.Fatalf("info = %d %+v", code, info)
-	}
-	var res map[string]any
-	if code := apiJSON(t, c, http.MethodPost, e.url+"/api/memory/home/learned/delete", m.CSRF, map[string]any{fieldIDs: []string{other}}, &res); code != http.StatusNotFound {
-		t.Fatalf("delete another peer's fact = %d %v", code, res)
-	}
-	if code := apiJSON(t, c, http.MethodPost, e.url+"/api/memory/home/learned/delete", m.CSRF, map[string]any{fieldIDs: []string{a}}, &res); code != http.StatusOK || res["deleted"] != float64(1) {
-		t.Fatalf("delete = %d %v", code, res)
-	}
-	var added hub.Conclusion
-	if code := apiJSON(t, c, http.MethodPost, e.url+"/api/memory/home/learned", m.CSRF, map[string]string{fieldContent: "Has a garage."}, &added); code != http.StatusCreated || added.View != hub.ViewHermes {
-		t.Fatalf("add = %d %+v", code, added)
-	}
-	resp, body := get(t, c, e.url+"/api/memory/home/learned/export")
-	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Disposition"), "attachment") ||
-		resp.Header.Get("Content-Type") != "application/json" {
-		t.Fatalf("export = %d %v", resp.StatusCode, resp.Header)
-	}
-	var out []hub.Conclusion
-	if err := json.Unmarshal([]byte(body), &out); err != nil || len(out) != 2 {
-		t.Fatalf("export body = %v %s", err, body)
-	}
-	if strings.Contains(body, honchoKey) {
-		t.Fatal("the export holds the Honcho key")
-	}
-	for _, r := range e.honcho.Requests() {
-		if r.Auth != "Bearer "+honchoKey {
-			t.Fatalf("honcho request without the key: %+v", r)
 		}
 	}
 }

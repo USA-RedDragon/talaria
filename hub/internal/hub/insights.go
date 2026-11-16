@@ -104,15 +104,6 @@ type Observed struct {
 	Chats  []LiveUsage      `json:"chats"`
 }
 
-// Backlog is Honcho's queue of work for a workspace: messages it has not
-// yet turned into memory.
-type Backlog struct {
-	Total      int64 `json:"total"`
-	Completed  int64 `json:"completed"`
-	InProgress int64 `json:"in_progress"`
-	Pending    int64 `json:"pending"`
-}
-
 // GPUWindow is the local GPU's time over one window, from the Ollama
 // proxy's metrics: Busy is the time any request was running, People and
 // Background the summed time of the requests of each class, which can
@@ -136,8 +127,6 @@ type UsageReport struct {
 	Truncated     bool           `json:"truncated,omitempty"`
 	TokensError   string         `json:"tokens_error,omitempty"`
 	Observed      Observed       `json:"observed"`
-	Backlog       *Backlog       `json:"backlog,omitempty"`
-	BacklogError  string         `json:"backlog_error,omitempty"`
 	GPU           []GPUWindow    `json:"gpu,omitempty"`
 	GPUError      string         `json:"gpu_error,omitempty"`
 	ObservedSince time.Time      `json:"observed_since,omitzero"`

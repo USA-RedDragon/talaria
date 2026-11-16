@@ -162,14 +162,6 @@ hermes:
 #         name: ""
 #         token: "(secret)"
 #         token_file: ""
-#     honcho:
-#       url: ""
-#       workspace: ""
-#       user_peer: ""
-#       ai_peer: ""
-#       api_key: "(secret)"
-#       api_key_file: ""
-#       api_key_env: ""
 #     agent_messages: false
 telegram:
   # Run the Telegram bot

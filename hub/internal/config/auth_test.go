@@ -18,7 +18,7 @@ const (
 
 // homelabFile is shaped like a deployed OIDC hub that sets everything but
 // users and backends through environment variables: two people, one
-// backend each, with devices and Honcho off.
+// backend each, with devices off.
 const homelabFile = `
 users:
   - sub: 9f8e7d6c5b4a

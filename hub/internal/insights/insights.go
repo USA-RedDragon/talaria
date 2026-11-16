@@ -1,7 +1,7 @@
 // Package insights serves the hub's chat search and its Usage page: the
 // talaria device plugin's views of each backend's session store, what the
-// hub saw in usage events, Honcho's backlog and the local GPU's time from
-// the Ollama proxy's metrics.
+// hub saw in usage events and the local GPU's time from the Ollama
+// proxy's metrics.
 package insights
 
 import (
@@ -42,19 +42,12 @@ type Observer interface {
 	Observed(ctx context.Context, user, backendID string) (hub.Observed, time.Time, error)
 }
 
-// Backlogs reads Honcho's backlog of a backend. *memory.Service is one.
-type Backlogs interface {
-	Backlog(ctx context.Context, user, backendID string) (hub.Backlog, error)
-}
-
 // Options are the dependencies of a Service.
 type Options struct {
 	Access Access
 	// Requesters reach each backend's dashboard with the hub's session.
 	Requesters map[string]device.Requester
 	Observer   Observer
-	// Backlogs is nil when no backend has Honcho.
-	Backlogs Backlogs
 	// GPU reads the local GPU's time. Nil: the Usage page has none.
 	GPU *GPU
 	// Timeout bounds each backend's answer. Default 20s.
@@ -191,7 +184,7 @@ func (s *Service) Search(ctx context.Context, user, query string) (hub.SearchRep
 }
 
 // Usage reports one backend's token use over the last days days, with
-// what the hub saw in its usage events, Honcho's backlog and the local
+// what the hub saw in its usage events and the local
 // GPU's time. See hub.Insights.
 func (s *Service) Usage(ctx context.Context, user, backendID string, days int) (hub.UsageReport, error) {
 	if err := s.opts.Access.Allowed(ctx, user, backendID); err != nil {
@@ -201,23 +194,6 @@ func (s *Service) Usage(ctx context.Context, user, backendID string, days int) (
 	out := hub.UsageReport{BackendID: backendID, Days: days, Sessions: []hub.UsageSession{}, Models: []hub.UsageModel{}}
 	var wg sync.WaitGroup
 	wg.Go(func() { s.tokens(ctx, backendID, days, &out) })
-	if s.opts.Backlogs != nil {
-		wg.Go(func() {
-			cctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
-			defer cancel()
-			b, err := s.opts.Backlogs.Backlog(cctx, user, backendID)
-			var me *hub.MemoryError
-			switch {
-			case err == nil:
-				out.Backlog = &b
-			case errors.Is(err, hub.ErrNoMemory):
-			case errors.As(err, &me):
-				out.BacklogError = me.Message
-			default:
-				out.BacklogError = "Could not reach Honcho"
-			}
-		})
-	}
 	if s.opts.GPU != nil {
 		wg.Go(func() {
 			cctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)

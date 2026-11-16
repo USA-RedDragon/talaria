@@ -148,7 +148,6 @@ type Backend struct {
 	MediaRoots     []string        `name:"media_roots" description:"Absolute folders on this backend's server whose files the hub shows: files a reply names with MEDIA:<path>, browser_screenshot results and images users attached. The hub shows a file only when that chat names it. Empty: only images, in the folders of the talaria device plugin's browser_screenshot (<dir>/cache/screenshots/hermes-device/<session>/<file>) and of attached images (<dir>/cache/images/<file>), under any <dir>. Set it to anchor them to the backend's HERMES_HOME. Other paths, and those the server does not have, are read from the computer or sandbox that runs the chat"`
 	MaxFileBytes   int64           `name:"max_file_bytes" description:"Largest file, in bytes, that the hub passes on from this backend's chats when the agent offers one (send_file, a Markdown link, MEDIA:<path>). The hub streams files without keeping a copy. 0 is the default, 8 GiB (8589934592)"`
 	ServiceDevices []ServiceDevice `name:"service_devices" description:"Devices listed here are trusted without pairing, such as each user's sandbox pod that runs talaria run. They may use only the exec leg"`
-	Honcho         Honcho          `name:"honcho"`
 	AgentMessages  *bool           `name:"agent_messages" description:"Let the agents of this backend message each other through the hub with the talaria device plugin's device-agents tools (needs devices). Default: on when users names exactly one user and groups is empty; a backend shared by several people needs true, and then all its chats count as one person's"`
 }
 
@@ -173,18 +172,6 @@ func (h Hermes) backend() (Backend, bool) {
 	}
 	return Backend{ID: HermesBackendID, Name: h.Name, URL: h.URL, Username: h.Username, Password: h.Password,
 		Everyone: true, Devices: h.Devices}, true
-}
-
-// Honcho is where a backend's Hermes keeps what it learned about its user,
-// for the Learned tab of the Memory page.
-type Honcho struct {
-	URL        string `name:"url" description:"Base URL of the Honcho API that this backend's Hermes uses, such as http://honcho.example.svc:8000. Empty: the Memory page has no Learned tab for this backend"`
-	Workspace  string `name:"workspace" description:"Honcho workspace of this backend's user. Required with url"`
-	UserPeer   string `name:"user_peer" description:"Honcho peer id of the user. Required with url"`
-	AIPeer     string `name:"ai_peer" description:"Honcho peer id of Hermes. Default hermes"`
-	APIKey     string `name:"api_key" secret:"true" description:"Honcho API key (a JWT scoped to the workspace). The hub never sends it to browsers. Required with url unless api_key_file or api_key_env is set"`
-	APIKeyFile string `name:"api_key_file" description:"File that holds the Honcho API key. Wins over api_key_env and api_key"`
-	APIKeyEnv  string `name:"api_key_env" description:"Environment variable that holds the Honcho API key. Wins over api_key"`
 }
 
 // Claude configures the Claude subscription accounts that the
@@ -591,9 +578,6 @@ func (c *Config) validateBackends() error {
 			return fmt.Errorf("%w: backends[%d].max_file_bytes must not be negative", ErrBackend, i)
 		case b.MaxFileBytes == 0:
 			b.MaxFileBytes = hub.DefaultMaxFileBytes
-		}
-		if err := b.Honcho.validate(i); err != nil {
-			return err
 		}
 		if b.ACPURL != "" {
 			if _, ok := webURL(b.ACPURL); !ok {
