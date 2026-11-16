@@ -1,0 +1,1899 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 15:15:02 -0600
+Subject: [PATCH] feat(gateway): restart hands running turns over at a step
+ boundary
+
+gateway.restart_turn_handoff_boundary (false = off), with restart_turn_handoff: a graceful restart no longer stops each running turn mid-step (cutting a streamed reply or a foreground command) and continues it with a synthetic "Hermes restarted" message. It asks each turn to stop at its next step boundary, waiting up to restart_turn_handoff_wait_seconds: after a model call that is fully streamed and stored, or after a tool round whose results are stored. The turn ends with no reply, failed-turn row or notice, and its admission goes back to its FIFO place with a resume record (state_meta gateway.turn_resume.v1.<admission>).
+
+A turn parked on its own clarify question or approval card counts as at a boundary. The record keeps each prompt (id, card, smart verdict); the call that raised it stays unexecuted and unwritten. The prompt stays answerable on the old gateway until it exits (the answer goes into the record), and the next gateway registers it under the same id before any claim.
+
+The next gateway claims the admission like any queued one; the claim takes the record in the same write. message.start carries resumed: true and no text. The turn reuses its stored rows (no second user row), runs only the tool calls its last step left without a result, then calls the model. A re-raised clarify or approval adopts the handed-over prompt: same id, no new card, no second smart review, an answer already given is read at once.
+
+A turn still between boundaries when the wait ends, or one run by a managed worker, is stopped and continued as restart_turn_handoff does.
+---
+ agent/conversation_loop.py                  |  15 +-
+ agent/session_persistence.py                |   4 +
+ agent/tool_executor.py                      |   7 +
+ agent/turn_boundary_handoff.py              | 190 +++++++++++
+ agent/turn_context.py                       |   8 +-
+ agent/turn_iteration_prep.py                |   8 +
+ agent/turn_tool_round.py                    |  12 +
+ gateway/config.py                           |  10 +-
+ gateway/config_loader.py                    |   1 +
+ gateway/run_shutdown.py                     |   7 +
+ gateway/run_startup.py                      |   9 +
+ gateway/run_turn.py                         |   6 +-
+ gateway/run_turn_runner.py                  |  40 ++-
+ gateway/run_turn_runner_clarify_delivery.py |  12 +
+ gateway/session_authority.py                |  16 +-
+ gateway/session_ingress.py                  |   3 +
+ gateway/session_queued_controls.py          |   6 +-
+ gateway/turn_boundary.py                    | 339 ++++++++++++++++++++
+ gateway/turn_handoff.py                     |   3 +
+ hermes_state_runtime.py                     |  72 +++++
+ tests/agent/test_turn_boundary_handoff.py   | 203 ++++++++++++
+ tests/gateway/test_restart_turn_boundary.py | 329 +++++++++++++++++++
+ tools/approval.py                           |  25 +-
+ tools/approval_gateway_wait.py              |  27 +-
+ tools/prompt_handoff.py                     | 129 ++++++++
+ 25 files changed, 1459 insertions(+), 22 deletions(-)
+ create mode 100644 agent/turn_boundary_handoff.py
+ create mode 100644 gateway/turn_boundary.py
+ create mode 100644 tests/agent/test_turn_boundary_handoff.py
+ create mode 100644 tests/gateway/test_restart_turn_boundary.py
+ create mode 100644 tools/prompt_handoff.py
+
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index 5fcb9f62..4dd24646 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -1745,7 +1745,12 @@ def _run_conversation_turn(
+     if (early_result := _turn_without_loop(agent, s, _ctx.plugin_block_message)) is not None:
+         return early_result
+ 
+-    _prelude_action, _prelude_result = play_prelude(agent, s, prelude)
++    # gateway.restart_turn_handoff_boundary: a turn the previous gateway handed off at a step boundary
++    # goes on from that step (no-op for every other turn).
++    from agent import turn_boundary_handoff as _handoff
++    _prelude_action, _prelude_result = _handoff.play_resume(agent, s)
++    if _prelude_action == "run":
++        _prelude_action, _prelude_result = play_prelude(agent, s, prelude)
+     if _prelude_action == "return":
+         return _prelude_result
+     while _prelude_action != "break" and (
+@@ -1797,6 +1802,9 @@ def _run_conversation_turn(
+             if _run_phase(handle_outer_loop_error, agent, s, e=e).action == "break":
+                 break
+ 
++    if _handoff.handed_off(agent):
++        # Not a finished turn: no final text, notice or failure; the next gateway continues it.
++        return _handoff.finish(agent, s)
+     result = _finalize_from_state(agent, s)
+     if s._compression_timeout_exhausted:
+         # Reuse the gateway's context-recovery contract: transcript stays intact while
+@@ -1859,6 +1867,7 @@ def run_conversation(
+             )
+         finally:
+             end_voice_turn_route(agent)
++            agent._resume_turn_rows = None  # a resume is this turn's only (a cached agent runs the next one)
+     settle_held_final(agent, result)
+     result = export_current_turn_boundary(agent, result, user_message)
+     if isinstance(result, dict):
+@@ -1886,6 +1895,8 @@ def _hand_back_leftover_steer(agent, result: Any) -> None:
+     as in the finalizer."""
+     if not isinstance(result, dict) or result.get("completed") is True or result.get("pending_steer"):
+         return
++    if result.get("handed_off"):
++        return  # the turn goes on in the next gateway, with its steers
+     if getattr(agent, "_turn_user_cancelled", False) is True:
+         return
+     drain = getattr(agent, "_drain_leftover_steer", None)
+@@ -1971,6 +1982,8 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
+     try:
+         if not isinstance(result, dict) or result.get("completed") is True:
+             return
++        if result.get("handed_off"):
++            return  # gateway.restart_turn_handoff_boundary: the turn goes on in the next gateway
+         if (
+             result.get("compression_exhausted") or result.get("compression_deferred")
+             or result.get("failure_reason") in ("context_overflow", "content_policy_blocked")
+diff --git a/agent/session_persistence.py b/agent/session_persistence.py
+index 76237a34..7aab3d6f 100644
+--- a/agent/session_persistence.py
++++ b/agent/session_persistence.py
+@@ -564,6 +564,10 @@ class SessionPersistenceMixin:
+         # a write here would land the curator's turn in the user's real history.
+         if getattr(self, "_persist_disabled", False) or not self._session_db:
+             return None
++        if getattr(self, "_handoff_withdrawn", False) is True:
++            # gateway.restart_turn_handoff_boundary withdrew this turn's parked prompt: what the turn appends
++            # from here on is not its record (agent/turn_boundary_handoff.py).
++            return None
+         batch_rows: list[dict[str, Any]] = []
+         try:
+             if not self._session_db_created:  # retry row creation if the earlier attempt failed transiently
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+index 752703f8..260b222f 100644
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -204,6 +204,13 @@ def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str)
+     effects can kill/restart the process before turn-end persistence runs."""
+     from agent.conversation_loop import _maybe_inject_run_budget_wrapup
+     from agent.turn_iteration_prep import _maybe_inject_iteration_budget_warning
++    from agent.turn_boundary_handoff import withdrawn
++
++    if withdrawn(agent):
++        # gateway.restart_turn_handoff_boundary withdrew this turn's parked prompt: the next gateway runs the
++        # call again under the same prompt, so this result (and the rest of the batch) stays unwritten and
++        # unshown. Not a persistence failure.
++        return False
+ 
+     # Persist exactly the checkpoint text the next model call will see, before stamping
+     # this tool result as durable. Already-written rows must never be rewritten later.
+diff --git a/agent/turn_boundary_handoff.py b/agent/turn_boundary_handoff.py
+new file mode 100644
+index 00000000..1dfdd455
+--- /dev/null
++++ b/agent/turn_boundary_handoff.py
+@@ -0,0 +1,190 @@
++"""Step-boundary handoff of a running turn (``gateway.restart_turn_handoff_boundary``).
++
++A graceful restart with the key asks every running chat turn to stop at its next step boundary instead
++of interrupting it:
++
++* the top of a loop iteration: the previous model call's assistant row and its tool results are
++  durable, the next model call has not started;
++* a tool round whose assistant ``tool_calls`` row is durable and whose tools have not started.
++
++There the turn ends with ``handed_off`` set and nothing else: no interrupted tool result, no failed-turn
++row, no notice, no final text. The gateway puts the turn's admission back at the head of its session's
++FIFO and the gateway that takes the profile over runs it again in resume mode (``play_resume``): no new
++user row, the turn's own rows after its input are restored, the tool calls of the last assistant row that
++have no result run exactly once, and the model loop goes on from there.
++
++A turn parked on a clarify or approval prompt is withdrawn by the gateway when the old process exits
++(``withdraw``): the prompt's tool returns, but nothing it appends after that is made durable, so the
++transcript ends with the assistant row whose tool call the next gateway runs again under the same prompt.
++"""
++from __future__ import annotations
++
++import json
++import logging
++from typing import Any
++
++logger = logging.getLogger(__name__)
++
++HANDED_OFF_EXIT_REASON = "handed_off"
++WITHDRAW_TOOL_REASON = "turn handoff"
++
++
++def request(agent: Any) -> None:
++    """Ask *agent*'s running turn to stop at its next step boundary (thread-safe: a flag)."""
++    agent._handoff_boundary = True
++
++
++def requested(agent: Any) -> bool:
++    return getattr(agent, "_handoff_boundary", False) is True
++
++
++def withdrawn(agent: Any) -> bool:
++    """The gateway withdrew this turn's parked prompt for the handoff: no further write is durable."""
++    return getattr(agent, "_handoff_withdrawn", False) is True
++
++
++def cancel(agent: Any) -> None:
++    """Take back a request the turn did not reach in time (the restart stops it the other way)."""
++    agent._handoff_boundary = False
++
++
++def mark_withdrawn(agent: Any) -> None:
++    """A turn parked on a prompt is being handed off: from here on nothing it appends is durable."""
++    agent._handoff_boundary = True
++    agent._handoff_withdrawn = True
++
++
++def withdraw(agent: Any) -> None:
++    """End a turn parked on a prompt for the handoff. The prompt's wait ends by the interrupt; every row
++    appended after this point stays in memory only (``agent.tool_executor``)."""
++    mark_withdrawn(agent)
++    interrupt = getattr(agent, "interrupt", None)
++    if callable(interrupt):
++        interrupt(tool_reason=WITHDRAW_TOOL_REASON)
++
++
++def stop_here(agent: Any) -> bool:
++    """At a step boundary: True when the turn must end here for the handoff (and marks it handed off)."""
++    if not (requested(agent) or withdrawn(agent)):
++        return False
++    agent._handed_off_at_boundary = True
++    return True
++
++
++def handed_off(agent: Any) -> bool:
++    return getattr(agent, "_handed_off_at_boundary", False) is True
++
++
++def _durable(message: Any) -> bool:
++    from agent.context_compressor import _DB_PERSISTED_MARKER
++    return isinstance(message, dict) and bool(message.get(_DB_PERSISTED_MARKER))
++
++
++def finish(agent: Any, s: Any) -> dict[str, Any]:
++    """The result of a handed-off turn. Rows that are not durable (a withdrawn prompt's tool result, the
++    batch's skipped results) are dropped; the rest is flushed so the next gateway reads the whole step."""
++    messages = list(s.messages or [])
++    if withdrawn(agent):
++        while messages and not _durable(messages[-1]) and messages[-1].get("role") == "tool":
++            messages.pop()
++        s.messages[:] = messages
++    else:
++        try:
++            agent._flush_messages_to_session_db(s.messages, s.conversation_history)
++        except Exception:
++            logger.warning("Flush of a handed-off turn failed (session=%s)", getattr(agent, "session_id", None),
++                           exc_info=True)
++    agent._session_messages = s.messages
++    for name in ("_handoff_boundary", "_handoff_withdrawn", "_handed_off_at_boundary"):
++        if hasattr(agent, name):
++            setattr(agent, name, False)
++    clear = getattr(agent, "clear_interrupt", None)
++    if callable(clear):
++        try:
++            clear()
++        except Exception:
++            logger.debug("clear_interrupt after a handoff failed", exc_info=True)
++    logger.info("Turn handed off at a step boundary (session=%s, api_calls=%d)",
++                getattr(agent, "session_id", None), s.api_call_count)
++    return {
++        "final_response": "", "messages": s.messages, "api_calls": s.api_call_count,
++        "completed": False, "interrupted": False, "failed": False, "partial": False,
++        "handed_off": True, "turn_exit_reason": HANDED_OFF_EXIT_REASON,
++    }
++
++
++# ── resume on the gateway that took the turn over ─────────────────────────────────────────────────
++
++
++def _call_parts(tc: Any) -> tuple[str, str, Any]:
++    fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
++    name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
++    args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "")
++    cid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
++    return str(cid or ""), str(name or ""), args
++
++
++def pending_tool_calls(rows: list[dict]) -> tuple[dict | None, list[Any]]:
++    """``(assistant row, calls)``: the last assistant row with tool calls and those of its calls that have
++    no tool result after it; ``(None, [])`` when every call has one or the tail is not a tool round."""
++    idx = next((i for i in range(len(rows) - 1, -1, -1)
++                if isinstance(rows[i], dict) and rows[i].get("role") == "assistant"), None)
++    if idx is None or not rows[idx].get("tool_calls"):
++        return None, []
++    answered = {r.get("tool_call_id") for r in rows[idx + 1:] if isinstance(r, dict) and r.get("role") == "tool"}
++    calls = [tc for tc in rows[idx]["tool_calls"] if _call_parts(tc)[0] not in answered]
++    return (rows[idx], calls) if calls else (None, [])
++
++
++def adopt_turn(history: list[dict], agent: Any) -> Any:
++    """Re-stage the handed-off turn from *history* (trimmed in place): its input row becomes this turn's user
++    message without a second write, the rows after it are restored by ``play_resume``. Returns the input's
++    content (the turn's message), or None when the history holds no input row."""
++    from agent.context_compressor import _DB_PERSISTED_MARKER
++    idx = next((i for i in range(len(history) - 1, -1, -1)
++                if isinstance(history[i], dict) and history[i].get("role") == "user"), None)
++    if idx is None:
++        return None
++    anchor, tail = history[idx], list(history[idx + 1:])
++    del history[idx:]
++    anchor[_DB_PERSISTED_MARKER] = True
++    for row in tail:
++        if isinstance(row, dict):
++            row[_DB_PERSISTED_MARKER] = True
++    agent._pending_cli_user_message = anchor
++    agent._resume_turn_rows = tail
++    return anchor.get("content")
++
++
++def play_resume(agent: Any, s: Any) -> tuple[str, Any]:
++    """Restore the rows of a resumed turn and run the tool calls its last step left without a result.
++    ``("run", None)`` goes on with the model loop (also when the turn is not a resumed one), ``("break",
++    None)`` ends the turn without a model call."""
++    rows = getattr(agent, "_resume_turn_rows", None)
++    if rows is None:
++        return "run", None
++    agent._resume_turn_rows = None
++    s.messages.extend(rows)
++    agent._session_messages = s.messages
++    row, calls = pending_tool_calls(s.messages)
++    if not calls:
++        return "run", None
++    from agent.transports.types import NormalizedResponse, build_tool_call
++    tool_calls = []
++    for tc in calls:
++        cid, name, args = _call_parts(tc)
++        if isinstance(args, str):
++            try:
++                args = json.loads(args) if args.strip() else {}
++            except ValueError:
++                pass
++        tool_calls.append(build_tool_call(cid, name, args))
++    message = NormalizedResponse(content=row.get("content") or "", tool_calls=tool_calls, finish_reason="tool_calls")
++    logger.info("Resuming a handed-off turn: running %d tool call(s) its last step left (session=%s)",
++                len(tool_calls), getattr(agent, "session_id", None))
++    agent._execute_tool_calls(message, s.messages, s.effective_task_id, s.api_call_count)
++    agent._session_messages = s.messages
++    if getattr(agent, "_incremental_persistence_failed", False):
++        s._turn_exit_reason, s.failed, s.final_response = "session_persistence_failed", True, ""
++        return "break", None
++    return "run", None
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index 0ffa48de..beadf8c2 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -740,9 +740,11 @@ def _stage_turn_user_message(
+     expected_persist_content = (
+         persist_user_message if persist_user_message is not None else user_message
+     )
+-    if (
+-        isinstance(pending_cli_message, dict)
+-        and pending_cli_message.get("content") == expected_persist_content
++    if isinstance(pending_cli_message, dict) and (
++        pending_cli_message.get("content") == expected_persist_content
++        # gateway.restart_turn_handoff_boundary: a resumed turn's input row is already durable; whatever text
++        # the gateway built for it this time, it is that row (agent.turn_boundary_handoff.adopt_turn).
++        or getattr(agent, "_resume_turn_rows", None) is not None
+     ):
+         user_msg = pending_cli_message
+         # CLI-staged value is the clean text; restore the API-facing variant (e.g. voice
+diff --git a/agent/turn_iteration_prep.py b/agent/turn_iteration_prep.py
+index fe670cd7..31667395 100644
+--- a/agent/turn_iteration_prep.py
++++ b/agent/turn_iteration_prep.py
+@@ -389,6 +389,14 @@ def begin_iteration(
+     # Reset per-turn checkpoint dedup so each iteration can take one snapshot.
+     agent._checkpoint_mgr.new_turn()
+ 
++    # gateway.restart_turn_handoff_boundary: the last step is durable and the next model call has not
++    # started, so the turn ends here for the next gateway (before the interrupt check: a withdrawn prompt's
++    # interrupt is part of the handoff, not a stop).
++    from agent.turn_boundary_handoff import stop_here
++    if stop_here(agent):
++        _turn_exit_reason = "handed_off"
++        return _verdict("break")
++
+     if agent._interrupt_requested:
+         interrupted = True
+         _issuer = interrupt_issuer(agent)
+diff --git a/agent/turn_tool_round.py b/agent/turn_tool_round.py
+index 0afc7ab8..e82e3603 100644
+--- a/agent/turn_tool_round.py
++++ b/agent/turn_tool_round.py
+@@ -168,7 +168,19 @@ def run_tool_round(
+     from agent.prepared_compaction import maybe_prepare
+     maybe_prepare(agent, messages, origin="tool-batch")
+ 
++    # gateway.restart_turn_handoff_boundary: the tool-call row is durable and no tool has started; the next
++    # gateway runs them (agent.turn_boundary_handoff.play_resume).
++    from agent.turn_boundary_handoff import stop_here, withdrawn
++    if stop_here(agent):
++        _turn_exit_reason = "handed_off"
++        return _verdict("break")
++
+     agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
++    if withdrawn(agent):
++        # A prompt of this round was withdrawn for the handoff: its result was not made durable.
++        stop_here(agent)
++        _turn_exit_reason = "handed_off"
++        return _verdict("break")
+     from hermes_cli.observability.shared_metrics_harness import finish_tool_round
+ 
+     finish_tool_round(agent)
+diff --git a/gateway/config.py b/gateway/config.py
+index 31cae21c..7a5f6032 100644
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -692,6 +692,12 @@ class GatewayConfig:
+     # (agent.restart_after_turn_timeout) and the stop drains them (agent.restart_drain_timeout).
+     restart_turn_handoff: bool = False
+     restart_turn_handoff_wait_seconds: float = 0.0
++    # With restart_turn_handoff: the restart waits (up to restart_turn_handoff_wait_seconds) for each running turn
++    # to reach a step boundary (a model call or tool round done and durable, or a parked clarify/approval) instead
++    # of stopping it; the next gateway resumes the same admission from that step, with no notice and nothing
++    # repeated. A turn still between boundaries when the wait ends is stopped as restart_turn_handoff does.
++    # False = restart_turn_handoff's stop-and-continue.
++    restart_turn_handoff_boundary: bool = False
+     # In-process loop liveness watchdog: after consecutive missed probes it dumps all-thread stacks
+     # and hard-exits with the service-restart code. The knobs tolerate transient self-recovering
+     # stalls (adapter reconnect doing sync socket I/O) so a short block does not cause restart churn.
+@@ -732,7 +738,8 @@ class GatewayConfig:
+         "restart_listener_relay_seconds", "restart_listener_hold_seconds", "stop_trace",
+         "restart_ticket_handover", "restart_listener_relay_close_sockets", "restart_reads_grace_seconds",
+         "restart_socket_close_delay_seconds", "restart_memory_shutdown_after_release_seconds",
+-        "restart_wait_ws_reads", "restart_turn_handoff", "restart_turn_handoff_wait_seconds", "loop_watchdog",
++        "restart_wait_ws_reads", "restart_turn_handoff", "restart_turn_handoff_wait_seconds",
++        "restart_turn_handoff_boundary", "loop_watchdog",
+         "loop_watchdog_probe_interval_s", "loop_watchdog_probe_timeout_s",
+         "loop_watchdog_max_strikes", "unauthorized_dm_behavior", "unauthorized_dm_decline_message",
+     )
+@@ -883,6 +890,7 @@ class GatewayConfig:
+             restart_wait_ws_reads=_coerce_bool(pick("restart_wait_ws_reads"), False),
+             restart_turn_handoff=_coerce_bool(pick("restart_turn_handoff"), False),
+             restart_turn_handoff_wait_seconds=bounded_float("restart_turn_handoff_wait_seconds", 0.0, 0.0, 3600.0),
++            restart_turn_handoff_boundary=_coerce_bool(pick("restart_turn_handoff_boundary"), False),
+             restart_wait_plugin_sockets=[
+                 str(name).strip("/ ") for name in (pick("restart_wait_plugin_sockets") or [])
+                 if isinstance(pick("restart_wait_plugin_sockets"), list) and str(name).strip("/ ")],
+diff --git a/gateway/config_loader.py b/gateway/config_loader.py
+index e545fd21..e6b60dc1 100644
+--- a/gateway/config_loader.py
++++ b/gateway/config_loader.py
+@@ -112,6 +112,7 @@ _TOPLEVEL_BRIDGE: tuple = (
+     ("restart_wait_ws_reads", "restart_wait_ws_reads", "nested", None, None),
+     ("restart_turn_handoff", "restart_turn_handoff", "nested", None, None),
+     ("restart_turn_handoff_wait_seconds", "restart_turn_handoff_wait_seconds", "nested", None, None),
++    ("restart_turn_handoff_boundary", "restart_turn_handoff_boundary", "nested", None, None),
+     ("streaming", "streaming", "dict", None, None),
+     *_presence(
+         "reset_triggers", "always_log_local", "write_sessions_json", "loop_watchdog",
+diff --git a/gateway/run_shutdown.py b/gateway/run_shutdown.py
+index 214b4545..887043bc 100644
+--- a/gateway/run_shutdown.py
++++ b/gateway/run_shutdown.py
+@@ -1651,6 +1651,13 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+         from gateway import turn_handoff
+         handoff = turn_handoff.enabled(self)
+         if handoff:
++            from gateway import turn_boundary
++            if turn_boundary.enabled(self):
++                # gateway.restart_turn_handoff_boundary: each running turn goes to the next gateway at its next step
++                # boundary (up to restart_turn_handoff_wait_seconds); one past the cap is stopped as below.
++                self._scale_to_zero_status("draining", "restart wait: status mark failed")
++                await turn_boundary.hand_off_at_boundaries(self, turn_handoff.wait_seconds(self))
++                return False
+             # gateway.restart_turn_handoff: running turns go to the next gateway, which continues them, instead
+             # of holding this one (and every new turn of the profile) for up to restart_after_turn_timeout.
+             timeout = turn_handoff.wait_seconds(self)
+diff --git a/gateway/run_startup.py b/gateway/run_startup.py
+index 7fc020b1..de5faaa5 100644
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -1657,7 +1657,16 @@ class GatewayStartupMixin:
+         self._schedule_resume_pending_sessions()
+         await self._finish_startup_restore()
+         from gateway.run_runtime import recover_gateway_native_sessions
++        from gateway import turn_boundary
++        if turn_boundary.configured(self):
++            # gateway.restart_turn_handoff_boundary: the prompts of the turns handed off at a step boundary wait
++            # under their old ids before recovery schedules any claim, and are listed once the sessions are live.
++            with _log_suppressed(logging.WARNING, "Handed-off prompt restore failed: %s"):
++                turn_boundary.restore_prompts(self)
+         await recover_gateway_native_sessions(self)
++        if turn_boundary.configured(self):
++            with _log_suppressed(logging.WARNING, "Handed-off prompt listing failed: %s"):
++                turn_boundary.show_prompts(self)
+         # gateway.restart_turn_handoff: after recovery (a handed-off turn its owner could not settle is fenced
+         # unknown by now), queue a continuation for each turn the previous gateway stopped for this takeover.
+         if getattr(getattr(self, "config", None), "restart_turn_handoff", False):
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+index 9304e42b..51defcab 100644
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -287,6 +287,9 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
+             if not self._is_session_run_current(_quick_key, run_generation):
+                 self._hmwa_discard_stale_result(source, _quick_key, run_generation)
+                 return None
++            if isinstance(agent_result, dict) and agent_result.get("handed_off"):
++                # gateway.restart_turn_handoff_boundary: the next gateway continues this turn; nothing to send or write.
++                return None
+ 
+             response, _intentional_silence, agent_messages = await self._hmwa_shape_agent_response(
+                 agent_result, source, history, session_entry, session_key,
+@@ -2221,7 +2224,8 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
+             result = turn_ctx.result_holder[0]
+             adapter = self._delivery_adapter_for(source)
+             await self._run_agent_finalize_streaming_tts(turn_ctx, adapter)
+-            pending_event, pending = await self._run_agent_drain_pending(result, adapter, source, session_key)
++            pending_event, pending = (None, None) if (isinstance(response, dict) and response.get("handed_off")) else (
++                await self._run_agent_drain_pending(result, adapter, source, session_key))
+             if pending_event or pending:
+                 return await self._run_agent_queued_followup(
+                     turn_ctx, adapter, pending, pending_event, response, result, stream_task,
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+index 96526eac..659fe887 100644
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -727,8 +727,23 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+             # user inactivity (#112684).
+             return UNDELIVERED_NO_SURFACE, False
+         session_key = ctx.session_key or ""
+-        clarify_id = uuid.uuid4().hex[:10]
+         choices = list(choices) if choices else None
++        if not subagent:
++            from tools.prompt_handoff import take_clarify
++            handed = take_clarify(session_key, question, choices)
++            if handed is not None:
++                # gateway.restart_turn_handoff_boundary: the previous gateway asked this and handed the card over
++                # (same id, shown already); its answer, if one came, is read at once.
++                from gateway.run_turn_runner_clarify_delivery import wait_handed_over
++                response, answered = wait_handed_over(handed.clarify_id, clarify_mod)
++                if self._approval_owner is not None:
++                    authority, session_id, generation = self._approval_owner
++                    if (live := authority.sessions.get(session_id)) is not None:
++                        live.controls.snapshot(session_id, generation)
++                if marks is not None:
++                    marks.update(at=handed.answered_at, via=handed.answered_via, ended_at=handed.ended_at or time.time())
++                return response, answered
++        clarify_id = uuid.uuid4().hex[:10]
+         send_kwargs = dict(
+             chat_id=ctx._status_chat_id, question=question, choices=choices, clarify_id=clarify_id,
+             session_key=session_key, metadata=ctx._status_thread_metadata,
+@@ -970,7 +985,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+             from gateway.run import _collect_history_media_paths
+             history = api['history']
+             tail = history[-1] if history else None
+-            if api.get('resume_unanswered') and isinstance(tail, dict) and tail.get('role') == 'user':
++            from gateway.turn_boundary import resume_turn
++            if resume_turn.get() is not None:
++                # gateway.restart_turn_handoff_boundary: this turn's own rows (as below for a native turn).
++                from agent.turn_boundary_handoff import adopt_turn
++                history = list(history)
++                adopt_turn(history, agent)
++            elif api.get('resume_unanswered') and isinstance(tail, dict) and tail.get('role') == 'user':
+                 # The door's re-run continues the row its failed attempt persisted (#115325). Only a
+                 # bare user tail: a tool suffix is completed work the re-run must still see.
+                 from agent.session_persistence import adopt_unanswered_turn
+@@ -984,6 +1005,14 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+         agent_history, observed_group_context = _build_gateway_agent_history(
+             ctx.history, channel_prompt=ctx.channel_prompt, inject_timestamps=_message_timestamps_enabled(ctx.user_config),
+         )
++        from gateway.turn_boundary import resume_turn
++        if resume_turn.get() is not None:
++            # gateway.restart_turn_handoff_boundary: the previous gateway handed this turn off at a step boundary.
++            # Its input row and the rows after it are this turn's own (agent.turn_boundary_handoff.adopt_turn).
++            from agent.turn_boundary_handoff import adopt_turn
++            agent_history = list(agent_history)
++            adopt_turn(agent_history, agent)
++            return agent_history, observed_group_context, _collect_history_media_paths(agent_history)
+         # FTS write-corruption guard: if persistence failed silently the reloaded transcript is stale
+         # while the SAME cached agent still holds the live conversation (same-session amnesia). Only
+         # for a reused agent bound to this exact session_id.
+@@ -1536,6 +1565,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 publish_usage(self, agent, record=True)  # turn end: the final API call's counters
+                 from gateway.session_local_inventory import publish_settled_info
+                 publish_settled_info(self, agent)
++        if result.get("handed_off"):
++            # gateway.restart_turn_handoff_boundary: stopped at a step boundary for the next gateway. Not an
++            # answer: no reply, no empty-response notice, no transcript write.
++            self._finish_stream_consumer(result, agent_history, stream_consumer)
++            return {"final_response": "", "handed_off": True, "messages": result.get("messages", []),
++                    "api_calls": result.get("api_calls", 0), "failed": False, "completed": False,
++                    "interrupted": False, "tools": ctx.tools_holder[0] or [], "agent_persisted": True}
+         persisted_turn = _persisted_turn(agent, agent_history, result, compressions)
+         self._finish_stream_consumer(result, agent_history, stream_consumer)
+         if _finite_viewer_turn() and getattr(agent, "_codex_session", None) is not None:
+diff --git a/gateway/run_turn_runner_clarify_delivery.py b/gateway/run_turn_runner_clarify_delivery.py
+index 5f241e0f..6dfb1023 100644
+--- a/gateway/run_turn_runner_clarify_delivery.py
++++ b/gateway/run_turn_runner_clarify_delivery.py
+@@ -122,6 +122,18 @@ def _clarify_send_then_wait(fut, *, clarify_id: str, session_key: str, clarify_m
+     return response, True
+ 
+ 
++def wait_handed_over(clarify_id: str, clarify_mod) -> tuple[str, bool]:
++    """The wait of a question the previous gateway asked and handed over (``tools.prompt_handoff``): its card is
++    out already, so only the wait runs. Same ``(response, answered)`` contract as ``_clarify_send_then_wait``."""
++    timeout = clarify_mod.get_clarify_timeout()
++    response = clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
++    if response == clarify_mod.CANCELLED:
++        return response, False
++    if response is None or response == "":
++        return f"[user did not respond within {int(timeout / 60)}m]", False
++    return response, True
++
++
+ class _LateFailureWatch:
+     """Watch a possibly-delivered card send: when it resolves as a definitive failure after the
+     ack window, try the text fallback once, then release the waiter with the delivery notice.
+diff --git a/gateway/session_authority.py b/gateway/session_authority.py
+index 657b6dce..a57dcb6e 100644
+--- a/gateway/session_authority.py
++++ b/gateway/session_authority.py
+@@ -1245,8 +1245,14 @@ class SessionAuthority:
+                     'admission_id': row['admission_id']}
+                 self.executing[ref.session_id] = row['generation']
+                 from gateway.session_automation import admission_display
+-                live.event_stream.publish(ref.session_id, admission_display(row.get('payload') or {}),
+-                                          event_type='message.start')
++                start = admission_display(row.get('payload') or {})
++                if row.get('resume') is not None:
++                    # gateway.restart_turn_handoff_boundary: the turn the previous gateway handed off goes on.
++                    # Its input was shown when it first started: the frame names the same admission and no text.
++                    from gateway import turn_boundary
++                    turn_boundary.claimed(self, ref.session_id, row)
++                    start = {'resumed': True}
++                live.event_stream.publish(ref.session_id, start, event_type='message.start')
+                 self._publish_pending(ref)
+         return row
+ 
+@@ -1432,6 +1438,12 @@ class SessionAuthority:
+                 if isinstance(exc, ManagedExecutionUnknown):
+                     return
+                 raise
++            from gateway import turn_boundary
++            if turn_boundary.handed_off_result(self, admission_id):
++                # gateway.restart_turn_handoff_boundary: the turn stopped at a step boundary for a restart. Its
++                # admission goes back to its FIFO place for the next gateway; nothing settles or is delivered.
++                await turn_boundary.finish_handed_off(self, ref, live, row)
++                return
+             from gateway.session_runtime_workers import track_mutation
+             from gateway.session_settlement_recovery import settle_and_deliver
+             delivery = track_mutation(self, settle_and_deliver(self, live, ref, row, response, outcome))
+diff --git a/gateway/session_ingress.py b/gateway/session_ingress.py
+index ef89958b..e0ab020e 100644
+--- a/gateway/session_ingress.py
++++ b/gateway/session_ingress.py
+@@ -334,6 +334,8 @@ async def execute_admission(authority, ref, row):
+     captured = {}
+     result_token = execution_result.set(captured)
+     token = executing_admission.set(True)
++    from gateway.turn_boundary import resume_turn
++    resume_token = resume_turn.set(row.get('resume'))
+     # This drain, not the handler's unwind, releases the turn's crash marker (see below).
+     event._turn_marker_handoff = True
+     handed = False
+@@ -391,6 +393,7 @@ async def execute_admission(authority, ref, row):
+         if not handed:
+             await _release_turn_marker(authority, event)
+         executing_admission.reset(token)
++        resume_turn.reset(resume_token)
+         execution_result.reset(result_token)
+         api_execution.reset(api_token)
+         admission_author.reset(author_token)
+diff --git a/gateway/session_queued_controls.py b/gateway/session_queued_controls.py
+index 25b54df4..f488cfb7 100644
+--- a/gateway/session_queued_controls.py
++++ b/gateway/session_queued_controls.py
+@@ -67,7 +67,11 @@ def pending_rows(authority, ref):
+     """The pending rows a viewer is shown, plus each queued admission in transfer to the running
+     claim: listed ``started`` and ``steering``, because it may still go back to its queue place, and a
+     client must not retire an admission it no longer sees. The caller holds the stream lock."""
+-    rows = {row['admission_id']: row for row in authority._pending_rows(ref)}
++    from gateway.turn_boundary import is_resuming
++    # A turn handed off at a step boundary waits queued for its resume: it is the running turn's input, not
++    # a new one (gateway.restart_turn_handoff_boundary).
++    rows = {row['admission_id']: row for row in authority._pending_rows(ref)
++            if not (row['status'] == 'queued' and is_resuming(row['admission_id']))}
+     entry = authority.steer_transfers.get(ref.session_id)
+     for admission_id in entry[1] if entry is not None else ():
+         row = get_session_admission(authority.db, admission_id=admission_id)
+diff --git a/gateway/turn_boundary.py b/gateway/turn_boundary.py
+new file mode 100644
+index 00000000..ed9325aa
+--- /dev/null
++++ b/gateway/turn_boundary.py
+@@ -0,0 +1,339 @@
++"""``gateway.restart_turn_handoff_boundary`` (false = off): a restart hands each running chat turn to the
++next gateway at a step boundary, so the user sees nothing cut, repeated or restarted.
++
++It refines ``gateway.restart_turn_handoff`` (``gateway.turn_handoff``), which stops every running turn at
++once and has the next gateway queue a continuation turn with a synthetic message. With this key the
++restart instead asks each running turn (``agent.turn_boundary_handoff.request``) to stop at its next
++step boundary, and waits up to ``gateway.restart_turn_handoff_wait_seconds`` for every turn to get there:
++
++* a turn that reaches a boundary (its model call streamed and persisted, its tool round finished and
++  persisted) ends with ``handed_off`` and nothing else. The drain puts its admission back at its FIFO
++  place (``hermes_state_runtime.hand_off_session_input``) instead of settling it: no reply, failed-turn
++  row or notice;
++* a turn parked on a clarify question or an approval card counts as at a boundary. When the wait ends
++  its prompt records (id, kind, card, smart verdict) go into the same resume record, the turn is
++  withdrawn (the pending tool call stays unexecuted and unwritten), and the prompt stays answerable
++  here until this process exits: an answer given now is written into the resume record and applies
++  once, on the next gateway;
++* a turn still between boundaries when the wait ends is stopped as ``restart_turn_handoff`` does.
++
++The next gateway claims the handed-off admission like any queued one. The claim carries the resume
++record (``claim_session_input``); the turn adopts its own transcript rows instead of writing a new user
++row, runs exactly the tool calls its last step left without a result (a re-raised prompt adopts the old
++card: same id, no second review, an answer already given is read at once), then goes on with the model.
++Its prompts are registered with the viewers before any claim, so a viewer that reattaches still lists
++them under the same id.
++"""
++from __future__ import annotations
++
++import asyncio
++import logging
++from contextvars import ContextVar
++from typing import Any
++
++logger = logging.getLogger(__name__)
++
++# The resume record of the handed-off turn this claim runs (``gateway.session_ingress.execute_admission``).
++resume_turn: ContextVar[dict | None] = ContextVar("resume_turn", default=None)
++
++# Admission ids queued for a resume: a viewer must not see one as a new pending input.
++_resuming: set[str] = set()
++# Admission ids this process handed off (the 0048 export skips them).
++_handed_off: set[str] = set()
++
++
++def enabled(runner) -> bool:
++    from gateway import turn_handoff
++    return bool(turn_handoff.enabled(runner)
++                and getattr(getattr(runner, "config", None), "restart_turn_handoff_boundary", False))
++
++
++def configured(runner) -> bool:
++    cfg = getattr(runner, "config", None)
++    return bool(getattr(cfg, "restart_turn_handoff", False) and getattr(cfg, "restart_turn_handoff_boundary", False))
++
++
++def is_resuming(admission_id) -> bool:
++    return admission_id in _resuming
++
++
++def handed_off_here(admission_id) -> bool:
++    return admission_id in _handed_off
++
++
++# ── the outgoing gateway ─────────────────────────────────────────────────────────────────────────────
++
++
++class _Turn:
++    __slots__ = ("authority", "session_id", "live", "generation", "admission_id", "agent")
++
++    def __init__(self, authority, session_id, live, generation, admission_id, agent):
++        self.authority, self.session_id, self.live = authority, session_id, live
++        self.generation, self.admission_id, self.agent = generation, admission_id, agent
++
++
++def _turns(runner) -> list[_Turn]:
++    """The running canonical turns whose agent runs in this process."""
++    from gateway.session_authorities import all_authorities
++    turns = []
++    for authority in all_authorities(runner):
++        for session_id, live in list((getattr(authority, "sessions", None) or {}).items()):
++            execution = dict(getattr(getattr(live, "event_stream", None), "execution", None) or {})
++            generation, admission_id = execution.get("execution_generation"), execution.get("admission_id")
++            if generation is None or not admission_id or admission_id in _handed_off:
++                continue
++            adopted_generation, agent = (getattr(authority, "adopted", None) or {}).get(session_id, (None, None))
++            if adopted_generation != generation or agent is None or not _in_process(agent):
++                continue
++            turns.append(_Turn(authority, session_id, live, generation, admission_id, agent))
++    return turns
++
++
++def _in_process(agent) -> bool:
++    """An agent whose loop runs in this process (a managed worker's turn runs in its own process and is stopped
++    the ``restart_turn_handoff`` way)."""
++    from gateway.session_managed_worker import ManagedWorker
++    return not isinstance(agent, ManagedWorker)
++
++
++def _parked_prompts(turn: _Turn) -> list[tuple[str, Any, dict]]:
++    """``(prompt_id, route_or_entry, prompt)`` of the turn's own pending prompts (not a subagent's)."""
++    controls = turn.live.controls
++    with turn.live.event_stream.lock:
++        controls.snapshot(turn.session_id, turn.generation)
++        return [(pid, route, dict(prompt)) for pid, (route, prompt) in controls.pending.items()
++                if prompt.get("execution_generation") == turn.generation and pid not in controls.background]
++
++
++def _prompt_record(turn: _Turn, prompt_id, route, prompt) -> dict | None:
++    if prompt.get("kind") == "clarify":
++        entry = route
++        return {"kind": "clarify", "prompt_id": prompt_id, "session_key": entry.session_key,
++                "question": entry.question, "choices": list(entry.choices or []) or None,
++                "multi_select": bool(entry.multi_select), "timeout_s": prompt.get("timeout_s")}
++    from tools import approval as _approval
++    with _approval._lock:
++        entry = next((e for e in _approval._gateway_queues.get(route, []) if e.data.get("request_id") == prompt_id), None)
++    if entry is None:
++        return None
++    return {"kind": "approval", "prompt_id": prompt_id, "session_key": route, "data": dict(entry.data),
++            "authority": dict(getattr(entry, "authority", None) or {}), "timeout_s": prompt.get("timeout_s"),
++            "card_deny_only": bool(getattr(entry, "card_deny_only", False))}
++
++
++async def hand_off_at_boundaries(runner, cap: float) -> int:
++    """Ask every running turn to stop at its next step boundary and wait up to *cap* seconds; then hand
++    the parked ones off and let the rest fall back to ``restart_turn_handoff``. Returns how many turns
++    were handed off at a boundary."""
++    from agent import turn_boundary_handoff as boundary
++    loop = asyncio.get_running_loop()
++    deadline = loop.time() + max(0.0, cap)
++    asked = {}
++    last_log = 0.0
++    while True:
++        turns = _turns(runner)
++        for turn in turns:
++            boundary.request(turn.agent)
++            asked[turn.admission_id] = turn
++        running = [t for t in turns if not _parked_prompts(t)]
++        now = loop.time()
++        if not running or now >= deadline:
++            break
++        if now - last_log >= 30.0:
++            logger.info("Restart: waiting up to %.0fs for %d running turn(s) to reach a step boundary "
++                        "(gateway.restart_turn_handoff_boundary)", deadline - now, len(running))
++            last_log = now
++        await asyncio.sleep(0.1)
++    for turn in _turns(runner):
++        if _parked_prompts(turn):
++            try:
++                await _withdraw(turn)
++            except Exception:
++                logger.warning("Could not hand off the parked turn of %s", turn.session_id, exc_info=True)
++    left = _turns(runner)
++    for turn in left:
++        # Past the cap: this turn is stopped the 0048 way; a boundary it reaches now must not end it twice.
++        boundary.cancel(turn.agent)
++    handed = sum(1 for aid in asked if aid in _handed_off)
++    logger.info("Restart: %d turn(s) handed to the next gateway at a step boundary, %d stopped "
++                "(gateway.restart_turn_handoff_boundary)", handed, len(left))
++    return handed
++
++
++async def _withdraw(turn: _Turn) -> None:
++    """Hand off a turn parked on its own prompt: the resume record names the prompts, the turn's agent is
++    withdrawn (no further write), and the prompts stay answerable here until the process exits."""
++    from agent import turn_boundary_handoff as boundary
++    from hermes_state_runtime import RuntimeStoreError, get_session_admission
++    authority, live = turn.authority, turn.live
++    boundary.mark_withdrawn(turn.agent)  # from here on nothing the turn appends is durable
++    with live.event_stream.lock:
++        if live.event_stream.execution.get("execution_generation") != turn.generation:
++            return
++        prompts = [r for r in (_prompt_record(turn, pid, route, prompt)
++                               for pid, route, prompt in _parked_prompts(turn)) if r is not None]
++        # The withdrawn turn's own events (its cancelled prompt tool) never reach a viewer.
++        if authority.executing.get(turn.session_id) == turn.generation:
++            authority.executing.pop(turn.session_id, None)
++    row = await asyncio.to_thread(get_session_admission, authority.db, admission_id=turn.admission_id)
++    try:
++        await _commit(authority, live, row, {"prompts": prompts})
++    except RuntimeStoreError:
++        logger.warning("Parked turn of %s could not be handed off", turn.session_id, exc_info=True)
++        return
++    with live.event_stream.lock:
++        for record in prompts:
++            # Answerable here until exit: no longer bound to the (requeued) turn, so no generation check.
++            live.controls.remote_responders[record["prompt_id"]] = _late_answer(authority, turn.admission_id)
++            live.controls.background.add(record["prompt_id"])
++    boundary.withdraw(turn.agent)
++    logger.info("Turn of %s parked on %d prompt(s) handed to the next gateway", turn.session_id, len(prompts))
++
++
++def _late_answer(authority, admission_id):
++    """The responder of a handed-off prompt on this (outgoing) gateway: the answer goes into the resume
++    record, and the next gateway applies it once."""
++    def respond(kind, prompt_id, value):
++        from hermes_state_runtime import resume_record, update_resume_record
++        record = resume_record(authority.db, admission_id=admission_id) or {}
++        for prompt in record.get("prompts") or []:
++            if prompt.get("prompt_id") == prompt_id and "answer" not in prompt:
++                prompt["answer"] = value
++        if not update_resume_record(authority.db, admission_id=admission_id, record=record):
++            logger.warning("Answer to handed-off prompt %s arrived after the next gateway claimed the turn", prompt_id)
++    return respond
++
++
++async def _commit(authority, live, row, record) -> None:
++    from functools import partial
++    from gateway.session_runtime_workers import tracked_write
++    from gateway.session_settlement_recovery import _transfers
++    from hermes_state_runtime import hand_off_session_input
++    transfers = _transfers(authority, live, row)
++    await tracked_write(authority, partial(
++        hand_off_session_input, authority.db, epoch=authority.epoch, admission_id=row["admission_id"],
++        generation=row["generation"], record=record, transfers=transfers))
++    _handed_off.add(row["admission_id"])
++    _resuming.add(row["admission_id"])
++
++
++def handed_off_result(authority, admission_id) -> bool:
++    """The claim's execution returned a turn handed off at a step boundary."""
++    if admission_id in _handed_off:
++        return True
++    captured = (getattr(authority, "pending_results", None) or {}).get(admission_id) or {}
++    return bool((captured.get("result") or {}).get("handed_off"))
++
++
++async def finish_handed_off(authority, ref, live, row) -> None:
++    """The drain's end of a claim handed off at a boundary: the admission goes back to its FIFO place for
++    the next gateway (unless the parked path did that already), with nothing published or delivered."""
++    admission_id = row["admission_id"]
++    try:
++        if admission_id not in _handed_off:
++            await _commit(authority, live, row, {"prompts": []})
++            logger.info("Turn of %s handed to the next gateway at a step boundary", ref.session_id)
++    finally:
++        authority.pending_results.pop(admission_id, None)
++        getattr(authority, "pending_deliveries", {}).pop(admission_id, None)
++        with live.event_stream.lock:
++            if live.event_stream.execution.get("admission_id") == admission_id:
++                live.event_stream.execution = {}
++        authority.adopted.pop(ref.session_id, None)
++
++
++# ── the incoming gateway ─────────────────────────────────────────────────────────────────────────────
++
++
++def restore_prompts(runner) -> int:
++    """At startup, before any claim: put every handed-over prompt back under its old id (the waiters
++    the resumed turns adopt). Returns how many."""
++    from gateway.session_authorities import serving_authorities
++    from hermes_state_runtime import resume_records
++    count = 0
++    for authority in serving_authorities(runner):
++        try:
++            records = resume_records(authority.db)
++        except Exception:
++            logger.warning("Could not read the handed-off turns", exc_info=True)
++            continue
++        for admission_id, record in records.items():
++            _resuming.add(admission_id)
++            for prompt in record.get("prompts") or []:
++                count += _register_waiter(prompt)
++    return count
++
++
++def _register_waiter(prompt: dict) -> int:
++    from tools import prompt_handoff
++    try:
++        if prompt.get("kind") == "clarify":
++            prompt_handoff.add_clarify(prompt["session_key"], prompt["prompt_id"], prompt["question"],
++                                       prompt.get("choices"), bool(prompt.get("multi_select")),
++                                       answer=prompt.get("answer"))
++        elif prompt.get("kind") == "approval":
++            prompt_handoff.add_approval(prompt["session_key"], prompt["data"], authority=prompt.get("authority"),
++                                        answer=prompt.get("answer"))
++        else:
++            return 0
++    except Exception:
++        logger.warning("Could not restore handed-off prompt %s", prompt.get("prompt_id"), exc_info=True)
++        return 0
++    return 1
++
++
++def show_prompts(runner) -> None:
++    """After startup recovery made the sessions live: list each handed-over prompt that still waits with
++    the session's viewers, under its old id (a reattaching viewer keeps the same card)."""
++    from gateway.session_authorities import serving_authorities
++    from hermes_state_runtime import get_session_admission, resume_records
++    for authority in serving_authorities(runner):
++        try:
++            records = resume_records(authority.db)
++        except Exception:
++            continue
++        for admission_id, record in records.items():
++            row = get_session_admission(authority.db, admission_id=admission_id)
++            if row is not None:
++                show_record(authority, row["target_session_id"], record)
++
++
++def show_record(authority, session_id, record) -> None:
++    live = (getattr(authority, "sessions", None) or {}).get(session_id)
++    if live is None:
++        return
++    from tools import clarify_gateway as cg
++    from tools import approval as _approval
++    for prompt in record.get("prompts") or []:
++        if prompt.get("answer") is not None:
++            continue
++        _register_waiter(prompt)  # idempotent
++        pid = prompt.get("prompt_id")
++        with live.event_stream.lock:
++            if pid in live.controls.pending:
++                continue
++            generation = authority.db.get_session(session_id)["runtime_generation"]
++            if prompt.get("kind") == "clarify":
++                with cg._lock:
++                    entry = cg._entries.get(pid)
++                if entry is not None and not entry.event.is_set():
++                    live.controls.register_clarify(session_id, generation, entry, timeout_s=prompt.get("timeout_s"),
++                                                   background=True)
++            else:
++                with _approval._lock:
++                    queued = any(e.data.get("request_id") == pid
++                                 for e in _approval._gateway_queues.get(prompt["session_key"], []))
++                if queued:
++                    live.controls.register(session_id, prompt["session_key"], generation, prompt["data"],
++                                           timeout_s=prompt.get("timeout_s"), background=True)
++
++
++def claimed(authority, session_id, row) -> None:
++    """The claim of a handed-off admission: no longer a pending input, and its prompts are listed."""
++    _resuming.discard(row["admission_id"])
++    record = row.get("resume")
++    if isinstance(record, dict):
++        for prompt in record.get("prompts") or []:
++            _register_waiter(prompt)
++        show_record(authority, session_id, record)
++
+diff --git a/gateway/turn_handoff.py b/gateway/turn_handoff.py
+index c24d7587..2bb1bc21 100644
+--- a/gateway/turn_handoff.py
++++ b/gateway/turn_handoff.py
+@@ -82,6 +82,9 @@ def running_turns(runner) -> list[dict]:
+             execution = dict(getattr(stream, "execution", None) or {})
+             if execution.get("execution_generation") is None or not execution.get("admission_id"):
+                 continue
++            from gateway.turn_boundary import handed_off_here
++            if handed_off_here(execution["admission_id"]):
++                continue  # gateway.restart_turn_handoff_boundary: resumed from its boundary, not continued
+             turns.append({
+                 "profile_id": getattr(authority, "profile_id", None), "session_id": session_id,
+                 "route": getattr(live, "route", None), "admission_id": execution["admission_id"],
+diff --git a/hermes_state_runtime.py b/hermes_state_runtime.py
+index 318b9e4b..c7afa06a 100644
+--- a/hermes_state_runtime.py
++++ b/hermes_state_runtime.py
+@@ -238,6 +238,15 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
+         # session): a row above it on this conversation was written by this turn, so settlement can
+         # tell this turn's own failed-turn boundary from an earlier turn's (#134889 GW-21).
+         claimed['transcript_mark'] = conn.execute('SELECT COALESCE(MAX(id), 0) FROM messages').fetchone()[0]
++        # gateway.restart_turn_handoff_boundary: a turn the previous owner handed off at a step boundary is
++        # resumed by this claim; its record is taken in the same write, so exactly one claim resumes it.
++        resume = conn.execute('SELECT value FROM state_meta WHERE key=?', (RESUME_PREFIX + row['admission_id'],)).fetchone()
++        if resume is not None:
++            conn.execute('DELETE FROM state_meta WHERE key=?', (RESUME_PREFIX + row['admission_id'],))
++            try:
++                claimed['resume'] = json.loads(resume[0])
++            except (TypeError, ValueError):
++                claimed['resume'] = {}
+         return claimed
+     return db._execute_write(write)
+ 
+@@ -274,6 +283,69 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int,
+     return db._execute_write(write)
+ 
+ 
++RESUME_PREFIX = 'gateway.turn_resume.v1.'
++
++
++def hand_off_session_input(db, *, epoch: int, admission_id: str, generation: int, record: dict,
++                           transfers=None) -> dict:
++    """``gateway.restart_turn_handoff_boundary``: the running claim stopped at a step boundary for a restart,
++    so it goes back to its FIFO place (``seq``) for the next owner, with ``record`` (what the resume needs:
++    its parked prompts) under ``RESUME_PREFIX + admission_id``. Unlike recovery this requeues started work:
++    its owner stopped it at a point where every finished step is durable and nothing is half done. Steers
++    it carried settle as in a completed claim (a delivered text is in the transcript the resume reads)."""
++    def write(conn):
++        _epoch(conn, epoch)
++        row = _admission(conn, admission_id)
++        session = _session(conn, row['target_session_id'])
++        if (row['status'] != 'started' or row['owner_epoch'] != epoch or type(generation) is not int
++                or row['generation'] != generation or session['runtime_generation'] != generation):
++            raise RuntimeStoreError('stale_generation')
++        conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) '
++                     'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
++                     (RESUME_PREFIX + admission_id, _json(record)))
++        conn.execute("UPDATE session_admissions SET status='queued',outcome=NULL,generation=NULL "
++                     "WHERE admission_id=?", (admission_id,))
++        settle_steer_transfers(conn, epoch=epoch, generation=generation, transfers=transfers, outcome='completed')
++        conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
++        return _row(_admission(conn, admission_id))
++    return db._execute_write(write)
++
++
++def update_resume_record(db, *, admission_id: str, record: dict) -> bool:
++    """Rewrite the resume record of a handed-off admission that is still queued (an answer to its parked
++    prompt arrived after the handoff); False when it is gone or no longer queued."""
++    def write(conn):
++        row = conn.execute('SELECT status FROM session_admissions WHERE admission_id=?', (admission_id,)).fetchone()
++        if row is None or row[0] != 'queued':
++            return False
++        return conn.execute('UPDATE state_meta SET value=? WHERE key=?',
++                            (_json(record), RESUME_PREFIX + admission_id)).rowcount == 1
++    return db._execute_write(write)
++
++
++def resume_records(db) -> dict:
++    """``{admission_id: record}`` of every handed-off admission still queued for its resume."""
++    rows = db._read_all("SELECT m.key, m.value FROM state_meta m JOIN session_admissions a "
++                        "ON a.admission_id = substr(m.key, ?) WHERE m.key >= ? AND m.key < ? AND a.status='queued'",
++                        (len(RESUME_PREFIX) + 1, RESUME_PREFIX, RESUME_PREFIX + '\uffff'))
++    out = {}
++    for key, value in rows:
++        try:
++            out[key[len(RESUME_PREFIX):]] = json.loads(value)
++        except (TypeError, ValueError):
++            continue
++    return out
++
++
++def resume_record(db, *, admission_id: str) -> dict | None:
++    with db._read_ctx() as conn:
++        row = conn.execute('SELECT value FROM state_meta WHERE key=?', (RESUME_PREFIX + admission_id,)).fetchone()
++    try:
++        return None if row is None else json.loads(row[0])
++    except (TypeError, ValueError):
++        return {}
++
++
+ _CANCEL_QUEUED = "UPDATE session_admissions SET status='terminal',outcome='cancelled' WHERE admission_id=?"
+ 
+ 
+diff --git a/tests/agent/test_turn_boundary_handoff.py b/tests/agent/test_turn_boundary_handoff.py
+new file mode 100644
+index 00000000..ea6958b7
+--- /dev/null
++++ b/tests/agent/test_turn_boundary_handoff.py
+@@ -0,0 +1,203 @@
++"""gateway.restart_turn_handoff_boundary, agent side: a turn asked to hand off stops at its next step boundary
++(nothing cut, nothing written that is not a finished step) and the next gateway's agent resumes it from the
++durable transcript: no second user row, no synthetic text, no repeated model call or tool run."""
++import json
++import tempfile
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from agent import turn_boundary_handoff as boundary
++from hermes_state import SessionDB
++from run_agent import AIAgent
++
++
++@pytest.fixture(autouse=True)
++def _quiet(monkeypatch):
++    monkeypatch.setattr("agent.title_generator.maybe_auto_title", lambda *args, **kwargs: None)
++
++
++def _tool_defs(*names):
++    return [{"type": "function", "function": {"name": n, "description": n, "parameters": {"type": "object", "properties": {}}}}
++            for n in names]
++
++
++def _agent(db, session_id):
++    home = Path(tempfile.mkdtemp(prefix="hermes-test-home-"))
++    (home / "logs").mkdir(parents=True, exist_ok=True)
++    with (patch("model_tools.get_tool_definitions", return_value=_tool_defs("web_search")),
++          patch("model_tools.check_toolset_requirements", return_value={}),
++          patch("agent.process_bootstrap.OpenAI"),
++          patch("run_agent._hermes_home", home),
++          patch("agent.model_metadata.fetch_model_metadata", return_value={})):
++        agent = AIAgent(api_key="test-key", base_url="https://openrouter.ai/api/v1", quiet_mode=True,
++                        skip_context_files=True, skip_memory=True)
++    agent.client = MagicMock()
++    agent._cached_system_prompt = "You are helpful."
++    agent._use_prompt_caching = False
++    agent.compression_enabled = False
++    agent.save_trajectories = False
++    agent._session_db = db
++    agent._session_db_created = True
++    agent.session_id = session_id
++    agent._last_flushed_db_idx = 0
++    agent._flushed_db_message_ids = set()
++    agent._flushed_db_message_session_id = None
++    agent._persist_disabled = False
++    return agent
++
++
++def _call(call_id="c1"):
++    return SimpleNamespace(id=call_id, type="function", function=SimpleNamespace(name="web_search", arguments="{}"))
++
++
++def _response(content="", tool_calls=None):
++    msg = SimpleNamespace(content=content, tool_calls=tool_calls)
++    return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="tool_calls" if tool_calls else "stop")],
++                           model="test/model", usage=None)
++
++
++def _db(tmp_path, session_id="s1"):
++    db = SessionDB(db_path=tmp_path / "state.db")
++    db.create_session(session_id=session_id, source="tui", model="test/model")
++    return db
++
++
++def _rows(tmp_path, session_id="s1"):
++    db = SessionDB(db_path=tmp_path / "state.db")
++    try:
++        return db.get_messages_as_conversation(session_id)
++    finally:
++        db.close()
++
++
++def _run(agent, text, history=None):
++    with (patch.object(agent, "_persist_session"), patch.object(agent, "_save_trajectory"),
++          patch.object(agent, "_cleanup_task_resources")):
++        return agent.run_conversation(text, conversation_history=history)
++
++
++def _resume(tmp_path, final="done"):
++    """The next gateway: a fresh agent on the same store resumes the handed-off turn."""
++    db = SessionDB(db_path=tmp_path / "state.db")
++    agent = _agent(db, "s1")
++    agent.client.chat.completions.create.side_effect = [_response(final)]
++    history = db.get_messages_as_conversation("s1")
++    text = boundary.adopt_turn(history, agent)
++    return agent, _run(agent, text, history), db
++
++
++def _assert_one_clean_turn(rows):
++    assert [r["role"] for r in rows].count("user") == 1
++    blob = json.dumps(rows)
++    assert "Hermes restarted" not in blob and "Gateway restarting" not in blob
++    assert not any(r.get("display_kind") == "failed_turn" for r in rows)
++
++
++def test_boundary_after_the_model_call_runs_the_tools_once_on_the_next_gateway(tmp_path):
++    db = _db(tmp_path)
++    agent = _agent(db, "s1")
++    tools = []
++
++    def model(**kwargs):
++        boundary.request(agent)  # the restart asks while the call streams
++        return _response("Searching now.", [_call()])
++
++    agent.client.chat.completions.create.side_effect = model
++    with patch("model_tools.handle_function_call", side_effect=lambda *a, **k: tools.append(1) or "result-1"):
++        result = _run(agent, "search something")
++        assert result["handed_off"] is True and result["final_response"] == ""
++        assert result["failed"] is False and result["interrupted"] is False
++        assert tools == []  # the tool round had not started: it runs on the next gateway
++        assert agent.client.chat.completions.create.call_count == 1
++        assert [r["role"] for r in _rows(tmp_path)] == ["user", "assistant"]
++
++        resumed, final, _ = _resume(tmp_path)
++    assert final["final_response"] == "done" and not final.get("handed_off")
++    assert tools == [1]  # exactly once, across both gateways
++    assert resumed.client.chat.completions.create.call_count == 1  # no model call to decide what to redo
++    sent = resumed.client.chat.completions.create.call_args.kwargs["messages"]
++    assert [m["role"] for m in sent if m["role"] != "system"] == ["user", "assistant", "tool"]
++    rows = _rows(tmp_path)
++    assert [r["role"] for r in rows] == ["user", "assistant", "tool", "assistant"]
++    assert rows[2]["tool_call_id"] == "c1" and "result-1" in rows[2]["content"]
++    _assert_one_clean_turn(rows)
++
++
++def test_boundary_after_a_tool_round_keeps_its_result_and_calls_the_model_once(tmp_path):
++    db = _db(tmp_path)
++    agent = _agent(db, "s1")
++    tools = []
++
++    def tool(*args, **kwargs):
++        boundary.request(agent)  # the restart asks while the tool runs: the tool finishes
++        tools.append(1)
++        return "result-1"
++
++    agent.client.chat.completions.create.side_effect = [_response("", [_call()])]
++    with patch("model_tools.handle_function_call", side_effect=tool):
++        result = _run(agent, "search something")
++        assert result["handed_off"] is True
++        assert tools == [1]
++        assert agent.client.chat.completions.create.call_count == 1  # stopped before the next model call
++        assert [r["role"] for r in _rows(tmp_path)] == ["user", "assistant", "tool"], _rows(tmp_path)
++        resumed, final, _ = _resume(tmp_path)
++    assert final["final_response"] == "done"
++    assert tools == [1]  # the finished tool is not run again
++    assert resumed.client.chat.completions.create.call_count == 1
++    rows = _rows(tmp_path)
++    assert [r["role"] for r in rows] == ["user", "assistant", "tool", "assistant"]
++    _assert_one_clean_turn(rows)
++
++
++def test_withdrawn_prompt_leaves_its_call_unexecuted_and_unwritten(tmp_path):
++    db = _db(tmp_path)
++    agent = _agent(db, "s1")
++
++    def parked(*args, **kwargs):
++        boundary.withdraw(agent)  # the gateway hands the parked turn off; the prompt's wait ends
++        return "BLOCKED: cancelled"
++
++    agent.client.chat.completions.create.side_effect = [_response("", [_call()])]
++    with patch("model_tools.handle_function_call", side_effect=parked):
++        result = _run(agent, "search something")
++    assert result["handed_off"] is True and result["final_response"] == ""
++    assert [r["role"] for r in _rows(tmp_path)] == ["user", "assistant"]
++    assert not boundary.withdrawn(agent) and not boundary.requested(agent)  # the cached agent is clean again
++    with patch("model_tools.handle_function_call", return_value="answered") as run:
++        _, final, _ = _resume(tmp_path)
++    assert run.call_count == 1 and final["final_response"] == "done"
++    _assert_one_clean_turn(_rows(tmp_path))
++
++
++def test_without_a_request_the_turn_is_unchanged(tmp_path):
++    db = _db(tmp_path)
++    agent = _agent(db, "s1")
++    agent.client.chat.completions.create.side_effect = [_response("", [_call()]), _response("done")]
++    with patch("model_tools.handle_function_call", return_value="result-1") as run:
++        result = _run(agent, "search something")
++    assert result["final_response"] == "done" and "handed_off" not in result
++    assert run.call_count == 1
++    assert [r["role"] for r in _rows(tmp_path)] == ["user", "assistant", "tool", "assistant"]
++
++
++def test_a_cancelled_request_does_not_stop_the_turn(tmp_path):
++    db = _db(tmp_path)
++    agent = _agent(db, "s1")
++    boundary.request(agent)
++    boundary.cancel(agent)
++    agent.client.chat.completions.create.side_effect = [_response("done")]
++    assert _run(agent, "hi")["final_response"] == "done"
++
++
++def test_pending_tool_calls_names_only_unanswered_calls():
++    rows = [{"role": "user", "content": "x"},
++            {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "function": {"name": "t", "arguments": "{}"}},
++                                                                {"id": "b", "function": {"name": "t", "arguments": "{}"}}]},
++            {"role": "tool", "tool_call_id": "a", "content": "ok"}]
++    row, calls = boundary.pending_tool_calls(rows)
++    assert row is rows[1] and [c["id"] for c in calls] == ["b"]
++    rows.append({"role": "tool", "tool_call_id": "b", "content": "ok"})
++    assert boundary.pending_tool_calls(rows) == (None, [])
+diff --git a/tests/gateway/test_restart_turn_boundary.py b/tests/gateway/test_restart_turn_boundary.py
+new file mode 100644
+index 00000000..2f183041
+--- /dev/null
++++ b/tests/gateway/test_restart_turn_boundary.py
+@@ -0,0 +1,329 @@
++"""gateway.restart_turn_handoff_boundary, gateway side: a restart hands a running turn to the next gateway at
++a step boundary. The admission goes back to its FIFO place with a resume record (no settlement, reply, notice
++or failed-turn row); the next owner's claim resumes it without synthetic text; a parked clarify or approval
++keeps its prompt id, stays answerable on both owners, is applied once and is not reviewed twice."""
++import asyncio
++import threading
++import time
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import turn_boundary, turn_handoff
++from gateway.config import GatewayConfig
++from gateway.session_events import SessionEvents
++from gateway.session_pending_controls import PendingControls
++from hermes_state import SessionDB
++from hermes_state_runtime import (
++    admit_session_input, begin_runtime_epoch, claim_session_input, get_session_admission,
++    hand_off_session_input, recover_session_inputs, resume_record, resume_records,
++)
++from tools import clarify_gateway, prompt_handoff
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch):
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    prompt_handoff.clear()
++    yield
++    prompt_handoff.clear()
++    clarify_gateway.clear_session("route-1")
++
++
++def _store(tmp_path):
++    db = SessionDB(db_path=tmp_path / "state.db")
++    db.create_session(session_id="s1", source="telegram", model="m")
++    return db
++
++
++def _started(db, epoch):
++    row = admit_session_input(db, epoch=epoch, principal_id="p", session_id="s1", request_id="r1",
++                              payload={"text": "do the thing"})
++    claimed = claim_session_input(db, epoch=epoch, session_id="s1")
++    assert claimed["admission_id"] == row["admission_id"] and "resume" not in claimed
++    return claimed
++
++
++def _authority(db, epoch, generation, admission_id, agent):
++    events = SessionEvents()
++    events.execution = {"authority_epoch": epoch, "execution_generation": generation, "admission_id": admission_id}
++    live = SimpleNamespace(event_stream=events, controls=PendingControls(events), route="route-1")
++    return SimpleNamespace(db=db, epoch=epoch, sessions={"s1": live}, adopted={"s1": (generation, agent)},
++                           executing={"s1": generation}, pending_results={}, pending_deliveries={},
++                           steer_transfers={})
++
++
++def _runner(authority, wait=0.0):
++    cfg = GatewayConfig(restart_turn_handoff=True, restart_turn_handoff_boundary=True,
++                        restart_turn_handoff_wait_seconds=wait)
++    return SimpleNamespace(config=cfg, _restart_requested=True, session_authority=authority, session_authorities=None)
++
++
++def test_off_by_default_and_needs_restart_turn_handoff():
++    assert GatewayConfig().restart_turn_handoff_boundary is False
++    cfg = GatewayConfig.from_dict({"gateway": {"restart_turn_handoff": True, "restart_turn_handoff_boundary": True}})
++    assert cfg.restart_turn_handoff_boundary is True
++    assert turn_boundary.enabled(SimpleNamespace(config=cfg, _restart_requested=True)) is True
++    alone = GatewayConfig.from_dict({"gateway": {"restart_turn_handoff_boundary": True}})
++    assert turn_boundary.enabled(SimpleNamespace(config=alone, _restart_requested=True)) is False
++    assert turn_boundary.enabled(SimpleNamespace(config=GatewayConfig(restart_turn_handoff=True),
++                                                 _restart_requested=True)) is False
++
++
++def test_handed_off_admission_is_requeued_and_resumed_by_exactly_one_claim(tmp_path):
++    db = _store(tmp_path)
++    old = begin_runtime_epoch(db, instance_id="old")
++    claimed = _started(db, old)
++    hand_off_session_input(db, epoch=old, admission_id=claimed["admission_id"], generation=claimed["generation"],
++                           record={"prompts": []})
++    row = get_session_admission(db, admission_id=claimed["admission_id"])
++    assert row["status"] == "queued" and row["outcome"] is None
++    assert resume_records(db) == {claimed["admission_id"]: {"prompts": []}}
++
++    new = begin_runtime_epoch(db, instance_id="new")
++    assert recover_session_inputs(db, epoch=new) == 0  # never fenced unknown: it is queued, not started
++    resumed = claim_session_input(db, epoch=new, session_id="s1")
++    assert resumed["admission_id"] == claimed["admission_id"] and resumed["resume"] == {"prompts": []}
++    assert resume_record(db, admission_id=claimed["admission_id"]) is None and resume_records(db) == {}
++
++
++def test_a_stale_owner_cannot_hand_off(tmp_path):
++    from hermes_state_runtime import RuntimeStoreError
++    db = _store(tmp_path)
++    old = begin_runtime_epoch(db, instance_id="old")
++    claimed = _started(db, old)
++    begin_runtime_epoch(db, instance_id="new")
++    with pytest.raises(RuntimeStoreError):
++        hand_off_session_input(db, epoch=old, admission_id=claimed["admission_id"],
++                               generation=claimed["generation"], record={})
++
++
++@pytest.mark.asyncio
++async def test_turn_at_a_boundary_is_requeued_with_nothing_settled_or_published(tmp_path):
++    db = _store(tmp_path)
++    epoch = begin_runtime_epoch(db, instance_id="old")
++    claimed = _started(db, epoch)
++    agent = SimpleNamespace()
++    authority = _authority(db, epoch, claimed["generation"], claimed["admission_id"], agent)
++    live = authority.sessions["s1"]
++    published = []
++    live.event_stream.publish = lambda *a, **k: published.append((a, k))
++
++    async def turn_reaches_its_boundary():
++        while not getattr(agent, "_handoff_boundary", False):
++            await asyncio.sleep(0.01)
++        authority.pending_results[claimed["admission_id"]] = {"result": {"handed_off": True, "final_response": ""}}
++        assert turn_boundary.handed_off_result(authority, claimed["admission_id"])
++        await turn_boundary.finish_handed_off(authority, SimpleNamespace(session_id="s1"), live, claimed)
++
++    task = asyncio.create_task(turn_reaches_its_boundary())
++    started = time.monotonic()
++    assert await turn_boundary.hand_off_at_boundaries(_runner(authority), 30.0) == 1
++    await task
++    assert time.monotonic() - started < 5.0  # did not wait for the cap
++    row = get_session_admission(db, admission_id=claimed["admission_id"])
++    assert row["status"] == "queued"
++    assert published == []  # no message.complete, notice or failure
++    assert authority.pending_results == {} and "s1" not in authority.adopted
++    # The 0048 export skips it: no continuation turn with synthetic text on the next gateway.
++    authority.sessions["s1"].event_stream.execution = {"execution_generation": 9, "admission_id": claimed["admission_id"]}
++    assert turn_handoff.export_turns(_runner(authority), tmp_path) == 0
++    # It is not shown as a new pending input while it waits for its resume.
++    assert turn_boundary.is_resuming(claimed["admission_id"])
++
++
++@pytest.mark.asyncio
++async def test_turn_that_misses_the_cap_falls_back_to_the_stop(tmp_path):
++    db = _store(tmp_path)
++    epoch = begin_runtime_epoch(db, instance_id="old")
++    claimed = _started(db, epoch)
++    agent = SimpleNamespace()
++    authority = _authority(db, epoch, claimed["generation"], claimed["admission_id"], agent)
++    started = time.monotonic()
++    assert await turn_boundary.hand_off_at_boundaries(_runner(authority), 0.3) == 0
++    assert 0.25 <= time.monotonic() - started < 3.0
++    assert agent._handoff_boundary is False  # a boundary reached now does not end it a second way
++    assert get_session_admission(db, admission_id=claimed["admission_id"])["status"] == "started"
++    # The 0048 path continues it.
++    assert turn_handoff.export_turns(_runner(authority), tmp_path) == 1
++
++
++def _parked_clarify(authority, generation):
++    live = authority.sessions["s1"]
++    entry = clarify_gateway.register("cq-1", "route-1", "Pick a color", ["blue", "green"])
++    live.controls.register_clarify("s1", generation, entry, timeout_s=1800)
++    return entry
++
++
++class _Parked:
++    """An agent parked on its prompt: its wait ends when the handoff withdraws it."""
++    def __init__(self):
++        self.interrupted = threading.Event()
++
++    def interrupt(self, **kwargs):
++        self.interrupted.set()
++
++
++@pytest.mark.asyncio
++async def test_parked_clarify_keeps_its_id_and_is_answered_once_on_the_next_owner(tmp_path):
++    db = _store(tmp_path)
++    old = begin_runtime_epoch(db, instance_id="old")
++    claimed = _started(db, old)
++    agent = _Parked()
++    authority = _authority(db, old, claimed["generation"], claimed["admission_id"], agent)
++    _parked_clarify(authority, claimed["generation"])
++    started = time.monotonic()
++    assert await turn_boundary.hand_off_at_boundaries(_runner(authority), 30.0) == 1
++    assert time.monotonic() - started < 5.0  # a parked turn is at a boundary: no wait
++    assert agent.interrupted.is_set() and agent._handoff_withdrawn is True
++    # Still listed and answerable on the old owner until it exits (no prompt.lost while both run).
++    live = authority.sessions["s1"]
++    assert [p["prompt_id"] for p in live.controls.snapshot("s1", None)] == ["cq-1"]
++    record = resume_record(db, admission_id=claimed["admission_id"])
++    assert record["prompts"][0]["prompt_id"] == "cq-1" and record["prompts"][0]["question"] == "Pick a color"
++    clarify_gateway.clear_session("route-1")  # the old process is gone
++
++    # The next owner: the prompt waits under its old id before any claim and is listed for viewers.
++    new = begin_runtime_epoch(db, instance_id="new")
++    new_auth = _authority(db, new, None, None, None)
++    new_auth.sessions["s1"].event_stream.execution = {}
++    runner = _runner(new_auth)
++    assert turn_boundary.restore_prompts(runner) == 1
++    turn_boundary.show_prompts(runner)
++    controls = new_auth.sessions["s1"].controls
++    assert [p["prompt_id"] for p in controls.snapshot("s1", None)] == ["cq-1"]
++    # The user answers the same card on the new owner (no running turn yet: no generation to match).
++    assert controls.respond("s1", 123, "cq-1", {"answer": "green"}, kind="clarify")["status"] == "resolved"
++    assert controls.respond("s1", 123, "cq-1", {"answer": "blue"}, kind="clarify")["status"] == "already_resolved"
++    # The resumed clarify call adopts it: same id, the answer read at once, no new card.
++    handed = prompt_handoff.take_clarify("route-1", "Pick a color", ["blue", "green"])
++    assert handed is not None and handed.clarify_id == "cq-1"
++    from gateway.run_turn_runner_clarify_delivery import wait_handed_over
++    assert wait_handed_over(handed.clarify_id, clarify_gateway) == ("green", True)
++    assert prompt_handoff.take_clarify("route-1", "Pick a color", ["blue", "green"]) is None
++
++
++@pytest.mark.asyncio
++async def test_answer_given_to_the_old_owner_after_the_handoff_applies_once_on_the_next(tmp_path):
++    db = _store(tmp_path)
++    old = begin_runtime_epoch(db, instance_id="old")
++    claimed = _started(db, old)
++    authority = _authority(db, old, claimed["generation"], claimed["admission_id"], _Parked())
++    _parked_clarify(authority, claimed["generation"])
++    await turn_boundary.hand_off_at_boundaries(_runner(authority), 30.0)
++    controls = authority.sessions["s1"].controls
++    assert controls.respond("s1", claimed["generation"], "cq-1", {"answer": "blue"}, kind="clarify")["status"] == "resolved"
++    assert controls.snapshot("s1", None) == ()
++    clarify_gateway.clear_session("route-1")
++
++    new_auth = _authority(db, begin_runtime_epoch(db, instance_id="new"), None, None, None)
++    runner = _runner(new_auth)
++    turn_boundary.restore_prompts(runner)
++    turn_boundary.show_prompts(runner)
++    assert new_auth.sessions["s1"].controls.snapshot("s1", None) == ()  # answered: no card again
++    handed = prompt_handoff.take_clarify("route-1", "Pick a color", ["blue", "green"])
++    from gateway.run_turn_runner_clarify_delivery import wait_handed_over
++    assert handed.clarify_id == "cq-1" and wait_handed_over("cq-1", clarify_gateway) == ("blue", True)
++
++
++@pytest.fixture
++def smart_gateway(monkeypatch):
++    from tools import approval as A
++    from tools import approval_context, approval_detection, approval_smart
++    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
++    for name in ("HERMES_INTERACTIVE", "HERMES_CRON_SESSION", "HERMES_EXEC_ASK"):
++        monkeypatch.delenv(name, raising=False)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "smart")
++    monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", False)
++    reviews = []
++    monkeypatch.setattr(approval_smart, "_smart_approve", lambda c, d: reviews.append(c) or "escalate")
++    danger = lambda command: (True, "handoff-test-danger", f"risk:{command}")  # noqa: E731
++    monkeypatch.setattr(A, "detect_dangerous_command", danger)
++    monkeypatch.setattr(approval_detection, "detect_dangerous_command", danger)
++    key = "route-1"
++    token = approval_context.set_current_session_key(key)
++    with A._lock:
++        A._permanent_approved.discard("handoff-test-danger")
++        A._session_approved.pop(key, None)
++        A._gateway_queues.pop(key, None)
++    try:
++        yield A, key, reviews
++    finally:
++        approval_context.reset_current_session_key(token)
++        with A._lock:
++            A._gateway_queues.pop(key, None)
++            A._gateway_notify_cbs.pop(key, None)
++            A._session_approved.pop(key, None)
++
++
++def test_parked_approval_keeps_its_id_and_is_not_reviewed_twice(smart_gateway):
++    A, key, reviews = smart_gateway
++    cards = []
++
++    def old_owner(data):
++        # The old gateway shows the card; the handoff takes the queued entry as its record and withdraws the wait.
++        cards.append(dict(data))
++        with A._lock:
++            entry = A._gateway_queues[key][-1]
++        record = {"kind": "approval", "prompt_id": data["request_id"], "session_key": key,
++                  "data": dict(entry.data), "authority": dict(entry.authority)}
++        cards.append(record)
++        entry.result = "deny"
++        entry.event.set()
++
++    with A._lock:
++        A._gateway_notify_cbs[key] = old_owner
++    A.check_all_command_guards("rm -rf build", "local")
++    assert len(reviews) == 1
++    record = cards[1]
++
++    # The next owner: the same card waits under its old id, and the user answers it there.
++    with A._lock:
++        A._gateway_queues.pop(key, None)
++        A._gateway_notify_cbs[key] = lambda data: pytest.fail("a second card was raised")
++    assert turn_boundary._register_waiter(record) == 1
++    events = SessionEvents()
++    controls = PendingControls(events)
++    controls.register("s1", key, 5, record["data"], background=True)
++    assert controls.respond("s1", 99, record["prompt_id"], {"choice": "once"})["status"] == "resolved"
++    assert controls.respond("s1", 99, record["prompt_id"], {"choice": "once"})["status"] == "already_resolved"
++    result = A.check_all_command_guards("rm -rf build", "local")
++    assert result["approved"] is True
++    assert len(reviews) == 1  # no second smart review
++    assert prompt_handoff.take_approval(key, record["data"]) is None  # adopted once
++
++def test_resume_claim_starts_without_text_or_notice_and_lists_its_prompts():
++    from gateway.session_authority import SessionAuthority
++    events = SessionEvents()
++    frames = []
++    original = events.publish
++    events.publish = lambda sid, payload, event_type="message.complete", **k: (
++        frames.append((event_type, payload)), original(sid, payload, event_type=event_type, **k))[1]
++    live = SimpleNamespace(event_stream=events, controls=PendingControls(events), route="route-1")
++    db = SimpleNamespace(get_session=lambda sid: {"runtime_generation": 4})
++    authority = SimpleNamespace(epoch=2, executing={}, sessions={"s1": live}, db=db, _publish_pending=lambda ref: None)
++    turn_boundary._resuming.add("a1")
++    record = {"prompts": [{"kind": "clarify", "prompt_id": "cq-9", "session_key": "route-1",
++                           "question": "Which one?", "choices": ["x", "y"], "multi_select": False}]}
++    row = {"admission_id": "a1", "generation": 4, "payload": {"text": "do the thing"}, "resume": record}
++    SessionAuthority._stamp_claim(authority, SimpleNamespace(session_id="s1"), live, row)
++    starts = [p for kind, p in frames if kind == "message.start"]
++    assert starts == [{"resumed": True}]  # the same admission goes on: no text, no notice
++    assert not any("restart" in str(p).lower() for _, p in frames)
++    assert [p["prompt_id"] for p in live.controls.snapshot("s1", 4)] == ["cq-9"]
++    assert not turn_boundary.is_resuming("a1")
++    # A fresh claim is unchanged.
++    frames.clear()
++    SessionAuthority._stamp_claim(authority, SimpleNamespace(session_id="s1"), live,
++                                  {"admission_id": "a2", "generation": 5, "payload": {"text": "next"}})
++    assert [p for kind, p in frames if kind == "message.start"] == [{}]
++
++
++def test_waiting_resume_is_not_listed_as_a_new_pending_input():
++    from gateway.session_queued_controls import pending_rows
++    rows = [{"admission_id": "a1", "status": "queued", "seq": 1}, {"admission_id": "a2", "status": "queued", "seq": 2}]
++    authority = SimpleNamespace(_pending_rows=lambda ref: rows, steer_transfers={})
++    turn_boundary._resuming.add("a1")
++    assert [r["admission_id"] for r in pending_rows(authority, SimpleNamespace(session_id="s1"))] == ["a2"]
+diff --git a/tools/approval.py b/tools/approval.py
+index 93510560..8c91b691 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -964,7 +964,13 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+     from agent.redact import redact_approval_display
+ 
+     smart_denied = review_blocked  # a provenance review block: the owner may override this one operation
+-    if smart and not review_blocked:
++    from tools.prompt_handoff import peek_approval
++    handed = peek_approval(session_key, redact_approval_display(command), pattern_keys) if smart else None
++    if handed is not None and not review_blocked:
++        # gateway.restart_turn_handoff_boundary: the previous gateway's smart review raised this card and handed
++        # it over; the user's answer to that card decides, without a second review.
++        smart_denied = bool(handed.data.get("smart_denied"))
++    elif smart and not review_blocked:
+         result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
+                                            session_key, human_present=is_cli or is_gateway or is_ask)
+         if result is not None:
+@@ -1101,6 +1107,15 @@ def _provenance_on() -> bool:
+ _REVIEW_ADVICE = " If other work does not depend on this action, continue with it."
+ 
+ 
++def _handed_over_verdict(data: dict):
++    """The verdict a handed-over provenance card was raised with, as the card carries it."""
++    from types import SimpleNamespace
++    parts = {k: data[k] for k in ("rule", "reason") if data.get(k)}
++    return SimpleNamespace(decision="ask", rule=data.get("rule"), reason=data.get("reason"), tier=None,
++                           card_text=str(data.get("description") or ""), card_parts=parts,
++                           detail={"grant_sources": list(data.get("grant_sources") or [])})
++
++
+ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command: str, approval_callback,
+                          is_cli: bool, is_gateway: bool, is_ask: bool, pending_body=None) -> dict:
+     """Provenance review (``approvals.smart_provenance``) of one action: allow runs it; a HARD rule
+@@ -1108,7 +1123,13 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+     one-operation card naming the rule (blocked when no human can answer). Never allows on a failed review."""
+     session_key = get_current_session_key()
+     agent, cwd = _automode._current_agent(), _automode._cwd()
+-    verdict = _automode.review(tool_name, args, agent=agent, cwd=cwd)
++    from agent.redact import redact_approval_display
++    from tools.prompt_handoff import peek_approval
++    handed = peek_approval(session_key, redact_approval_display(command), ["smart_provenance"])
++    # gateway.restart_turn_handoff_boundary: the previous gateway's review raised this card and handed it over;
++    # its verdict stands and the user's answer to that card decides, without a second review.
++    verdict = (_handed_over_verdict(handed.data) if handed is not None
++               else _automode.review(tool_name, args, agent=agent, cwd=cwd))
+     if verdict.decision == "allow":
+         _reset_denials(session_key)
+         return {"approved": True, "message": None, "smart_approved": True,
+diff --git a/tools/approval_gateway_wait.py b/tools/approval_gateway_wait.py
+index 6dcff9c0..ffaca5e6 100644
+--- a/tools/approval_gateway_wait.py
++++ b/tools/approval_gateway_wait.py
+@@ -226,13 +226,21 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
+         "session_key": session_key, "surface": surface,
+     }
+     keys = list(approval_data.get("pattern_keys") or [])
+-    # Born Deny-only: the mark exists before the entry is published, so no tap can approve it in the window
+-    # before its renderer has decided whether the card shows the whole command.
+-    entry = _ApprovalEntry(approval_data)
+-    entry.card_deny_only = True
+-    # Captured before the entry is published: a coalesced follower can find it while the pre-request
+-    # hooks still run, and must wait this same timeout rather than re-read a since-edited config.
+-    timeout_s = entry.data["timeout_s"] = _ctx._get_approval_timeout()
++    # gateway.restart_turn_handoff_boundary: the previous gateway raised this same approval and handed it over;
++    # its card (same request id) is queued and shown already, and an answer may be in. Adopt it.
++    from tools.prompt_handoff import take_approval
++    adopted = take_approval(session_key, approval_data)
++    if adopted is not None:
++        entry = adopted
++        timeout_s = entry.data.get("timeout_s") or _ctx._get_approval_timeout()
++    else:
++        # Born Deny-only: the mark exists before the entry is published, so no tap can approve it in the window
++        # before its renderer has decided whether the card shows the whole command.
++        entry = _ApprovalEntry(approval_data)
++        entry.card_deny_only = True
++        # Captured before the entry is published: a coalesced follower can find it while the pre-request
++        # hooks still run, and must wait this same timeout rather than re-read a since-edited config.
++        timeout_s = entry.data["timeout_s"] = _ctx._get_approval_timeout()
+ 
+     def _enqueue() -> None:
+         register_prepared_approval(session_key, entry)
+@@ -242,7 +250,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
+     # miss each other, both enqueue and the user gets duplicate prompts. A ``once`` releases the
+     # followers to prompt for themselves; they re-coalesce behind whichever re-prompts first, so the
+     # user still sees one prompt at a time (the answered leader is already off the queue).
+-    while True:
++    while adopted is None:
+         with _approval._lock:
+             leader = None
+             if not preparing_terminal_approval():
+@@ -302,7 +310,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
+         _ctx._fire_approval_hook("pre_approval_request", **payload)
+         # Bridges sync agent thread → async gateway.
+         try:
+-            notify_cb(dict(entry.data))
++            if adopted is None:
++                notify_cb(dict(entry.data))
+             approval_published()
+             # Bounded delivery trace (#138133): the notifier completed without raising, which is
+             # the last record the wait side has of the prompt until it settles. Correlation only —
+diff --git a/tools/prompt_handoff.py b/tools/prompt_handoff.py
+new file mode 100644
+index 00000000..7e2d0243
+--- /dev/null
++++ b/tools/prompt_handoff.py
+@@ -0,0 +1,129 @@
++"""Prompts a restart handed to this gateway (``gateway.restart_turn_handoff_boundary``).
++
++A turn parked on a clarify question or an approval card when the previous gateway exited is resumed here:
++the tool call that raised the prompt runs again. Before that, the gateway registers the prompt again under
++its old id (``add_clarify`` / ``add_approval``), so the card the user sees stays answerable, and an answer
++given to the old gateway after the handoff is applied here once. When the resumed call raises the same
++question or the same approval, it adopts that entry (``take_clarify`` / ``take_approval``) instead of
++asking again: same prompt id, no second card, no second smart review, and an answer that came first is
++read at once.
++"""
++from __future__ import annotations
++
++import logging
++import threading
++from typing import Any, Optional
++
++logger = logging.getLogger(__name__)
++
++_lock = threading.Lock()
++_clarify: dict[str, list[str]] = {}  # session key -> clarify ids waiting for their call
++_approvals: dict[str, list[Any]] = {}  # session key -> approval entries waiting for their call
++
++
++def _norm_choices(choices) -> Optional[list[str]]:
++    return [str(c) for c in choices] if choices else None
++
++
++def add_clarify(session_key: str, clarify_id: str, question: str, choices=None, multi_select: bool = False, *,
++                answer: Optional[str] = None, via: str = "") -> Any:
++    """Register a handed-over question under its old id (idempotent); returns its clarify entry."""
++    from tools import clarify_gateway as cg
++    with _lock:
++        known = clarify_id in (_clarify.get(session_key) or [])
++    with cg._lock:
++        entry = cg._entries.get(clarify_id)
++    if known and entry is not None:
++        return entry
++    entry = cg.register(clarify_id, session_key, question, _norm_choices(choices), bool(multi_select))
++    if answer is not None:
++        cg.resolve_gateway_clarify(clarify_id, answer, via)
++    with _lock:
++        ids = _clarify.setdefault(session_key, [])
++        if clarify_id not in ids:
++            ids.append(clarify_id)
++    return entry
++
++
++def take_clarify(session_key: str, question: str, choices=None) -> Any:
++    """The handed-over entry of this exact question, removed from the waiting list; None when there is none."""
++    from tools import clarify_gateway as cg
++    with _lock:
++        ids = list(_clarify.get(session_key) or [])
++    for cid in ids:
++        with cg._lock:
++            entry = cg._entries.get(cid)
++        if entry is None:
++            continue
++        if entry.question == question and entry.choices == _norm_choices(choices):
++            with _lock:
++                waiting = _clarify.get(session_key) or []
++                if cid in waiting:
++                    waiting.remove(cid)
++                if not waiting:
++                    _clarify.pop(session_key, None)
++            return entry
++    return None
++
++
++def add_approval(session_key: str, data: dict, *, authority: Optional[dict] = None,
++                 answer: Optional[str] = None) -> Any:
++    """Register a handed-over approval under its old ``request_id`` (idempotent); returns its entry. With
++    *answer* (given to the previous gateway after the handoff) it is decided already and not queued."""
++    from tools import approval as _approval
++    from tools.approval_gateway_wait import _ApprovalEntry
++    request_id = data.get("request_id")
++    with _lock:
++        for entry in _approvals.get(session_key) or []:
++            if entry.data.get("request_id") == request_id:
++                return entry
++    entry = _ApprovalEntry(data)
++    entry.card_deny_only = False  # the previous gateway's card showed the whole command
++    if authority:
++        entry.authority = dict(authority)
++    if answer is not None:
++        entry.result = answer
++        entry.event.set()
++    else:
++        with _approval._lock:
++            _approval._gateway_queues.setdefault(session_key, []).append(entry)
++    with _lock:
++        _approvals.setdefault(session_key, []).append(entry)
++    return entry
++
++
++def _matches(entry: Any, command: str, pattern_keys) -> bool:
++    return (entry.data.get("command") == command
++            and list(entry.data.get("pattern_keys") or [entry.data.get("pattern_key", "")]) == list(pattern_keys or []))
++
++
++def peek_approval(session_key: str, command: str, pattern_keys) -> Any:
++    """The handed-over approval of this command (display form) and pattern keys, left waiting; or None."""
++    with _lock:
++        return next((e for e in _approvals.get(session_key) or [] if _matches(e, command, pattern_keys)), None)
++
++
++def take_approval(session_key: str, approval_data: dict) -> Any:
++    """The handed-over entry this approval request adopts (removed from the waiting list), or None."""
++    keys = approval_data.get("pattern_keys") or [approval_data.get("pattern_key", "")]
++    with _lock:
++        waiting = _approvals.get(session_key) or []
++        entry = next((e for e in waiting if _matches(e, approval_data.get("command", ""), keys)), None)
++        if entry is not None:
++            waiting.remove(entry)
++            if not waiting:
++                _approvals.pop(session_key, None)
++    return entry
++
++
++def forget_session(session_key: str) -> None:
++    """Drop what still waits for a session (its resumed turn ended without raising it)."""
++    with _lock:
++        _clarify.pop(session_key, None)
++        _approvals.pop(session_key, None)
++
++
++def clear() -> None:
++    with _lock:
++        _clarify.clear()
++        _approvals.clear()

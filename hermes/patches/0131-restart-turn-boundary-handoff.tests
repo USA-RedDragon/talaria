@@ -1,0 +1,25 @@
+# The restart wait, the stop, the takeover and the 0048 continuation this patch refines
+tests/gateway/test_restart_turn_handoff.py
+tests/gateway/test_sigterm_restart_wait.py
+tests/gateway/test_restart_drain.py
+tests/gateway/test_restart_interrupt_notice.py
+tests/gateway/test_gateway_shutdown.py
+# Background processes (0012) and subagents (0016) handed off by the same restart
+tests/tools/test_process_checkpoint_worker_handoff.py
+tests/tools/test_delegation_restart_handoff.py
+# The claim, its stamp, queued controls and the transcript writes the resume reuses
+tests/gateway/test_execute_claimed_cancel_stamp.py
+tests/gateway/test_prompt_queued_transfer.py
+tests/gateway/test_preclaim_conflict_settles_head.py
+tests/agent/test_tool_call_incremental_persistence.py
+tests/agent/test_turn_iteration_prep.py
+tests/agent/test_failed_turn_keeps_message.py
+tests/tui_gateway/test_submit_time_user_row.py
+# Clarify and approval waits a handed-over prompt is adopted by
+tests/gateway/test_shared_clarify.py
+tests/gateway/test_clarify_delivery_fallback.py
+tests/gateway/test_subagent_answer_keeps_chat_question.py
+tests/tools/test_approval_gateway_wait_coalesce_race.py
+tests/tools/test_approval_gateway_wait_late_choice.py
+tests/tools/test_denial_circuit_breaker.py
+tests/tools/test_smart_provenance_chat_grants.py
