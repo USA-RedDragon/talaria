@@ -24,19 +24,22 @@ func TestProjectMemoryCardNamesTheProjectAndShowsFailure(t *testing.T) {
 	e := setup(t)
 	const key = "root:fbf7b093b915dfa01651a528d629ab4cbbb217fb"
 	call := func(id, args string) map[string]any {
-		return map[string]any{"id": id, "function": map[string]any{"name": "project_memory", "arguments": args}}
+		return map[string]any{"id": id, fnKey: map[string]any{fieldName: "project_memory", ilArgs: args}}
 	}
 	result := func(id string, res map[string]any) map[string]any {
-		b, _ := json.Marshal(res)
-		return map[string]any{"role": "tool", "tool_call_id": id, "name": "project_memory", "text": string(b)}
+		b, err := json.Marshal(res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return map[string]any{kRole: stepTool, kCallID: id, fieldName: "project_memory", keyText: string(b)}
 	}
 	msgs := []map[string]any{
-		{"role": "user", "text": "tidy the notes"},
-		{"role": "assistant", "text": "On it.", "tool_calls": []any{
+		{kRole: roleUser, keyText: "tidy the notes"},
+		{kRole: roleAssistant, keyText: "On it.", kCalls: []any{
 			call("c1", `{"action":"write","operations":[{"action":"add","content":"Releases are tagged from main"}]}`),
 			call("c2", `{"action":"write","operations":[{"action":"remove","old_text":"Honcho is the memory provider"}]}`),
 		}},
-		result("c1", map[string]any{"success": true, "project": key, "project_name": "relift", "message": "Applied 1 operation(s)."}),
+		result("c1", map[string]any{"success": true, "project": key, "project_name": "relift"}),
 		result("c2", map[string]any{"success": false, "project": key, "project_name": "relift",
 			"error":           "Operation 1 (remove): No entry matched 'Honcho is the memory provider'. No operations were applied.",
 			"closest_entries": []string{"Memory is kept in project notes"}}),
