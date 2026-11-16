@@ -1,4 +1,4 @@
-assertion/assertion.go	106	88
+assertion/assertion.go	106	89
 cmd/acp.go	29	1
 cmd/acphost.go	57	23
 cmd/autoupdate.go	75	58
@@ -25,7 +25,7 @@ extension/firefox/embed.go	45	39
 internal/acpbridge/acpbridge.go	489	427
 internal/acpbridge/inline.go	38	35
 internal/acpbridge/place.go	160	146
-internal/acphost/acphost.go	291	231
+internal/acphost/acphost.go	291	232
 internal/acphost/proc_unix.go	3	1
 internal/acphost/rewrite.go	260	237
 internal/acphost/sweep.go	30	28
@@ -58,7 +58,7 @@ internal/claudeusage/parse.go	88	84
 internal/claudeusage/run.go	73	68
 internal/claudeusage/sources.go	53	50
 internal/claudeusage/timeline.go	96	86
-internal/config/config.go	95	85
+internal/config/config.go	107	97
 internal/config/load.go	18	17
 internal/daemonstate/daemonstate.go	17	13
 internal/device/device.go	799	709
