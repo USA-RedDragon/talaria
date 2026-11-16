@@ -156,6 +156,7 @@ window.HubMiniChat = (() => {
       node.view = v;
       node.call = call;
       node.toolName = call.name;
+      node.classList.toggle("quiet", window.HubToolCard.quiet(call.name, false));
       node.dataset.ukey = "t:" + (o.key || e.call_id || "s" + e.seq);
       node.batch = o.batch || "";
       node.classList.add("running");
@@ -184,6 +185,7 @@ window.HubMiniChat = (() => {
       node.finished = true;
       node.classList.remove("running");
       node.classList.toggle("failed", failed);
+      node.classList.toggle("quiet", window.HubToolCard.quiet(call.name, failed));
       st.known.learn(call.name, call.args, res);
       node.view.update(call);
     }

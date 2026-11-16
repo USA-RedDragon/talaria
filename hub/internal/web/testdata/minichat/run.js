@@ -349,3 +349,24 @@ console.log("ok");
   w.add([ev({ type: "goal", text: goal, at: 0 }), ev({ type: "context", text: "short context", at: 0 })]);
   assert.deepStrictEqual(kidsOf(w.node).slice(0, 3), ["mc-brief", "mc-brief", "note"]);
 }
+
+// The ledger is the agent's notebook: a call that worked shows no card and is
+// left out of the group line; one that failed shows as any other.
+{
+  const card = (toolName, duration, failed) => ({ toolName, duration, failed, call: {} });
+  assert.strictEqual(G.summary([card("execute_code", 1), card("ledger", 1), card("clarify", 1), card("ledger", 1)]).text, "Used execute_code, used clarify (2.0 s)");
+  assert.strictEqual(G.summary([card("ledger"), card("ledger")]).text, "", "only ledger calls: no line");
+  const bad = G.summary([card("ledger", 1, true), card("clarify", 1)]);
+  assert.strictEqual(bad.text, "Used ledger, used clarify (2.0 s)");
+  assert.strictEqual(bad.failed, 1);
+  const lv = M.create({ el, toast: () => {} });
+  const t = (id, name, at, result) => [ev({ type: "tool_start", call_id: id, name, args: {}, at }), ev({ type: "tool_end", call_id: id, name, result, at: at + 1 })];
+  lv.add([...t("l1", "ledger", 1, '{"ok": true}'), ...t("l2", "ledger", 3, '{"ok": true}'), ev({ type: "message", text: "Noted.", at: 5 }),
+    ...t("l3", "ledger", 6, '{"ok": true}'), ...t("t1", "read_file", 8, "x"), ...t("l4", "ledger", 10, '{"ok": true}'), ...t("t2", "read_file", 12, "y"),
+    ev({ type: "message", text: "Done.", at: 14 }), ...t("l5", "ledger", 15, '{"error": "blocked: the approval was denied"}'), ev({ type: "message", text: "End.", at: 17 })]);
+  const shown = lv.node.querySelectorAll(".tool").filter((n) => !n.classList.contains("quiet"));
+  assert.deepStrictEqual(shown.map((n) => n.toolName), ["read_file", "read_file", "ledger"], "ledger cards that worked are hidden, the failed one is shown");
+  assert.ok(lv.node.querySelectorAll(".tool.quiet").length >= 4);
+  const lines = lv.node.querySelectorAll("details.toolgroup").map((g) => g.children[0].textContent);
+  assert.deepStrictEqual(lines.map((l) => l.replace(/ · .*?M/, "")), ["Read 2 files (2.0 s)", "Used ledger (1.0 s) 1 step failed"], "no group of ledger calls only, none counted: " + JSON.stringify(lines));
+}

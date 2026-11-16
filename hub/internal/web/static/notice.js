@@ -480,8 +480,26 @@ window.HubNotice = (() => {
   }
 
   // card builds the collapsed card of notice n; raw is the whole text.
-  function card(n, raw, ctx) {
+  // peerTitle is the title of a message from another agent with the sender
+  // in words: the subagent's goal or the chat's title, not a raw id.
+  const fromHead = "Message from ";
+  function peerTitle(n) {
+    if (n.kind !== "agent" || !window.HubPeer || typeof n.title !== "string" || !n.title.startsWith(fromHead)) return null;
+    return window.HubPeer.who(n.title.slice(fromHead.length), window.HubPeer.names);
+  }
+
+  // rename draws the title of an agent card again, for names learned after
+  // the card was drawn.
+  function rename(box) {
+    const p = box.notice && peerTitle(box.notice);
+    const t = p && box.querySelector(":scope > .notice-head > .notice-title");
+    if (t && t.textContent !== fromHead + p.label) t.textContent = fromHead + p.label;
+  }
+
+  function card(n0, raw, ctx) {
     const { el } = ctx;
+    const peer = peerTitle(n0);
+    const n = peer ? Object.assign({}, n0, { title: fromHead + peer.label }) : n0;
     const box = el("div", "notice");
     box.dataset.kind = n.kind;
     if (n.state) box.dataset.state = n.state;
@@ -503,6 +521,7 @@ window.HubNotice = (() => {
       body.append(list);
     }
     body.append(details(ctx, n));
+    if (peer && peer.id) body.append(section(ctx, peer.kind === "sub" ? "Subagent" : "Chat", peer.id, { pre: true, long: false }));
     const copy = window.HubIcons.button("copy", "Copy the whole notice", "ghost ib notice-copy");
     copy.onclick = async () => {
       try {
@@ -516,7 +535,7 @@ window.HubNotice = (() => {
     toggle(head, body);
     box.append(head, body);
     box.rawText = raw;
-    box.notice = n;
+    box.notice = n0;
     return box;
   }
 
@@ -540,5 +559,5 @@ window.HubNotice = (() => {
     return n && n.kind === "compaction" ? { notice: n, tail } : null;
   }
 
-  return { parse, folded, card, stamp, metaLine };
+  return { parse, folded, card, stamp, metaLine, rename };
 })();

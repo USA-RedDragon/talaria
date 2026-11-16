@@ -56,6 +56,9 @@ window.HubToolGroup = (() => {
     const spans = [];
     let from = 0;
     let to = 0;
+    const Q = window.HubToolCard && window.HubToolCard.quiet;
+    cards = Q ? cards.filter((c) => !Q(c.toolName, c.failed)) : cards;
+    if (!cards.length) return { text: "", failed: 0 };
     for (const c of cards) {
       const w = word(c.toolName || "tool");
       const key = w[0];
@@ -133,6 +136,8 @@ window.HubToolGroup = (() => {
     let live = false;
     for (const n of Array.from(parent.children)) {
       if (n === keep) live = true;
+      // A card the reader does not see neither joins a run nor ends it.
+      if (n.classList.contains("quiet")) continue;
       if (!live && finished(n)) run.push(n);
       else flush();
     }

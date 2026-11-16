@@ -16,7 +16,7 @@ func TestMiniChatScript(t *testing.T) {
 	if err != nil {
 		t.Skip("node is not installed")
 	}
-	files := []string{"times.js", "attach.js", "notice.js", "origin.js", "toolcard.js", "toolgroup.js", "minichat.js"}
+	files := []string{"times.js", "attach.js", "peer.js", "notice.js", "origin.js", "toolcard.js", "toolgroup.js", "minichat.js"}
 	args := make([]string, 0, 1+len(files))
 	args = append(args, filepath.Join("testdata", "minichat", "run.js"))
 	for _, f := range files {

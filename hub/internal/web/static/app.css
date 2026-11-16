@@ -235,6 +235,8 @@ pre.diff.tool-box { white-space: pre; overflow-wrap: normal; }
 .diff .del { color: var(--hl-del); background: var(--hl-del-bg); }
 .diff .hunk { color: var(--muted); }
 .diff .file { color: var(--hl-title); font-weight: 600; }
+/* A call the reader is not shown (the ledger, when it worked). */
+.tool.quiet { display: none; }
 details.toolgroup { font-size: .88rem; color: var(--muted); }
 details.toolgroup > summary { cursor: pointer; padding: .15rem .1rem; }
 details.toolgroup .bad { color: var(--bad); }

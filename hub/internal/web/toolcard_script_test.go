@@ -15,7 +15,7 @@ func TestToolCardScript(t *testing.T) {
 		t.Skip("node is not installed")
 	}
 	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "toolcard", "run.js"), filepath.Join("static", "toolcard.js"),
-		filepath.Join("testdata", "toolcard", "cases.json")).CombinedOutput()
+		filepath.Join("testdata", "toolcard", "cases.json"), filepath.Join("static", "peer.js")).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

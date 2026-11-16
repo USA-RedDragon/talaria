@@ -3,8 +3,9 @@ const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
 
-const [script, cases] = process.argv.slice(2);
+const [script, cases, peer] = process.argv.slice(2);
 const sandbox = { window: {} };
+vm.runInNewContext(fs.readFileSync(peer, "utf8"), sandbox);
 vm.runInNewContext(fs.readFileSync(script, "utf8"), sandbox);
 const { derive, memory } = sandbox.window.HubToolCard;
 for (const c of JSON.parse(fs.readFileSync(cases, "utf8"))) {

@@ -1424,6 +1424,7 @@
       card.view = view;
       card.call = call;
       card.toolName = call.name;
+      card.classList.toggle("quiet", window.HubToolCard.quiet(call.name, false));
       card.dataset.ukey = "t:" + id;
       card.classList.add("running");
       if (activity.opens(name, args)) {
@@ -1565,6 +1566,7 @@
       const { res, failed, out } = window.HubToolCard.outcome(card.toolName, p);
       card.failed = failed;
       if (failed) card.classList.add("failed");
+      card.classList.toggle("quiet", window.HubToolCard.quiet(card.toolName, failed));
       call.done = true;
       call.partial = p.cut && (p.cut.row > 0 || p.cut.call) ? p.cut : null;
       call.res = res;
@@ -3233,6 +3235,7 @@
   function drawSubs() {
     const sp = $("subsline");
     if (!sp) return;
+    renamePeers();
     let models = [];
     try { models = activity.liveModels(); } catch (_) { /* before Activity starts */ }
     const counts = new Map();
@@ -4382,6 +4385,29 @@
     closeSide: () => openSide(false) });
   const activity = window.HubActivity({ api, el, showText, drawn: () => drawSubs(), highlight: highlightBash, diff: diffView,
     page: (p) => (view ? pageCard(view.base, p) : null) });
+  // The names of the other end of an agent message: a subagent by its goal
+  // (from the Activity list), a chat by its title (from the sidebar's list).
+  window.HubPeer.names = {
+    sub: (id) => activity.goalOf(id),
+    chat: (ref) => {
+      const l = lastList ? lastList.sessions : [];
+      const q = String(ref || "").toLowerCase();
+      const s = l.find((x) => x.id === ref) || (q && l.find((x) => (x.title || "").toLowerCase() === q));
+      return s ? s.title || "" : "";
+    },
+  };
+  let peersKey = "";
+  // renamePeers draws the agent_send cards and the agent message cards of the
+  // open chat again when the names they use changed (the Activity list came
+  // after the cards).
+  function renamePeers() {
+    if (!view || !view.tools) return;
+    const key = JSON.stringify([...activity.goalIds()]) + (lastList ? lastList.sessions.length : 0);
+    if (key === peersKey) return;
+    peersKey = key;
+    for (const card of view.tools.values()) if (card.toolName === "agent_send" && card.call && card.call.done) card.view.update(card.call);
+    for (const box of document.querySelectorAll("#msgs .notice[data-kind=agent], .notice[data-kind=agent]")) window.HubNotice.rename(box);
+  }
   const claude = window.HubClaude({ api, el, me: () => me, redraw: () => { if (view) drawInfo(view.info); else if (page) pageIdle(); } });
   const claudeCode = window.HubClaudeCode({ api, el });
   const usage = window.HubUsage({ api, el, chatHash, defaultBackend: () => me.default_backend || "",

@@ -321,17 +321,28 @@ window.HubToolCard = (() => {
   function send(c) {
     const a = isObj(c.args) ? c.args : {};
     const res = isObj(c.res) ? c.res : {};
-    const to = str(a.to);
     const out = { icon: "mail", blocks: [] };
-    // The hub names the peer in the result as "chat 'name' (session id)"; the
-    // title says "chat" itself.
-    const label = (str(res.to) || to).replace(/^chat\s+/, "");
-    const m = verb(c, "Sent a message to ", "Sending a message to ");
-    out.title = to === "parent" ? m + "the parent chat" : /^sa-/.test(to) ? m + "subagent " + short(label) : m + (label ? "chat " + short(label) : "a chat");
+    // The hub names the peer in the result ("chat 'name' (session id)",
+    // "subagent sa-..."); the title says it in words: a subagent by its goal,
+    // a chat by its title. The raw id goes in the details.
+    const peer = who(str(res.to) || str(a.to), c.mem);
+    out.title = verb(c, "Sent a message to ", "Sending a message to ") + peer.label;
     out.status = str(res.delivery) ? upperFirst(squash(res.delivery)) : "Sent";
     if (a.text) out.blocks.push({ label: "Message", text: str(a.text), pre: true });
+    if (peer.id) out.blocks.push({ label: peer.kind === "sub" ? "Subagent" : "Chat", text: peer.id, pre: true });
     if (c.out) out.blocks.push({ label: "Output", text: c.out, pre: true });
     return out;
+  }
+
+  // who names a peer from what the chat learned, then from the page's names.
+  function who(ref, mem) {
+    const P = window.HubPeer;
+    if (!P) return { kind: "", label: "another agent", id: "" };
+    const page = P.names || {};
+    return P.who(ref, {
+      sub: (id) => (mem && mem.sub(id)) || (page.sub && page.sub(id)) || "",
+      chat: (r) => (page.chat && page.chat(r)) || "",
+    });
   }
 
   // agentPeers and agentName are the tools that list the user's chats and
@@ -1216,5 +1227,10 @@ window.HubToolCard = (() => {
     });
   }
 
-  return { derive, memory, create, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
+  // quiet says a tool call is not shown to the reader: the ledger is the
+  // agent's own notebook, so a call that worked leaves no card. A call that
+  // failed or was blocked is shown as any other.
+  const quiet = (name, failed) => name === "ledger" && !failed;
+
+  return { quiet, derive, memory, create, wrapped, take, calls, split, parse, outcome, statusLine, plain, batch };
 })();

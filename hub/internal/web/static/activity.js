@@ -1118,6 +1118,19 @@ window.HubActivity = (ctx) => {
   // liveModels are the models of the chat's running subagents.
   const liveModels = () => S.chat ? [...S.subs.values()].filter((r) => live.has(r.state)).map((r) => r.model) : [];
 
-  return { view, restore, show, event: (kind, p) => { if (S.chat && event(kind, p)) draw(); }, opens, fromTool, background, liveModels,
+  // goalOf is the goal of a subagent of the open chat by its id, "" when
+  // the chat does not list it (any more).
+  function goalOf(id) {
+    if (!id || !S.chat) return "";
+    const r = S.subs.get(id);
+    return r && r.kind === "sub" && r.goal ? r.goal : "";
+  }
+
+  // goalIds lists the subagents that have a goal, to tell when the names changed.
+  function goalIds() {
+    return [...S.subs.values()].filter((r) => r.kind === "sub" && r.goal).map((r) => r.id);
+  }
+
+  return { goalOf, goalIds, view, restore, show, event: (kind, p) => { if (S.chat && event(kind, p)) draw(); }, opens, fromTool, background, liveModels,
     running: (on) => { S.running = !!on; draw(); }, usage: (u) => { if (u) { S.usage = u; draw(); } } };
 };
