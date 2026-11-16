@@ -44,7 +44,8 @@
 //   statusLast the status line comes after the lines
 //   bad, idle, waiting  the state is bad; the status is muted; it waits
 // Parts are strings or { code }, { chip }, { tone, text } (tone ok, bad,
-// warn, add, del).
+// warn, add, del), { link, text } (a web page, opened in a new tab). A list
+// item may set gap to start a new group of rows.
 window.HubToolCard = (() => {
   const titleLen = 120;
   const errorLen = 80;
@@ -289,6 +290,8 @@ window.HubToolCard = (() => {
     if (!isObj(p)) return "";
     if (p.code !== undefined) return { code: plain(str(p.code)) };
     if (p.chip !== undefined) return { chip: plain(str(p.chip)) };
+    // A link goes only to a web page: any other address is its text alone.
+    if (p.link !== undefined) return /^https?:\/\//i.test(str(p.link)) ? { link: str(p.link), text: plain(str(p.text)) || str(p.link) } : plain(str(p.text));
     if (p.tone !== undefined) return { tone: str(p.tone), text: plain(str(p.text)) };
     return "";
   }
@@ -501,6 +504,13 @@ window.HubToolCard = (() => {
       if (typeof p === "string") return p;
       if (p.code !== undefined) return el("code", "tcode", p.code);
       if (p.chip !== undefined) return el("span", "tchip", p.chip);
+      if (p.link !== undefined) {
+        const a = el("a", "tlink", p.text);
+        a.href = p.link;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer nofollow";
+        return a;
+      }
       const cls = { ok: "notice-ok", bad: "notice-bad", warn: "notice-wait", add: "tadd", del: "tdel" }[p.tone] || "";
       return el("span", cls, p.text);
     }));
@@ -662,7 +672,7 @@ window.HubToolCard = (() => {
         body = el("div", "tool-list");
         for (const it of b.items) {
           const o = isObj(it) && it.parts !== undefined ? it : { parts: it };
-          const row = el("div", "tool-li" + (o.dim ? " dim" : "") + (o.mono ? " mono" : ""));
+          const row = el("div", "tool-li" + (o.dim ? " dim" : "") + (o.mono ? " mono" : "") + (o.gap ? " gap" : ""));
           drawParts(el, row, partsOf(o.parts));
           body.append(row);
         }

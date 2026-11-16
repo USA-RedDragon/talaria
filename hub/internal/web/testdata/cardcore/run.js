@@ -184,6 +184,25 @@ function shape(n) {
   assert.ok(!withLink.querySelector(".notice-head").classList.contains("flat"));
 }
 
+// A link part is an anchor to a web page, in a new tab; any other address
+// is plain text.
+{
+  H.register({ link_tool: () => ({ title: "Linked", status: "Done", blocks: [{ label: "Results", kind: "list", items: [
+    { parts: [{ link: "https://go.dev/doc", text: "Go docs" }] }, { parts: ["go.dev"], dim: true },
+    { parts: [{ link: "javascript:alert(1)", text: "bad" }], gap: true }] }] }) });
+  const v = H.create(ctx, { name: "link_tool", done: true, failed: false, args: {}, res: null, out: "", mem: H.memory() });
+  v.toggle();
+  const a = v.node.querySelector(".tool-list a");
+  assert.strictEqual(a.className, "tlink");
+  assert.strictEqual(a.href, "https://go.dev/doc");
+  assert.strictEqual(a.target, "_blank");
+  assert.strictEqual(a.rel, "noopener noreferrer nofollow");
+  const rows = v.node.querySelectorAll(".tool-list .tool-li");
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows[2].querySelector("a"), null, "no link to a script address");
+  assert.ok(rows[2].classList.contains("gap"));
+}
+
 // A diff shows its lines, not the file and hunk headers.
 {
   const d = H.diffLines("--- a/x.go\n+++ b/x.go\n@@ -1 +1,3 @@\n-\treturn nil\n+\tif err != nil {\n ctx\n@@ -9 +11 @@\n-a\n+b\n");
