@@ -29,6 +29,7 @@ import (
 	"github.com/USA-RedDragon/talaria/extension/firefox"
 	"github.com/USA-RedDragon/talaria/internal/browser/bidi"
 	"github.com/USA-RedDragon/talaria/internal/browser/broker"
+	"github.com/USA-RedDragon/talaria/internal/browser/grants"
 	"github.com/USA-RedDragon/talaria/internal/browser/host"
 )
 
@@ -38,6 +39,7 @@ user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 user_pref("browser.aboutwelcome.enabled", false);
 user_pref("signon.autofillForms", true);
 user_pref("signon.rememberSignons", true);
+user_pref("network.dns.localDomains", "` + grantHost + `");
 user_pref("extensions.webextensions.uuids", "{\"browser@hermes-device\":\"` + extUUID + `\"}");
 `
 
@@ -90,7 +92,7 @@ func TestFirefoxEndToEnd(t *testing.T) { //nolint:paralleltest // one Firefox at
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
-	b, bc := startFirefox(ctx, t)
+	b, bc, gr := startFirefoxGrants(ctx, t)
 
 	var tab tabResult
 	if _, err := b.Call(ctx, "tab_open", map[string]any{keyURL: exampleURL}); err == nil ||
@@ -149,7 +151,7 @@ func TestFirefoxEndToEnd(t *testing.T) { //nolint:paralleltest // one Firefox at
 	formFlow(ctx, t, b, tab.TabID, srv.URL)
 	refusals(ctx, t, b, tab.TabID)
 	pages, rec := frameFlow(ctx, t, b, tab.TabID)
-	loginFlow(ctx, t, b, bc, tab.TabID)
+	loginFlow(ctx, t, b, gr, bc, tab.TabID)
 	if _, err := b.Call(ctx, "navigate", map[string]any{keyTab: tab.TabID, keyURL: e2eHubURL + "/device/pair",
 		keyGuard: map[string]any{keyVisit: []string{e2eHubHost}}}); err == nil || !strings.Contains(err.Error(), "Talaria hub") {
 		t.Errorf("navigate an agent tab to the hub: err = %v", err)
@@ -167,6 +169,14 @@ const (
 // fresh HOME, starts a headless Firefox on a fresh profile, loads the
 // extension as a temporary add-on over BiDi and waits for it to connect.
 func startFirefox(ctx context.Context, t *testing.T) (*broker.Broker, *bidi.Client) {
+	t.Helper()
+	b, bc, _ := startFirefoxGrants(ctx, t)
+	return b, bc
+}
+
+// startFirefoxGrants is startFirefox that also returns the sign-in grant gate
+// in front of the broker, which trusts the hub key in the returned rig.
+func startFirefoxGrants(ctx context.Context, t *testing.T) (*broker.Broker, *bidi.Client, *grantRig) {
 	t.Helper()
 	root := t.TempDir() // honors TMPDIR; removed after the Firefox cleanup below
 	home := filepath.Join(root, "home")
@@ -193,13 +203,14 @@ func startFirefox(ctx context.Context, t *testing.T) (*broker.Broker, *bidi.Clie
 
 	sock := filepath.Join(root, "state", broker.SocketName)
 	b, err := broker.Listen(broker.Options{Path: sock, ExtensionID: host.ExtensionID,
-		AllowHosts:     []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost},
+		AllowHosts:     []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost, grantHost},
 		ConfirmHosts:   []string{confirmHost},
 		AutologinHosts: []string{loginHost, twoLoginHost}, AutologinMethods: map[string]string{loginHost: pickerMethod}, HubURL: e2eHubURL})
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() { _ = b.Serve(ctx) }()
+	gr := newGrantRig(t, b, filepath.Join(root, "state", grants.FileName))
 
 	ffDone := runFirefox(ctx, t, profile, []string{
 		"HOME=" + home,
@@ -235,7 +246,7 @@ func startFirefox(ctx context.Context, t *testing.T) (*broker.Broker, *bidi.Clie
 		t.Fatalf("extension did not connect through the native host: %v", err)
 	}
 	t.Logf("extension connected: %+v", hello)
-	return b, bc
+	return b, bc, gr
 }
 
 // runFirefox starts Firefox in its own process group and stops that group

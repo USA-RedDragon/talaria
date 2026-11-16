@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -296,6 +298,26 @@ func (b *Broker) SetDeviceID(id string) {
 		return
 	}
 	b.deviceID = id
+	cn, m := b.cur, b.configLocked()
+	b.mu.Unlock()
+	if cn != nil {
+		if err := cn.write(m); err != nil {
+			slog.Warn("Could not configure the browser extension", "error", err)
+		}
+	}
+}
+
+// SetAutologin replaces the autologin hosts and the per-host sign-in
+// methods, and sends the config again to the connected extension when they
+// changed. The daemon calls it when a sign-in grant is added, used up,
+// expires or is revoked.
+func (b *Broker) SetAutologin(hosts []string, methods map[string]string) {
+	b.mu.Lock()
+	if slices.Equal(b.opts.AutologinHosts, hosts) && maps.Equal(b.opts.AutologinMethods, methods) {
+		b.mu.Unlock()
+		return
+	}
+	b.opts.AutologinHosts, b.opts.AutologinMethods = slices.Clone(hosts), maps.Clone(methods)
 	cn, m := b.cur, b.configLocked()
 	b.mu.Unlock()
 	if cn != nil {

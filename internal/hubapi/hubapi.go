@@ -6,6 +6,8 @@ package hubapi
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +30,7 @@ const (
 	PathACPLeg       = "/api/device/acp"
 	PathGatewayLeg   = "/api/device/gateway"
 	PathUsage        = "/api/device/usage"
+	PathHubKeys      = "/api/device/hub-keys"
 	maxResponseBody  = 1 << 20
 )
 
@@ -96,6 +99,26 @@ type Whoami struct {
 	HermesVersion string `json:"hermes_version"`
 	PluginVersion string `json:"plugin_version"`
 	Placeholder   string `json:"placeholder"`
+}
+
+// HubKeys returns the hub's public signing keys (raw 32-byte Ed25519 keys),
+// which verify the sign-in grants the hub signs (package logingrant).
+func (c *Client) HubKeys(ctx context.Context) ([]ed25519.PublicKey, error) {
+	var out struct {
+		Keys []string `json:"keys"`
+	}
+	if err := c.do(ctx, http.MethodGet, PathHubKeys, nil, &out, true); err != nil {
+		return nil, err
+	}
+	keys := make([]ed25519.PublicKey, 0, len(out.Keys))
+	for _, k := range out.Keys {
+		raw, err := base64.StdEncoding.DecodeString(k)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("hub sent a malformed public key")
+		}
+		keys = append(keys, ed25519.PublicKey(raw))
+	}
+	return keys, nil
 }
 
 // Binding is a session's device binding.

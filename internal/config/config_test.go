@@ -265,12 +265,12 @@ func TestCommandMemory(t *testing.T) {
 
 func TestAutologinMethods(t *testing.T) {
 	t.Parallel()
-	const hosts = "browser:\n  autologin-hosts: [login.w3.ibm.com]\n"
-	cfg, err := load(map[string]string{hubURLEnv: hubURL}, hosts+"  autologin-methods:\n    login.w3.ibm.com: w3id Password\n")
+	const hosts = "browser:\n  autologin-hosts: [login.example.com]\n"
+	cfg, err := load(map[string]string{hubURLEnv: hubURL}, hosts+"  autologin-methods:\n    login.example.com: Password\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cfg.Browser.AutologinMethods["login.w3.ibm.com"]; got != "w3id Password" {
+	if got := cfg.Browser.AutologinMethods["login.example.com"]; got != "Password" {
 		t.Errorf("autologin-methods = %v", cfg.Browser.AutologinMethods)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -280,11 +280,11 @@ func TestAutologinMethods(t *testing.T) {
 		t.Errorf("default autologin-methods = %v, %v", def.Browser.AutologinMethods, err)
 	}
 	for name, in := range map[string]string{ //nolint:gosec // labels of sign-in buttons, not credentials
-		"host not listed": "  autologin-methods:\n    other.example.com: w3id Password\n",
-		"empty label":     "  autologin-methods:\n    login.w3.ibm.com: \"\"\n",
-		"passkey":         "  autologin-methods:\n    login.w3.ibm.com: Passkey\n",
-		"push":            "  autologin-methods:\n    login.w3.ibm.com: IBM Verify\n",
-		"long label":      "  autologin-methods:\n    login.w3.ibm.com: " + strings.Repeat("a", 81) + "\n",
+		"host not listed": "  autologin-methods:\n    other.example.com: Password\n",
+		"empty label":     "  autologin-methods:\n    login.example.com: \"\"\n",
+		"passkey":         "  autologin-methods:\n    login.example.com: Passkey\n",
+		"push":            "  autologin-methods:\n    login.example.com: Approve on phone\n",
+		"long label":      "  autologin-methods:\n    login.example.com: " + strings.Repeat("a", 81) + "\n",
 	} {
 		// load validates, so the bad entry is refused at load.
 		if _, err := load(map[string]string{hubURLEnv: hubURL}, hosts+in); !errors.Is(err, config.ErrAutologinMethod) {

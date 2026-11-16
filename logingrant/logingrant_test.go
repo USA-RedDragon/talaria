@@ -11,8 +11,10 @@ import (
 	"github.com/USA-RedDragon/talaria/logingrant"
 )
 
+const testMethod = "Password"
+
 func claims(now time.Time) logingrant.Claims {
-	return logingrant.Claims{Sub: "jacob", DeviceID: "d_abc", Host: "login.example.com", Method: "Password",
+	return logingrant.Claims{Sub: "jacob", DeviceID: "d_abc", Host: "login.example.com", Method: testMethod,
 		Scope: logingrant.ScopeDevice, SessionID: "s1", ChatTitle: "chat", Via: "web",
 		IssuedAt: now.Unix(), Expires: now.Add(2 * time.Minute).Unix()}
 }
@@ -27,7 +29,7 @@ func TestSignVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, err := logingrant.Verify([]ed25519.PublicKey{other, pub}, tok, now)
-	if err != nil || c.Host != "login.example.com" || c.Method != "Password" || c.Scope != logingrant.ScopeDevice {
+	if err != nil || c.Host != "login.example.com" || c.Method != testMethod || c.Scope != logingrant.ScopeDevice {
 		t.Fatalf("verify: %+v %v", c, err)
 	}
 	if _, err := logingrant.Verify([]ed25519.PublicKey{other}, tok, now); !errors.Is(err, logingrant.ErrSignature) {
@@ -82,7 +84,7 @@ func TestRefusedMethod(t *testing.T) {
 			t.Errorf("%q not refused", l)
 		}
 	}
-	for _, l := range []string{"Password", "Sign in with password", "Email and password", ""} {
+	for _, l := range []string{testMethod, "Sign in with password", "Email and password", ""} {
 		if !logingrant.ValidMethod(l) {
 			t.Errorf("%q refused", l)
 		}

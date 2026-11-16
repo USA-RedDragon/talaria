@@ -248,3 +248,48 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return data
 }
+
+const (
+	pwLabel       = "Password"
+	autologinHost = "a.example.com"
+)
+
+// SetAutologin sends the config again with the new lists, and nothing when
+// they did not change.
+func TestSetAutologinResendsConfig(t *testing.T) {
+	t.Parallel()
+	b, sock := start(t)
+	conn := dialRaw(t, sock)
+	send := func(m any) {
+		if err := nativemsg.Write(conn, mustJSON(t, m), nativemsg.MaxToBrowser); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send(broker.Message{Type: broker.TypeHostHello, ExtensionID: host.ExtensionID, HostPID: 1})
+	send(broker.Message{Type: broker.TypeHello, Version: "0.5.0"})
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for range 2 { // config, legacy auth_status
+		if _, err := nativemsg.Read(conn, nativemsg.MaxToBrowser); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := b.WaitConnected(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b.SetAutologin([]string{autologinHost}, map[string]string{autologinHost: pwLabel})
+	data, err := nativemsg.Read(conn, nativemsg.MaxToBrowser)
+	var m broker.Message
+	if err != nil || json.Unmarshal(data, &m) != nil || m.Type != broker.TypeConfig ||
+		len(m.AutologinHosts) != 1 || m.AutologinHosts[0] != autologinHost || m.AutologinMethods[autologinHost] != pwLabel {
+		t.Fatalf("config after SetAutologin = %s, %v", data, err)
+	}
+	b.SetAutologin([]string{autologinHost}, map[string]string{autologinHost: pwLabel})
+	b.SetAutologin(nil, nil)
+	var cleared broker.Message
+	if data, err = nativemsg.Read(conn, nativemsg.MaxToBrowser); err != nil || json.Unmarshal(data, &cleared) != nil ||
+		cleared.Type != broker.TypeConfig || len(cleared.AutologinHosts) != 0 {
+		t.Fatalf("config after clearing = %s, %v (an unchanged call must send nothing)", data, err)
+	}
+}

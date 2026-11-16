@@ -12,10 +12,14 @@ import (
 // the extension cannot see (docs/browser.md section 7.4).
 type lockReporter struct {
 	*broker.Broker
+	// next runs the operations: the sign-in grant gate in front of the broker.
+	next interface {
+		Call(ctx context.Context, op string, args any) (json.RawMessage, error)
+	}
 }
 
 func (r lockReporter) Call(ctx context.Context, op string, args any) (json.RawMessage, error) {
-	res, err := r.Broker.Call(ctx, op, args)
+	res, err := r.next.Call(ctx, op, args)
 	if err != nil || op != "check" {
 		return res, err
 	}

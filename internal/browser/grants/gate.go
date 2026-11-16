@@ -1,0 +1,338 @@
+package grants
+
+import (
+	"context"
+	"crypto/ed25519"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/USA-RedDragon/talaria/internal/browser/broker"
+	"github.com/USA-RedDragon/talaria/logingrant"
+)
+
+// OpName is the browser operation the gate handles itself.
+const OpName = "login_grants"
+
+// Caller runs a browser operation: the broker.
+type Caller interface {
+	Call(ctx context.Context, op string, args any) (json.RawMessage, error)
+}
+
+// Options configure a Gate.
+type Options struct {
+	// Inner is the broker, for every operation but login_grants.
+	Inner Caller
+	// Store holds the grants.
+	Store *Store
+	// Keys holds the hub's public keys.
+	Keys *KeyCache
+	// Identity answers who this device belongs to and its id, as the hub
+	// says (whoami), never as the plugin says.
+	Identity func(ctx context.Context) (user, deviceID string, err error)
+	// ConfigHosts and ConfigMethods are browser.autologin-hosts and
+	// browser.autologin-methods.
+	ConfigHosts   []string
+	ConfigMethods map[string]string
+	// Apply sends the merged lists to the extension. Optional.
+	Apply func(hosts []string, methods map[string]string)
+	// ProfileDirs lists Firefox profile directories to count saved logins
+	// in, first one that exists wins. Called for each status.
+	ProfileDirs func() []string
+	// Now is the clock; time.Now when nil.
+	Now func() time.Time
+}
+
+// Gate sits in front of the broker. It answers login_grants, refuses login
+// on a host that neither the config nor a grant allows, and keeps the
+// extension's lists in step with the grants.
+type Gate struct {
+	o Options
+
+	mu    sync.Mutex
+	seen  map[string][]string
+	timer *time.Timer
+}
+
+// NewGate returns a gate and sends the merged lists to the extension.
+func NewGate(o Options) *Gate {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	g := &Gate{o: o, seen: map[string][]string{}}
+	g.Sync()
+	return g
+}
+
+// Effective returns the hosts browser_login may sign in on and the method
+// label per host: the config's, plus the hosts of unexpired grants; a
+// grant's method overrides the config's.
+func (g *Gate) Effective() ([]string, map[string]string) {
+	hosts := slices.Clone(g.o.ConfigHosts)
+	methods := maps.Clone(g.o.ConfigMethods)
+	if methods == nil {
+		methods = map[string]string{}
+	}
+	for _, gr := range g.o.Store.Grants() {
+		if !slices.Contains(hosts, gr.Host) {
+			hosts = append(hosts, gr.Host)
+		}
+		if gr.Method != "" {
+			methods[gr.Host] = gr.Method
+		}
+	}
+	return hosts, methods
+}
+
+// Sync sends the merged lists to the extension and arms the timer for the
+// next once grant to expire.
+func (g *Gate) Sync() {
+	hosts, methods := g.Effective()
+	if g.o.Apply != nil {
+		g.o.Apply(hosts, methods)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.timer != nil {
+		g.timer.Stop()
+		g.timer = nil
+	}
+	if at, ok := g.o.Store.NextExpiry(); ok {
+		g.timer = time.AfterFunc(max(time.Until(at), 0)+time.Second, g.Sync)
+	}
+}
+
+func refuse(op, format string, a ...any) error {
+	return &broker.Error{Op: op, Code: broker.CodeRefused, Message: fmt.Sprintf(format, a...)}
+}
+
+// Call implements the browser operations.
+func (g *Gate) Call(ctx context.Context, op string, args any) (json.RawMessage, error) {
+	switch op {
+	case OpName:
+		return g.grantsOp(ctx, args)
+	case "login":
+		return g.login(ctx, args)
+	case "check":
+		res, err := g.o.Inner.Call(ctx, op, args)
+		if err != nil {
+			return res, err
+		}
+		var m map[string]any
+		if json.Unmarshal(res, &m) != nil || m == nil {
+			return res, nil //nolint:nilerr // not an object: the extension's answer stands as it is
+		}
+		m["login_grants"] = g.list()
+		out, merr := json.Marshal(m)
+		if merr != nil {
+			return res, nil //nolint:nilerr // the extension's own answer stands without the grants
+		}
+		return out, nil
+	}
+	return g.o.Inner.Call(ctx, op, args)
+}
+
+type loginArgs struct {
+	URL   string `json:"url"`
+	Guard struct {
+		LoginHosts []string `json:"login_hosts"`
+	} `json:"guard"`
+}
+
+func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	var a loginArgs
+	_ = json.Unmarshal(raw, &a)
+	hosts := make([]string, 0, len(a.Guard.LoginHosts)+1)
+	for _, h := range a.Guard.LoginHosts {
+		hosts = append(hosts, strings.ToLower(strings.TrimSuffix(h, ".")))
+	}
+	if h := urlHost(a.URL); h != "" {
+		hosts = append(hosts, h)
+	}
+	allowed, _ := g.Effective()
+	for _, h := range hosts {
+		if !slices.Contains(allowed, h) {
+			return nil, refuse("login", "browser_login is not allowed on %s: it is not in browser.autologin-hosts and the user has not allowed it for this computer", h)
+		}
+	}
+	res, err := g.o.Inner.Call(ctx, "login", args)
+	var out struct {
+		Submitted   bool     `json:"submitted"`
+		MethodsSeen []string `json:"methods_seen"`
+	}
+	if err != nil || json.Unmarshal(res, &out) != nil {
+		return res, err
+	}
+	g.mu.Lock()
+	for _, h := range hosts {
+		switch {
+		case out.Submitted:
+			delete(g.seen, h)
+		case len(out.MethodsSeen) > 0:
+			g.seen[h] = slices.Clone(out.MethodsSeen)
+		}
+	}
+	g.mu.Unlock()
+	if out.Submitted {
+		for _, h := range hosts {
+			if err := g.o.Store.Used(h); err != nil {
+				slog.Warn("Could not record a sign-in grant use", "host", h, "error", err)
+			}
+		}
+		g.Sync()
+	}
+	return res, nil
+}
+
+func urlHost(u string) string {
+	rest, ok := strings.CutPrefix(u, "https://")
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	if i := strings.LastIndex(rest, ":"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.ToLower(strings.TrimSuffix(rest, "."))
+}
+
+type configHost struct {
+	Host   string `json:"host"`
+	Method string `json:"method"`
+}
+
+type listResult struct {
+	Grants      []Grant      `json:"grants"`
+	ConfigHosts []configHost `json:"config_hosts"`
+}
+
+func (g *Gate) list() listResult {
+	res := listResult{Grants: g.o.Store.Grants(), ConfigHosts: []configHost{}}
+	for _, h := range g.o.ConfigHosts {
+		res.ConfigHosts = append(res.ConfigHosts, configHost{Host: h, Method: g.o.ConfigMethods[h]})
+	}
+	return res
+}
+
+func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	var a struct {
+		Action string `json:"action"`
+		Host   string `json:"host"`
+		Token  string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, refuse(OpName, "bad arguments: %v", err)
+	}
+	a.Host = strings.ToLower(strings.TrimSuffix(a.Host, "."))
+	switch a.Action {
+	case "list":
+		return json.Marshal(g.list())
+	case "status":
+		return g.status(a.Host)
+	case "add":
+		gr, err := g.add(ctx, a.Token)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]any{"grant": gr})
+	case "revoke":
+		ok, err := g.o.Store.Revoke(a.Host)
+		if err != nil {
+			return nil, fmt.Errorf("revoke: %w", err)
+		}
+		g.mu.Lock()
+		delete(g.seen, a.Host)
+		g.mu.Unlock()
+		g.Sync()
+		return json.Marshal(map[string]any{"revoked": ok})
+	}
+	return nil, refuse(OpName, "unknown action %q", a.Action)
+}
+
+func (g *Gate) status(host string) (json.RawMessage, error) {
+	if host == "" {
+		return nil, refuse(OpName, "status needs a host")
+	}
+	var grant *Grant
+	if gr, ok := g.o.Store.Get(host); ok {
+		grant = &gr
+	}
+	_, methods := g.Effective()
+	saved := -1
+	if g.o.ProfileDirs != nil {
+		saved = savedLogins(g.o.ProfileDirs(), host)
+	}
+	g.mu.Lock()
+	seen := slices.Clone(g.seen[host])
+	g.mu.Unlock()
+	if seen == nil {
+		seen = []string{}
+	}
+	return json.Marshal(map[string]any{"host": host, "config": slices.Contains(g.o.ConfigHosts, host), "grant": grant,
+		"once": grant != nil && grant.Scope == logingrant.ScopeOnce, "method": methods[host], "saved_logins": saved,
+		"methods_seen": seen})
+}
+
+// add verifies a grant token and stores it. The grant must verify with a hub
+// key, name this device's user and id, and carry a nonce not seen before.
+func (g *Gate) add(ctx context.Context, token string) (Grant, error) {
+	keys, err := g.o.Keys.Keys(ctx)
+	var c *logingrant.Claims
+	if err == nil {
+		c, err = verify(ctx, g.o.Keys, keys, token, g.o.Now())
+	}
+	if err != nil {
+		return Grant{}, refuse(OpName, "%v", err)
+	}
+	user, id, err := g.o.Identity(ctx)
+	if err != nil || user == "" || id == "" {
+		return Grant{}, refuse(OpName, "cannot confirm this device's user with the hub")
+	}
+	if c.Sub != user {
+		return Grant{}, refuse(OpName, "sign-in grant is for another user")
+	}
+	if c.DeviceID != id {
+		return Grant{}, refuse(OpName, "sign-in grant is for another computer")
+	}
+	gr, err := g.o.Store.Add(c)
+	switch {
+	case errors.Is(err, ErrNonceUsed):
+		return Grant{}, refuse(OpName, "%v", err)
+	case err != nil:
+		return Grant{}, fmt.Errorf("store the grant: %w", err)
+	}
+	g.Sync()
+	return gr, nil
+}
+
+// verify checks token with keys; when no key fits it fetches the hub keys
+// again (at most once a minute) and tries once more.
+func verify(ctx context.Context, kc *KeyCache, keys []ed25519.PublicKey, token string, now time.Time) (*logingrant.Claims, error) {
+	c, err := logingrant.Verify(keys, token, now)
+	if errors.Is(err, logingrant.ErrSignature) || errors.Is(err, logingrant.ErrNoKeys) {
+		fresh, ferr := kc.Refresh(ctx)
+		if ferr == nil && len(fresh) > 0 {
+			return logingrant.Verify(fresh, token, now)
+		}
+	}
+	return c, err
+}

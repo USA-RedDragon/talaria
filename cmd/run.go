@@ -219,7 +219,7 @@ func runDaemon(ctx context.Context, cfg *config.Config, version, userAgent strin
 	spool, releaseSpool := commandSpool(stateDir, opts.Scope)
 	defer releaseSpool()
 	opts.Spool = spool
-	br, stopBrowser, err := setupBrowser(ctx, cfg, version, &opts)
+	br, stopBrowser, err := setupBrowser(ctx, cfg, version, hub, &opts)
 	if err != nil {
 		return err
 	}
@@ -578,7 +578,7 @@ func inSystemdService(path string) bool {
 // desktop Firefox or, with browser.headless, a supervised one of the daemon's
 // own (docs/browser.md section 5). The returned function waits until a
 // headless Firefox has stopped, after ctx ended.
-func setupBrowser(ctx context.Context, cfg *config.Config, version string, opts *device.Options) (*broker.Broker, func(), error) {
+func setupBrowser(ctx context.Context, cfg *config.Config, version string, hub *hubapi.Client, opts *device.Options) (*broker.Broker, func(), error) {
 	if !cfg.Browser.Enabled {
 		return nil, func() {}, nil
 	}
@@ -586,7 +586,17 @@ func setupBrowser(ctx context.Context, cfg *config.Config, version string, opts 
 	if err != nil {
 		return nil, nil, err
 	}
-	opts.Browser = lockReporter{br}
+	headlessDir := ""
+	if cfg.Browser.Headless {
+		if headlessDir, err = headlessProfile(cfg); err != nil {
+			return nil, nil, err
+		}
+	}
+	gate, err := newGrantGate(cfg, br, hub, headlessDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	opts.Browser = lockReporter{Broker: br, next: gate}
 	switch {
 	case cfg.Browser.Headless:
 		sup, err := startHeadless(ctx, cfg, version, opts.Env)

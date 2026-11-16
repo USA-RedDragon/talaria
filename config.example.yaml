@@ -77,9 +77,9 @@ browser:
   # allow-hosts: []
   # Sites where every click and every Enter or Space key press asks the user each time and scripts may only read. Host names; each covers its subdomains. The plugin cannot change this list
   # confirm-hosts: []
-  # Exact host names where browser_login may submit the login form that Firefox fills from its own saved login, so a scheduled job can sign in without the agent seeing the password. Only https pages whose top-level host is listed; no subdomains. Scripts are refused there, and clicks, typing, key presses and screenshots on its login pages. Example: login.w3.ibm.com. The plugin cannot change this list
+  # Exact host names where browser_login may submit the login form that Firefox fills from its own saved login, so a scheduled job can sign in without the agent seeing the password. Only https pages whose top-level host is listed; no subdomains. Scripts are refused there, and clicks, typing, key presses and screenshots on its login pages. Example: login.example.com. The plugin cannot change this list. Hosts the user allows on a hub card are added at run time as revocable sign-in grants
   # autologin-hosts: []
-  # Per autologin host, the visible text of the sign-in method button that browser_login clicks when the page shows a method picker instead of a password form, such as login.w3.ibm.com: w3id Password. Only that exact label is clicked, only on a host in autologin-hosts and only while the page has no password field. Passkey and push approval methods are never chosen for you. Config file only. The plugin cannot change this
+  # Per autologin host, the visible text of the sign-in method button that browser_login clicks when the page shows a method picker instead of a password form, such as login.example.com: Password. Only that exact label is clicked, only on a host in autologin-hosts and only while the page has no password field. Passkey and push approval methods are never chosen for you. Config file only. The plugin cannot change this
   # autologin-methods:
   #   example: ""
   # Let the agent start Firefox, with the user's default profile, in the user's graphical session when the extension is not connected, so a scheduled job works after Firefox was closed. Not used with headless

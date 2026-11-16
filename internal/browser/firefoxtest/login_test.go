@@ -5,6 +5,7 @@ package firefoxtest_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -12,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -20,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +30,8 @@ import (
 
 	"github.com/USA-RedDragon/talaria/internal/browser/bidi"
 	"github.com/USA-RedDragon/talaria/internal/browser/broker"
+	"github.com/USA-RedDragon/talaria/internal/browser/grants"
+	"github.com/USA-RedDragon/talaria/logingrant"
 )
 
 const (
@@ -36,8 +41,12 @@ const (
 	otherLoginHost = "127.0.0.5"
 	twoLoginHost   = "127.0.0.6"
 	loginUser      = "alice"
+	// grantHost is a name for the loopback address that is in no config:
+	// the user allows it with a sign-in grant. Grants take host names, not
+	// addresses.
+	grantHost = "grant.localhost"
 	// pickerMethod is the label configured for loginHost in browser.autologin-methods.
-	pickerMethod = "w3id Password"
+	pickerMethod = "Password"
 	keyLogins    = "login_hosts"
 	keySensitive = "sensitive"
 	keySelector  = "selector"
@@ -71,20 +80,20 @@ func (l *loginServer) clicked() []string {
 	return append([]string(nil), l.clicks...)
 }
 
-// pickerPage mimics IBM w3id: buttons to choose how to sign in, and the
-// password form only after "w3id Password" is chosen. Every button tells the
+// pickerPage mimics a typical identity provider: buttons to choose how to sign in, and the
+// password form only after "Password" is chosen. Every button tells the
 // server which one was clicked.
 func pickerPage(buttons ...string) string {
 	var b strings.Builder
 	b.WriteString(`<!doctype html><title>Sign in</title><div id="root"><h1>Choose how to sign in</h1>` +
-		`<p>Not sure? Use w3id Password if you have one.</p><a href="#help">w3id Password help</a>`)
+		`<p>Not sure? Use Password if you have one.</p><a href="#help">Password help</a>`)
 	for _, label := range buttons {
 		b.WriteString(`<button type="button" onclick="pick(this.textContent)">` + label + `</button>`)
 	}
 	b.WriteString(`</div><script>
 function pick(m) {
   fetch("/clicked?m=" + encodeURIComponent(m), {method: "POST"});
-  if (m !== "w3id Password") { return; }
+  if (m !== "Password") { return; }
   setTimeout(() => { document.getElementById("root").innerHTML = '<form method="post" action="/login">' +
     '<label>Email <input name="user" autocomplete="username"></label>' +
     '<label>Password <input type="password" name="pass" autocomplete="current-password"></label>' +
@@ -120,13 +129,13 @@ func (l *loginServer) handler(other string) http.HandlerFunc {
 		case "/get-form":
 			_, _ = io.WriteString(w, form("/login", "get"))
 		case "/picker":
-			_, _ = io.WriteString(w, pickerPage("Passkey", "w3id Password", "IBM Verify"))
+			_, _ = io.WriteString(w, pickerPage("Passkey", "Password", "Approve on phone"))
 		case "/picker-nomatch":
-			_, _ = io.WriteString(w, pickerPage("Passkey", "IBM Verify", "Other options"))
+			_, _ = io.WriteString(w, pickerPage("Passkey", "Approve on phone", "Other options"))
 		case "/picker-dup":
-			_, _ = io.WriteString(w, pickerPage("w3id Password", "w3id Password"))
+			_, _ = io.WriteString(w, pickerPage("Password", "Password"))
 		case "/picker-offsite":
-			_, _ = io.WriteString(w, `<!doctype html><title>Sign in</title><a href="https://evil.example/login">w3id Password</a>`)
+			_, _ = io.WriteString(w, `<!doctype html><title>Sign in</title><a href="https://evil.example/login">Password</a>`)
 		case "/clicked":
 			l.mu.Lock()
 			l.clicks = append(l.clicks, r.URL.Query().Get("m"))
@@ -181,7 +190,11 @@ func testCA(t *testing.T, hosts ...string) ([]byte, tls.Certificate) {
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 	for _, h := range hosts {
-		leaf.IPAddresses = append(leaf.IPAddresses, net.ParseIP(h))
+		if ip := net.ParseIP(h); ip != nil {
+			leaf.IPAddresses = append(leaf.IPAddresses, ip)
+		} else {
+			leaf.DNSNames = append(leaf.DNSNames, h)
+		}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, leaf, caCert, &key.PublicKey, caKey)
 	if err != nil {
@@ -268,10 +281,15 @@ func jsJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
+// caller runs browser operations: the broker or the grant gate in front of it.
+type caller interface {
+	Call(ctx context.Context, op string, args any) (json.RawMessage, error)
+}
+
 // recorded calls the broker and keeps every answer and error, so the test
 // can check that the password never comes back.
 type recorded struct {
-	b   *broker.Broker
+	b   caller
 	out []string
 }
 
@@ -309,23 +327,31 @@ func (r *recorded) refused(ctx context.Context, t *testing.T, what, want, op str
 
 // loginFlow checks browser_login (docs/browser.md section 7.4) with real
 // saved logins in the test profile: Firefox itself fills the form.
-func loginFlow(ctx context.Context, t *testing.T, b *broker.Broker, bc *bidi.Client, firstTab int) {
+func loginFlow(ctx context.Context, t *testing.T, b *broker.Broker, gr *grantRig, bc *bidi.Client, firstTab int) {
 	t.Helper()
 	password := "pw-" + rand.Text()
-	caDER, cert := testCA(t, loginHost, otherLoginHost, twoLoginHost)
+	caDER, cert := testCA(t, loginHost, otherLoginHost, twoLoginHost, grantHost)
 	other := &loginServer{}
 	otherSrv := serveTLSOn(ctx, t, otherLoginHost, cert, other.handler(""))
 	main := &loginServer{}
 	mainSrv := serveTLSOn(ctx, t, loginHost, cert, main.handler(otherSrv.URL))
 	two := &loginServer{}
 	twoSrv := serveTLSOn(ctx, t, twoLoginHost, cert, two.handler(""))
+	grantLoginSrv := &loginServer{}
+	grantSrv := serveTLSOn(ctx, t, loopback, cert, grantLoginSrv.handler(""))
+	grantAddr, ok := grantSrv.Listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("grant host listener is %T", grantSrv.Listener.Addr())
+	}
+	grantURL := "https://" + grantHost + ":" + strconv.Itoa(grantAddr.Port)
 	seedLogins(ctx, t, bc, caDER, [][3]string{
+		{grantURL, loginUser, password},
 		{mainSrv.URL, loginUser, password},
 		{otherSrv.URL, loginUser, password},
 		{twoSrv.URL, loginUser, password},
 		{twoSrv.URL, "bob", password + "-b"},
 	})
-	r := &recorded{b: b}
+	r := &recorded{b: gr.gate}
 	rig := &loginRig{r: r, main: main, other: other, two: two, mainURL: mainSrv.URL, twoURL: twoSrv.URL,
 		otherURL: otherSrv.URL}
 	open := func(u string) tabResult { return rig.open(ctx, t, u) }
@@ -395,6 +421,7 @@ func loginFlow(ctx context.Context, t *testing.T, b *broker.Broker, bc *bidi.Cli
 	}
 
 	loginEdges(ctx, t, rig, tab.TabID)
+	grantFlow(ctx, t, rig, b, gr, grantLoginSrv, grantURL, tab.TabID, password)
 
 	for _, out := range r.out {
 		if strings.Contains(out, password) {
@@ -450,8 +477,8 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	if !res.Filled || !post(res) || res.LandedHost != loginHost || res.Method != pickerMethod || res.Reason != "" {
 		t.Errorf("login through a picker = %+v", res)
 	}
-	if got := rig.main.clicked(); len(got) != 1 || got[0] != "w3id Password" {
-		t.Errorf("buttons clicked = %q, want only w3id Password", got)
+	if got := rig.main.clicked(); len(got) != 1 || got[0] != "Password" {
+		t.Errorf("buttons clicked = %q, want only Password", got)
 	}
 
 	// Nothing configured for this host: the labels come back, nothing is clicked.
@@ -459,7 +486,7 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	res = rig.login(ctx, t, map[string]any{keyTab: two, keyGuard: approve(twoLoginHost), keyTimeout: 3000})
 	t.Logf("picker without a configured method: %+v", res)
 	if res.Filled || res.Submitted || !strings.Contains(res.Reason, "no method is configured") ||
-		!slices.Equal(res.MethodsSeen, []string{"w3id Password help", "Passkey", "w3id Password", "IBM Verify"}) {
+		!slices.Equal(res.MethodsSeen, []string{"Password help", "Passkey", "Password", "Approve on phone"}) {
 		t.Errorf("picker without a configured method = %+v", res)
 	}
 	if got := rig.two.clicked(); len(got) != 0 {
@@ -567,4 +594,130 @@ func loginRefusals(ctx context.Context, t *testing.T, r *recorded, tabID int) {
 	r.refused(ctx, t, "selector wait on the login page", "autologin", "wait",
 		map[string]any{keyTab: tabID, keySelector: "input[name=pass]:placeholder-shown", keyTimeout: 500})
 	r.refused(ctx, t, "login without approval", "needs the user's approval", "login", map[string]any{keyTab: tabID})
+}
+
+// grantRig is the sign-in grant gate in front of the test broker, and the
+// key that plays the hub: the gate trusts its public key.
+type grantRig struct {
+	gate *grants.Gate
+	key  ed25519.PrivateKey
+}
+
+const (
+	grantAction = "action"
+	grantUser   = "e2e-user"
+	grantDevice = "d_e2e"
+)
+
+func newGrantRig(t *testing.T, b *broker.Broker, path string) *grantRig {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := grants.OpenStore(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := grants.NewGate(grants.Options{
+		Inner: b, Store: store,
+		Keys: &grants.KeyCache{Fetch: func(context.Context) ([]ed25519.PublicKey, error) {
+			return []ed25519.PublicKey{pub}, nil
+		}},
+		Identity:    func(context.Context) (string, string, error) { return grantUser, grantDevice, nil },
+		ConfigHosts: []string{loginHost, twoLoginHost}, ConfigMethods: map[string]string{loginHost: pickerMethod},
+		Apply: b.SetAutologin,
+	})
+	return &grantRig{gate: gate, key: priv}
+}
+
+func (g *grantRig) token(t *testing.T, host, scope string) string {
+	t.Helper()
+	now := time.Now()
+	tok, err := logingrant.Sign(g.key, logingrant.Claims{Sub: grantUser, DeviceID: grantDevice, Host: host, Scope: scope,
+		SessionID: "s_e2e", ChatTitle: "e2e", Via: "web", IssuedAt: now.Unix(), Expires: now.Add(time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// grantFlow checks sign-in grants against the real extension: a host that is
+// in no config is refused; after a grant the hub signed, Firefox signs in;
+// after the grant is revoked, or a once grant is used up, it is refused again,
+// by the daemon and, with the daemon bypassed, by the extension itself, which
+// got the new lists.
+func grantFlow(ctx context.Context, t *testing.T, rig *loginRig, b *broker.Broker, gr *grantRig, srv *loginServer, u string, tabID int, password string) {
+	t.Helper()
+	r := rig.r
+	guard := approve(grantHost)
+	show := func() int {
+		r.must(ctx, t, "navigate", map[string]any{keyTab: tabID, keyURL: u + "/", keyGuard: map[string]any{keyVisit: []string{grantHost}}}, nil)
+		return tabID
+	}
+	login := func() (loginResult, error) {
+		var res loginResult
+		out, err := r.call(ctx, "login", map[string]any{keyTab: show(), keyGuard: guard, keyTimeout: 5000})
+		if err == nil {
+			err = json.Unmarshal(out, &res)
+		}
+		return res, err
+	}
+	refusedBoth := func(what string) {
+		t.Helper()
+		if _, err := login(); err == nil || !strings.Contains(err.Error(), grantHost) {
+			t.Errorf("%s: daemon err = %v, want a refusal naming %s", what, err, grantHost)
+		}
+		// With the daemon out of the way the extension refuses too.
+		_, err := b.Call(ctx, "login", map[string]any{keyTab: tabID, keyGuard: guard})
+		var be *broker.Error
+		if !errors.As(err, &be) || !be.Refused() || !strings.Contains(err.Error(), "browser.autologin-hosts") {
+			t.Errorf("%s: extension err = %v, want a refusal", what, err)
+		}
+	}
+	grant := func(scope string) {
+		t.Helper()
+		if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: "add", "token": gr.token(t, grantHost, scope)}); err != nil {
+			t.Fatalf("add %s grant: %v", scope, err)
+		}
+	}
+	signedIn := func(want int) {
+		t.Helper()
+		res, err := login()
+		if err != nil || !res.Filled || !res.Submitted || res.Reason != "" {
+			t.Fatalf("login with a grant = %+v, %v", res, err)
+		}
+		want2 := "POST user=" + url.QueryEscape(loginUser) + "&pass=" + url.QueryEscape(password)
+		if got := srv.got(); len(got) != want || got[want-1] != want2 {
+			t.Errorf("grant host got %q, want %d posts ending in %q", got, want, want2)
+		}
+	}
+
+	refusedBoth("no grant")
+	if got := srv.got(); len(got) != 0 {
+		t.Fatalf("the ungranted host got posts: %q", got)
+	}
+	grant(logingrant.ScopeDevice)
+	signedIn(1)
+	signedIn(2) // a device grant stays until revoked
+	out, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: "revoke", "host": grantHost})
+	if err != nil || !strings.Contains(string(out), `"revoked":true`) {
+		t.Fatalf("revoke = %s, %v", out, err)
+	}
+	refusedBoth("after revoke")
+
+	grant(logingrant.ScopeOnce)
+	signedIn(3)
+	refusedBoth("after a once grant was used")
+	if got := srv.got(); len(got) != 3 {
+		t.Errorf("grant host got %d posts, want 3", len(got))
+	}
+	// A token the hub did not sign adds nothing.
+	_, forged, _ := ed25519.GenerateKey(rand.Reader)
+	bad, _ := logingrant.Sign(forged, logingrant.Claims{Sub: grantUser, DeviceID: grantDevice, Host: grantHost, Scope: "device",
+		IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
+	if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: "add", "token": bad}); err == nil {
+		t.Error("a grant with a wrong signature was accepted")
+	}
+	refusedBoth("after a forged grant")
 }
