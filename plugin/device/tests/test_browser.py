@@ -2155,6 +2155,31 @@ class BatchTool(BrowserBase):
         self.assertNotIn("target", self.run_tool("browser_press", tab_id=7, key="Tab"))
         self.assertNotIn("target", self.run_tool("browser_click", tab_id=7, ref="e99"), "a ref no snapshot gave out")
 
+    def test_type_into_a_password_field_says_so_and_holds_no_text(self):
+        self.snapshot()
+        self.fake.inspect = dict(self.fake.inspect, target={"kind": "field", "field": "password"})
+        out = self.run_tool("browser_type", tab_id=7, ref="e1", text="hunter2 secret")
+        self.assertIs(out["secret"], True)
+        self.assertNotIn("hunter2", json.dumps(out))
+        self.fake.inspect = dict(self.fake.inspect, target={"kind": "field"})
+        self.assertNotIn("secret", self.run_tool("browser_type", tab_id=7, ref="e1", text="a@b.c"))
+        self.assertNotIn("secret", self.run_tool("browser_click", tab_id=7, ref="e4"))
+
+    def test_actions_say_when_the_page_changed(self):
+        self.snapshot()
+        self.assertNotIn("navigated", self.run_tool("browser_click", tab_id=7, ref="e4"))
+        self.fake.tabs[7] = dict(self.fake.tabs[7], url="https://example.com/#top")
+        self.assertNotIn("navigated", self.run_tool("browser_click", tab_id=7, ref="e4"), "a fragment is not a new page")
+        self.fake.tabs[7] = dict(self.fake.tabs[7], url="https://example.com/next")
+        self.assertIs(self.run_tool("browser_click", tab_id=7, ref="e4")["navigated"], True)
+        self.assertIs(self.run_tool("browser_press", tab_id=7, key="Enter", ref="e2")["navigated"], True)
+        self.assertIs(self.run_tool("browser_type", tab_id=7, ref="e1", text="q", submit=True)["navigated"], True)
+
+    def test_tab_close_and_keep_name_the_tab(self):
+        out = self.run_tool("browser_tabs", action="close", tab_id=7)
+        self.assertEqual(out["title"], "Example Domain")
+        self.assertEqual(self.run_tool("browser_tabs", action="close", tab_id=99).get("title"), None)
+
     def test_target_of_a_failed_action_and_after_a_rerender(self):
         self.snapshot()
         self.fake.fail["click"] = ("failed", "the element is hidden")

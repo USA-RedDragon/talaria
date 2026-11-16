@@ -1010,6 +1010,10 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
             tool_name == "browser_type" and bool(args.get("submit")))
         link_away = tool_name == "browser_click" and kind == "link" and bool(host) and site_of(host) != page
     grant: dict = {"submit_hosts": [host] if submits else [], "visit_hosts": [host] if link_away else []}
+    if tool_name == "browser_type" and t.get("field"):
+        grant["secret"] = True  # typed into a password field: the result says so and never holds the text
+    if isinstance(info.get("url"), str):
+        grant["page_url"] = info["url"]  # the page before the action, to tell whether it navigated
     sensitive = [s for s in (info.get("sensitive") or []) if isinstance(s, str)]
     if info.get("autologin") and "password" in sensitive:
         return {}, {"action": "block", "message": (
@@ -1161,6 +1165,24 @@ def _confirm(text: str) -> bool:
 def _page(result: Any) -> dict:
     r = result if isinstance(result, dict) else {}
     return {k: r[k] for k in ("tab_id", "url", "title") if k in r}
+
+
+def _navigated(before: Any, after: Any) -> bool:
+    """The page URL changed (a fragment alone does not count); False when either is unknown."""
+    if not (isinstance(before, str) and isinstance(after, str) and before and after):
+        return False
+    return before.split("#", 1)[0] != after.split("#", 1)[0]
+
+
+def _tab_title(conn: Any, tab: int) -> str:
+    """The title of the agent tab, or "" when it cannot be read (the result then omits it)."""
+    try:
+        for t in (call(conn, "tabs_list", {}) or {}).get("tabs", []):
+            if int(t.get("tab_id")) == tab:
+                return str(t.get("title") or "")
+    except Exception:
+        pass
+    return ""
 
 
 def _untrusted(out: dict) -> dict:
@@ -1894,7 +1916,12 @@ def _tabs(args: dict, conn: Any, sid: str) -> str:
     if action == "close":
         if _tab_id(args) is None:
             raise ValueError("tab_id is required to close a tab; browser_tabs with action list shows the tab ids")
-        return _ok(call(conn, "tab_close", {"tab_id": _need_tab(args)}))
+        tab = _need_tab(args)
+        title = _tab_title(conn, tab)
+        res = call(conn, "tab_close", {"tab_id": tab})
+        if title and isinstance(res, dict):
+            res = dict(res, title=title)
+        return _ok(res)
     if action in ("keep", "release"):
         tab = _need_tab(args)
         led = ledger()
@@ -1903,7 +1930,11 @@ def _tabs(args: dict, conn: Any, sid: str) -> str:
         if not done:
             raise ValueError(f"tab {tab} was not opened by this chat, so it is not closed automatically and "
                              f"there is nothing to {action}")
-        return _ok({"tab_id": tab, "keep": action == "keep"})
+        out = {"tab_id": tab, "keep": action == "keep"}
+        title = _tab_title(conn, tab)
+        if title:
+            out["title"] = title
+        return _ok(out)
     raise ValueError("action must be list, open, close, keep or release, such as {\"action\": \"list\"}")
 
 
@@ -2164,6 +2195,10 @@ def _act(op: str) -> Callable[[dict, Any, str], str]:
         out = _page(res)
         if op == "press" and isinstance(res, dict):
             out.update({k: res[k] for k in ("pressed", "default_action", "focused") if k in res})
+        if op == "type" and grant.get("secret"):
+            out["secret"] = True
+        if _navigated(grant.get("page_url"), out.get("url")):
+            out["navigated"] = True
         return _ok(out)
     act.__name__ = op
     return act

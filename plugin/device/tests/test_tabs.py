@@ -305,7 +305,7 @@ class KeepTests(TabBase):
         self.turn()
         a = self.open()
         out = self.run_tool("browser_tabs", action="keep", tab_id=a)
-        self.assertEqual(out, {"tab_id": a, "keep": True})
+        self.assertEqual(out, {"tab_id": a, "keep": True, "title": "Opened"})
         self.end()
         self.clock.advance(5000)
         self.assertEqual(self.sweep(), 0)
