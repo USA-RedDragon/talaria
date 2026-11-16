@@ -100,7 +100,7 @@ type Subagent struct {
 	// WaitingOn are the commands of the background processes a subagent with
 	// status "waiting" ended its turn on; Hermes resumes it when one exits.
 	WaitingOn []string `json:"waiting_on,omitempty"`
-	// Todo is the subagent's own to-do list at a glance; nil while it keeps none.
+	// The field holds the subagent's own to-do list at a glance; nil while it keeps none.
 	Todo *TodoBrief `json:"todo,omitempty"`
 }
 

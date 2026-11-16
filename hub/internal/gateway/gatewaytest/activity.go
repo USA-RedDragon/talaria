@@ -13,6 +13,7 @@ const (
 	kPaused      = "paused"
 	kTaskID      = "task_id"
 	statusRun    = "running"
+	kRunning     = "running"
 	statusKill   = "killed"
 	kTruncated   = "truncated"
 	kInterrupted = "interrupted"

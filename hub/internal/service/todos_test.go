@@ -18,7 +18,7 @@ const (
 func planItems() []gateway.TodoItem {
 	return []gateway.TodoItem{
 		{ID: "1", Content: "Ship the build", Status: statusInProgress},
-		{ID: "2", Content: "Check touch", Status: statusInProgress, Parent: "1", Notes: "libnx touch test", Owner: subMine},
+		{ID: "2", Content: "Check touch", Status: statusInProgress, Parent: "1", Notes: noteTouch, Owner: subMine},
 		{ID: "3", Content: "Icon", Status: statusPending, Parent: "1"},
 	}
 }
@@ -35,16 +35,16 @@ func TestTodosReadStoredLists(t *testing.T) {
 		t.Fatalf("no list stored = %+v, %v", got, err)
 	}
 	e.gw.SetTodos(sLive, planItems(), false)
-	e.gw.SetChildTodos(sLive, subMine, []gateway.TodoItem{{ID: "a", Content: "Read the store", Status: statusInProgress}, {ID: "b", Content: "Report", Status: statusPending}})
+	e.gw.SetChildTodos(sLive, subMine, []gateway.TodoItem{{ID: "a", Content: goalReadStore, Status: statusInProgress}, {ID: "b", Content: "Report", Status: statusPending}})
 	got, err = e.svc.Todos(ctx, userAlice, backendPC, sLive, "")
 	if err != nil || !got.Supported || got.Revision != 1 || len(got.Todos) != 3 {
 		t.Fatalf("chat list = %+v, %v", got, err)
 	}
-	if it := got.Todos[1]; it.ID != "2" || it.Parent != "1" || it.Notes != "libnx touch test" || it.Owner != subMine || it.Status != statusInProgress {
+	if it := got.Todos[1]; it.ID != "2" || it.Parent != "1" || it.Notes != noteTouch || it.Owner != subMine || it.Status != statusInProgress {
 		t.Fatalf("item = %+v", it)
 	}
 	child, err := e.svc.Todos(ctx, userAlice, backendPC, sLive, subMine)
-	if err != nil || len(child.Todos) != 2 || !child.Running || child.Todos[0].Content != "Read the store" {
+	if err != nil || len(child.Todos) != 2 || !child.Running || child.Todos[0].Content != goalReadStore {
 		t.Fatalf("child list = %+v, %v", child, err)
 	}
 	for _, c := range e.gw.Calls() {
@@ -68,13 +68,13 @@ func TestActivityCarriesSubagentTodoBrief(t *testing.T) {
 	t.Parallel()
 	e := activitySetup(t)
 	e.gw.SetChildTodos(sLive, subMine, []gateway.TodoItem{
-		{ID: "a", Content: "Read the store", Status: statusInProgress}, {ID: "b", Content: "Report", Status: statusPending}, {ID: "c", Content: "Done", Status: "completed"}})
+		{ID: "a", Content: goalReadStore, Status: statusInProgress}, {ID: "b", Content: "Report", Status: statusPending}, {ID: "c", Content: "Done", Status: "completed"}})
 	st, err := e.svc.Activity(context.Background(), userAlice, backendPC, sLive)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := st.Subagents[0].Todo
-	if b == nil || len(b.Current) != 1 || b.Current[0].Content != "Read the store" || b.Counts["total"] != 3 || b.Counts["completed"] != 1 || b.Counts[statusPending] != 1 {
+	if b == nil || len(b.Current) != 1 || b.Current[0].Content != goalReadStore || b.Counts["total"] != 3 || b.Counts["completed"] != 1 || b.Counts[statusPending] != 1 {
 		t.Fatalf("brief = %+v", b)
 	}
 	if st.Subagents[1].Todo != nil {
@@ -98,7 +98,7 @@ func TestTodosOnAnOlderHermes(t *testing.T) {
 	}
 }
 
-// todo.updated reaches the chat's viewers with the whole list and its
+// The todo.updated event reaches the chat's viewers with the whole list and its
 // revision, as Hermes sent it.
 func TestTodoUpdatedReachesViewers(t *testing.T) {
 	t.Parallel()
@@ -121,7 +121,7 @@ func TestTodoUpdatedReachesViewers(t *testing.T) {
 			Todos    []gateway.TodoItem `json:"todos"`
 			Revision int64              `json:"revision"`
 		}
-		if err := json.Unmarshal(ev.Data, &p); err != nil || p.Revision != 1 || len(p.Todos) != 3 || p.Todos[1].Owner != subMine || p.Todos[1].Notes != "libnx touch test" {
+		if err := json.Unmarshal(ev.Data, &p); err != nil || p.Revision != 1 || len(p.Todos) != 3 || p.Todos[1].Owner != subMine || p.Todos[1].Notes != noteTouch {
 			t.Fatalf("todo.updated = %s, %v", ev.Data, err)
 		}
 		return

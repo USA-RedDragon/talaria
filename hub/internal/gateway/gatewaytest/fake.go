@@ -1062,7 +1062,7 @@ func (g *Gateway) snapshotLocked(c *conn, s *Session) map[string]any {
 	}
 	out := map[string]any{
 		kSessionID: s.ID, "stored_session_id": s.ID, "messages": msgs, "message_count": len(msgs),
-		"running": s.Running, "authority_epoch": 1, kReplayEpoch: s.epoch, kLastSequence: s.seq,
+		kRunning: s.Running, "authority_epoch": 1, kReplayEpoch: s.epoch, kLastSequence: s.seq,
 		"subscription_id": sub, kRevision: s.Revision, kExecGen: s.Generation,
 		kPending: pending, "prompts": prompts,
 		"info": g.infoLocked(s, true),
@@ -1157,6 +1157,20 @@ func (g *Gateway) dispatch(c *conn, method string, p map[string]any) (any, strin
 			return nil, "unknown method: " + method, nil
 		}
 		h = g.hSessionTodos
+	default:
+		if h = g.agentHandler(method); h == nil {
+			return nil, "unknown method: " + method, nil
+		}
+	}
+	return h(c, p)
+}
+
+// agentHandler is the handler of a subagent, process, delegation or
+// background-tool method, or the compose handler for any other; nil when
+// the method is unknown.
+func (g *Gateway) agentHandler(method string) func(*conn, map[string]any) (any, string, func()) {
+	var h func(*conn, map[string]any) (any, string, func())
+	switch method {
 	case gateway.MethodSubagentList:
 		h = g.hSubagentList
 	case gateway.MethodSubagentTail:
@@ -1178,11 +1192,9 @@ func (g *Gateway) dispatch(c *conn, method string, p map[string]any) (any, strin
 	case gateway.MethodBackgroundTool:
 		h = g.hBackgroundTool
 	default:
-		if h = g.composeHandler(method); h == nil {
-			return nil, "unknown method: " + method, nil
-		}
+		return g.composeHandler(method)
 	}
-	return h(c, p)
+	return h
 }
 
 func (g *Gateway) hSessionList(_ *conn, p map[string]any) (any, string, func()) {

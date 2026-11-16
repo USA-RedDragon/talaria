@@ -32,9 +32,8 @@ func TestSteerOrderAfterSwitchFirefox(t *testing.T) {
 
 // The chat a test goes to and back from, and what the page's driver asks.
 const (
-	chatElsewhere = "elsewhere"
-	pokeStart     = "start"
-	pokeFinish    = "finish"
+	pokeStart  = "start"
+	pokeFinish = "finish"
 )
 
 func steerOrder(t *testing.T, bin string) {

@@ -68,7 +68,7 @@ type SubagentRow struct {
 	ChildSessionID *string  `json:"child_session_id"`
 	// WaitingOn are the commands of the background processes a "waiting" subagent will be resumed by.
 	WaitingOn []string `json:"waiting_on"`
-	// Todo is the child's to-do list at a glance (Hermes patch 0126); nil while it keeps none.
+	// The field holds the child's to-do list at a glance (Hermes patch 0126); nil while it keeps none.
 	Todo *TodoBrief `json:"todo"`
 }
 

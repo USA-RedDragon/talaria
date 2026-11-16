@@ -72,11 +72,11 @@ func (g *Gateway) hSessionTodos(_ *conn, p map[string]any) (any, string, func())
 	if s.NoTodos {
 		return nil, "unknown method: " + gateway.MethodSessionTodos, nil
 	}
-	res := map[string]any{kSessionID: s.ID, kSubagentID: nil, "running": nil, "todo_state": nil}
+	res := map[string]any{kSessionID: s.ID, kSubagentID: nil, kRunning: nil, "todo_state": nil}
 	st := s.todos
 	if id := str(p, kSubagentID); id != "" {
 		res[kSubagentID] = id
-		res["running"] = s.subagent(id) >= 0
+		res[kRunning] = s.subagent(id) >= 0
 		st = s.childTodos[id]
 	}
 	if st != nil {

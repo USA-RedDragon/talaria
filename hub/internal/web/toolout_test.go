@@ -11,8 +11,6 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/gateway/gatewaytest"
 )
 
-const titleOther = "Other"
-
 // titleWork is the title of the chat a script works in.
 const titleWork = "Work"
 const toolOutBase = "/api/sessions/pc/"
@@ -41,7 +39,7 @@ func TestSnapshotCutsToolOutputs(t *testing.T) {
 		{kRole: stepTool, kCallID: "t3", fieldName: "page_publish", kText: page},
 		{kRole: roleAssistant, kText: "finished"},
 	}})
-	e.gw.AddSession(&gatewaytest.Session{ID: "elsewhere", Title: titleOther, Live: true, StartedAt: 301, Messages: []map[string]any{
+	e.gw.AddSession(&gatewaytest.Session{ID: chatElsewhere, Title: titleOther, Live: true, StartedAt: 301, Messages: []map[string]any{
 		{kRole: roleUser, kText: "go"},
 		{kRole: roleAssistant, kText: "", kCalls: []any{call("o1", toolTerminal)}},
 		{kRole: stepTool, kCallID: "o1", fieldName: toolTerminal, kText: "secret of the other chat"},

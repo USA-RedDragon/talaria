@@ -85,7 +85,7 @@ func TestClaudeCodeAPI(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if len(fake.names) != 1 || fake.names[u.Groups[0].Label+"/acct-1"] != "work" {
+	if len(fake.names) != 1 || fake.names[u.Groups[0].Label+"/acct-1"] != chatWork {
 		t.Fatalf("names %v", fake.names)
 	}
 }

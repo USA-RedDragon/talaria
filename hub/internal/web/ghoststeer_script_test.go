@@ -51,11 +51,11 @@ func ghostSteer(t *testing.T, bin string) {
 		}
 		return ms
 	}
-	e.gw.AddSession(&gatewaytest.Session{ID: "work", Title: titleSteering, Live: true, StartedAt: 900, Messages: turns("work")})
+	e.gw.AddSession(&gatewaytest.Session{ID: chatWork, Title: titleSteering, Live: true, StartedAt: 900, Messages: turns(chatWork)})
 	// A Hermes that stored the steers where the page cannot see them.
 	e.gw.AddSession(&gatewaytest.Session{ID: "hidden", Title: "Hidden", Live: true, StartedAt: 800, Messages: turns("hidden"),
 		SteerRow: func([]string) map[string]any { return nil }})
-	e.gw.AddSession(&gatewaytest.Session{ID: "elsewhere", Title: titleOther, Live: true, StartedAt: 700, Messages: turns("elsewhere")})
+	e.gw.AddSession(&gatewaytest.Session{ID: chatElsewhere, Title: titleOther, Live: true, StartedAt: 700, Messages: turns(chatElsewhere)})
 	// The page's driver asks for a turn to start or end; the gateway does it
 	// outside the request, as Hermes does on its own.
 	type ask struct {

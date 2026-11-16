@@ -17,11 +17,13 @@ import (
 )
 
 const (
-	sOther   = "s-other"
-	subMine  = "sa-0-mine"
-	subOther = "sa-0-other"
-	procMine = "proc_mine"
-	procElse = "proc_else"
+	sOther        = "s-other"
+	subMine       = "sa-0-mine"
+	goalReadStore = "Read the store"
+	noteTouch     = "libnx touch test"
+	subOther      = "sa-0-other"
+	procMine      = "proc_mine"
+	procElse      = "proc_else"
 	// statusRunning is a running subagent's or process's status.
 	statusRunning = "running"
 	// statusWaiting is the status of a subagent that ended its turn waiting on a background job.
@@ -40,7 +42,7 @@ func activitySetup(t *testing.T) *env {
 		Processes: []gateway.ProcessRow{{SessionID: procElse, Command: "sleep 99", Status: statusRunning}}})
 	e.gw.AddSession(&gatewaytest.Session{ID: sLive, Title: liveTitle, Live: true, StartedAt: 2000,
 		Subagents: []gateway.SubagentRow{
-			{SubagentID: subMine, Goal: "Read the store", Model: ptr("qwen"), Status: ptr(statusRunning), ToolCount: ptr(3),
+			{SubagentID: subMine, Goal: goalReadStore, Model: ptr("qwen"), Status: ptr(statusRunning), ToolCount: ptr(3),
 				LastTool: ptr(toolTerm), LastPreview: ptr("go test ./..."),
 				AcceptingSteer: ptr(true), StartedAt: ptr(1700000000.5)},
 			{SubagentID: "sa-1-child", ParentID: ptr(subMine), Depth: ptr(1), Goal: "Child", Status: ptr(statusRunning),

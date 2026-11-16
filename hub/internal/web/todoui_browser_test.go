@@ -38,13 +38,13 @@ const (
 func todoPlan() []gateway.TodoItem {
 	items := []gateway.TodoItem{
 		{ID: "build", Content: "Android build of main installs on the Thor", Status: todoDone},
-		{ID: "rezero", Content: "Re:Zero to the title screen on the Thor", Status: todoProg},
-		{ID: "vulkan", Content: "Find the failing Vulkan call", Status: todoDone, Parent: "rezero"},
-		{ID: "touch", Content: "Thor touch: confirm touch reaches the guest", Status: todoProg, Parent: "rezero", Owner: subRezero,
+		{ID: todoRezero, Content: "Re:Zero to the title screen on the Thor", Status: todoProg},
+		{ID: "vulkan", Content: "Find the failing Vulkan call", Status: todoDone, Parent: todoRezero},
+		{ID: "touch", Content: "Thor touch: confirm touch reaches the guest", Status: todoProg, Parent: todoRezero, Owner: subRezero,
 			Notes: "Re:Zero doesn't read touch; checking with the libnx touch test"},
-		{ID: "apk", Content: "APK size back to ~630 MB", Status: "blocked", Parent: "rezero", Owner: "sa-apk",
+		{ID: "apk", Content: "APK size back to ~630 MB", Status: "blocked", Parent: todoRezero, Owner: "sa-apk",
 			Notes: "Blocked: needs the cold-copy change from main"},
-		{ID: "icon", Content: "Launcher icon and name", Status: todoPending, Parent: "rezero"},
+		{ID: "icon", Content: "Launcher icon and name", Status: todoPending, Parent: todoRezero},
 		{ID: "push1", Content: "relift push: batch the device file check", Status: todoPending},
 		{ID: "push2", Content: "relift push: leave romfs readable by the app", Status: todoPending},
 		{ID: "turnip", Content: "Try Turnip as the default driver", Status: "cancelled"},

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// todo.js reads the agent's to-do list: the tree, the counts and their words,
+// The script todo.js reads the agent's to-do list: the tree, the counts and their words,
 // the folding of finished items, the line above the message box and a
 // subagent's brief. testdata/todo/run.js checks them without a page.
 func TestTodoScript(t *testing.T) {

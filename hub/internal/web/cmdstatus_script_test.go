@@ -36,7 +36,7 @@ func TestCompressShowsProgress(t *testing.T) {
 	}
 	chrome := chromePath(t)
 	e := setup(t)
-	msgs := []map[string]any{{kRole: roleUser, kText: "hello"}, {kRole: roleAssistant, kText: "hi there"}}
+	msgs := []map[string]any{{kRole: roleUser, kText: textHello}, {kRole: roleAssistant, kText: "hi there"}}
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Compress me", Live: true, StartedAt: 900, Messages: msgs})
 	e.gw.AddSession(&gatewaytest.Session{ID: "s8", Title: "Busy chat", Live: true, StartedAt: 800, Running: true, Messages: msgs})
 	release := e.gw.HoldCompress()

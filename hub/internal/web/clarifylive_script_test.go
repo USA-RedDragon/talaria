@@ -43,7 +43,7 @@ func clarifyLive(t *testing.T, bin string) {
 		Prompts:     []gateway.Prompt{{Kind: gateway.PromptClarify, PromptID: "cl-1", Question: &q1, Choices: []string{"L3", "R3", "none"}, MultiSelect: true}},
 		NextPrompts: []gateway.Prompt{{Kind: gateway.PromptClarify, PromptID: "cl-2", Question: &q2, Choices: []string{}, Subagent: &who}}})
 	e.gw.AddSession(&gatewaytest.Session{ID: "away", Title: titleOther, Live: true, StartedAt: 700,
-		Messages: []map[string]any{{kRole: roleUser, kText: "hello"}, {kRole: roleAssistant, kText: "hi"}}})
+		Messages: []map[string]any{{kRole: roleUser, kText: textHello}, {kRole: roleAssistant, kText: "hi"}}})
 	prof := t.TempDir()
 	out, err := browserCmd(t.Context(), t, node, filepath.Join("testdata", "clarifylive", "run.js"), bin, e.url, prof, q1, q2).CombinedOutput()
 	if err != nil {
