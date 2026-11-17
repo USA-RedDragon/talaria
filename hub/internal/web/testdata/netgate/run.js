@@ -158,4 +158,30 @@ const fresh = (opt) => {
   g.answered();
   assert.strictEqual(n, 1);
 }
-console.log("ok");
+// The gate rings the hub by itself on the shared backoff: a drop that ends
+// is found within one step, with no caller asking.
+{
+  let pings = 0;
+  let up = false;
+  const { g, log, advance } = fresh({ ping: () => { pings++; return Promise.resolve(up); } });
+  g.failed();
+  (async () => {
+    for (let i = 0; i < 6; i++) { advance(1000); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); }
+    assert.ok(pings >= 1 && pings <= 3, "few pings in 6 s: " + pings);
+    up = true;
+    const before = pings;
+    for (let i = 0; i < 20 && !log.includes("back"); i++) { advance(1000); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); }
+    assert.ok(log.includes("back"), "found the network by itself: " + log);
+    assert.ok(pings - before <= 2);
+    // online rings at once.
+    const h = fresh({ ping: () => { pings++; return Promise.resolve(true); } });
+    h.g.failed();
+    for (let i = 0; i < 5; i++) { h.advance(30000); await Promise.resolve(); }
+    h.g.failed();
+    h.g.online();
+    h.advance(0);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    assert.ok(h.log.includes("back"), "online rings at once: " + h.log);
+    console.log("ok");
+  })().catch((e) => { console.error(e); process.exit(1); });
+}

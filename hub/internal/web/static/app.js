@@ -215,7 +215,8 @@
       if (e.network) {
         // A drop on this side: the chats shown stay, no red banner. The
         // quiet note comes from the net listener below after the grace.
-        listRetry = setTimeout(refreshList, Math.max(listBackoff.next(), window.HubNet.retryIn()));
+        // The shared gate probes by itself and calls the listener below when it is back.
+        listRetry = 0;
       } else if (e.message !== "login required") {
         banner("Could not load chats: " + e.message, true, "list");
         listRetry = setTimeout(refreshList, listBackoff.next());

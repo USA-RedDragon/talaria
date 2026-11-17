@@ -29,6 +29,8 @@ window.HubNetGate = (o) => {
   let quiet = false;
   let quietTimer = 0;
   let requests = 0;
+  let pingTimer = 0;
+  const ping = opt.ping || null;
 
   const once = [];
   const say = (what) => {
@@ -55,6 +57,21 @@ window.HubNetGate = (o) => {
     return true;
   }
 
+  // ring asks the hub once, by itself, when the shared wait is over: a drop
+  // ends within one step of the backoff, whoever else is asking.
+  function ring() {
+    pingTimer = 0;
+    if (!downAt || !ping) return;
+    probeAt = now();
+    requests++;
+    Promise.resolve().then(ping).then((ok) => { if (ok) answered(); else failed(); }, failed);
+  }
+  function plan(ms) {
+    if (!ping) return;
+    clear(pingTimer);
+    pingTimer = timer(ring, Math.max(0, ms));
+  }
+
   // failed notes a fetch that got no answer.
   function failed() {
     const t = now();
@@ -69,6 +86,7 @@ window.HubNetGate = (o) => {
       }, grace);
     }
     nextAt = t + wait.next();
+    plan(nextAt - t);
   }
 
   // answered notes any answer from the hub, whatever its status.
@@ -77,6 +95,8 @@ window.HubNetGate = (o) => {
     const wasQuiet = quiet;
     clear(quietTimer);
     quietTimer = 0;
+    clear(pingTimer);
+    pingTimer = 0;
     downAt = 0;
     nextAt = 0;
     probeAt = 0;
@@ -92,6 +112,7 @@ window.HubNetGate = (o) => {
     nextAt = 0;
     probeAt = 0;
     wait.reset();
+    plan(0);
   }
 
   return {
@@ -108,5 +129,7 @@ window.HubNetGate = (o) => {
   };
 };
 
-window.HubNet = window.HubNetGate();
+window.HubNet = window.HubNetGate({
+  ping: () => fetch("/api/me", { credentials: "same-origin", cache: "no-store" }).then(() => true, () => false),
+});
 if (window.addEventListener) window.addEventListener("online", () => window.HubNet.online());

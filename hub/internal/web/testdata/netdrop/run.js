@@ -145,7 +145,7 @@ const asked = (from) => stat.attempts - from.attempts;
     // wait of the shared backoff after the drop) and fetches the list again.
     const r0 = Date.now();
     const s0 = stat.byPath["/api/sessions"] || 0;
-    for (; (stat.byPath["/api/sessions"] || 0) <= s0 && Date.now() - r0 < 20000;) await sleep(100);
+    for (; (stat.byPath["/api/sessions"] || 0) <= s0 && Date.now() - r0 < 45000;) await sleep(100);
     assert.ok((stat.byPath["/api/sessions"] || 0) > s0, "the list is fetched again after the drop");
     console.log(`short drop: list fetched again ${Date.now() - r0} ms after the network came back`);
   }
