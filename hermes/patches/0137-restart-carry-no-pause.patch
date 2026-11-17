@@ -1,0 +1,1615 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 02:49:29 +0000
+Subject: [PATCH] fix(gateway): a per-turn restart carries foreground commands,
+ keeps the hub's socket and relays the API across pods
+
+With gateway.restart_turn_handoff_per_turn a carried turn's foreground command is no longer moved to the
+background at SIGTERM: it finishes on the old gateway with its real result. Background processes go to the next
+gateway once no carried turn is in a tool round, and the device plugin's sockets stay open until then. The hub's
+Webapp socket keeps its session past the seal, so carried turns stream on with no gap, and ends once the next
+gateway is ready and the socket is idle, its client sent a request, or a carried turn moved over. A relayed device
+leg closes with 1001 instead of 1012, and a relayed session socket only when idle. The standby opens its API port
+before it takes over and publishes it in gateway.standby; the old pod relays API connections there and holds an API
+request made between the restart and the release instead of answering 503. A prompt listed again under the same
+id is announced once.
+---
+ gateway/listener_relay.py                    |  91 +++-
+ gateway/platforms/tcp_site.py                |  55 ++
+ gateway/run_api.py                           | 142 ++++-
+ gateway/run_bootstrap.py                     |  35 ++
+ gateway/run_shutdown.py                      |  14 +-
+ gateway/session_pending_controls.py          |  24 +-
+ gateway/turn_carry.py                        | 225 ++++++--
+ tests/gateway/test_restart_carry_no_pause.py | 522 +++++++++++++++++++
+ 8 files changed, 1043 insertions(+), 65 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_no_pause.py
+
+diff --git a/gateway/listener_relay.py b/gateway/listener_relay.py
+index 028e694c..2702ac73 100644
+--- a/gateway/listener_relay.py
++++ b/gateway/listener_relay.py
+@@ -33,6 +33,15 @@ DRAIN_S = 5.0
+ CLOSE_BOUNDARY_S = 2.0
+ # A server's close frame with code 1012 (service restart): the client reconnects, now to the successor.
+ SERVICE_RESTART_CLOSE = b"\x88\x02\x03\xf4"
++# A server's close frame with code 1001 (going away), for a relayed WebSocket other than the gateway's own session
++# socket: a device's exec leg (``/api/plugins/device/ws``) parks its commands on 1001 and resumes them on the next
++# gateway, while 1012 makes the device kill them.
++GOING_AWAY_CLOSE = b"\x88\x02\x03\xe9"
++# The session socket path, whose clients (the hub, the TUI) reconnect at once on 1012.
++SESSION_SOCKET_PATH = b"/api/ws"
++# With *idle_until* (gateway.restart_turn_handoff_per_turn): a relayed session socket still open when the window ends
++# closes once the successor sent it no data frame for this long.
++IDLE_CLOSE_S = 2.0
+ # The close frame goes out this long after the other relayed connections were cut, so a client that
+ # reconnects at once does not reuse a pooled HTTP connection of the relay that is being cut.
+ CLOSE_DELAY_S = 0.5
+@@ -68,8 +77,17 @@ def standby_listener_record(home) -> dict | None:
+ def successor_target(marker: Path) -> tuple[str, int] | None:
+     """The address to relay to, from the standby marker at *marker*: None without a standby, for one
+     in this network namespace, or for a loopback address (this namespace's own)."""
++    return _marker_target(marker, "listener")
++
++
++def successor_api_target(marker: Path) -> tuple[str, int] | None:
++    """:func:`successor_target` for the API port the standby opened (``gateway.restart_turn_handoff_per_turn``)."""
++    return _marker_target(marker, "api")
++
++
++def _marker_target(marker: Path, key: str) -> tuple[str, int] | None:
+     try:
+-        record = json.loads(Path(marker).read_text(encoding="utf-8")).get("listener")
++        record = json.loads(Path(marker).read_text(encoding="utf-8")).get(key)
+         host, port, netns = str(record["host"]), int(record["port"]), record["netns"]
+         loopback = ipaddress.ip_address(host).is_loopback
+     except (OSError, ValueError, TypeError, KeyError, AttributeError):
+@@ -101,6 +119,7 @@ class _ServerFrames:
+         self.websocket: bool | None = None  # None while the head is still arriving
+         self._partial = bytearray()  # the start of a frame whose header is incomplete
+         self._skip = 0  # bytes of the current frame still to come
++        self.data_frames = 0  # text, binary and continuation frames seen (pings and pongs are not activity)
+ 
+     @property
+     def between_frames(self) -> bool:
+@@ -133,6 +152,8 @@ class _ServerFrames:
+                 total = _frame_length(self._partial)
+                 if total is None:
+                     break
++                if self._partial[0] & 0x0F < 0x8:
++                    self.data_frames += 1
+                 if len(self._partial) >= total:
+                     del self._partial[:total]
+                     continue
+@@ -159,24 +180,58 @@ def _frame_length(buf) -> int | None:
+     return header + size
+ 
+ 
++async def _pipe_from_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, request: dict) -> None:
++    """:func:`_pipe` that notes the path of the client's request line in ``request["path"]``."""
++    head = bytearray()
++    try:
++        while data := await reader.read(65536):
++            if "path" not in request:
++                head += data
++                if b"\r\n" in head or len(head) > _HEAD_LIMIT:
++                    parts = bytes(head[:head.find(b"\r\n")]).split()
++                    request["path"] = parts[1].split(b"?", 1)[0] if len(parts) > 1 else b""
++                    head.clear()
++            writer.write(data)
++            await writer.drain()
++        if writer.can_write_eof():
++            writer.write_eof()
++    except (OSError, RuntimeError):
++        pass
++
++
++def _close_frame(request: dict) -> bytes:
++    return SERVICE_RESTART_CLOSE if request.get("path") == SESSION_SOCKET_PATH else GOING_AWAY_CLOSE
++
++
+ async def _pipe_to_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+-                          closing: asyncio.Event) -> None:
++                          closing: asyncio.Event, request: dict | None = None,
++                          idle_until: float | None = None) -> None:
+     """The successor-to-client half of a relay that ends a WebSocket cleanly: once *closing* is set other
+-    connections are cut, and a WebSocket gets a close frame (1012) :data:`CLOSE_DELAY_S` later, between
+-    two frames."""
++    connections are cut, and a WebSocket gets a close frame :data:`CLOSE_DELAY_S` later, between two frames:
++    1012 (service restart) on the session socket, 1001 (going away) on any other. With *idle_until* (loop time)
++    a session socket closes only once the successor sent it no data frame for :data:`IDLE_CLOSE_S`, up to then."""
+     frames = _ServerFrames()
+     loop = asyncio.get_running_loop()
+     boundary_deadline = None
+     close_at = None
++    request = {} if request is None else request
++    last_frames, last_active = 0, loop.time()
+     try:
+         while True:
++            if frames.data_frames != last_frames:
++                last_frames, last_active = frames.data_frames, loop.time()
+             if closing.is_set():
+                 if frames.websocket is not True:
+                     return
+                 close_at = close_at or loop.time() + CLOSE_DELAY_S
++                session = request.get("path") == SESSION_SOCKET_PATH
++                if (idle_until is not None and session and loop.time() < idle_until
++                        and loop.time() - last_active < IDLE_CLOSE_S):
++                    # Busy: keep relaying; look again once it may have gone idle.
++                    close_at = max(close_at, min(idle_until, last_active + IDLE_CLOSE_S))
+                 if loop.time() >= close_at:  # until then it keeps relaying
+                     if frames.between_frames:
+-                        writer.write(SERVICE_RESTART_CLOSE)
++                        writer.write(_close_frame(request))
+                         await writer.drain()
+                         return
+                     boundary_deadline = boundary_deadline or loop.time() + CLOSE_BOUNDARY_S
+@@ -214,7 +269,7 @@ async def _pipe_to_client(reader: asyncio.StreamReader, writer: asyncio.StreamWr
+ 
+ 
+ async def _relay_connection(reader, writer, target, connect_deadline: float,
+-                            closing: asyncio.Event | None = None) -> bool:
++                            closing: asyncio.Event | None = None, idle_until: float | None = None) -> bool:
+     """Relay one accepted connection to *target*; False when the successor never listened in time.
+     With *closing*, a relayed WebSocket ends with a close frame once it is set (see :func:`relay_listener`)."""
+     loop = asyncio.get_running_loop()
+@@ -232,8 +287,10 @@ async def _relay_connection(reader, writer, target, connect_deadline: float,
+             if closing is None:
+                 await asyncio.gather(_pipe(reader, upstream_writer), _pipe(upstream_reader, writer))
+             else:
+-                to_upstream = asyncio.ensure_future(_pipe(reader, upstream_writer))
+-                to_client = asyncio.ensure_future(_pipe_to_client(upstream_reader, writer, closing))
++                request: dict = {}
++                to_upstream = asyncio.ensure_future(_pipe_from_client(reader, upstream_writer, request))
++                to_client = asyncio.ensure_future(_pipe_to_client(upstream_reader, writer, closing, request,
++                                                                  idle_until))
+                 try:
+                     await to_client  # the client's half ends with it: the close was sent, or a side ended
+                 finally:
+@@ -247,7 +304,8 @@ async def _relay_connection(reader, writer, target, connect_deadline: float,
+ 
+ 
+ async def relay_listener(sock: socket.socket, target: tuple[str, int], seconds: float, *,
+-                         close_sockets: bool = False) -> tuple[int, int]:
++                         close_sockets: bool = False, idle_until: float | None = None,
++                         connect_timeout: float | None = None) -> tuple[int, int]:
+     """Accept on the listening *sock* for *seconds* and relay each connection to *target*; then close
+     it, give the open relays :data:`DRAIN_S` and cut the rest. Returns ``(relayed, unrelayed)``:
+     connections that reached the successor and those that did not.
+@@ -255,7 +313,12 @@ async def relay_listener(sock: socket.socket, target: tuple[str, int], seconds:
+     With *close_sockets* (``gateway.restart_listener_relay_close_sockets``) a relayed WebSocket still
+     open when the window ends gets a close frame with code 1012 (service restart) between two of the
+     successor's frames instead of a cut connection, so its client reconnects at once, now straight to
+-    the successor."""
++    the successor. A WebSocket other than the session socket gets 1001 (going away) instead.
++
++    With *idle_until* (loop time, ``gateway.restart_turn_handoff_per_turn``) a relayed session socket open when the
++    window ends is closed only once idle (:data:`IDLE_CLOSE_S` without a data frame from the successor), up to then:
++    its client's reconnect then shows no pause. With *connect_timeout* each connection waits at most that long for
++    the successor to accept it, instead of up to the end of the window."""
+     loop = asyncio.get_running_loop()
+     deadline = loop.time() + seconds
+     tasks: set[asyncio.Task] = set()
+@@ -265,8 +328,12 @@ async def relay_listener(sock: socket.socket, target: tuple[str, int], seconds:
+     async def handle(reader, writer):
+         task = asyncio.current_task()
+         tasks.add(task)
++        connect_deadline = deadline + DRAIN_S
++        if connect_timeout is not None:
++            connect_deadline = min(connect_deadline, loop.time() + connect_timeout)
+         try:
+-            counts[0 if await _relay_connection(reader, writer, target, deadline + DRAIN_S, closing) else 1] += 1
++            relayed = await _relay_connection(reader, writer, target, connect_deadline, closing, idle_until)
++            counts[0 if relayed else 1] += 1
+         except Exception:
+             counts[1] += 1
+             logger.debug("Listener relay connection failed", exc_info=True)
+@@ -283,6 +350,8 @@ async def relay_listener(sock: socket.socket, target: tuple[str, int], seconds:
+         if tasks:
+             # A WebSocket finishing its frame before the close may take up to CLOSE_BOUNDARY_S.
+             drain = DRAIN_S if closing is None else max(DRAIN_S, CLOSE_DELAY_S + CLOSE_BOUNDARY_S + 0.5)
++            if closing is not None and idle_until is not None:
++                drain = max(drain, idle_until - loop.time() + CLOSE_BOUNDARY_S + 0.5)
+             _done, pending = await asyncio.wait(set(tasks), timeout=drain)
+             for task in pending:
+                 task.cancel()
+diff --git a/gateway/platforms/tcp_site.py b/gateway/platforms/tcp_site.py
+index 77c9f698..646e8cde 100644
+--- a/gateway/platforms/tcp_site.py
++++ b/gateway/platforms/tcp_site.py
+@@ -17,6 +17,51 @@ from gateway.platforms.shared_ingress import is_wildcard_host
+ 
+ logger = logging.getLogger(__name__)
+ 
++# ``gateway.restart_turn_handoff_per_turn``: listening sockets a standby gateway in its own network namespace (the
++# next pod of a rolling update) opened before it owns the profile, by ``(host, port)``. Connections queue in the
++# backlog until the adapter serves them (:func:`start_tcp_site`), instead of being refused while it starts.
++_prebound: dict[tuple[str, int], socket.socket] = {}
++
++
++def prebind(host: Optional[str], port: int) -> bool:
++    """Open a listening socket on ``host:port`` for :func:`start_tcp_site` to serve later; False when the address
++    is taken (the gateway being replaced holds it in this network namespace) or cannot be bound."""
++    key = (host or "", int(port))
++    if not port or key in _prebound:
++        return key in _prebound
++    try:
++        infos = socket.getaddrinfo(host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
++        family, kind, proto, _name, addr = infos[0]
++        sock = socket.socket(family, kind, proto)
++    except OSError:
++        return False
++    try:
++        if sys.platform != "darwin":
++            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++        sock.bind(addr)
++        sock.listen(256)
++    except OSError:
++        sock.close()
++        return False
++    sock.setblocking(False)
++    _prebound[key] = sock
++    return True
++
++
++def prebound(host: Optional[str], port: int) -> bool:
++    return (host or "", int(port)) in _prebound
++
++
++def close_prebound() -> None:
++    """Close the sockets :func:`prebind` opened and no adapter took (a standby that never took over)."""
++    while _prebound:
++        _key, sock = _prebound.popitem()
++        try:
++            sock.close()
++        except OSError:
++            pass
++
++
+ def has_live_listener(host: str, port: int) -> bool:
+     """Blocking probe: True when something accepts connections on ``host:port``. Refused = nobody listens;
+     any other failure (timeout, unroutable) is treated as live so the caller stays exclusive."""
+@@ -47,6 +92,16 @@ async def start_tcp_site(runner: web.BaseRunner, host: Optional[str], port: int,
+     foreign listener on a non-loopback interface could not be probed, so it must keep winning."""
+     from aiohttp import web
+ 
++    sock = _prebound.pop((host or "", int(port)), None)
++    if sock is not None:
++        site = web.SockSite(runner, sock)
++        try:
++            await site.start()
++        except OSError:
++            sock.close()
++            raise
++        logger.info("[%s] serving %s:%d on the socket the standby opened", log_tag, host, port)
++        return site
+     exclusive = sys.platform == "darwin"
+     site = web.TCPSite(runner, host, port, reuse_address=False if exclusive else None)
+     try:
+diff --git a/gateway/run_api.py b/gateway/run_api.py
+index 3e0f32f9..c200d3eb 100644
+--- a/gateway/run_api.py
++++ b/gateway/run_api.py
+@@ -381,16 +381,21 @@ async def stop_gateway_api(handle: GatewayAPIHandle) -> None:
+ 
+ 
+ async def relay_gateway_api(handle: GatewayAPIHandle, target: tuple[str, int], seconds: float, *,
+-                            keep_connections: bool = False, close_sockets: bool = False) -> tuple[int, int]:
++                            keep_connections: bool = False, close_sockets: bool = False,
++                            keep_until=None, idle_until: float | None = None) -> tuple[int, int]:
+     """``gateway.restart_listener_relay_seconds``: stop serving on the listener but keep its socket
+     open, so connections that arrive meanwhile wait in its backlog, then relay what it accepts to the
+     successor at *target* for *seconds* (``gateway.listener_relay.relay_listener``).
+ 
+     With *keep_connections* (``gateway.restart_listener_hold_seconds``) the listener only stops
+     accepting: the connections it has keep running, forwarding their held and later requests to the
+-    successor, and the server stops once the relay window is over."""
++    successor, and the server stops once the relay window is over and *keep_until* (an awaitable, see
++    :func:`stop_accepting_until`) completed. *idle_until* (loop time): relayed WebSockets still open when the
++    window ends are closed once idle, up to then (``listener_relay.relay_listener``)."""
+     from gateway.listener_relay import relay_listener
+     closing = {"close_sockets": True} if close_sockets else {}  # gateway.restart_listener_relay_close_sockets
++    if idle_until is not None:
++        closing["idle_until"] = idle_until
+     sock = handle.socket.dup()
+     if keep_connections:
+         try:
+@@ -402,6 +407,8 @@ async def relay_gateway_api(handle: GatewayAPIHandle, target: tuple[str, int], s
+         try:
+             return await relay_listener(sock, target, seconds, **closing)
+         finally:
++            if keep_until is not None:
++                await keep_until
+             await stop_gateway_api(handle)
+     try:
+         await stop_gateway_api(handle)
+@@ -411,6 +418,17 @@ async def relay_gateway_api(handle: GatewayAPIHandle, target: tuple[str, int], s
+     return await relay_listener(sock, target, seconds, **closing)
+ 
+ 
++async def stop_accepting_until(handle: GatewayAPIHandle, keep_until) -> None:
++    """Stop accepting on the listener, let its connections run until *keep_until* completed, then stop it
++    (``gateway.restart_turn_handoff_per_turn``: a carrier's device connections outlive the release)."""
++    for server in list(getattr(handle.server, "servers", None) or ()):
++        server.close()
++    try:
++        await keep_until
++    finally:
++        await stop_gateway_api(handle)
++
++
+ def seal_gateway_api(handle: GatewayAPIHandle) -> None:
+     """``gateway.restart_listener_handover``, where the stop would close the listener: from here it
+     serves only the handover's reads and refuses every other request and socket, and every open
+@@ -422,9 +440,18 @@ def seal_gateway_api(handle: GatewayAPIHandle) -> None:
+     from gateway.drain_control import restart_hold_configured
+     hold = restart_hold_configured(getattr(handle.api, "runner", None))
+     state = getattr(handle.server, "server_state", None)
++    from gateway import turn_carry
++    carrying = turn_carry.carrying(getattr(handle.api, "runner", None))
+     for connection in list(getattr(state, "connections", ())):
+         scope = getattr(connection, "scope", None) or {}
++        if carrying and turn_carry.keeps_socket(handle.api.runner, scope):
++            continue  # a device connection a carried turn's command or a background process still uses
+         parked = scope.get(PARKED_SCOPE_KEY)
++        if parked is not None and carrying and scope.get(KEPT_SCOPE_KEY) is not None:
++            # The carried turns' frames keep reaching this client without a pause (gateway.restart_turn_handoff_per_turn).
++            scope[KEPT_SCOPE_KEY].set()
++            handle.api.keep_until_idle(scope)
++            continue
+         if parked is not None:
+             # gateway.restart_socket_close_delay_seconds: the socket's session ends now, as it would
+             # here, but its connection stays open until the successor is ready.
+@@ -457,6 +484,16 @@ async def end_gateway_api_reads(runner, handle: GatewayAPIHandle, timeout: float
+     runner._listener_handover = HANDOVER_HEALTH
+     # Held requests do not use the stores; they wait for the successor.
+     tasks = set(getattr(handle.api, "inflight", ()) or ()) - set(getattr(handle.api, "held", ()) or ())
++    from gateway import turn_carry
++    if turn_carry.carrying(runner):
++        # A carrier's device sockets and kept Webapp sockets run on (gateway.restart_turn_handoff_per_turn).
++        scopes = getattr(handle.api, "scopes", None) or {}
++
++        def kept(task) -> bool:
++            scope = scopes.get(task) or {}
++            kept_socket = scope.get(KEPT_SCOPE_KEY)
++            return turn_carry.keeps_socket(runner, scope) or (kept_socket is not None and kept_socket.is_set())
++        tasks = {task for task in tasks if not kept(task)}
+     if tasks:
+         _done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+         for task in pending:
+@@ -496,6 +533,15 @@ HELD_SCOPE_KEY = 'hermes.listener_held'
+ #: ``gateway.restart_socket_close_delay_seconds``: the scope of a Webapp socket kept through the restart
+ #: wait carries the event that ends its session where the stop would close its connection.
+ PARKED_SCOPE_KEY = 'hermes.socket_parked'
++#: ``gateway.restart_turn_handoff_per_turn``: set when a carrier keeps a parked socket's session past the seal.
++KEPT_SCOPE_KEY = 'hermes.socket_kept'
++#: ``[loop time]`` of the last frame a kept socket sent its client.
++KEPT_SENT_KEY = 'hermes.socket_kept_sent'
++#: Set when the client of a kept socket sent a request (it is answered on its next connection).
++KEPT_ASKED_KEY = 'hermes.socket_kept_asked'
++#: A kept socket ends once it sent nothing for this long (after the next gateway is ready): its client reconnects
++#: between two of its frames, so the carried turns it shows do not pause.
++KEPT_IDLE_S = 1.5
+ #: Close codes of a socket that ends because its gateway goes away; a parked socket sends 1012 for them.
+ _RESTART_CLOSE_CODES = frozenset({1000, 1001, 1012, 1013})
+ _READY_POLL_S = 0.05
+@@ -519,7 +565,10 @@ async def await_successor_ready(target, deadline: float) -> bool:
+         try:
+             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port),
+                                                     max(0.01, min(1.0, deadline - loop.time())))
+-            writer.write(b'GET /api/health HTTP/1.1\r\nHost: successor\r\nConnection: close\r\n\r\n')
++            # The address dialed as the Host: a loopback listener refuses any other name (400), and the
++            # carrier's same-namespace probe (gateway.restart_turn_handoff_per_turn) dials one.
++            authority = f'[{host}]:{port}' if ':' in str(host) else f'{host}:{port}'
++            writer.write(f'GET /api/health HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n'.encode())
+             await writer.drain()
+             status = await asyncio.wait_for(reader.readline(), max(0.01, deadline - loop.time()))
+             if status.split(b' ')[1:2] == [b'200']:
+@@ -575,6 +624,15 @@ class GatewayRuntimeAPI:
+         self.app, self.runner, self.web_app = app, runner, web_app
+         #: Tasks of the requests in progress (``end_gateway_api_reads`` waits for them).
+         self.inflight: set = set()
++        #: The scope of each request in progress (``gateway.restart_turn_handoff_per_turn``: a carrier keeps its
++        #: device plugin sockets through the seal until its processes were handed over).
++        self.scopes: dict = {}
++        #: ``gateway.restart_turn_handoff_per_turn``: where to ask whether the next gateway is ready when no
++        #: relay target is known (it binds this listener's own address in this network namespace).
++        self.ready_probe = None
++        self.kept_endings: set = set()
++        self._kept_tasks: set = set()
++        self.kept_release = asyncio.Event()
+         #: Set by :func:`seal_gateway_api`: only a restart stop's handover reads are served.
+         self.sealed = False
+         #: ``gateway.restart_listener_hold_seconds``: tasks of the requests held for the successor,
+@@ -591,10 +649,12 @@ class GatewayRuntimeAPI:
+     async def __call__(self, scope, receive, send):
+         task = asyncio.current_task()
+         self.inflight.add(task)
++        self.scopes[task] = scope
+         try:
+             return await self._call(scope, receive, send)
+         finally:
+             self.inflight.discard(task)
++            self.scopes.pop(task, None)
+ 
+     def forward_to(self, target, seconds: float = 0.0) -> None:
+         """The profile is released: held requests, and every later one, go to the successor at
+@@ -605,7 +665,60 @@ class GatewayRuntimeAPI:
+             self._released.set()
+         delay = socket_close_delay(self.runner)
+         if delay > 0 and self._settle_task is None:
+-            self._settle_task = asyncio.create_task(self._settle_successor(self.successor or None, delay))
++            self._settle_task = asyncio.create_task(
++                self._settle_successor(self.successor or self.ready_probe or None, delay))
++
++    def keep_until_idle(self, scope) -> None:
++        """``gateway.restart_turn_handoff_per_turn``: a kept socket's session ends once the next gateway is ready
++        (the close gate) and then the first of: the socket sent nothing for :data:`KEPT_IDLE_S`; its client sent a
++        request; a carried turn moved to the next gateway (:meth:`end_kept`, whose frames its client gets only
++        there); the relay window (``gateway.restart_listener_relay_seconds``) passed; the hold's bound passed. Its
++        close frame follows as for any parked socket."""
++        ending = scope[PARKED_SCOPE_KEY]
++        self.kept_endings.add(ending)
++        loop = asyncio.get_running_loop()
++        config = getattr(self.runner, 'config', None)
++        bound = float(getattr(config, 'restart_listener_hold_seconds', 0) or 0)
++        window = float(getattr(config, 'restart_listener_relay_seconds', 0) or 0)
++        started = loop.time()
++
++        asked = scope[KEPT_ASKED_KEY]
++
++        async def end():
++            try:
++                await asyncio.wait_for(self._close_gate().wait(), max(0.0, bound))
++                last = loop.time()
++                stop_at = min(started + bound, last + max(window, KEPT_IDLE_S))
++                while not ending.is_set() and not self.kept_release.is_set() and not asked.is_set():
++                    now = loop.time()
++                    quiet = now - scope[KEPT_SENT_KEY][0]
++                    if quiet >= KEPT_IDLE_S or now >= stop_at:
++                        break
++                    wakes = {asyncio.ensure_future(self.kept_release.wait()), asyncio.ensure_future(asked.wait())}
++                    try:
++                        await asyncio.wait(wakes, timeout=min(KEPT_IDLE_S - quiet, stop_at - now) + 0.01,
++                                           return_when=asyncio.FIRST_COMPLETED)
++                    finally:
++                        for wake in wakes:
++                            wake.cancel()
++            except (TimeoutError, asyncio.CancelledError):
++                pass
++            finally:
++                ending.set()
++                self.kept_endings.discard(ending)
++        task = asyncio.ensure_future(end())
++        self._kept_tasks.add(task)
++        task.add_done_callback(self._kept_tasks.discard)
++
++    def end_kept(self) -> None:
++        """Every kept socket ends once the close gate opened (a carried turn moved to the next gateway)."""
++        self.kept_release.set()
++
++    def end_kept_now(self) -> None:
++        """The carry is over: every kept socket's session ends now (before the stores close)."""
++        self.kept_release.set()
++        for ending in list(self.kept_endings):
++            ending.set()
+ 
+     def _close_gate(self) -> asyncio.Event:
+         if self._sockets_may_close is None:
+@@ -630,6 +743,14 @@ class GatewayRuntimeAPI:
+         goes out as 1012. Frames the client sends meanwhile are never read."""
+         ending = asyncio.Event()
+         scope[PARKED_SCOPE_KEY] = ending
++        # gateway.restart_turn_handoff_per_turn: set instead of *ending* at the seal of a carrier. The socket keeps
++        # its session, so the frames of the turns the carrier still runs reach the client without a pause, until
++        # :meth:`keep_until_idle` ends it. A frame the client sends meanwhile is not served: the session ends as soon
++        # as the next gateway is ready (the client sends the request again on its next connection, there).
++        kept = asyncio.Event()
++        scope[KEPT_SCOPE_KEY] = kept
++        scope[KEPT_SENT_KEY] = [asyncio.get_running_loop().time()]
++        scope[KEPT_ASKED_KEY] = asyncio.Event()
+         client_left = False
+         runner = self.runner
+ 
+@@ -649,7 +770,13 @@ class GatewayRuntimeAPI:
+                     message = step.result()
+                     if message.get('type') == 'websocket.disconnect' and not stopping():
+                         client_left = True
+-                    return message
++                    if not kept.is_set() or message.get('type') == 'websocket.disconnect':
++                        return message
++                    # A request on a kept socket goes to the next gateway: the session ends once it is ready (the
++                    # carried turns' frames reach the client until then).
++                    scope[KEPT_ASKED_KEY].set()
++                    await ending.wait()
++                    return {'type': 'websocket.disconnect', 'code': 1012}
+                 step.cancel()
+                 await asyncio.wait({step})
+             return {'type': 'websocket.disconnect', 'code': 1012}
+@@ -659,6 +786,8 @@ class GatewayRuntimeAPI:
+                 code = message.get('code') or 1000
+                 await self._await_close_gate(scope)
+                 message = {**message, 'code': 1012 if code in _RESTART_CLOSE_CODES else code}
++            elif kept.is_set() and message.get('type') == 'websocket.send':
++                scope[KEPT_SENT_KEY][0] = asyncio.get_running_loop().time()
+             await send(message)
+ 
+         return receive_parked, send_parked
+@@ -807,6 +936,9 @@ class GatewayRuntimeAPI:
+             # held one (a kanban worker polling its card) would otherwise pin the drain to its cap.
+             # With gateway.restart_listener_hold_seconds a Webapp socket opened before the wait is kept
+             # too: it already passed the same gate a dial-back in the wait would.
++            kept_socket = scope.get(KEPT_SCOPE_KEY)
++            if kept_socket is not None and kept_socket.is_set():
++                return message  # a carrier's kept socket (the parked receive holds it; never served)
+             if ((descriptor['state'] != 'ready' or self.runner._draining) and not allow_draining
+                     and not ((admitted_in_wait or kept_in_wait) and restart_wait_open(self.runner))):
+                 return {'type': 'websocket.disconnect', 'code': 1013}
+diff --git a/gateway/run_bootstrap.py b/gateway/run_bootstrap.py
+index e3ad8810..dcaa7e3d 100644
+--- a/gateway/run_bootstrap.py
++++ b/gateway/run_bootstrap.py
+@@ -747,6 +747,37 @@ def _prewarm_before_runtime_lock(config=None) -> None:
+         logger.debug("Prewarm dashboard import failed", exc_info=True)
+ 
+ 
++def _prebind_api_listener(config) -> None:
++    """``gateway.restart_turn_handoff_per_turn``: a standby in its own network namespace (the next pod) opens the API
++    server's port now, so the gateway it replaces can relay API connections to it from the takeover on, and they
++    wait in the backlog until the API server serves them instead of being refused or dropped meanwhile. In the
++    same namespace the port is taken and nothing is opened."""
++    if config is None or not getattr(config, "restart_turn_handoff_per_turn", False):
++        return
++    try:
++        from gateway.config import Platform
++        platform_config = (getattr(config, "platforms", None) or {}).get(Platform.API_SERVER)
++        if platform_config is None or not getattr(platform_config, "enabled", False):
++            return
++        from gateway.platforms.api_server import listen_address
++        from gateway.platforms.tcp_site import prebind
++        host, port = listen_address(getattr(platform_config, "extra", None) or {})
++        if prebind(host, port):
++            logger.info("Standby opened the API port %s:%d; it serves once it took over", host, port)
++    except Exception:
++        logger.debug("Could not open the API port early", exc_info=True)
++
++
++def _standby_api_record(listener) -> Optional[dict]:
++    """The API port the standby opened (``_prebind_api_listener``), at the address of its listener record."""
++    if not listener:
++        return None
++    from gateway.platforms import tcp_site
++    for (_host, port) in list(tcp_site._prebound):
++        return {"host": listener["host"], "port": port, "netns": listener["netns"]}
++    return None
++
++
+ def _host_lock_held_by_predecessor(home) -> bool:
+     """True while another process holds the host gateway lock for this same home: the gateway this
+     standby replaces, between releasing ``gateway.lock`` and exiting."""
+@@ -814,6 +845,9 @@ def _write_standby_marker(path) -> None:
+         listener = standby_listener_record(path.parent)
+         if listener is not None:
+             record["listener"] = listener
++            api = _standby_api_record(listener)
++            if api is not None:
++                record["api"] = api  # gateway.restart_turn_handoff_per_turn: where the API port relays to
+     except Exception:
+         logger.debug("Standby listener address unknown", exc_info=True)
+     try:
+@@ -848,6 +882,7 @@ async def _start_gateway_wait_for_runtime_lock(profile_homes, wait_s: float, con
+     started = time.monotonic()
+     deadline = started + wait_s
+     _prewarm_before_runtime_lock(config)
++    _prebind_api_listener(config)
+     marker = launch_home / STANDBY_MARKER
+     waited = False
+     touched = 0.0
+diff --git a/gateway/run_shutdown.py b/gateway/run_shutdown.py
+index a5bc8126..caee0da2 100644
+--- a/gateway/run_shutdown.py
++++ b/gateway/run_shutdown.py
+@@ -2052,10 +2052,14 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+                 or getattr(self, "_handover_listener_closing", False)):
+             return
+         self._handover_listener_closing = True
++        from gateway import turn_carry
+         from gateway.drain_control import restart_hold_configured
+-        from gateway.run_api import relay_gateway_api, stop_gateway_api
++        from gateway.run_api import relay_gateway_api, stop_accepting_until, stop_gateway_api
+         seconds = float(getattr(getattr(self, "config", None), "restart_listener_relay_seconds", 0) or 0)
+         hold = restart_hold_configured(self)
++        # gateway.restart_turn_handoff_per_turn: a carrier's device connections stay until its processes were handed
++        # over, and the WebSockets it relays end only when idle, while it carries.
++        keep_until, idle_until = turn_carry.listener_keep(self)
+         api = getattr(handle, "api", None)
+         if hold and api is not None and hasattr(api, "forward_to"):
+             # gateway.restart_listener_hold_seconds: what the stop held goes to the successor now.
+@@ -2065,10 +2069,14 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+             # gateway.restart_listener_relay_close_sockets: relayed WebSockets end with a close frame.
+             closing = ({"close_sockets": True} if getattr(getattr(self, "config", None),
+                                                           "restart_listener_relay_close_sockets", False) else {})
+-            relayed, unrelayed = await relay_gateway_api(handle, relay_to, seconds, keep_connections=hold,
+-                                                         **closing)
++            if keep_until is not None:
++                closing.update(keep_until=keep_until, idle_until=idle_until)
++            relayed, unrelayed = await relay_gateway_api(
++                handle, relay_to, seconds, keep_connections=hold or keep_until is not None, **closing)
+             logger.info("Listener relayed %d connection(s) to the next gateway at %s:%d in %.1fs (%d not reached)",
+                         relayed, relay_to[0], relay_to[1], time.monotonic() - started, unrelayed)
++        elif keep_until is not None:
++            await stop_accepting_until(handle, keep_until)
+         else:
+             await stop_gateway_api(handle)
+         self._listener_handover = None
+diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
+index 6c4ae3f4..16d90a61 100644
+--- a/gateway/session_pending_controls.py
++++ b/gateway/session_pending_controls.py
+@@ -41,6 +41,10 @@ def _clarify_record(entry, prompt):
+     return record
+ 
+ 
++# Fields of an announced prompt that may change while it stays the same question.
++_ANNOUNCE_VOLATILE = frozenset({'execution_generation', 'timeout_s'})
++
++
+ class PendingControls:
+     def __init__(self, events):
+         self.events = events
+@@ -49,6 +53,10 @@ class PendingControls:
+         # Prompts of subagents: bound to the session, not to the turn that was running when they were raised, so
+         # a background subagent's approval or question outlives its parent's turn.
+         self.background = set()
++        # What each open prompt was last announced to viewers as (``*.request``), until it settles: a prompt listed
++        # again under the same id (a handed-over turn's prompt restored, relayed from the carrier, then asked again
++        # by the resumed turn) is announced once.
++        self.announced = {}
+ 
+     def is_background(self, prompt_id):
+         with self.events.lock:
+@@ -98,7 +106,7 @@ class PendingControls:
+             self.pending[prompt_id] = (route, prompt)
+             if background:
+                 self.background.add(prompt_id)
+-            self.events.publish(session_id, prompt, event_type='approval.request')
++            self.announce(session_id, prompt, 'approval.request')
+ 
+     def register_clarify(self, session_id, generation, entry, *, timeout_s=None, background=False):
+         from gateway.run import _redact_approval_command
+@@ -115,7 +123,18 @@ class PendingControls:
+             self.pending[entry.clarify_id] = (entry, prompt)
+             if background:
+                 self.background.add(entry.clarify_id)
+-            self.events.publish(session_id, prompt, event_type="clarify.request")
++            self.announce(session_id, prompt, "clarify.request")
++
++    def announce(self, session_id, prompt, event_type):
++        """Publish *prompt* as *event_type*, unless the same prompt was announced under its id and has not settled
++        since (its generation and remaining time may differ: a viewer's card answers it either way)."""
++        with self.events.lock:
++            key = {k: v for k, v in prompt.items() if k not in _ANNOUNCE_VOLATILE}
++            if self.announced.get(prompt['prompt_id']) == key:
++                return False
++            self.announced[prompt['prompt_id']] = key
++            self.events.publish(session_id, prompt, event_type=event_type)
++            return True
+ 
+     def snapshot(self, session_id, generation):
+         with self.events.lock:
+@@ -127,6 +146,7 @@ class PendingControls:
+                     del self.pending[prompt_id]
+                     self.background.discard(prompt_id)
+                     self.remote_responders.pop(prompt_id, None)
++                    self.announced.pop(prompt_id, None)
+                     settled = {'prompt_id': prompt_id, 'execution_generation': prompt['execution_generation']}
+                     if prompt['kind'] == 'clarify':
+                         settled.update(_clarify_record(route, prompt))
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index 4b9400c0..87b6966c 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -55,10 +55,9 @@ RELAY_DIR = ".turn-carry"
+ POLL_S = 0.05
+ # How long the frames of a turn that ended on the carrier are still relayed after its settlement.
+ ENDING_RELAY_S = 5.0
+-# How long the carrier waits, before it releases the profile, for the tool rounds of its turns to end (a foreground
+-# terminal command was asked to move to the background first). A tool call on a device connection must not be in
+-# flight when that connection moves to the next gateway; any other tool call still running after this goes on here.
+-YIELD_SETTLE_S = 5.0
++# The frame the carrier writes once it handed its background processes over during the carry: the next gateway
++# reattaches them at once (``_reattach_processes``).
++PROCESSES_HANDED = "turn_carry.processes_handed"
+ # Platforms whose running turns can be carried: their viewers reach the next gateway (LOCAL) or their run
+ # finishes on its own HTTP connection here (API_SERVER). A turn of any other platform makes the restart fall back
+ # to restart_turn_handoff_boundary's single handover.
+@@ -153,6 +152,10 @@ class _Carry:
+         self.control_offset = 0
+         self.lock_fd = None
+         self.api_relay = None
++        # Set once the background processes went to the next gateway; until then the device connections they and
++        # the carried turns' foreground commands use stay open here.
++        self.processes_handed = asyncio.Event()
++        self.processes_deferred = False
+ 
+ 
+ def _platform(turn) -> str:
+@@ -203,6 +206,8 @@ async def carry_restart(runner) -> bool:
+     from gateway.run import get_hermes_home
+     carry = _Carry(runner, authority, turns, get_hermes_home())
+     runner._turn_carry = carry
++    global _carrying
++    _carrying = True  # API requests wait for the release, then go to the next gateway (api_forward_middleware)
+     for turn in turns:
+         if _platform(turn) != "api_server":  # an API turn finishes here, on its own HTTP connection
+             boundary.request(turn.agent)
+@@ -214,36 +219,51 @@ async def carry_restart(runner) -> bool:
+                 logger.warning("Could not hand off the parked turn of %s", turn.session_id, exc_info=True)
+     from gateway.drain_control import begin_restart_drain
+     begin_restart_drain(runner)
+-    await _yield_tools(carry)
+-    await _hand_off_background(runner)
+-    await _stop_cron(runner)
+-    await _disconnect_messaging(runner)
+-    await _record(carry)
+-    _mirror(carry)
+-    await _release(carry)
+-    await _carry_turns(carry)
++    # A foreground tool call of a carried turn runs on to its end here (terminal.auto_background_seconds still
++    # applies), so its result is the real one. Background processes go to the next gateway once no carried turn is
++    # in a tool round (``_hand_off_processes_when_idle``): a device command and the next gateway cannot share one
++    # device connection, and the process handoff ends it.
++    try:
++        await _hand_off_background(runner)
++        await _hand_off_processes_when_idle(carry)
++        await _stop_cron(runner)
++        await _disconnect_messaging(runner)
++        await _record(carry)
++        _mirror(carry)
++        await _release(carry)
++        await _carry_turns(carry)
++    finally:
++        _carrying = False  # released (requests go on to the next gateway) or the carry failed (the stop goes on)
+     return True
+ 
+ 
+-async def _yield_tools(carry) -> None:
+-    """A foreground terminal command of a carried turn moves to the background now: its device or remote shell
+-    reconnects to the next gateway, which reattaches the process (``terminal.process_handoff_backends``)."""
+-    asked = []
+-    for turn in carry.turns.values():
+-        request = getattr(turn.agent, "request_tool_yield", None)
+-        if callable(request):
+-            try:
+-                if request():
+-                    asked.append(turn.agent)
+-            except Exception:
+-                logger.debug("Tool yield request failed", exc_info=True)
+-    deadline = time.monotonic() + YIELD_SETTLE_S
+-    while time.monotonic() < deadline:
+-        if not any(getattr(t.agent, "_executing_tools", False) for t in carry.turns.values()):
+-            break
+-        await asyncio.sleep(POLL_S)
+-    if asked:
+-        logger.info("Restart: asked the tool calls of %d carried turn(s) to move to the background", len(asked))
++def _in_tool_round(carry) -> bool:
++    """Whether a carried turn still runs a tool call here."""
++    return any(aid not in carry.done and getattr(t.agent, "_executing_tools", False) for aid, t in carry.turns.items())
++
++
++async def _hand_off_processes_when_idle(carry) -> bool:
++    """Hand the background processes (``terminal.process_handoff_backends``) to the next gateway, unless a carried
++    turn is in a tool round: its foreground command may run on a device whose one connection the handoff closes.
++    The carry loop retries at each poll. True once handed off (or nothing was to hand off)."""
++    if carry.processes_handed.is_set():
++        return True
++    if _in_tool_round(carry) and time.monotonic() < carry.started + ceiling_seconds(carry.runner):
++        if not carry.processes_deferred:
++            carry.processes_deferred = True
++            logger.info("Restart: background processes go to the next gateway once the carried turns' tool calls "
++                        "end (gateway.restart_turn_handoff_per_turn)")
++        return False
++    from gateway.run_shutdown import GatewayShutdownMixin
++    try:
++        await GatewayShutdownMixin._stop_hand_off_processes(carry.runner)
++    except Exception:
++        logger.warning("Background process handoff during the carry failed", exc_info=True)
++    carry.processes_handed.set()
++    if carry.events is not None:
++        # The next gateway reattaches what was handed over now instead of once this process exited.
++        _write_frame(carry, {"type": PROCESSES_HANDED, "session_id": ""})
++    return True
+ 
+ 
+ async def _disconnect_messaging(runner) -> None:
+@@ -264,12 +284,10 @@ async def _hand_off_background(runner) -> None:
+     from gateway.run_shutdown import GatewayShutdownMixin
+     ctx = GatewayShutdownMixin._StopContext(deferred_count=lambda: 0)
+     ctx.started_at = time.monotonic()
+-    for step in (lambda: GatewayShutdownMixin._stop_hand_off_delegations(runner, ctx),
+-                 lambda: GatewayShutdownMixin._stop_hand_off_processes(runner)):
+-        try:
+-            await step()
+-        except Exception:
+-            logger.warning("Background handoff before the carry failed", exc_info=True)
++    try:
++        await GatewayShutdownMixin._stop_hand_off_delegations(runner, ctx)
++    except Exception:
++        logger.warning("Subagent handoff before the carry failed", exc_info=True)
+ 
+ 
+ async def _stop_cron(runner) -> None:
+@@ -342,10 +360,78 @@ async def _release(carry) -> None:
+     if getattr(runner, "_listener_handover", None):
+         ctx = GatewayShutdownMixin._StopContext(deferred_count=lambda: 0)
+         ctx.started_at = time.monotonic()
++        if relay_to is None:
++            _ready_probe(runner)
+         await GatewayShutdownMixin._stop_end_listener_reads(runner, ctx)
+         runner._carry_listener_task = asyncio.ensure_future(runner.stop_handover_listener(relay_to))
+ 
+ 
++def carrying(runner) -> bool:
++    """This gateway carries its turns for the next gateway (from the restart until it exits)."""
++    return getattr(runner, "_turn_carry", None) is not None
++
++
++def keeps_socket(runner, scope) -> bool:
++    """A WebSocket of a plugin in ``gateway.restart_wait_plugin_sockets`` (the device plugin's exec legs) stays open
++    on the carrier until its background processes were handed over: a carried turn's foreground command, or a
++    process not handed over yet, still runs on it."""
++    carry = getattr(runner, "_turn_carry", None)
++    if carry is None or carry.processes_handed.is_set() or (scope or {}).get("type") != "websocket":
++        return False
++    names = getattr(getattr(runner, "config", None), "restart_wait_plugin_sockets", None) or ()
++    path = str(scope.get("path") or "")
++    return any(path.startswith(f"/api/plugins/{name}/") for name in names)
++
++
++# How long past the relay window a WebSocket the carrier's listener relays may stay open waiting to be idle before it
++# is closed anyway (between two frames).
++IDLE_CLOSE_MAX_S = 120.0
++
++
++def listener_keep(runner):
++    """``(keep_until, idle_until)`` for the carrier's listener stop: an awaitable that completes once the background
++    processes were handed over (None when they were), and the loop time up to which a relayed WebSocket waits to be
++    idle before its close. ``(None, None)`` outside a carry."""
++    carry = getattr(runner, "_turn_carry", None)
++    if carry is None or not _released:
++        return None, None
++    left = max(0.0, carry.started + ceiling_seconds(runner) - time.monotonic())
++    api = getattr(getattr(runner, "session_api", None), "api", None)
++
++    def kept_open() -> bool:
++        from gateway.run_api import KEPT_SCOPE_KEY
++        return any((scope.get(KEPT_SCOPE_KEY) is not None and scope[KEPT_SCOPE_KEY].is_set())
++                   for scope in list((getattr(api, "scopes", None) or {}).values()))
++
++    async def kept():
++        deadline = time.monotonic() + left
++        try:
++            await asyncio.wait_for(carry.processes_handed.wait(), left)
++        except TimeoutError:
++            pass
++        # The kept sockets end once the next gateway is ready and they are idle; the listener serves them until then.
++        while kept_open() and time.monotonic() < deadline:
++            await asyncio.sleep(POLL_S)
++    keep = asyncio.ensure_future(kept())
++    window = float(getattr(getattr(runner, "config", None), "restart_listener_relay_seconds", 0) or 0)
++    return keep, asyncio.get_running_loop().time() + min(left, window + IDLE_CLOSE_MAX_S)
++
++
++def _ready_probe(runner) -> None:
++    """Same network namespace (no relay): the next gateway binds this listener's own address; the close gate of the
++    kept sockets waits for it to answer ready there."""
++    handle = getattr(runner, "session_api", None)
++    api = getattr(handle, "api", None)
++    if api is None or getattr(api, "ready_probe", None) is not None:
++        return
++    try:
++        host, port = handle.socket.getsockname()[:2]
++        from gateway.webapp_listener import dial_host
++        api.ready_probe = (dial_host(host), int(port))
++    except Exception:
++        logger.debug("No address to probe the next gateway at", exc_info=True)
++
++
+ def _listener_relay_target_for(runner, read):
+     try:
+         if not getattr(runner, "_listener_handover", None):
+@@ -373,15 +459,20 @@ async def _stop_api_listening(runner, carry) -> None:
+     port = int(getattr(adapter, "_port", 0) or 0)
+     successor = None
+     try:
+-        from gateway.listener_relay import successor_target
++        from gateway.listener_relay import successor_api_target, successor_target
+         from gateway.run import get_hermes_home
+         from gateway.run_bootstrap import STANDBY_MARKER
+-        successor = successor_target(get_hermes_home() / STANDBY_MARKER)
++        marker = get_hermes_home() / STANDBY_MARKER
++        # The API port the standby opened (its pod's address), else its listener's address with this API port.
++        successor = successor_api_target(marker)
++        if successor is None:
++            listener = successor_target(marker)
++            successor = (listener[0], port) if listener is not None else None
+     except Exception:
+         logger.debug("No API relay target", exc_info=True)
+     if port:
+         host = getattr(adapter, "_host", None) or "127.0.0.1"
+-        _api_target = (successor[0], port) if successor is not None else (
++        _api_target = successor if successor is not None else (
+             "127.0.0.1" if host in ("0.0.0.0", "", "::") else host, port)
+     sock = None
+     if successor is not None and port:
+@@ -400,11 +491,16 @@ async def _stop_api_listening(runner, carry) -> None:
+     if sock is not None:
+         from gateway.listener_relay import relay_listener
+         sock.setblocking(False)
+-        carry.api_relay = asyncio.ensure_future(relay_listener(sock, _api_target, ceiling_seconds(runner)))
++        carry.api_relay = asyncio.ensure_future(relay_listener(sock, _api_target, ceiling_seconds(runner),
++                                                               connect_timeout=API_FORWARD_CONNECT_S))
+         logger.info("API port relays new connections to the next gateway at %s:%d", *_api_target)
+ 
+ 
+ _api_target: tuple[str, int] | None = None
++# Set when the carry begins: from then on new API requests are the next gateway's, so one that arrives before the
++# release waits for it (at most API_RELEASE_WAIT_S) instead of the 503 draining answer.
++_carrying = False
++API_RELEASE_WAIT_S = 30.0
+ # How long a forwarded API request waits for the next gateway's API server to listen.
+ API_FORWARD_CONNECT_S = 30.0
+ _HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
+@@ -465,6 +561,11 @@ def api_forward_middleware():
+ 
+     @web.middleware
+     async def forward(request, handler):
++        if _carrying and not _released and not _local_run(request):
++            loop = asyncio.get_running_loop()
++            deadline = loop.time() + API_RELEASE_WAIT_S
++            while _carrying and not _released and loop.time() < deadline:
++                await asyncio.sleep(POLL_S)
+         target = _api_target
+         if not _released or target is None or _local_run(request):
+             return await handler(request)
+@@ -493,6 +594,7 @@ async def _carry_turns(carry) -> None:
+     last_log = 0.0
+     while True:
+         await _apply_controls(carry)
++        await _hand_off_processes_when_idle(carry)
+         for turn in turn_boundary._turns(runner):
+             if turn.admission_id in carry.turns and turn_boundary._parked_prompts(turn):
+                 try:
+@@ -503,9 +605,13 @@ async def _carry_turns(carry) -> None:
+             row = await asyncio.to_thread(get_session_admission, carry.authority.db, admission_id=aid)
+             if row is None or row["status"] != "started" or row["owner_epoch"] != carry.epoch:
+                 carry.done.add(aid)
++                # Queued for the next gateway, or already claimed there (it picks a handoff up within a poll).
++                handed = row is not None and (row["status"] == "queued" or (
++                    row["status"] == "started" and row["owner_epoch"] != carry.epoch))
+                 logger.info("Carried turn of %s %s after %.1fs", carry.turns[aid].session_id,
+-                            "handed over" if (row or {}).get("status") == "queued" else "ended",
+-                            time.monotonic() - carry.started)
++                            "handed over" if handed else "ended", time.monotonic() - carry.started)
++                if handed:
++                    _end_kept_sockets(runner)  # its viewers get the resumed turn's frames from the next gateway
+         left = set(carry.turns) - carry.done
+         api = _api_live(runner)
+         now = time.monotonic()
+@@ -522,6 +628,9 @@ async def _carry_turns(carry) -> None:
+             logger.info("Restart: carrying %d turn(s) and %d API run(s) to their ends", len(left), api)
+             last_log = now
+         await asyncio.sleep(POLL_S)
++    carry.done.update(carry.turns)
++    await _hand_off_processes_when_idle(carry)
++    _end_kept_sockets(runner, now=True)
+     # The listeners relay to the next gateway for their window (gateway.restart_listener_relay_seconds), so a
+     # client routed here before the new pod is ready still reaches it; the API port relays as long.
+     listener = getattr(runner, "_carry_listener_task", None)
+@@ -535,6 +644,19 @@ async def _carry_turns(carry) -> None:
+         await asyncio.gather(carry.api_relay, return_exceptions=True)
+ 
+ 
++def _end_kept_sockets(runner, now: bool = False) -> None:
++    """End the Webapp sockets kept past the seal (``run_api.GatewayAPI.keep_until_idle``): once the next gateway is
++    ready, or *now* (the carry is over; their close frames still wait for the next gateway to be ready)."""
++    api = getattr(getattr(runner, "session_api", None), "api", None)
++    try:
++        if now and hasattr(api, "end_kept_now"):
++            api.end_kept_now()
++        elif hasattr(api, "end_kept"):
++            api.end_kept()
++    except Exception:
++        logger.debug("Could not end the kept sockets", exc_info=True)
++
++
+ async def _apply_controls(carry) -> None:
+     """Stop, steer and prompt answers the next gateway forwarded for a carried turn."""
+     path = control_path(carry.home, carry.epoch)
+@@ -601,6 +723,7 @@ class _Remote:
+         # after the settlement commits) are still relayed for a moment.
+         self.ending: dict[str, float] = {}
+         self.prompts: dict[str, set] = {}
++        self.reattach = False
+ 
+     def session_turn(self, session_id, *, ending=False):
+         for aid in (*self.open, *(self.ending if ending else ())):
+@@ -617,6 +740,10 @@ class _Remote:
+             os.close(fd)
+ 
+ 
++def runner_of(remote: _Remote):
++    return remote.runner
++
++
+ def _remote(authority) -> _Remote | None:
+     return getattr(authority, "_turn_carrier", None)
+ 
+@@ -650,6 +777,9 @@ async def _watch(remote: _Remote) -> None:
+             _live(remote.authority, remote.turns[aid]["session_id"])
+         while True:
+             _relay_frames(remote)
++            if remote.reattach:
++                remote.reattach = False
++                await _reattach_processes(runner_of(remote))
+             await _pick_up(remote)
+             if not await asyncio.to_thread(carrier_alive, remote.home):
+                 _relay_frames(remote)
+@@ -694,6 +824,9 @@ def _relay_frames(remote: _Remote) -> None:
+             params = json.loads(line)
+         except ValueError:
+             continue
++        if params.get("type") == PROCESSES_HANDED:
++            remote.reattach = True  # _watch reattaches them now
++            continue
+         try:
+             _relay_one(remote, params)
+         except Exception:
+@@ -727,7 +860,10 @@ def _relay_one(remote: _Remote, params: dict) -> None:
+             controls.background.add(pid)  # answerable whatever generation this gateway reads as running
+             controls.remote_responders[pid] = _forward_answer(remote, session_id, generation)
+             remote.prompts.setdefault(session_id, set()).add(pid)
+-            stream.publish(session_id, payload, event_type=event_type)
++            if hasattr(controls, "announce"):
++                controls.announce(session_id, dict(payload), event_type)
++            else:
++                stream.publish(session_id, payload, event_type=event_type)
+             return
+         if event_type in ("approval.settled", "clarify.settled"):
+             pid = payload.get("prompt_id")
+@@ -736,6 +872,7 @@ def _relay_one(remote: _Remote, params: dict) -> None:
+                 controls.background.discard(pid)
+                 controls.remote_responders.pop(pid, None)
+             remote.prompts.get(session_id, set()).discard(pid)
++            getattr(controls, "announced", {}).pop(pid, None)
+             stream.publish(session_id, payload, event_type=event_type)
+             return
+         execution = {k: params[k] for k in ("authority_epoch", "execution_generation", "admission_id") if k in params}
+diff --git a/tests/gateway/test_restart_carry_no_pause.py b/tests/gateway/test_restart_carry_no_pause.py
+new file mode 100644
+index 00000000..14cfb981
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_no_pause.py
+@@ -0,0 +1,522 @@
++"""gateway.restart_turn_handoff_per_turn without a pause at the takeover:
++
++- a carried turn's foreground command finishes on the old gateway (it is not moved to the background at SIGTERM),
++  and the background processes go to the next gateway once no carried turn is in a tool round;
++- the hub's socket on the old gateway keeps its session past the seal, so the carried turns' frames reach it without
++  a gap, and it ends once the next gateway is ready and the socket is idle (or the client sends a request, or a turn
++  moved over);
++- a relayed device leg ends with 1001 (the device parks and resumes its commands) instead of 1012 (it kills them),
++  and a relayed session socket is closed only when idle;
++- the standby opens its API port early and publishes it, so API connections relayed by the old pod wait in the
++  backlog instead of being refused or dropped;
++- a prompt listed again under the same id is announced once.
++"""
++import asyncio
++import json
++import socket
++import time
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++from gateway.config import GatewayConfig
++from gateway.listener_relay import relay_listener, successor_api_target, successor_target
++
++from tests.gateway.test_restart_turn_carry import _claimed_turn, _old_runner, _reserve_profile, _until
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_hand_off_background", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++
++
++# --- the foreground command of a carried turn ------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_a_foreground_command_finishes_on_the_carrier_and_processes_move_after_it(owner, tmp_path, monkeypatch):
++    _reserve_profile(tmp_path)
++    row, live, agent = _claimed_turn(owner, "cmd")
++    agent._executing_tools = True  # a 40 s foreground command runs
++    yields = []
++    agent.request_tool_yield = lambda *a, **k: yields.append(a) or 1
++    handed = []
++    from gateway.run_shutdown import GatewayShutdownMixin
++
++    async def hand_off(runner):
++        handed.append(time.monotonic())
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(hand_off))
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    await asyncio.sleep(0.3)
++    # Not moved to the background (its result would be a lie and its device leg would move under it), and the
++    # background processes stay until the command ends: handing them over closes the device's legs.
++    assert yields == []
++    assert handed == []
++    assert turn_carry.keeps_socket(runner, {"type": "websocket", "path": "/api/plugins/device/ws"}) is False  # no key
++    runner.config.restart_wait_plugin_sockets = ["device"]
++    assert turn_carry.keeps_socket(runner, {"type": "websocket", "path": "/api/plugins/device/ws"}) is True
++    assert turn_carry.keeps_socket(runner, {"type": "websocket", "path": "/api/ws"}) is False
++    ended = time.monotonic()
++    agent._executing_tools = False  # the command ends; its real result goes to the model
++    await _until(lambda: handed)
++    assert handed[0] - ended < 1.0
++    assert turn_carry.keeps_socket(runner, {"type": "websocket", "path": "/api/plugins/device/ws"}) is False
++    # The next gateway learns at once that it can reattach them.
++    frames = [json.loads(line) for line in turn_carry.events_path(tmp_path, owner.epoch).read_text().splitlines()]
++    assert any(f.get("type") == turn_carry.PROCESSES_HANDED for f in frames)
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 5.0)
++    assert len(handed) == 1
++    import os
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_with_no_tool_round_the_processes_move_before_the_release(owner, tmp_path, monkeypatch):
++    _reserve_profile(tmp_path)
++    row, _live, agent = _claimed_turn(owner, "model")
++    agent._executing_tools = False  # in a model call
++    order = []
++    from gateway.run_shutdown import GatewayShutdownMixin
++
++    async def hand_off(runner):
++        order.append(("processes", turn_carry.released()))
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(hand_off))
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    assert order == [("processes", False)]
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 5.0)
++    import os
++    os.close(runner._turn_carry.lock_fd)
++
++
++# --- the hub's socket on the carrier ---------------------------------------------------------------------------
++
++
++def _carrier_runner():
++    from tests.gateway.test_restart_socket_close_delay import _config, _runner
++    config = _config(delay=0.2)
++    config.restart_listener_relay_seconds = 5
++    runner = _runner(config)
++    runner._turn_carry = SimpleNamespace(processes_handed=asyncio.Event())
++    return runner
++
++
++async def _open(monkeypatch, runner):
++    """test_restart_socket_close_delay._open, with the app's send kept (``app_send``) to send frames later."""
++    from gateway.run_api import GatewayRuntimeAPI
++    monkeypatch.setattr("hermes_cli.web_server_boundary._gateway_ws_ticket_from_subprotocol",
++                        lambda ws: ("abc", "ok"))
++    monkeypatch.setattr("hermes_cli.web_server_surface.policy", lambda state: SimpleNamespace(gateway_ticket=True))
++    got, opened, ended, app_send = [], asyncio.Event(), asyncio.Event(), []
++
++    async def dashboard(scope, receive, send):
++        app_send.append(send)
++        await send({"type": "websocket.accept"})
++        opened.set()
++        while True:
++            message = await receive()
++            got.append(message)
++            if message["type"] == "websocket.disconnect":
++                ended.set()
++                await send({"type": "websocket.close", "code": 1000})
++                return
++
++    api = GatewayRuntimeAPI(dashboard, runner, SimpleNamespace(state=SimpleNamespace()))
++    to_app: asyncio.Queue = asyncio.Queue()
++    from_app: asyncio.Queue = asyncio.Queue()
++    scope = {"type": "websocket", "path": "/api/ws", "raw_path": b"/api/ws", "query_string": b"native_dial=browser",
++             "headers": [(b"host", b"hermes:9120"), (b"origin", b"http://hermes:9120"),
++                         (b"sec-websocket-protocol", b"hermes.v1, ticket.abc"), (b"sec-websocket-key", b"x")],
++             "subprotocols": ["hermes.v1", "ticket.abc"], "client": ("10.0.0.9", 1),
++             "server": ("10.0.0.1", 9120), "scheme": "ws"}
++    task = asyncio.ensure_future(api(scope, to_app.get, from_app.put))  # (the app's accept took the connect)
++    await asyncio.wait_for(opened.wait(), 2)
++    assert from_app.get_nowait() == {"type": "websocket.accept"}
++    return SimpleNamespace(api=api, task=task, scope=scope, to_app=to_app, from_app=from_app, got=got, ended=ended,
++                           app_send=app_send)
++
++
++async def _kept_socket(monkeypatch):
++    from tests.gateway.test_restart_socket_close_delay import _seal, _wait
++    runner = _carrier_runner()
++    s = await _open(monkeypatch, runner)
++    _wait(runner)
++    runner._running = False  # the stop begins (the carrier released the profile)
++    assert _seal(s.api, s.scope) == []
++    return runner, s
++
++
++@pytest.mark.asyncio
++async def test_the_hub_socket_keeps_streaming_the_carried_turn_past_the_seal(monkeypatch):
++    from gateway.run_api import KEPT_SCOPE_KEY
++    from tests.gateway.test_restart_socket_close_delay import _successor
++    runner, s = await _kept_socket(monkeypatch)
++    assert s.scope[KEPT_SCOPE_KEY].is_set()
++    await asyncio.sleep(0.3)
++    assert not s.ended.is_set()  # its session (and its subscriptions) live on: no close, no reconnect
++    successor, target, _asked = await _successor(ready_after=0.2)
++    try:
++        loop = asyncio.get_running_loop()
++        s.api.forward_to(target, 10)
++        # The carried turn streams: a frame every 0.3 s for 3 s. The socket stays while it streams.
++        started = loop.time()
++        while loop.time() - started < 3.0:
++            await _send_through(s, {"type": "websocket.send", "text": "delta"})
++            last = loop.time()
++            await asyncio.sleep(0.3)
++            assert not s.ended.is_set()
++        await asyncio.wait_for(s.ended.wait(), 5)
++        from gateway.run_api import KEPT_IDLE_S
++        assert loop.time() - last >= KEPT_IDLE_S - 0.1  # it ended once idle
++        assert s.got[-1] == {"type": "websocket.disconnect", "code": 1012}
++    finally:
++        await successor.cleanup()
++
++
++async def _send_through(s, message):
++    """A frame the session socket's handler sends (a carried turn's event), through the parked send."""
++    await s.app_send[0](message)
++    assert await asyncio.wait_for(s.from_app.get(), 2) == message  # it reaches the client
++
++
++@pytest.mark.asyncio
++async def test_a_request_on_the_kept_socket_ends_it_once_the_next_gateway_is_ready(monkeypatch):
++    from tests.gateway.test_restart_socket_close_delay import _successor
++    runner, s = await _kept_socket(monkeypatch)
++    await s.to_app.put({"type": "websocket.receive", "text": '{"method": "prompt.submit"}'})
++    await asyncio.sleep(0.3)
++    # Not served here, and the next gateway is not ready: the carried turn's frames still reach the client.
++    assert not s.ended.is_set()
++    await _send_through(s, {"type": "websocket.send", "text": "delta"})
++    successor, target, _asked = await _successor(ready_after=0.3)
++    try:
++        loop = asyncio.get_running_loop()
++        released = loop.time()
++        s.api.forward_to(target, 10)
++        await asyncio.wait_for(s.ended.wait(), 3)
++        # Ended as soon as the next gateway was ready, though the socket was not idle; the client resends there.
++        assert 0.3 - 0.05 <= loop.time() - released < 1.2
++        assert all(m.get("text") != '{"method": "prompt.submit"}' for m in s.got)
++        assert await asyncio.wait_for(s.from_app.get(), 2) == {"type": "websocket.close", "code": 1012}
++    finally:
++        await successor.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_a_turn_moving_over_ends_the_kept_socket_once_the_next_gateway_is_ready(monkeypatch):
++    from tests.gateway.test_restart_socket_close_delay import _successor
++    runner, s = await _kept_socket(monkeypatch)
++    successor, target, _asked = await _successor()
++    try:
++        s.api.forward_to(target, 10)
++        # It streams on, so it is not idle; a turn handed over at its boundary streams from the next gateway only.
++        for _ in range(3):
++            await _send_through(s, {"type": "websocket.send", "text": "delta"})
++            await asyncio.sleep(0.2)
++        assert not s.ended.is_set()
++        runner.session_api = SimpleNamespace(api=s.api)
++        turn_carry._end_kept_sockets(runner)
++        await asyncio.wait_for(s.ended.wait(), 2)
++    finally:
++        await successor.cleanup()
++
++
++# --- the relay of the old pod's listener ---------------------------------------------------------------------
++
++
++async def _ws_upstream(stream_for=0.0):
++    """The next gateway: answers a WebSocket upgrade with 101, then sends a text frame every 0.2 s for *stream_for*."""
++    async def handle(reader, writer):
++        await reader.readuntil(b"\r\n\r\n")
++        writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
++        await writer.drain()
++        loop = asyncio.get_running_loop()
++        end = loop.time() + stream_for
++        try:
++            while loop.time() < end:
++                writer.write(b"\x81\x05delta")
++                await writer.drain()
++                await asyncio.sleep(0.2)
++            await reader.read()  # idle until the relay goes
++        except (OSError, asyncio.CancelledError):
++            pass
++        finally:
++            writer.close()
++    server = await asyncio.start_server(handle, "127.0.0.1", 0)
++    return server, server.sockets[0].getsockname()[:2]
++
++
++async def _relayed_client(port, path):
++    reader, writer = await asyncio.open_connection("127.0.0.1", port)
++    writer.write(f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n".encode())
++    await writer.drain()
++    await reader.readuntil(b"\r\n\r\n")
++    return reader, writer
++
++
++async def _until_close(reader, timeout=10.0):
++    """Read frames until a close frame; returns ``(close code, loop time)``."""
++    loop = asyncio.get_running_loop()
++    buf = b""
++    end = loop.time() + timeout
++    while loop.time() < end:
++        data = await asyncio.wait_for(reader.read(65536), end - loop.time())
++        if not data:
++            return None, loop.time()
++        buf += data
++        while len(buf) >= 2:
++            size = buf[1] & 0x7F
++            if len(buf) < 2 + size:
++                break
++            if buf[0] & 0x0F == 0x8:
++                return int.from_bytes(buf[2:4], "big"), loop.time()
++            buf = buf[2 + size:]
++    raise AssertionError("no close frame")
++
++
++def _listening():
++    sock = socket.socket()
++    sock.bind(("127.0.0.1", 0))
++    sock.listen(16)
++    sock.setblocking(False)
++    return sock
++
++
++@pytest.mark.asyncio
++async def test_a_relayed_device_leg_ends_with_going_away_and_the_session_socket_with_service_restart():
++    upstream, target = await _ws_upstream()
++    sock = _listening()
++    port = sock.getsockname()[1]
++    relay = asyncio.ensure_future(relay_listener(sock, target, 0.5, close_sockets=True))
++    try:
++        device_reader, _dw = await _relayed_client(port, "/api/plugins/device/ws?device=x")
++        hub_reader, _hw = await _relayed_client(port, "/api/ws?native_dial=browser")
++        (device_code, _), (hub_code, _) = await asyncio.gather(_until_close(device_reader), _until_close(hub_reader))
++        assert device_code == 1001  # the device parks its commands and resumes them on the next gateway
++        assert hub_code == 1012
++    finally:
++        await asyncio.wait_for(relay, 10)
++        upstream.close()
++
++
++@pytest.mark.asyncio
++async def test_a_relayed_session_socket_is_closed_only_once_idle():
++    upstream, target = await _ws_upstream(stream_for=2.0)
++    sock = _listening()
++    port = sock.getsockname()[1]
++    loop = asyncio.get_running_loop()
++    window = 0.5
++    relay = asyncio.ensure_future(relay_listener(sock, target, window, close_sockets=True,
++                                                 idle_until=loop.time() + 30))
++    try:
++        reader, _w = await _relayed_client(port, "/api/ws")
++        opened = loop.time()
++        code, closed_at = await _until_close(reader)
++        assert code == 1012
++        # It streamed for 2 s past a 0.5 s window: closed once its frames stopped, not mid-stream.
++        assert closed_at - opened >= 2.0
++    finally:
++        await asyncio.wait_for(relay, 40)
++        upstream.close()
++
++
++@pytest.mark.asyncio
++async def test_a_relayed_connection_waits_no_longer_than_its_connect_timeout():
++    dead = socket.socket()
++    dead.bind(("127.0.0.1", 0))  # bound, never listening: refused
++    target = dead.getsockname()[:2]
++    sock = _listening()
++    port = sock.getsockname()[1]
++    loop = asyncio.get_running_loop()
++    relay = asyncio.ensure_future(relay_listener(sock, target, 60, connect_timeout=0.5))
++    try:
++        reader, writer = await asyncio.open_connection("127.0.0.1", port)
++        started = loop.time()
++        assert await asyncio.wait_for(reader.read(), 5) == b""
++        assert loop.time() - started < 2.0  # not until the end of the window
++        writer.close()
++    finally:
++        relay.cancel()
++        await asyncio.gather(relay, return_exceptions=True)
++        dead.close()
++
++
++# --- the standby's API port ------------------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_the_standby_opens_its_api_port_early_and_serves_the_waiting_connections(monkeypatch, tmp_path):
++    from aiohttp import web
++    from gateway.config import Platform, PlatformConfig
++    from gateway.platforms import tcp_site
++    from gateway import run_bootstrap
++    monkeypatch.setattr(tcp_site, "_prebound", {})
++    probe = socket.socket()
++    probe.bind(("127.0.0.1", 0))
++    port = probe.getsockname()[1]
++    probe.close()
++    config = GatewayConfig(restart_turn_handoff_per_turn=True)
++    config.platforms[Platform.API_SERVER] = PlatformConfig(enabled=True, extra={"host": "127.0.0.1", "port": port})
++    run_bootstrap._prebind_api_listener(config)
++    assert tcp_site.prebound("127.0.0.1", port)
++    # Another standby in this namespace cannot take the port twice; the gateway being replaced would hold it.
++    assert tcp_site.prebind("127.0.0.1", port + 0) is True  # already ours
++
++    # What the old pod relays now connects and waits; it is not refused.
++    reader, writer = await asyncio.open_connection("127.0.0.1", port)
++    writer.write(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
++    await writer.drain()
++    answer = asyncio.ensure_future(reader.read())
++    await asyncio.sleep(0.3)
++    assert not answer.done()
++
++    async def health(_request):
++        return web.json_response({"ok": True})
++    app = web.Application()
++    app.router.add_get("/health", health)
++    runner = web.AppRunner(app)
++    await runner.setup()
++    try:
++        await tcp_site.start_tcp_site(runner, "127.0.0.1", port, log_tag="test")
++        assert b"200 OK" in await asyncio.wait_for(answer, 5)
++        assert not tcp_site.prebound("127.0.0.1", port)
++    finally:
++        writer.close()
++        await runner.cleanup()
++
++
++def test_the_standby_marker_names_its_api_port_and_the_carrier_relays_there(monkeypatch, tmp_path):
++    from gateway import run_bootstrap
++    from gateway.platforms import tcp_site
++    import gateway.listener_relay as relay
++    monkeypatch.setattr(tcp_site, "_prebound", {("0.0.0.0", 8642): object()})
++    monkeypatch.setattr(relay, "standby_listener_record",
++                        lambda home: {"host": "10.1.2.3", "port": 9120, "netns": "net:[2]"})
++    marker = tmp_path / run_bootstrap.STANDBY_MARKER
++    run_bootstrap._write_standby_marker(marker)
++    record = json.loads(marker.read_text())
++    assert record["api"] == {"host": "10.1.2.3", "port": 8642, "netns": "net:[2]"}
++    monkeypatch.setattr(relay, "net_namespace_id", lambda: "net:[1]")
++    assert successor_api_target(marker) == ("10.1.2.3", 8642)
++    assert successor_target(marker) == ("10.1.2.3", 9120)
++
++
++def test_without_the_key_the_standby_opens_nothing(monkeypatch):
++    from gateway.config import Platform, PlatformConfig
++    from gateway.platforms import tcp_site
++    from gateway import run_bootstrap
++    monkeypatch.setattr(tcp_site, "_prebound", {})
++    config = GatewayConfig()
++    config.platforms[Platform.API_SERVER] = PlatformConfig(enabled=True, extra={"host": "127.0.0.1", "port": 1})
++    run_bootstrap._prebind_api_listener(config)
++    assert tcp_site._prebound == {}
++
++
++# --- prompts announced once ------------------------------------------------------------------------------------
++
++
++def _controls():
++    from gateway.session_authority import LiveSession
++    from gateway.session import SessionSource
++    from gateway.config import Platform
++    live = LiveSession(SessionSource(platform=Platform.LOCAL, chat_id="c"), "route-c")
++    seen = []
++    live.event_stream.observers.add(lambda frame: seen.append(frame["params"]["type"]))
++    return live, seen
++
++
++def test_a_question_listed_again_under_its_id_is_announced_once():
++    live, seen = _controls()
++    entry = SimpleNamespace(clarify_id="q1", question="which?", choices=["a", "b"], multi_select=False,
++                            event=SimpleNamespace(is_set=lambda: False))
++    # The handed-over turn's question restored at startup, then asked again by the resumed turn (new generation).
++    live.controls.register_clarify("c", 4, entry, timeout_s=300, background=True)
++    live.controls.register_clarify("c", 5, entry, timeout_s=290)
++    assert seen.count("clarify.request") == 1
++    assert live.controls.pending["q1"][1]["execution_generation"] == 5  # listed under the running turn
++
++
++def test_a_relayed_question_then_restored_here_is_announced_once(owner, tmp_path):
++    from tests.gateway.test_restart_turn_carry import _NextAuthority
++    from gateway.session_authority import LiveSession
++    from hermes_state_runtime import turn_carry_record, begin_turn_carry
++    row, live, _agent = _claimed_turn(owner, "ask")
++    begin_turn_carry(owner.db, epoch=owner.epoch, record={
++        "turns": {row["admission_id"]: {"session_id": "ask", "generation": row["generation"]}}})
++    nxt = _NextAuthority(owner.db)
++    nxt.sessions["ask"] = LiveSession(live.source, live.route)
++    seen = []
++    nxt.sessions["ask"].event_stream.observers.add(lambda frame: seen.append(frame["params"]["type"]))
++    remote = turn_carry._Remote(SimpleNamespace(), nxt, turn_carry_record(owner.db), tmp_path)
++    prompt = {"kind": "clarify", "prompt_id": "q1", "execution_generation": row["generation"], "question": "which?",
++              "choices": ["a"], "multi_select": False}
++    for _ in range(2):  # the open prompt the carrier mirrors first, then the frame it published
++        turn_carry._relay_one(remote, {"type": "clarify.request", "session_id": "ask", "payload": dict(prompt)})
++    # The turn is handed over: its prompt leaves the relay and is listed here under the same id.
++    turn_carry._clear_remote(remote, nxt.sessions["ask"], "ask")
++    entry = SimpleNamespace(clarify_id="q1", question="which?", choices=["a"], multi_select=False,
++                            event=SimpleNamespace(is_set=lambda: False))
++    nxt.sessions["ask"].controls.register_clarify("ask", row["generation"], entry, background=True)
++    assert seen.count("clarify.request") == 1
++
++
++@pytest.mark.asyncio
++async def test_an_api_request_between_the_restart_and_the_release_waits_and_is_served_by_the_next(monkeypatch):
++    """The carry drains the API server a moment before it releases the profile: a request in between is not
++    answered 503 draining but waits for the release and goes to the next gateway."""
++    from aiohttp import ClientSession, web
++
++    async def old_handler(_request):
++        return web.json_response({"error": "Gateway is draining existing work; retry shortly."}, status=503)
++
++    async def new_handler(_request):
++        return web.json_response({"who": "next"})
++    old_app = web.Application(middlewares=[turn_carry.api_forward_middleware()])
++    old_app.router.add_get("/v1/models", old_handler)
++    old_runner = web.AppRunner(old_app)
++    await old_runner.setup()
++    old_site = web.TCPSite(old_runner, "127.0.0.1", 0)
++    await old_site.start()
++    old_port = old_site._server.sockets[0].getsockname()[1]
++    new_app = web.Application()
++    new_app.router.add_get("/v1/models", new_handler)
++    new_runner = web.AppRunner(new_app)
++    await new_runner.setup()
++    new_site = web.TCPSite(new_runner, "127.0.0.1", 0)
++    await new_site.start()
++    new_port = new_site._server.sockets[0].getsockname()[1]
++    try:
++        monkeypatch.setattr(turn_carry, "_carrying", True)  # the carry began; the profile is not released yet
++        async with ClientSession() as http:
++            pending = asyncio.ensure_future(http.get(f"http://127.0.0.1:{old_port}/v1/models"))
++            await asyncio.sleep(0.3)
++            assert not pending.done()
++            monkeypatch.setattr(turn_carry, "_api_target", ("127.0.0.1", new_port))
++            monkeypatch.setattr(turn_carry, "_released", True)
++            response = await asyncio.wait_for(pending, 5)
++            assert response.status == 200 and await response.json() == {"who": "next"}
++            response.release()
++    finally:
++        await old_runner.cleanup()
++        await new_runner.cleanup()

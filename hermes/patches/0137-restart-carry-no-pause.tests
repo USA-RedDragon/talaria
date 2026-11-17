@@ -1,0 +1,20 @@
+# The per-turn carry (0136) and the boundary handoff it builds on (0131, 0135)
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_turn_boundary.py
+tests/gateway/test_restart_boundary_admission.py
+tests/gateway/test_restart_turn_resume_pending_call.py
+tests/gateway/test_restart_takeover_gap.py
+tests/agent/test_turn_boundary_handoff.py
+tests/gateway/test_restart_turn_handoff.py
+# The listener handover, relay, hold, parked sockets and close frames this patch changes (0031 to 0043)
+tests/gateway/test_restart_listener_handover.py
+tests/gateway/test_restart_listener_relay.py
+tests/gateway/test_restart_socket_close_delay.py
+tests/gateway/test_sigterm_restart_wait.py
+tests/gateway/test_runtime_lock_wait.py
+tests/gateway/test_standby_marker_stale.py
+tests/gateway/test_gateway_shutdown.py
+# The API server's bind, the background process handoff (0012) and the prompt list
+tests/gateway/test_api_server.py
+tests/tools/test_process_handoff.py
+tests/gateway/test_session_authority.py
