@@ -24,7 +24,7 @@ func TestTypedRowShowsWithoutHermesNotes(t *testing.T) {
 	e := setup(t)
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Typed notes", Live: true, StartedAt: 900,
 		Messages: []map[string]any{
-			{kRole: roleUser, kText: "[Note: model was just switched from gpt-5 to claude-sonnet-5-5 via anthropic. Adjust your self-identification accordingly.]\n\nis this a bug?", "submission_id": "web-1"},
+			{kRole: roleUser, kText: "[Note: model was just switched from gpt-5 to claude-sonnet-5-5 via anthropic. Adjust your self-identification accordingly.]\n\nis this a bug?", keySubmission: "web-1"},
 			{kRole: roleAssistant, kText: "Let me look."},
 			{kRole: roleUser, kText: "ping\n\n[Waiting: to wait for something slow, start it with terminal(background=true), then call process_manage(action='wait', session_id=..., timeout=...).]", "submission_id": "web-2"},
 			{kRole: roleAssistant, kText: "pong"},

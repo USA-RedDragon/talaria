@@ -313,7 +313,7 @@ func TestTypedNoticeLookalikeIsEchoed(t *testing.T) {
 	sid := h.startTurn(t)
 	h.finishFirst(t, sid)
 	text := "[Agent message am_0123456789abcdef from chat A]\n\nwhy does this look odd?"
-	h.hub.emit(t, sid, hub.KindMessageStart, map[string]any{kText: text, "submission_id": "web-1"})
+	h.hub.emit(t, sid, hub.KindMessageStart, map[string]any{kText: text, kSubmitID: "web-1"})
 	got := h.tg.wait(mSend, "in another app").text()
 	if !strings.Contains(got, "why does this look odd?") {
 		t.Fatalf("echo = %q", got)

@@ -44,7 +44,7 @@ func joinedAgentMessage(t *testing.T, bin string) {
 	body := joinedHead + joinedPre + "Both targets are in the docs table now. Fixture text, not a real chat."
 	e.gw.AddSession(&gatewaytest.Session{ID: "joined", Title: "Joined rows", Live: true, StartedAt: 900, Messages: []map[string]any{
 		// As stored: the user's row with the agent message joined after it.
-		{kRole: roleUser, kText: joinedTyped + "\n\n" + body, keyDisplayMeta: map[string]any{"submission_id": "web-fixture"}},
+		{kRole: roleUser, kText: joinedTyped + "\n\n" + body, keyDisplayMeta: map[string]any{keySubmission: "web-fixture"}},
 		{kRole: roleAssistant, kText: "Noted, both targets are listed."},
 		// The same without the marks Hermes stores, and with two messages.
 		{kRole: roleUser, kText: "and the wii one too\n\n" + body + "\n\n" + joinedHead + joinedPre + "A second message."},

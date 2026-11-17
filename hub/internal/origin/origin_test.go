@@ -55,7 +55,7 @@ func TestClassify(t *testing.T) {
 				t.Fatalf("got show %q text %q why %q, want show %q text %q why %q",
 					got.Show, got.Text, got.Why, c.Want.Show, c.Want.Text, c.Want.Why)
 			}
-			var titles []string
+			titles := make([]string, 0, len(got.After))
 			for _, n := range got.After {
 				titles = append(titles, n.Title)
 			}
