@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 03:51:23 -0600
+Subject: [PATCH] fix(cron): a manual run's notice shows only the output that
+ run saved
+
+The completion notice of a background cronjob(action='run') attached the job's newest output file. A cancelled or crashed run saves none, so its notice showed the previous completed run's report (its Run Time, Run Context and file path) as this run's output. The notice now takes only a file written at or after the run's dispatch time, and says "Job output: none saved by this run." when there is none.
+---
+ .../async-report-producer.py                  |  3 +-
+ .../desktop_bug_campaign/markdown-producer.py |  3 +-
+ .../tools/test_cron_run_notice_own_output.py  | 88 +++++++++++++++++++
+ tools/cronjob_tools.py                        | 14 +--
+ 4 files changed, 101 insertions(+), 7 deletions(-)
+ create mode 100644 tests/tools/test_cron_run_notice_own_output.py
+
+diff --git a/evals/desktop_bug_campaign/async-report-producer.py b/evals/desktop_bug_campaign/async-report-producer.py
+index cde0f59b..89bebde8 100644
+--- a/evals/desktop_bug_campaign/async-report-producer.py
++++ b/evals/desktop_bug_campaign/async-report-producer.py
+@@ -24,8 +24,9 @@ with tempfile.TemporaryDirectory(prefix="async-report-producer-") as temporary:
+ 
+     report = "# Generated inspection\n\n**Conclusion:** attention needed.\n\n| Strategy | Status |\n|---|---|\n| Canary | running |\n\nFirst line  \nSecond line\n\n```python\nvalue = 1  \nvalue = 2 \n```"
+     job = create_job(prompt="Offline fixture; never run", schedule="0 0 * * *", name="Markdown probe", deliver="local")
++    started_at = time.time()  # the notice shows only output this run saved
+     save_job_output(job["id"], report)
+-    result = _manual_run_completion({"success": True}, job["id"], job["name"], "local", time.time())
++    result = _manual_run_completion({"success": True}, job["id"], job["name"], "local", started_at)
+     common = dict(type="async_delegation", delegation_id="report-probe", goal="PRIVATE GOAL", context="PRIVATE CONTEXT")
+     events = {
+         "cron": dict(common, **result),
+diff --git a/evals/desktop_bug_campaign/markdown-producer.py b/evals/desktop_bug_campaign/markdown-producer.py
+index e960450a..5a44893f 100644
+--- a/evals/desktop_bug_campaign/markdown-producer.py
++++ b/evals/desktop_bug_campaign/markdown-producer.py
+@@ -24,8 +24,9 @@ with tempfile.TemporaryDirectory(prefix="markdown-producer-") as temporary:
+ 
+     report = "# Generated inspection\n\n**Conclusion:** attention needed.\n\n| Strategy | Status |\n|---|---|\n| Canary | running |\n\nFirst line  \nSecond line\n\n```python\nvalue = 1  \nvalue = 2 \n```"
+     job = create_job(prompt="Offline fixture; never run", schedule="0 0 * * *", name="Markdown probe", deliver="local")
++    started_at = time.time()  # the notice shows only output this run saved
+     save_job_output(job["id"], report)
+-    result = _manual_run_completion({"success": True}, job["id"], job["name"], "local", time.time())
++    result = _manual_run_completion({"success": True}, job["id"], job["name"], "local", started_at)
+     event = dict(result, type="async_delegation", delegation_id="markdown-probe", goal="Inspect a generated report")
+     envelope = format_process_notification(event)
+     assert envelope is not None
+diff --git a/tests/tools/test_cron_run_notice_own_output.py b/tests/tools/test_cron_run_notice_own_output.py
+new file mode 100644
+index 00000000..177c3be8
+--- /dev/null
++++ b/tests/tools/test_cron_run_notice_own_output.py
+@@ -0,0 +1,88 @@
++"""A manual cron run's completion notice shows only the output THIS run saved.
++
++The background ``cronjob(action='run')`` completion attached the job's newest output file. A
++cancelled run saves none, so its notice carried the previous completed run's report (its Run
++Time, Run Context and file path) as if the cancelled run had produced it.
++"""
++import os
++import time
++from unittest.mock import patch
++
++import pytest
++
++from cron import jobs
++from tests.fakes.cron_owner import cron_owner
++from tools.cronjob_tools import _try_dispatch_background_run
++
++EARLIER_REPORT = "# Earlier run\n\n**Run Time:** 2026-11-17 03:11:28\n\nEARLIER RUN BODY"
++
++
++@pytest.fixture()
++def owner(tmp_path, monkeypatch):
++    authority = cron_owner(tmp_path / "home", monkeypatch)
++    yield authority
++    authority.db.close()
++
++
++def _completion(job, run_one_job):
++    """Dispatch ``job`` through the real background path and return its completion event."""
++    from tools.approval_context import _approval_session_key
++    from tools.process_registry import process_registry
++
++    token = _approval_session_key.set("agent:main:telegram:dm:4242")
++    others = []
++    try:
++        with patch("tools.cronjob_tools.claim_job_for_fire", side_effect=lambda jid, **kw: dict(job)), \
++             patch("cron.scheduler.run_one_job", side_effect=run_one_job):
++            res = _try_dispatch_background_run(dict(job))
++            assert res["dispatched"] is True
++            while True:  # a blocking get is the signal; Empty after the deadline fails the test
++                evt = process_registry.completion_queue.get(timeout=10)
++                if evt.get("delegation_id") == res["delegation_id"]:
++                    return evt
++                others.append(evt)
++    finally:
++        for evt in others:
++            process_registry.completion_queue.put(evt)
++        _approval_session_key.reset(token)
++
++
++def _earlier_completed_run(job_id):
++    """The output file a scheduled run saved before this manual run started."""
++    out_dir = jobs.get_cron_output_dir() / job_id
++    out_dir.mkdir(parents=True, exist_ok=True)
++    earlier = out_dir / "2026-11-17_03-11-31.md"
++    earlier.write_text(EARLIER_REPORT, encoding="utf-8")
++    past = time.time() - 600
++    os.utime(earlier, (past, past))
++    return earlier
++
++
++def test_cancelled_run_notice_never_shows_an_earlier_runs_output(owner):
++    job = jobs.create_job(prompt="report", schedule="every 1h", deliver="local")
++    earlier = _earlier_completed_run(job["id"])
++
++    def run_one_job(claimed, **kw):  # an operator cancel: booked, no output file saved
++        jobs.mark_job_run(claimed["id"], False, "Cancelled: cancelled on request", status="cancelled")
++        return True
++
++    summary = _completion(job, run_one_job)["summary"]
++    assert "EARLIER RUN BODY" not in summary
++    assert "03:11:28" not in summary
++    assert str(earlier) not in summary
++    assert "Job output: none saved by this run." in summary
++
++
++def test_completed_run_notice_shows_its_own_output(owner):
++    job = jobs.create_job(prompt="report", schedule="every 1h", deliver="local")
++    _earlier_completed_run(job["id"])
++
++    def run_one_job(claimed, **kw):
++        jobs.save_job_output(claimed["id"], "# This run\n\nTHIS RUN BODY")
++        jobs.mark_job_run(claimed["id"], True)
++        return True
++
++    summary = _completion(job, run_one_job)["summary"]
++    assert "--- JOB OUTPUT ---" in summary
++    assert "THIS RUN BODY" in summary
++    assert "EARLIER RUN BODY" not in summary
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+index f64968a6..800764ae 100644
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -445,14 +445,16 @@ def execute_job_for_event(
+     return _execute_job_now(job, extra_prompt=extra_prompt)
+ 
+ 
+-def _latest_job_output_excerpt(job_id: str, max_chars: int = 2000) -> Optional[str]:
+-    """Excerpt of the job's most recent saved output file for the background completion
+-    block (parent sees what the job produced). Never raises."""
++def _run_output_excerpt(job_id: str, since: float, max_chars: int = 2000) -> Optional[str]:
++    """Excerpt of the output file THIS run saved, for the background completion block (parent
++    sees what the run produced). Only a file written at or after ``since`` (the run's dispatch
++    time) counts: a cancelled or crashed run saves none, and the job's newest file is then an
++    earlier run's report, which must never be shown as this run's. Never raises."""
+     try:
+         from cron.jobs import get_cron_output_dir
+ 
+         out_dir = get_cron_output_dir() / job_id
+-        files = sorted(out_dir.glob("*.md"))
++        files = sorted(f for f in out_dir.glob("*.md") if f.is_file() and f.stat().st_mtime >= since)
+         if not files:
+             return None
+         text = files[-1].read_text(encoding="utf-8-sig", errors="replace").strip()
+@@ -544,9 +546,11 @@ def _manual_run_completion(
+     ]
+     if refreshed.get("next_run_at"):
+         lines.append(f"Next scheduled run: {refreshed['next_run_at']}")
+-    excerpt = _latest_job_output_excerpt(job_id)
++    excerpt = _run_output_excerpt(job_id, started_at)
+     if excerpt:
+         lines += ["--- JOB OUTPUT ---", excerpt]
++    else:
++        lines.append("Job output: none saved by this run.")
+     return {
+         "status": "completed" if res.get("success") else "error", "summary": "\n".join(lines),
+         "error": res.get("error"), "duration_seconds": duration, **_run_session_usage(job_id, execution_id),
+-- 
+2.56.0
+
