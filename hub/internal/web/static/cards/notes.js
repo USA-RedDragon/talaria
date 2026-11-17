@@ -760,10 +760,9 @@
 
   function lastRun(job) {
     if (!job.last_run_at) return "Never run yet";
-    const w = wall(job.last_run_at);
-    const when = w ? w.dow + " " + clock(w) : str(job.last_run_at);
-    const how = str(job.last_status) === "error" || str(job.last_status) === "failed" ? ", failed" : str(job.last_status) ? ", " + str(job.last_status) : "";
-    return when + how + (str(job.last_error) ? ": " + cut(squash(job.last_error), 80) : "");
+    // When it last ran is not shown (a card carries no clock time); how it went is.
+    const how = str(job.last_status) === "error" || str(job.last_status) === "failed" ? "Last run failed" : str(job.last_status) ? "Last run " + str(job.last_status) : "Ran before";
+    return how + (str(job.last_error) ? ": " + cut(squash(job.last_error), 80) : "");
   }
 
   const cronVerbs = {

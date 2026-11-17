@@ -54,6 +54,9 @@ const out = process.env.SHOT_DIR || "";
       }
     }
   }
+  // No clock time or date on a notice card.
+  const dated = await ev(`[...document.querySelectorAll('#log .notice')].map((n) => n.textContent).filter((t) => /\\b\\d{1,2}:\\d\\d\\s?[AP]M\\b|\\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\b/.test(t))`);
+  assert.deepStrictEqual(dated, [], "a notice card shows a time");
   const titles = await ev(`[...document.querySelectorAll('#log .notice[data-kind="delegation"] > .notice-head > .notice-title')].map((t) => t.textContent)`);
   console.log(JSON.stringify(titles));
   c.close();

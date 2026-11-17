@@ -272,7 +272,7 @@ window.HubMiniChat = (() => {
         case "goal": {
           if (e.text) put(brief(e.text));
           const n = el("div", "note");
-          n.append("Started ", stamp(e.ts));
+          n.append("Started");
           if (st.info.model) n.append(" · " + st.info.model);
           st.started = n;
           put(n);
@@ -302,8 +302,7 @@ window.HubMiniChat = (() => {
           break;
         case "thinking": {
           const d = el("details", "reasoning");
-          const s = el("summary", "", "Thinking ");
-          s.append(stamp(e.ts));
+          const s = el("summary", "", "Thinking");
           d.append(s, el("div", "body", e.text || ""));
           put(d);
           st.answers.text("think", e.text || "", false);
@@ -363,7 +362,6 @@ window.HubMiniChat = (() => {
       const text = el("div");
       text.append(el("b", "", r.head));
       if (r.body) text.append(el("p", "", r.body));
-      if (st.info.end.endedAt) text.append(stamp(st.info.end.endedAt));
       n.append(window.HubIcons.icon(r.bad ? "alert" : "checkcircle"), text);
       st.endNode = n;
       put(n);

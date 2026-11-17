@@ -68,6 +68,18 @@ async function takeShots(c, main, mini) {
     await c.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile });
     await c.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });
     await sleep(300);
+    // The first folded group of tool cards in the chat, closed: its summary line.
+    if (await ev(`!!document.querySelector("#log details.toolgroup")`)) {
+      if (await panelOpen()) await ev(`document.getElementById("actbtn").click()`);
+      await sleep(300);
+      await ev(`(() => { const g = document.querySelector("#log details.toolgroup"); g.open = false; g.querySelector(":scope > summary").scrollIntoView({ block: "center" }); })()`);
+      await sleep(500);
+      await ev(`document.querySelector("#log details.toolgroup > summary").scrollIntoView({ block: "center" })`);
+      await sleep(300);
+      const r = await ev(`(() => { const b = document.querySelector("#log details.toolgroup > summary").getBoundingClientRect(); return { x: Math.max(0, b.x - 8), y: Math.max(0, b.y - 8), width: Math.min(b.width + 16, ${w}), height: b.height + 16 }; })()`);
+      const png = await c.send("Page.captureScreenshot", { format: "png", clip: Object.assign(r, { scale: 1 }) });
+      fs.writeFileSync(`${shots}/toolgroup-${w}-${dark ? "dark" : "light"}.png`, Buffer.from(png.data, "base64"));
+    }
     for (const [where, sel] of [["main", main], ["mini", mini]]) {
       // The chat's cards are shot with the Activity panel closed, the subagent's with it open.
       const shown = await panelOpen();
@@ -137,7 +149,32 @@ let proc;
   await until(ids.map((id) => mini(id)).join(" && "), "every card in the subagent's steps");
   await ev(`document.querySelectorAll("details.toolgroup").forEach((d) => { d.open = true; })`);
 
+  // No clock time or date anywhere in the chat or the Activity panel, but
+  // in a message's own corner (.when under a bubble, .ts in a subagent's
+  // message) and a scheduled job's schedule: cards, groups, notices and rows
+  // say how long, never when.
+  const noTimes = async (where) => {
+    const hits = await ev(`(() => {
+      const re = /\\b\\d{1,2}:\\d\\d\\s?[AP]M\\b|\\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\b|\\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2}, \\d{4}\\b/;
+      const out = [];
+      for (const root of document.querySelectorAll("#log, .act")) {
+        const walk = (n) => {
+          if (n.nodeType === 1 && (n.classList.contains("when") || (n.classList.contains("ts") && n.closest(".msg")))) return;
+          // A scheduled job's card states its schedule and next run: that is its data.
+          if (n.nodeType === 1 && n.matches('.tool[data-tool^="cronjob"]')) return;
+          // A scheduled job's card states its schedule and next run: that is its data.
+          if (n.nodeType === 1 && n.matches('.tool[data-tool^="cronjob"]')) return;
+          if (n.nodeType === 3 && re.test(n.data)) out.push((n.parentElement && n.parentElement.className) + ": " + n.data.trim().slice(0, 80));
+          for (const k of n.childNodes) walk(k);
+        };
+        walk(root);
+      }
+      return out;
+    })()`);
+    assert.deepStrictEqual(hits, [], where + ": a clock time or date outside a message's corner");
+  };
   const compare = async (state) => {
+    await noTimes(state);
     // The subagent's steps never carry Show in Activity: they are in it.
     assert.strictEqual(await ev(`document.querySelectorAll(".act .mc .tool-open").length`), 0, "Show in Activity inside Activity");
     for (const id of ids) {

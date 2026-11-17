@@ -422,10 +422,9 @@ window.HubNotice = (() => {
   function metaLine(el, meta, state, kind, at) {
     const line = el("div", "notice-meta" + (kind === "agent" ? " quote" : ""));
     const items = (meta || []).map((m, i) => (i === 0 && state && kind !== "agent" ? el("span", "notice-" + state, m) : kind === "agent" ? "\"" + m + "\"" : durationText.test(m) ? "ran " + m : m));
-    if (window.HubTimes.valid(at)) {
-      const when = window.HubTimes.stamp(el("span", "notice-when"), at);
-      items.splice(kind === "delegation" ? items.length : kind === "command" ? 1 : 0, 0, when);
-    }
+    // No clock time or date: a card says how long, never when (Jacob's rule
+    // for every card). at is kept for callers but not drawn.
+    void at;
     items.forEach((m, i) => {
       if (i) line.append(" · ");
       line.append(m);
@@ -534,7 +533,7 @@ window.HubNotice = (() => {
     head.type = "button";
     head.setAttribute("aria-expanded", "false");
     head.append(window.HubIcons.icon(iconName(n)), commandTitle(el, n), chevron());
-    if ((n.meta && n.meta.length) || window.HubTimes.valid(at)) head.append(metaLine(el, n.meta, n.state, n.kind, at));
+    if (n.meta && n.meta.length) head.append(metaLine(el, n.meta, n.state, n.kind, at));
     const end = n.kind === "command" && !n.rows && n.result ? lastLine(n.result) : n.kind === "delegation" ? gist(n) : "";
     if (end) {
       const box = el("div", "tool-lines");
@@ -605,7 +604,7 @@ window.HubNotice = (() => {
   }
 
   function stamp(box, ms, ctx) {
-    if (!box.notice || !window.HubTimes.valid(ms)) return;
+    if (!box.notice || !window.HubTimes.valid(ms) || !(box.notice.meta && box.notice.meta.length)) return;
     const head = box.querySelector(":scope > .notice-head");
     const old = head.querySelector(":scope > .notice-meta");
     const line = metaLine(ctx.el, box.notice.meta, box.notice.state, box.notice.kind, ms);

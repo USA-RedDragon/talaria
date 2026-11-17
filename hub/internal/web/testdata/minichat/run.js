@@ -50,7 +50,7 @@ assert.strictEqual(M.pill(3), "3 new steps");
   const s = G.summary([card("terminal", 12.4), card("read_file", 0.1), card("terminal", 100.3, true)]);
   assert.strictEqual(s.text, "Ran 2 commands, read a file (1 min 53 s)");
   assert.strictEqual(s.failed, 1);
-  assert.strictEqual(G.summary([card("browser_click"), card("my_tool")]).text, "Used the browser, used my_tool");
+  assert.strictEqual(G.summary([card("browser_click"), card("my_tool")]).text, "Used the browser, used my tool");
 }
 
 // The view.
@@ -354,10 +354,10 @@ console.log("ok");
 // left out of the group line; one that failed shows as any other.
 {
   const card = (toolName, duration, failed) => ({ toolName, duration, failed, call: {} });
-  assert.strictEqual(G.summary([card("execute_code", 1), card("ledger", 1), card("clarify", 1), card("ledger", 1)]).text, "Used execute_code, used clarify (2.0 s)");
+  assert.strictEqual(G.summary([card("execute_code", 1), card("ledger", 1), card("clarify", 1), card("ledger", 1)]).text, "Ran code, asked a question (2.0 s)");
   assert.strictEqual(G.summary([card("ledger"), card("ledger")]).text, "", "only ledger calls: no line");
   const bad = G.summary([card("ledger", 1, true), card("clarify", 1)]);
-  assert.strictEqual(bad.text, "Used ledger, used clarify (2.0 s)");
+  assert.strictEqual(bad.text, "Used ledger, asked a question (2.0 s)");
   assert.strictEqual(bad.failed, 1);
   const lv = M.create({ el, toast: () => {} });
   const t = (id, name, at, result) => [ev({ type: "tool_start", call_id: id, name, args: {}, at }), ev({ type: "tool_end", call_id: id, name, result, at: at + 1 })];

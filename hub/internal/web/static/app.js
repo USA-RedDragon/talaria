@@ -2700,7 +2700,7 @@
       if (st.sending) {
         n.append("Sending to the chat\u2026");
       } else if (st.sent) {
-        n.append("Sent to the chat at " + st.sent.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+        n.append("Sent to the chat");
       } else {
         n.append("Could not send: " + st.failed.message);
         const copy = el("button", "", "Copy");

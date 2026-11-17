@@ -404,11 +404,7 @@
     const kv = [];
     const shown = str(offer.name) || str(a.name);
     if (shown && shown !== real) kv.push({ k: "Shown as", v: shown });
-    const t = +offer.mtime;
-    if (t > 0) {
-      const when = new Date(t < 1e12 ? t * 1000 : t);
-      kv.push({ k: "Modified", v: when.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }) });
-    }
+    // No modified time: a card carries no clock time or date.
     if (kv.length) out.blocks.push({ kind: "kv", rows: kv });
     return out;
   }

@@ -20,6 +20,9 @@ window.HubToolGroup = (() => {
     todo: ["updated the to-do list", "updated the to-do list %d times"],
     process_manage: ["managed a background command", "managed background commands %d times"],
     delegate_task: ["used a subagent", "used subagents %d times"],
+    execute_code: ["ran code", "ran code %d times"],
+    clarify: ["asked a question", "asked %d questions"],
+    vision_analyze: ["looked at an image", "looked at %d images"],
     send_file: ["sent a file", "sent %d files"],
     agent_send: ["sent a message", "sent %d messages"],
     agent_peers: ["listed your chats", "listed your chats %d times"],
@@ -40,7 +43,8 @@ window.HubToolGroup = (() => {
     skills_list: ["used a skill", "used skills %d times"],
   };
 
-  const word = (name) => words[name] || (String(name).startsWith("browser_") ? ["used the browser", "used the browser %d times"] : ["used " + name, "used " + name + " %d times"]);
+  const said = (name) => String(name).replace(/[_-]+/g, " ").trim();
+  const word = (name) => words[name] || (String(name).startsWith("browser_") ? ["used the browser", "used the browser %d times"] : ["used " + said(name), "used " + said(name) + " %d times"]);
 
   // summary is the group's line: what the cards did, their total time and
   // the span of time they ran, and how many failed. Calls that overlapped
@@ -83,8 +87,7 @@ window.HubToolGroup = (() => {
       const wall = from && to ? T.span((to - from) / 1000) : "";
       if (wall) text += " (" + wall + ")";
     } else if (total && T.span(total)) text += " (" + T.span(total) + ")";
-    const span = T.range(from, to || from);
-    if (span) text += " \u00B7 " + span;
+    // How long, never when: the messages carry their times.
     return { text, failed };
   }
 

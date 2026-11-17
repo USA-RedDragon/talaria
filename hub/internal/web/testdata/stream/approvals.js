@@ -97,7 +97,7 @@ async function questionCards() {
     tracker.offer(Object.assign({ prompt_id: "a" }, ask));
     tracker.settled("a", { prompt_id: "a", outcome: "answered", answer: "cpus/aarch64", answered_at: 1, answered_via: "hub", question: ask.question, choices: ask.choices });
     assert.deepStrictEqual(rows(shown[0]), [["pick", "\u2713 cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["", OTHER]]);
-    assert.strictEqual(res(shown[0]), "Answered at 12:56 PM (in the hub)");
+    assert.strictEqual(res(shown[0]), "Answered (in the hub)");
     assert.strictEqual(shown[0].buttons().length, 0);
     assert.strictEqual(dv(shown[0]).title, "Question: cpus/aarch64");
   }
@@ -107,7 +107,7 @@ async function questionCards() {
     tracker.offer(Object.assign({ prompt_id: "a" }, ask));
     tracker.settled("a", { outcome: "answered", answer: "cpus/armv8, and rename the symbols to rl_armv8_*", answered_at: 1, answered_via: "telegram" });
     assert.deepStrictEqual(rows(shown[0]), [["", "cpus/aarch64"], ["", "cpus/arm64"], ["", "Keep cpus/a64"], ["pick", "\u2713 Other: cpus/armv8, and rename the symbols to rl_armv8_*"]]);
-    assert.strictEqual(res(shown[0]), "Answered at 12:56 PM (on Telegram)");
+    assert.strictEqual(res(shown[0]), "Answered (on Telegram)");
   }
   // Several picks and a typed one in a multi-select question; an open question's answer is the Other row, checked.
   {
@@ -166,7 +166,7 @@ async function questionCards() {
     tracker.restore(rec);
     assert.strictEqual(shown.length, 1);
     assert.deepStrictEqual(rows(shown[0])[1], ["pick", "\u2713 Separate"]);
-    assert.strictEqual(res(shown[0]), "Answered at 12:56 PM (on Telegram)");
+    assert.strictEqual(res(shown[0]), "Answered (on Telegram)");
     // Retiring the chat's own cards leaves it alone.
     let removed = false;
     shown[0].remove = () => { removed = true; };

@@ -107,7 +107,8 @@ const { proc, connect } = driver();
       await c.shot(`${process.env.SHOT_DIR}/live-${q.slice(0, 5).trim().replace(/\W/g, "")}-412-dark.png`, 412, H, true, "dark");
     }
   };
-  const clock = /^Answered at \d{1,2}:\d\d [AP]M \(in the hub\)$/;
+  // No clock time on the card: the message it belongs to has it.
+  const clock = /^Answered \(in the hub\)$/;
 
   await c.nav(url + "/auth/login?next=/");
   await until(`document.querySelectorAll('#sessions a.go[href="#/s/pc/ask"]').length === 1`, "the chat list");

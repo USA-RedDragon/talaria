@@ -99,8 +99,9 @@ window.HubQuestion = (() => {
   }
 
   // status is the line under the card.
-  function status(rec, clock) {
-    const when = rec.at && clock ? clock(rec.at) : "";
+  // A card carries no clock time: the message it belongs to shows that.
+  function status(rec) {
+    const when = "";
     switch (rec.outcome) {
       case "answered": return when ? "Answered at " + when + where(rec.via) : "Answered" + where(rec.via);
       case "skipped": return when ? "Skipped at " + when + where(rec.via) : "Skipped" + where(rec.via);
@@ -126,8 +127,8 @@ window.HubQuestion = (() => {
 
   // statusParts is the status line of a card: what became of the question,
   // with the first words in the tone of the outcome.
-  function statusParts(rec, clock) {
-    const when = rec.at && clock ? clock(rec.at) : "";
+  function statusParts(rec) {
+    const when = "";
     const tail = (when ? " at " + when : "") + where(rec.via);
     switch (rec.outcome) {
       case "answered": return [{ tone: "ok", text: "Answered" }, tail];
