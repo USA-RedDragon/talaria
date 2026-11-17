@@ -321,6 +321,10 @@ def _files():
     return _core()._load_sibling("hermes_device_files", "files.py")
 
 
+def _relay():
+    return _core()._load_sibling("hermes_device_relay", "relay.py")
+
+
 def _file_error(core, exc) -> JSONResponse:
     extra = {"secret": True} if getattr(exc, "secret", False) else {}
     return _error(exc.status, exc.code, exc.message, **extra)
@@ -612,9 +616,17 @@ async def device_socket(ws: WebSocket) -> None:
     core = _core()
     header = _header(ws, core.assertion.HEADER)
     path = _request_path(ws)
+    relay = _relay()
+    carrier = _header(ws, relay.HEADER)
     await ws.accept()
     claims = None
-    if header is not None or not core.dev_static_tokens():
+    if carrier is not None:
+        # The gateway that carries turns through a restart serves its device leg here (section 4.7 point 8).
+        if not relay.verify(carrier):
+            logger.warning("device: carrier link refused")
+            await _close(ws, core.CLOSE_ASSERTION_REFUSED, "carrier refused")
+            return
+    elif header is not None or not core.dev_static_tokens():
         if header is None:
             logger.warning("device: exec upgrade without an assertion refused")
             await _close(ws, core.CLOSE_ASSERTION_REFUSED, "assertion missing")
@@ -646,7 +658,13 @@ async def device_socket(ws: WebSocket) -> None:
         await _close(ws, core.CLOSE_UNSUPPORTED_PLATFORM,
                      "a windows device must name its shell: " + ", ".join(core.WINDOWS_SHELLS))
         return
-    if claims is None:
+    if carrier is not None:
+        who = relay.identity(hello)
+        if who is None:
+            await _close(ws, core.CLOSE_PROTOCOL_ERROR, "carrier hello without the device")
+            return
+        device_id, display, user = who
+    elif claims is None:
         name, token = str(hello.get("name") or ""), str(hello.get("token") or "")
         if not core.DEVICE_ID_RE.fullmatch(name) or not core.authenticate_static(name, token):
             logger.warning("device: refused dev hello for %r", name)
@@ -718,6 +736,8 @@ async def device_socket(ws: WebSocket) -> None:
             await ws.send_text(json.dumps(welcome))
             if version >= core.RESUME_VERSION:
                 await ws.send_text(json.dumps({"type": core.TYPE_RESUME, "commands": resume}))
+        if carrier is None:
+            relay.attached(conn)
 
         async def ping_loop() -> None:
             seq = 0
@@ -746,9 +766,12 @@ async def device_socket(ws: WebSocket) -> None:
                     resumable = False
                 break
             last = loop.time()
+            link = relay.link_for(conn)
             if data is not None:
                 # A binary frame: the 32 id bytes of a file_read, then file bytes (section 4.11).
-                if core.CAPABILITY_FILE_READ in conn.capabilities:
+                if link is not None and link.takes_frame(data):
+                    await link.deliver(data)
+                elif core.CAPABILITY_FILE_READ in conn.capabilities:
                     files.on_frame(conn, data)
                 continue
             try:
@@ -762,6 +785,11 @@ async def device_socket(ws: WebSocket) -> None:
                 await send_text(json.dumps({"type": core.TYPE_PONG, "seq": msg.get("seq")}))
             elif kind in (core.TYPE_OUTPUT, core.TYPE_EXIT, core.TYPE_BROWSER_RESULT, core.TYPE_BROWSER_STATUS,
                           core.TYPE_MCP_RESULT, core.TYPE_FILE_RESULT):
+                if link is not None and (kind == core.TYPE_BROWSER_STATUS or link.takes(msg)):
+                    # Awaited before the next message, so a pong still acknowledges what came before it.
+                    await link.deliver(text, msg)
+                    if kind != core.TYPE_BROWSER_STATUS:
+                        continue
                 hub.on_message(conn, msg)
     except asyncio.CancelledError:
         resumable = False
@@ -773,3 +801,7 @@ async def device_socket(ws: WebSocket) -> None:
             pinger.cancel()
         if attached:
             hub.detach(conn, resumable=resumable)
+            try:
+                await relay.leg_ended(conn)
+            except BaseException:
+                logger.debug("device: link of %s did not close", device_id, exc_info=True)

@@ -60,6 +60,12 @@ def register(ctx: Any, core: Any) -> None:
         process_registry.register_reattach_provider(core.PLUGIN_ID, sys.modules[__name__])
 
 
+def carry_released(target: Any) -> None:
+    """Hermes, once this gateway released the profile and carries its turns to their boundaries:
+    ``target`` is the next gateway's listener. Serve it the device legs kept here (relay.py)."""
+    _core()._load_sibling("hermes_device_relay", "relay.py").carry_released(target)
+
+
 def _path(hub: Any) -> Optional[Path]:
     return hub._state_path.with_name(FILE_NAME) if hub._state_path else None
 
@@ -72,6 +78,8 @@ def prepare() -> None:
     hub = core.hub()
     with hub._lock:
         handing_off = True
+    # The links that served this gateway's device legs to the next gateway end first (relay.py).
+    core._load_sibling("hermes_device_relay", "relay.py").stop()
     closed: set[str] = set()
     deadline = time.monotonic() + PREPARE_TIMEOUT_S
     while True:
