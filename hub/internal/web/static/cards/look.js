@@ -118,7 +118,7 @@
     // (the model went on without saying anything about it) the question is
     // the card's subtitle, not a block that waits for an answer.
     const answer = str(c.answer).trim();
-    out.vision = Object.assign(src, { question: answer ? q : "", answer });
+    out.vision = Object.assign(src, { question: q, answer });
     if (src.kind === "file") out.vision.hidePath = true;
     if (!answer && q) out.lines.push({ parts: q, dim: true });
     // The page's own screenshot comes with the result: until then, or when

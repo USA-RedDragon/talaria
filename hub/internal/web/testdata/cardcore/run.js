@@ -315,7 +315,7 @@ function shape(n) {
     assert.strictEqual(n.querySelector(".vis-path"), null);
     n.view.toggle();
     const labels = [...n.querySelectorAll(".vis-sec b")].map((b) => text(b));
-    assert.deepStrictEqual(labels, []);
+    assert.deepStrictEqual(labels, ["Question"]);
     assert.ok(!text(n).includes("/home/alice"), "no folder or path under the chip");
   }
   // The step after the call brings nothing and the next brings thinking: that

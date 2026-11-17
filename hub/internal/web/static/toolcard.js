@@ -812,13 +812,11 @@ window.HubToolCard = (() => {
       }
       visBig.hidden = true;
       vis.hidden = false;
-      if (v.kind === "nothing" && !answer && !v.question) {
-        vis.hidden = true;
-        return;
-      }
+      // With no answer the question is the card's subtitle line, so nothing
+      // here waits for one.
       const q = el("div", "vis-q");
       if (answer) q.append(el("span", "qt", first(answer)));
-      if (v.question) q.append(el(answer ? "small" : "span", answer ? "vis-ask" : "qt", v.question));
+      if (answer && v.question) q.append(el("small", "vis-ask", v.question));
       if (shown) {
         vis.append(picture(src, name, "vis-thumb", broken), q);
       } else if (v.kind === "nothing") {
