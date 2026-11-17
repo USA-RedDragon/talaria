@@ -37,6 +37,42 @@ type Grant struct {
 	LastUsed  int64  `json:"last_used"`
 	// ExpiresAt is set for a once grant only.
 	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// PostHosts are the other hosts the login form of Host may send the
+	// login to, for as long as the grant lasts.
+	PostHosts []string `json:"post_hosts,omitempty"`
+	// OncePostHosts are post hosts the user allowed once on a host that
+	// has a device grant: for the next sign-in only, until
+	// OncePostExpiresAt.
+	OncePostHosts     []string `json:"once_post_hosts,omitempty"`
+	OncePostExpiresAt int64    `json:"once_post_expires_at,omitempty"`
+}
+
+// AllPostHosts returns the grant's post hosts and its once post hosts.
+func (g Grant) AllPostHosts() []string {
+	return union(g.PostHosts, g.OncePostHosts)
+}
+
+// union returns a followed by the hosts of b that a lacks, nil when both
+// are empty.
+func union(a, b []string) []string {
+	var out []string
+	for _, h := range slices.Concat(a, b) {
+		if !slices.Contains(out, h) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// without returns a without the hosts in drop, nil when nothing is left.
+func without(a []string, drop ...string) []string {
+	var out []string
+	for _, h := range a {
+		if !slices.Contains(drop, h) {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // state is the file's content.
@@ -49,7 +85,12 @@ type state struct {
 }
 
 func (s state) clone() state {
-	return state{Grants: slices.Clone(s.Grants), Nonces: cloneMap(s.Nonces)}
+	grants := slices.Clone(s.Grants)
+	for i := range grants {
+		grants[i].PostHosts = slices.Clone(grants[i].PostHosts)
+		grants[i].OncePostHosts = slices.Clone(grants[i].OncePostHosts)
+	}
+	return state{Grants: grants, Nonces: cloneMap(s.Nonces)}
 }
 
 func cloneMap(m map[string]int64) map[string]int64 {
@@ -103,6 +144,11 @@ func (s *Store) pruneLocked(st *state) {
 	st.Grants = slices.DeleteFunc(st.Grants, func(g Grant) bool {
 		return g.Scope == logingrant.ScopeOnce && g.ExpiresAt <= now
 	})
+	for i := range st.Grants {
+		if g := &st.Grants[i]; g.OncePostExpiresAt != 0 && g.OncePostExpiresAt <= now {
+			g.OncePostHosts, g.OncePostExpiresAt = nil, 0
+		}
+	}
 	for n, exp := range st.Nonces {
 		if exp < now {
 			delete(st.Nonces, n)
@@ -170,11 +216,13 @@ func (s *Store) writeLocked(st state) error {
 }
 
 // Add stores the grant c describes, which the caller verified, and remembers
-// its nonce. A device grant is never replaced by a once grant.
+// its nonce. A device grant is never replaced by a once grant; the once
+// grant's post hosts then hold for the device grant's next sign-in only.
+// Post hosts add up: a new grant keeps those the user allowed before.
 func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 	now := s.now()
 	g := Grant{Host: c.Host, Method: c.Method, Scope: c.Scope, GrantedAt: now.Unix(), SessionID: c.SessionID,
-		ChatTitle: c.ChatTitle, Via: c.Via, User: c.Sub}
+		ChatTitle: c.ChatTitle, Via: c.Via, User: c.Sub, PostHosts: union(c.PostHosts, nil)}
 	if c.Scope == logingrant.ScopeOnce {
 		g.ExpiresAt = now.Add(logingrant.OnceLifetime).Unix()
 	}
@@ -189,14 +237,36 @@ func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 			if old.Host != g.Host {
 				continue
 			}
-			if old.Scope == logingrant.ScopeDevice && g.Scope == logingrant.ScopeOnce {
+			switch {
+			case old.Scope == logingrant.ScopeDevice && g.Scope == logingrant.ScopeOnce:
+				if extra := without(g.PostHosts, old.PostHosts...); len(extra) > 0 {
+					old.OncePostHosts = union(old.OncePostHosts, extra)
+					old.OncePostExpiresAt = g.ExpiresAt
+					st.Grants[i] = old
+				}
 				out = old
 				return nil
-			}
-			if old.Scope == logingrant.ScopeDevice {
+			case old.Scope == logingrant.ScopeDevice:
 				g.LastUsed = old.LastUsed
-				out = g
+				if g.Method == "" && len(c.PostHosts) > 0 {
+					// A card that allowed a post host leaves the method as it was.
+					g.Method = old.Method
+				}
+				g.PostHosts = union(old.PostHosts, g.PostHosts)
+				if once := without(old.OncePostHosts, g.PostHosts...); len(once) > 0 {
+					g.OncePostHosts, g.OncePostExpiresAt = once, old.OncePostExpiresAt
+				}
+			case g.Scope == logingrant.ScopeOnce:
+				// A once grant on a host with an unused once grant.
+				g.PostHosts = union(old.PostHosts, g.PostHosts)
+			default:
+				// A device grant on a host with an unused once grant: the once
+				// post hosts still hold for the next sign-in.
+				if once := without(old.PostHosts, g.PostHosts...); len(once) > 0 {
+					g.OncePostHosts, g.OncePostExpiresAt = once, old.ExpiresAt
+				}
 			}
+			out = g
 			st.Grants[i] = g
 			return nil
 		}
@@ -206,10 +276,28 @@ func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 	return out, err
 }
 
-// Revoke removes the grant for host and reports whether there was one.
-func (s *Store) Revoke(host string) (bool, error) {
+// Revoke removes the grant for host and reports whether there was one. With
+// postHost set it removes only that post host from the grant.
+func (s *Store) Revoke(host, postHost string) (bool, error) {
 	found := false
 	err := s.mutate(func(st *state) error {
+		if postHost != "" {
+			for i := range st.Grants {
+				g := &st.Grants[i]
+				if g.Host != host || !slices.Contains(g.AllPostHosts(), postHost) {
+					continue
+				}
+				g.PostHosts, g.OncePostHosts = without(g.PostHosts, postHost), without(g.OncePostHosts, postHost)
+				if g.OncePostHosts == nil {
+					g.OncePostExpiresAt = 0
+				}
+				found = true
+			}
+			if !found {
+				return errNoChange
+			}
+			return nil
+		}
 		before := len(st.Grants)
 		st.Grants = slices.DeleteFunc(st.Grants, func(g Grant) bool { return g.Host == host })
 		found = len(st.Grants) != before
@@ -227,7 +315,7 @@ func (s *Store) Revoke(host string) (bool, error) {
 var errNoChange = errors.New("no change")
 
 // Used records a submitted sign-in on host: it sets last_used and removes a
-// once grant.
+// once grant and once post hosts.
 func (s *Store) Used(host string) error {
 	err := s.mutate(func(st *state) error {
 		changed := false
@@ -242,6 +330,7 @@ func (s *Store) Used(host string) error {
 		for i := range st.Grants {
 			if st.Grants[i].Host == host {
 				st.Grants[i].LastUsed, changed = now, true
+				st.Grants[i].OncePostHosts, st.Grants[i].OncePostExpiresAt = nil, 0
 			}
 		}
 		if !changed {
@@ -279,12 +368,15 @@ func (s *Store) Get(host string) (Grant, bool) {
 	return Grant{}, false
 }
 
-// NextExpiry returns the earliest expiry of a once grant, if any.
+// NextExpiry returns the earliest expiry of a once grant or of once post
+// hosts, if any.
 func (s *Store) NextExpiry() (time.Time, bool) {
 	var best int64
 	for _, g := range s.Grants() {
-		if g.ExpiresAt != 0 && (best == 0 || g.ExpiresAt < best) {
-			best = g.ExpiresAt
+		for _, at := range []int64{g.ExpiresAt, g.OncePostExpiresAt} {
+			if at != 0 && (best == 0 || at < best) {
+				best = at
+			}
 		}
 	}
 	return time.Unix(best, 0), best != 0

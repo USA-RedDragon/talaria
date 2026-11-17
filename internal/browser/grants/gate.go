@@ -145,6 +145,51 @@ type loginArgs struct {
 	} `json:"guard"`
 }
 
+// PostHosts returns, per host, the other hosts the user allowed its login
+// form to send the login to; only hosts that have any.
+func (g *Gate) PostHosts(hosts []string) map[string][]string {
+	out := map[string][]string{}
+	for _, gr := range g.o.Store.Grants() {
+		if all := gr.AllPostHosts(); len(all) > 0 && slices.Contains(hosts, gr.Host) {
+			out[gr.Host] = union(out[gr.Host], all)
+		}
+	}
+	return out
+}
+
+// withPostHosts returns the login arguments with guard.post_hosts set from
+// the grants of hosts. Whatever the caller put there is replaced: only a
+// grant the hub signed adds a host.
+func withPostHosts(raw []byte, post map[string][]string) (json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		return nil, refuse("login", "bad arguments")
+	}
+	var guard map[string]json.RawMessage
+	if len(m["guard"]) > 0 && string(m["guard"]) != "null" {
+		if err := json.Unmarshal(m["guard"], &guard); err != nil {
+			return nil, refuse("login", "bad guard")
+		}
+	}
+	if guard == nil {
+		guard = map[string]json.RawMessage{}
+	}
+	delete(guard, "post_hosts")
+	if len(post) > 0 {
+		enc, err := json.Marshal(post)
+		if err != nil {
+			return nil, err
+		}
+		guard["post_hosts"] = enc
+	}
+	enc, err := json.Marshal(guard)
+	if err != nil {
+		return nil, err
+	}
+	m["guard"] = enc
+	return json.Marshal(m)
+}
+
 func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 	raw, err := json.Marshal(args)
 	if err != nil {
@@ -165,7 +210,11 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 			return nil, refuse("login", "browser_login is not allowed on %s: it is not in browser.autologin-hosts and the user has not allowed it for this computer", h)
 		}
 	}
-	res, err := g.o.Inner.Call(ctx, "login", args)
+	send, err := withPostHosts(raw, g.PostHosts(hosts))
+	if err != nil {
+		return nil, err
+	}
+	res, err := g.o.Inner.Call(ctx, "login", send)
 	var out struct {
 		Submitted   bool     `json:"submitted"`
 		MethodsSeen []string `json:"methods_seen"`
@@ -192,6 +241,13 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 		g.Sync()
 	}
 	return res, nil
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func urlHost(u string) string {
@@ -235,14 +291,16 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 		return nil, err
 	}
 	var a struct {
-		Action string `json:"action"`
-		Host   string `json:"host"`
-		Token  string `json:"token"`
+		Action   string `json:"action"`
+		Host     string `json:"host"`
+		PostHost string `json:"post_host"`
+		Token    string `json:"token"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, refuse(OpName, "bad arguments: %v", err)
 	}
 	a.Host = strings.ToLower(strings.TrimSuffix(a.Host, "."))
+	a.PostHost = strings.ToLower(strings.TrimSuffix(a.PostHost, "."))
 	switch a.Action {
 	case "list":
 		return json.Marshal(g.list())
@@ -255,13 +313,15 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 		}
 		return json.Marshal(map[string]any{"grant": gr})
 	case "revoke":
-		ok, err := g.o.Store.Revoke(a.Host)
+		ok, err := g.o.Store.Revoke(a.Host, a.PostHost)
 		if err != nil {
 			return nil, fmt.Errorf("revoke: %w", err)
 		}
-		g.mu.Lock()
-		delete(g.seen, a.Host)
-		g.mu.Unlock()
+		if a.PostHost == "" {
+			g.mu.Lock()
+			delete(g.seen, a.Host)
+			g.mu.Unlock()
+		}
 		g.Sync()
 		return json.Marshal(map[string]any{"revoked": ok})
 	}
@@ -289,7 +349,7 @@ func (g *Gate) status(host string) (json.RawMessage, error) {
 	}
 	return json.Marshal(map[string]any{"host": host, "config": slices.Contains(g.o.ConfigHosts, host), "grant": grant,
 		"once": grant != nil && grant.Scope == logingrant.ScopeOnce, "method": methods[host], "saved_logins": saved,
-		"methods_seen": seen})
+		"methods_seen": seen, "post_hosts": nonNil(g.PostHosts([]string{host})[host])})
 }
 
 // add verifies a grant token and stores it. The grant must verify with a hub

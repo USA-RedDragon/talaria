@@ -31,22 +31,49 @@ const (
 	testDevice = "d_test"
 	hostA      = "portal.example.com"
 	hostB      = "static.example.com"
+	kGuard     = "guard"
+	kLogins    = "login_hosts"
+	kList      = "list"
+	scopeOnce  = "once"
+	submitted  = `{"filled":true,"submitted":true}`
 )
 
 type fakeInner struct {
 	mu    sync.Mutex
 	calls []string
+	args  []string
 	reply map[string]string
 }
 
-func (f *fakeInner) Call(_ context.Context, op string, _ any) (json.RawMessage, error) {
+func (f *fakeInner) Call(_ context.Context, op string, args any) (json.RawMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, op)
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	f.args = append(f.args, string(raw))
 	if r, ok := f.reply[op]; ok {
 		return json.RawMessage(r), nil
 	}
 	return json.RawMessage(`{}`), nil
+}
+
+// lastPostHosts returns guard.post_hosts of the last call.
+func (f *fakeInner) lastPostHosts(t *testing.T) map[string][]string {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var a struct {
+		Guard struct {
+			PostHosts map[string][]string `json:"post_hosts"`
+		} `json:"guard"`
+	}
+	if err := json.Unmarshal([]byte(f.args[len(f.args)-1]), &a); err != nil {
+		t.Fatal(err)
+	}
+	return a.Guard.PostHosts
 }
 
 func (f *fakeInner) count(op string) int {
@@ -157,7 +184,7 @@ func (r *rig) add(t *testing.T, tok string) error {
 }
 
 func (r *rig) login(host string) (json.RawMessage, error) {
-	return r.gate.Call(context.Background(), "login", map[string]any{"tab_id": 1, "guard": map[string]any{"login_hosts": []string{host}}})
+	return r.gate.Call(context.Background(), "login", map[string]any{"tab_id": 1, kGuard: map[string]any{kLogins: []string{host}}})
 }
 
 func wantRefused(t *testing.T, err error, contains string) {
@@ -182,7 +209,7 @@ func TestAddStoresGrantWith0600AndReloads(t *testing.T) {
 		t.Errorf("mode = %o, want 600", fi.Mode().Perm())
 	}
 	g2 := r.build(t)
-	res, err := g2.Call(t.Context(), "login_grants", map[string]any{kAction: "list"})
+	res, err := g2.Call(t.Context(), "login_grants", map[string]any{kAction: kList})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +255,7 @@ func TestAddRefusals(t *testing.T) {
 	} {
 		wantRefused(t, r.add(t, tc.tok), tc.want)
 		if name == "wrong key" || name == "wrong device" {
-			if got, _ := r.op(t, map[string]any{kAction: "list"}); len(asList(got["grants"])) != 0 {
+			if got, _ := r.op(t, map[string]any{kAction: kList}); len(asList(got["grants"])) != 0 {
 				t.Errorf("%s stored a grant", name)
 			}
 		}
@@ -253,7 +280,7 @@ func TestRefusedWithoutGrantAndAllowedWithOne(t *testing.T) {
 		t.Fatal("login reached the extension without a grant")
 	}
 	// A login by URL is checked too.
-	_, err = r.gate.Call(t.Context(), "login", map[string]any{"url": "https://" + hostA + "/x", "guard": map[string]any{"login_hosts": []string{hostB}}})
+	_, err = r.gate.Call(t.Context(), "login", map[string]any{"url": "https://" + hostA + "/x", kGuard: map[string]any{kLogins: []string{hostB}}})
 	wantRefused(t, err, hostA)
 	if _, err := r.login(hostB); err != nil {
 		t.Errorf("config host refused: %v", err)
@@ -313,7 +340,7 @@ func TestMergeWithConfigAndBrokerResent(t *testing.T) {
 func TestOnceGrantConsumedBySubmittedLogin(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	if err := r.add(t, r.token(t, func(c *logingrant.Claims) { c.Scope = "once" })); err != nil {
+	if err := r.add(t, r.token(t, func(c *logingrant.Claims) { c.Scope = scopeOnce })); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := r.op(t, map[string]any{kAction: kStatus, kHost: hostA})
@@ -328,7 +355,7 @@ func TestOnceGrantConsumedBySubmittedLogin(t *testing.T) {
 	if _, err := r.login(hostA); err != nil {
 		t.Fatalf("once grant gone after an unsubmitted login: %v", err)
 	}
-	r.inner.reply["login"] = `{"filled":true,"submitted":true}`
+	r.inner.reply["login"] = submitted
 	if _, err := r.login(hostA); err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +369,7 @@ func TestOnceGrantConsumedBySubmittedLogin(t *testing.T) {
 func TestOnceGrantExpires(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	if err := r.add(t, r.token(t, func(c *logingrant.Claims) { c.Scope = "once" })); err != nil {
+	if err := r.add(t, r.token(t, func(c *logingrant.Claims) { c.Scope = scopeOnce })); err != nil {
 		t.Fatal(err)
 	}
 	r.now = r.now.Add(logingrant.OnceLifetime + time.Second)
@@ -369,7 +396,7 @@ func TestDeviceGrantLastUsedAndMethodsSeen(t *testing.T) {
 		t.Errorf("methods_seen = %s", seen)
 	}
 	r.now = r.now.Add(time.Hour)
-	r.inner.reply["login"] = `{"filled":true,"submitted":true}`
+	r.inner.reply["login"] = submitted
 	if _, err := r.login(hostA); err != nil {
 		t.Fatal(err)
 	}
@@ -506,5 +533,168 @@ func TestDesktopProfileFromProfilesINI(t *testing.T) {
 	}
 	if got := grants.DesktopProfileDirs(t.TempDir()); len(got) != 0 {
 		t.Errorf("no profiles.ini: %v", got)
+	}
+}
+
+const (
+	apiA = "portal-api.example.com"
+	apiB = "auth.example.net"
+)
+
+func (r *rig) grant(t *testing.T, mod func(*logingrant.Claims)) grants.Grant {
+	t.Helper()
+	out, err := r.op(t, map[string]any{kAction: "add", "token": r.token(t, mod)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(out["grant"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g grants.Grant
+	if err := json.Unmarshal(raw, &g); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+func (r *rig) listed(t *testing.T, host string) grants.Grant {
+	t.Helper()
+	res, err := r.gate.Call(t.Context(), "login_grants", map[string]any{kAction: kList})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Grants []grants.Grant `json:"grants"`
+	}
+	if err := json.Unmarshal(res, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range list.Grants {
+		if g.Host == host {
+			return g
+		}
+	}
+	return grants.Grant{}
+}
+
+func TestPostHostsGoWithTheirLoginHostOnly(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.grant(t, func(c *logingrant.Claims) { c.PostHosts = []string{apiA} })
+	if _, err := r.login(hostA); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inner.lastPostHosts(t); len(got) != 1 || !slices.Equal(got[hostA], []string{apiA}) {
+		t.Errorf("post hosts for %s = %v", hostA, got)
+	}
+	// Another login host gets none, and what the caller put in the guard is
+	// dropped: only a signed grant adds a host.
+	if _, err := r.gate.Call(t.Context(), "login", map[string]any{"tab_id": 1, kGuard: map[string]any{
+		kLogins: []string{hostB}, "post_hosts": map[string][]string{hostB: {"evil.example.org"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inner.lastPostHosts(t); len(got) != 0 {
+		t.Errorf("post hosts for %s = %v, want none", hostB, got)
+	}
+	st, _ := r.op(t, map[string]any{kAction: kStatus, kHost: hostA})
+	if ph := asList(st["post_hosts"]); len(ph) != 1 || ph[0] != apiA {
+		t.Errorf("status post_hosts = %v", st["post_hosts"])
+	}
+	st, _ = r.op(t, map[string]any{kAction: kStatus, kHost: hostB})
+	if ph, ok := st["post_hosts"].([]any); !ok || len(ph) != 0 {
+		t.Errorf("status post_hosts of %s = %v", hostB, st["post_hosts"])
+	}
+}
+
+func TestPostHostsAddUp(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.grant(t, func(c *logingrant.Claims) { c.PostHosts = []string{apiA} })
+	g := r.grant(t, func(c *logingrant.Claims) { c.PostHosts = []string{apiB} })
+	if !slices.Equal(g.PostHosts, []string{apiA, apiB}) || g.Scope != scopeDev {
+		t.Errorf("grant = %+v", g)
+	}
+	// A device grant without post hosts keeps the earlier ones.
+	g = r.grant(t, func(c *logingrant.Claims) { c.Method = pwMethod })
+	if !slices.Equal(g.PostHosts, []string{apiA, apiB}) || g.Method != pwMethod {
+		t.Errorf("grant = %+v", g)
+	}
+	// A post host card without a method keeps the grant's method.
+	g = r.grant(t, func(c *logingrant.Claims) { c.PostHosts = []string{apiA} })
+	if g.Method != pwMethod {
+		t.Errorf("grant after a post host card = %+v", g)
+	}
+	// A config host takes a grant for its post host alone.
+	g = r.grant(t, func(c *logingrant.Claims) { c.Host, c.Scope, c.PostHosts = hostB, scopeOnce, []string{apiA} })
+	if g.Scope != scopeOnce || !slices.Equal(g.PostHosts, []string{apiA}) {
+		t.Errorf("config host grant = %+v", g)
+	}
+}
+
+func TestOncePostHostOnADeviceGrant(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.grant(t, nil)
+	g := r.grant(t, func(c *logingrant.Claims) { c.Scope, c.PostHosts = scopeOnce, []string{apiA} })
+	if g.Scope != scopeDev || len(g.PostHosts) != 0 || !slices.Equal(g.OncePostHosts, []string{apiA}) ||
+		g.OncePostExpiresAt != r.now.Add(logingrant.OnceLifetime).Unix() {
+		t.Fatalf("grant = %+v", g)
+	}
+	// Kept by a login that did not submit, used up by one that did.
+	r.inner.reply["login"] = `{"filled":true,"submitted":false,"needs_post_host":"x.example.com"}`
+	if _, err := r.login(hostA); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inner.lastPostHosts(t); !slices.Equal(got[hostA], []string{apiA}) {
+		t.Errorf("post hosts = %v", got)
+	}
+	r.inner.reply["login"] = submitted
+	if _, err := r.login(hostA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.login(hostA); err != nil {
+		t.Fatalf("the device grant went with the once post host: %v", err)
+	}
+	if got := r.inner.lastPostHosts(t); len(got) != 0 {
+		t.Errorf("post hosts after the sign-in = %v", got)
+	}
+	if g := r.listed(t, hostA); g.Scope != scopeDev || len(g.OncePostHosts) != 0 || g.OncePostExpiresAt != 0 {
+		t.Errorf("listed = %+v", g)
+	}
+	// Unused, it expires with the once lifetime.
+	r.grant(t, func(c *logingrant.Claims) { c.Scope, c.PostHosts = scopeOnce, []string{apiA} })
+	r.now = r.now.Add(logingrant.OnceLifetime + time.Second)
+	if g := r.listed(t, hostA); g.Scope != scopeDev || len(g.OncePostHosts) != 0 {
+		t.Errorf("after expiry = %+v", g)
+	}
+	// A device grant for the post host makes it lasting.
+	r.grant(t, func(c *logingrant.Claims) { c.Scope, c.PostHosts = scopeOnce, []string{apiA} })
+	g = r.grant(t, func(c *logingrant.Claims) { c.PostHosts = []string{apiA} })
+	if !slices.Equal(g.PostHosts, []string{apiA}) || len(g.OncePostHosts) != 0 {
+		t.Errorf("device after once = %+v", g)
+	}
+}
+
+func TestRevokeOnePostHost(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.grant(t, func(c *logingrant.Claims) { c.PostHosts = []string{apiA, apiB} })
+	out, err := r.op(t, map[string]any{kAction: kRevoke, kHost: hostA, "post_host": "Portal-API.example.com."})
+	if err != nil || out["revoked"] != true {
+		t.Fatalf("revoke = %v %v", out, err)
+	}
+	if g := r.listed(t, hostA); g.Host != hostA || !slices.Equal(g.PostHosts, []string{apiB}) {
+		t.Errorf("after revoke = %+v", g)
+	}
+	out, _ = r.op(t, map[string]any{kAction: kRevoke, kHost: hostA, "post_host": apiA})
+	if out["revoked"] != false {
+		t.Errorf("second revoke = %v", out)
+	}
+	if _, err := r.login(hostA); err != nil {
+		t.Errorf("the login grant went with its post host: %v", err)
+	}
+	if got := r.inner.lastPostHosts(t); !slices.Equal(got[hostA], []string{apiB}) {
+		t.Errorf("post hosts = %v", got)
 	}
 }
