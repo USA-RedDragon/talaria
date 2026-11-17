@@ -1,0 +1,4 @@
+# A cron run's scope (this patch changes _CronRunScope)
+tests/cron/test_scheduler.py
+tests/cron/test_scheduler_cron_session_isolation.py
+tests/tools/test_cronjob_run_background.py

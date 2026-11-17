@@ -1,0 +1,103 @@
+From c61e91f65af6996b17a6d0b082b2c8da02205ea3 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 10:07:28 +0000
+Subject: [PATCH] cron: a run uses its own approval session key
+
+---
+ cron/scheduler.py                            |  9 ++++
+ tests/cron/test_cron_run_own_approval_key.py | 52 ++++++++++++++++++++
+ 2 files changed, 61 insertions(+)
+ create mode 100644 tests/cron/test_cron_run_own_approval_key.py
+
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index 3e4a3059..c1dce7c1 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -2375,6 +2375,7 @@ class _CronRunScope:
+         self._cron_session_token = None
+         self._non_dispatcher_token = None
+         self._spend_token = None
++        self._approval_key_token = None
+ 
+     def enter(self) -> None:
+         # Scope cron approval policy; exit() RESETS via token (pinning "" would suppress the legacy
+@@ -2388,6 +2389,11 @@ class _CronRunScope:
+         # Each run is its own MCP spend "chat" (its approval session key is "" for every job).
+         from tools.mcp_tool_costs import bind_run
+         self._spend_token = bind_run(self.task_id)
++        # The run's own approval session key. A run that cronjob(action="run") started carries a copy of the
++        # chat's context, approval key included: it then counted the chat's session approvals, and a tool
++        # that records state by that key (a plugin's working directory) wrote over the chat's own.
++        from tools.approval_context import set_current_session_key
++        self._approval_key_token = set_current_session_key(self.task_id)
+ 
+     def exit(self) -> None:
+         from gateway.session_context import clear_session_vars
+@@ -2402,6 +2408,9 @@ class _CronRunScope:
+         if self._spend_token is not None:
+             from tools.mcp_tool_costs import unbind_run
+             unbind_run(self._spend_token)
++        if self._approval_key_token is not None:
++            from tools.approval_context import reset_current_session_key
++            reset_current_session_key(self._approval_key_token)
+         for name in _CRON_DELIVERY_VARS:
+             self._var_map[name].set("")
+ 
+diff --git a/tests/cron/test_cron_run_own_approval_key.py b/tests/cron/test_cron_run_own_approval_key.py
+new file mode 100644
+index 00000000..e51da121
+--- /dev/null
++++ b/tests/cron/test_cron_run_own_approval_key.py
+@@ -0,0 +1,52 @@
++"""A cron run uses its own approval session key, also when it starts from a chat's context.
++
++``cronjob(action="run")`` dispatches the run with a copy of the chat's context. The run then kept the
++chat's approval session key: it counted the chat's session approvals, and state a tool keeps by that
++key (a plugin's recorded working directory) was written over the chat's own.
++"""
++from __future__ import annotations
++
++import contextvars
++
++from cron.scheduler import _CronRunScope
++from tools.approval import approve_session, is_approved
++from tools.approval_context import get_current_session_key, set_current_session_key
++
++CHAT_KEY = "agent:main:local:dm:chat-1"
++
++
++def _in_chat_context(fn):
++    def run():
++        set_current_session_key(CHAT_KEY)
++        return fn()
++    return contextvars.copy_context().run(run)
++
++
++def test_run_started_from_a_chat_has_its_own_approval_key():
++    def run():
++        scope = _CronRunScope({"id": "job1", "name": "j"}, "job1", "e1")
++        scope.enter()
++        try:
++            inside = get_current_session_key(default="")
++        finally:
++            scope.exit()
++        return inside, get_current_session_key(default="")
++
++    inside, after = _in_chat_context(run)
++    assert inside == "cron:job1:e1"
++    assert after == CHAT_KEY
++
++
++def test_run_does_not_count_the_chats_session_approvals():
++    approve_session(CHAT_KEY, "plugin_rule:browser:visit:example.com")
++
++    def run():
++        scope = _CronRunScope({"id": "job1", "name": "j"}, "job1", "e2")
++        scope.enter()
++        try:
++            return is_approved(get_current_session_key(), "plugin_rule:browser:visit:example.com")
++        finally:
++            scope.exit()
++
++    assert _in_chat_context(run) is False
++    assert is_approved(CHAT_KEY, "plugin_rule:browser:visit:example.com")
