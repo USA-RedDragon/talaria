@@ -167,7 +167,7 @@
    "title": "Wrote notes.txt",
    "sub": "/home/alice/project/new-dir",
    "status": "3 lines, 212 B",
-   "more": "created folder",
+   "more": "",
    "blocks": [
     "Content"
    ]
@@ -686,6 +686,681 @@
     "kv"
    ],
    "page": null
+  }
+ },
+ {
+  "name": "real write new",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/work/w/a.txt",
+    "content": "one\ntwo\nthree\n"
+   },
+   "result": {
+    "bytes_written": 14,
+    "dirs_created": true,
+    "verified": true,
+    "lint": {
+     "status": "skipped",
+     "message": "No linter for .txt files"
+    },
+    "resolved_path": "/home/alice/work/w/a.txt",
+    "files_modified": [
+     "/home/alice/work/w/a.txt"
+    ]
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Wrote a.txt",
+   "status": "3 lines, 14 B",
+   "state": "ok",
+   "blocks": [
+    "Content"
+   ]
+  }
+ },
+ {
+  "name": "real write overwrite",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/work/w/a.txt",
+    "content": "one\ntwo\nthree\nfour\n"
+   },
+   "result": {
+    "bytes_written": 19,
+    "dirs_created": true,
+    "verified": true,
+    "lint": {
+     "status": "skipped",
+     "message": "No linter for .txt files"
+    },
+    "resolved_path": "/home/alice/work/w/a.txt",
+    "files_modified": [
+     "/home/alice/work/w/a.txt"
+    ]
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Wrote a.txt",
+   "status": "4 lines, 19 B",
+   "state": "ok",
+   "blocks": [
+    "Content"
+   ]
+  }
+ },
+ {
+  "name": "real write empty",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/work/w/e.txt",
+    "content": ""
+   },
+   "result": {
+    "bytes_written": 0,
+    "dirs_created": true,
+    "verified": true,
+    "lint": {
+     "status": "skipped",
+     "message": "No linter for .txt files"
+    },
+    "resolved_path": "/home/alice/work/w/e.txt",
+    "files_modified": [
+     "/home/alice/work/w/e.txt"
+    ]
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Wrote e.txt",
+   "status": "Empty file",
+   "state": "ok",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real write py ok",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/work/w/ok.py",
+    "content": "def f():\n    return 1\n"
+   },
+   "result": {
+    "bytes_written": 22,
+    "dirs_created": true,
+    "verified": true,
+    "lint": {
+     "status": "ok",
+     "output": ""
+    },
+    "resolved_path": "/home/alice/work/w/ok.py",
+    "files_modified": [
+     "/home/alice/work/w/ok.py"
+    ]
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Wrote ok.py",
+   "status": "2 lines, 22 B",
+   "state": "ok",
+   "blocks": [
+    "Content"
+   ],
+   "more": "syntax OK"
+  }
+ },
+ {
+  "name": "real write py",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/work/w/s.py",
+    "content": "def f(:\n  pass\n"
+   },
+   "result": {
+    "bytes_written": 15,
+    "dirs_created": true,
+    "verified": true,
+    "lint": {
+     "status": "error",
+     "output": "SyntaxError: invalid syntax (line 1, column 7)"
+    },
+    "resolved_path": "/home/alice/work/w/s.py",
+    "files_modified": [
+     "/home/alice/work/w/s.py"
+    ]
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Wrote s.py",
+   "status": "2 lines, 15 B",
+   "state": "ok",
+   "lines": [
+    "Syntax check failed: SyntaxError: invalid syntax (line 1, column 7)"
+   ],
+   "blocks": [
+    "Content"
+   ]
+  }
+ },
+ {
+  "name": "real write json bad",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/home/alice/work/w/x.json",
+    "content": "{bad"
+   },
+   "result": {
+    "bytes_written": 0,
+    "dirs_created": false,
+    "error": "Refusing to write '/home/alice/work/w/x.json': candidate content fails .json syntax validation (JSONDecodeError: Expecting property name enclosed in double quotes (line 1, column 2)). The file was NOT created or modified. Fix the content and retry.",
+    "resolved_path": "/home/alice/work/w/x.json"
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Could not write x.json",
+   "status": "Failed: Refusing to write '/home/alice/work/w/x.json': candidate content fails .json syn…",
+   "state": "bad",
+   "blocks": [
+    "Error"
+   ]
+  }
+ },
+ {
+  "name": "real write bad dir",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "path": "/proc/nope/x.txt",
+    "content": "x"
+   },
+   "result": {
+    "bytes_written": 0,
+    "dirs_created": false,
+    "error": "Failed to write file: No such file or directory: /proc/nope",
+    "resolved_path": "/proc/nope/x.txt"
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Could not write x.txt",
+   "status": "Failed: Failed to write file: No such file or directory: /proc/nope",
+   "state": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real write missing path",
+  "call": {
+   "name": "write_file",
+   "args": {
+    "content": "x"
+   },
+   "result": {
+    "error": "write_file: missing required field 'path'. Re-emit the tool call with both 'path' and 'content' set."
+   }
+  },
+  "want": {
+   "icon": "filenew",
+   "title": "Could not write a file",
+   "status": "Failed: write_file: missing required field 'path'. Re-emit the tool call with both 'path…",
+   "state": "bad",
+   "blocks": [
+    "Error"
+   ]
+  }
+ },
+ {
+  "name": "real patch replace",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/work/w/a.txt",
+    "old_string": "two",
+    "new_string": "2"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/a.txt\n+++ b//home/alice/work/w/a.txt\n@@ -1,4 +1,4 @@\n one\n-two\n+2\n three\n four\n",
+    "files_modified": [
+     "/home/alice/work/w/a.txt"
+    ],
+    "lint": {
+     "status": "skipped",
+     "message": "No linter for .txt files"
+    },
+    "resolved_path": "/home/alice/work/w/a.txt"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited a.txt work/w/",
+   "status": "+1 -1",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/a.txt"
+   ]
+  }
+ },
+ {
+  "name": "real patch nomatch",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/work/w/a.txt",
+    "old_string": "zzz",
+    "new_string": "2"
+   },
+   "result": {
+    "success": false,
+    "error": "Could not find a match for old_string in the file",
+    "_hint": "old_string not found. Use read_file to verify the current content, or search_files to locate the text."
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited a.txt work/w/",
+   "status": "Failed: Could not find a match for old_string in the file",
+   "state": "bad",
+   "lines": [
+    "Looked for zzz"
+   ],
+   "blocks": [
+    "Not applied"
+   ]
+  }
+ },
+ {
+  "name": "real patch multi",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/work/w/a.txt",
+    "old_string": "e",
+    "new_string": "E"
+   },
+   "result": {
+    "success": false,
+    "error": "Found 3 matches for old_string. Provide more context to make it unique, or use replace_all=True. Matches:\n  L1: one\n  L3: three\n  L3: three"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited a.txt work/w/",
+   "status": "Failed: Found 3 matches for old_string. Provide more context to make it unique, or use r…",
+   "state": "bad",
+   "lines": [
+    "Looked for e"
+   ],
+   "blocks": [
+    "Not applied"
+   ]
+  }
+ },
+ {
+  "name": "real patch all",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/work/w/a.txt",
+    "old_string": "e",
+    "new_string": "E",
+    "replace_all": true
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/a.txt\n+++ b//home/alice/work/w/a.txt\n@@ -1,4 +1,4 @@\n-one\n+onE\n 2\n-three\n+thrEE\n four\n",
+    "files_modified": [
+     "/home/alice/work/w/a.txt"
+    ],
+    "lint": {
+     "status": "skipped",
+     "message": "No linter for .txt files"
+    },
+    "resolved_path": "/home/alice/work/w/a.txt"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited a.txt work/w/",
+   "status": "+2 -2",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/a.txt"
+   ],
+   "more": "every match"
+  }
+ },
+ {
+  "name": "real patch missing file",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/work/w/no.txt",
+    "old_string": "e",
+    "new_string": "E"
+   },
+   "result": {
+    "success": false,
+    "error": "Failed to read file: /home/alice/work/w/no.txt"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited no.txt work/w/",
+   "status": "Failed: Failed to read file: /home/alice/work/w/no.txt",
+   "state": "bad",
+   "lines": [
+    "Looked for e"
+   ],
+   "blocks": [
+    "Not applied"
+   ]
+  }
+ },
+ {
+  "name": "real patch py ok",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/work/w/ok.py",
+    "old_string": "return 1",
+    "new_string": "return 2"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/ok.py\n+++ b//home/alice/work/w/ok.py\n@@ -1,2 +1,2 @@\n def f():\n-    return 1\n+    return 2\n",
+    "files_modified": [
+     "/home/alice/work/w/ok.py"
+    ],
+    "lint": {
+     "status": "ok",
+     "output": ""
+    },
+    "resolved_path": "/home/alice/work/w/ok.py"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited ok.py work/w/",
+   "status": "+1 -1",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/ok.py"
+   ],
+   "more": "syntax OK"
+  }
+ },
+ {
+  "name": "real patch py lint error",
+  "call": {
+   "name": "patch",
+   "args": {
+    "path": "/home/alice/work/w/ok.py",
+    "old_string": "def f():",
+    "new_string": "def f(:"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/ok.py\n+++ b//home/alice/work/w/ok.py\n@@ -1,2 +1,2 @@\n-def f():\n+def f(:\n     return 2\n",
+    "files_modified": [
+     "/home/alice/work/w/ok.py"
+    ],
+    "lint": {
+     "status": "error",
+     "output": "SyntaxError: invalid syntax (line 1, column 7)"
+    },
+    "resolved_path": "/home/alice/work/w/ok.py"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited ok.py work/w/",
+   "status": "+1 -1",
+   "state": "ok",
+   "lines": [
+    "Syntax check failed: SyntaxError: invalid syntax (line 1, column 7)"
+   ],
+   "blocks": [
+    "/home/alice/work/w/ok.py"
+   ]
+  }
+ },
+ {
+  "name": "real patch v4a update",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Update File: /home/alice/work/w/a.txt\n@@\n-onE\n+ONE\n*** End Patch"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/a.txt\n+++ b//home/alice/work/w/a.txt\n@@ -1,4 +1,4 @@\n-onE\n+ONE\n 2\n thrEE\n four\n",
+    "files_modified": [
+     "/home/alice/work/w/a.txt"
+    ],
+    "lint": {
+     "/home/alice/work/w/a.txt": {
+      "status": "skipped",
+      "message": "No linter for .txt files"
+     }
+    },
+    "resolved_path": "/home/alice/work/w/a.txt"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited a.txt work/w/",
+   "status": "+1 -1",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/a.txt"
+   ]
+  }
+ },
+ {
+  "name": "real patch v4a bad",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Update File: /home/alice/work/w/a.txt\n@@\n-nothere\n+x\n*** End Patch"
+   },
+   "result": {
+    "success": false,
+    "error": "Patch validation failed (no files were modified):\n  • /home/alice/work/w/a.txt: hunk 1 (no hint) not found — Could not find a match for old_string in the file\n\nDid you mean one of these sections?\n   1| ONE\n   2| 2\n   3| thrEE\n   4| four\n---\n   2| 2\n   3| thrEE\n   4| four"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited a.txt work/w/",
+   "status": "Failed: Patch validation failed (no files were modified): • /home/alice/work/w/a.txt: hu…",
+   "state": "bad",
+   "blocks": [
+    "Error"
+   ]
+  }
+ },
+ {
+  "name": "real patch v4a add",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Add File: /home/alice/work/w/n.txt\n+hello\n+world\n*** End Patch"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- /dev/null\n+++ b//home/alice/work/w/n.txt\n+hello\n+world",
+    "files_created": [
+     "/home/alice/work/w/n.txt"
+    ],
+    "lint": {
+     "/home/alice/work/w/n.txt": {
+      "status": "skipped",
+      "message": "No linter for .txt files"
+     }
+    },
+    "files_modified": [
+     "/home/alice/work/w/n.txt"
+    ],
+    "resolved_path": "/home/alice/work/w/n.txt"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited n.txt work/w/",
+   "status": "+2 -0",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/n.txt"
+   ]
+  }
+ },
+ {
+  "name": "real patch v4a move",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Move File: /home/alice/work/w/n.txt -> /home/alice/work/w/m.txt\n*** End Patch"
+   },
+   "result": {
+    "success": true,
+    "diff": "# Moved: /home/alice/work/w/n.txt -> /home/alice/work/w/m.txt",
+    "files_modified": [
+     "/home/alice/work/w/n.txt",
+     "/home/alice/work/w/m.txt"
+    ]
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Moved n.txt to m.txt",
+   "status": "Moved",
+   "state": "ok",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real patch v4a delete",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Delete File: /home/alice/work/w/m.txt\n*** End Patch"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/m.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-hello\n-world",
+    "files_deleted": [
+     "/home/alice/work/w/m.txt"
+    ],
+    "files_modified": [
+     "/home/alice/work/w/m.txt"
+    ],
+    "resolved_path": "/home/alice/work/w/m.txt"
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited m.txt work/w/",
+   "status": "+0 -2",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/m.txt"
+   ]
+  }
+ },
+ {
+  "name": "real patch two files",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Update File: /home/alice/work/w/a.txt\n@@\n-one\n+ONE\n*** Update File: /home/alice/work/w/b.txt\n@@\n-blue\n+green\n*** End Patch"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/a.txt\n+++ b//home/alice/work/w/a.txt\n@@ -1,2 +1,2 @@\n-one\n+ONE\n two\n\n--- a//home/alice/work/w/b.txt\n+++ b//home/alice/work/w/b.txt\n@@ -1,2 +1,2 @@\n red\n-blue\n+green\n",
+    "files_modified": [
+     "/home/alice/work/w/a.txt",
+     "/home/alice/work/w/b.txt"
+    ],
+    "lint": {
+     "/home/alice/work/w/a.txt": {
+      "status": "skipped",
+      "message": "No linter for .txt files"
+     },
+     "/home/alice/work/w/b.txt": {
+      "status": "skipped",
+      "message": "No linter for .txt files"
+     }
+    }
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited 2 files",
+   "status": "+2 -2",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/a.txt",
+    "/home/alice/work/w/b.txt"
+   ],
+   "more": "2 places"
+  }
+ },
+ {
+  "name": "real patch update and add",
+  "call": {
+   "name": "patch",
+   "args": {
+    "mode": "patch",
+    "patch": "*** Begin Patch\n*** Update File: /home/alice/work/w/a.txt\n@@\n-two\n+2\n*** Add File: /home/alice/work/w/c.txt\n+new\n*** End Patch"
+   },
+   "result": {
+    "success": true,
+    "diff": "--- a//home/alice/work/w/a.txt\n+++ b//home/alice/work/w/a.txt\n@@ -1,2 +1,2 @@\n ONE\n-two\n+2\n\n--- /dev/null\n+++ b//home/alice/work/w/c.txt\n+new",
+    "files_modified": [
+     "/home/alice/work/w/a.txt",
+     "/home/alice/work/w/c.txt"
+    ],
+    "files_created": [
+     "/home/alice/work/w/c.txt"
+    ],
+    "lint": {
+     "/home/alice/work/w/a.txt": {
+      "status": "skipped",
+      "message": "No linter for .txt files"
+     },
+     "/home/alice/work/w/c.txt": {
+      "status": "skipped",
+      "message": "No linter for .txt files"
+     }
+    }
+   }
+  },
+  "want": {
+   "icon": "edit",
+   "title": "Edited 2 files",
+   "status": "+2 -1",
+   "state": "ok",
+   "blocks": [
+    "/home/alice/work/w/a.txt",
+    "/home/alice/work/w/c.txt"
+   ],
+   "more": "1 new"
   }
  }
 ]

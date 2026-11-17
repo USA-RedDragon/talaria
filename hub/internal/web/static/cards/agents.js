@@ -277,8 +277,14 @@
   function agentName(c) {
     const a = isObj(c.args) ? c.args : {};
     const name = short(str(a.name));
-    const out = { icon: "edit", blocks: [], status: "Done" };
-    out.title = name ? verb(c, "Named this chat ", "Naming this chat ") + name : verb(c, "Cleared", "Clearing") + " this chat's name";
+    const out = { icon: "edit", blocks: [] };
+    const failed = c.done && c.failed;
+    if (name) out.title = failed ? "Could not name this chat " + name : verb(c, "Named this chat ", "Naming this chat ") + name;
+    else out.title = failed ? "Could not clear this chat's name" : verb(c, "Cleared", "Clearing") + " this chat's name";
+    if (!c.done || failed) return out;
+    // The name the hub kept is the one in its answer; a call without an answer shows the one asked for.
+    const kept = isObj(c.res) && typeof c.res.name === "string" ? short(c.res.name) : name;
+    out.status = kept ? "Other agents can message it as \u201c" + kept + "\u201d" : "Name removed";
     return out;
   }
 

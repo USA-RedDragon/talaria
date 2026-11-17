@@ -468,7 +468,9 @@ window.HubToolCard = (() => {
   function outcome(name, p) {
     const res = parse(p.result);
     const exit = res && typeof res.exit_code === "number" ? res.exit_code : null;
-    const failed = !!(p.is_error || (p.error && p.error !== false) || failedRes(res) || (exit !== null && exit !== 0));
+    // A background command that was stopped on purpose has the exit code of the signal: that is not a failure.
+    const stoppedOnPurpose = name === "process_manage" && res && (res.completion_reason === "killed" || res.status === "killed");
+    const failed = !!(p.is_error || (p.error && p.error !== false) || failedRes(res) || (exit !== null && exit !== 0 && !stoppedOnPurpose));
     let out = p.result_text;
     if (!out && res && name === "terminal" && "output" in res) {
       out = String(res.output || "");

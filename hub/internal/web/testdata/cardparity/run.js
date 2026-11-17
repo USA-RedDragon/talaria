@@ -90,6 +90,8 @@ async function takeShots(c, main, mini) {
         for (const want of ["open", "closed"]) {
           const isOpen = await ev(`${sel(id)}.querySelector(".notice-head").getAttribute("aria-expanded") === "true"`);
           if (isOpen !== (want === "open")) await ev(`${sel(id)}.querySelector(".notice-head").click()`);
+          // A card in a folded group of calls is shown once its groups are open.
+          await ev(`(() => { let g = ${sel(id)}.closest("details"); while (g) { g.open = true; g = g.parentElement && g.parentElement.closest("details"); } })()`);
           // Images load as they come into view and grow the card: wait for
           // them, then put the card in view again before the clip is taken.
           await ev(`${sel(id)}.scrollIntoView({ block: "center" })`);

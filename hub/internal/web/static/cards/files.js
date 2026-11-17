@@ -4,8 +4,9 @@
 // toolcard.js and is registered with HubToolCard.register.
 (() => {
   const H = window.HubToolCard;
-  const { isObj, str, cut, short, plural, base, dir, lines, stripAnsi, verb, errorText, upperFirst, num, size, rawOf } = H.util;
+  const { isObj, str, cut, short, plural, base, dir, lines, stripAnsi, verb, errorText, upperFirst, num, size, rawOf, squash } = H.util;
 
+  const arr = (v) => (Array.isArray(v) ? v : []);
   const args = (c) => (isObj(c.args) ? c.args : {});
   const result = (c) => (isObj(c.res) ? c.res : {});
   const pathOf = (a) => str(a.path) || str(a.file_path);
@@ -129,6 +130,23 @@
     return parts.map((p) => ({ path: p.path, text: p.lines.join("\n").replace(/\n+$/, "") })).filter((p) => p.text);
   }
 
+  // lintOf reads the syntax check Hermes runs after an edit: { status, output }
+  // for one file, or one such object per path for a patch of several files.
+  // It gives the first failure's text, "" for a pass or no check.
+  function lintFailure(res) {
+    const l = isObj(res.lint) ? res.lint : null;
+    if (!l) return "";
+    const all = typeof l.status === "string" ? [l] : Object.values(l).filter(isObj);
+    const bad = all.find((x) => str(x.status) === "error");
+    return bad ? cut(squash(str(bad.output) || str(bad.message)), 120) || "the syntax check failed" : "";
+  }
+  const lintPassed = (res) => {
+    const l = isObj(res.lint) ? res.lint : null;
+    if (!l) return false;
+    const all = typeof l.status === "string" ? [l] : Object.values(l).filter(isObj);
+    return all.some((x) => str(x.status) === "ok") && !all.some((x) => str(x.status) === "error");
+  };
+
   function write(c) {
     const a = args(c);
     const res = result(c);
@@ -160,8 +178,11 @@
       const k = counts(diff);
       more.push({ tone: "add", text: "+" + k.add }, " ", { tone: "del", text: "-" + k.del });
     }
-    if (res.dirs_created) more.push((more.length ? " · " : "") + "created folder");
+    // dirs_created only says Hermes made sure the folder was there, so it is not shown.
+    if (lintPassed(res)) more.push((more.length ? " · " : "") + "syntax OK");
     out.more = more;
+    const bad = lintFailure(res);
+    if (bad) out.lines = [{ parts: [{ tone: "bad", text: "Syntax check failed: " + bad }] }];
     if (diff) out.blocks.push({ label: "Diff", text: diff, kind: "diff" });
     else if (content) out.blocks.push({ label: "Content", text: content, kind: "pre" });
     return out;
@@ -173,6 +194,8 @@
       const re = /^\*\*\* (Update|Add|Delete) File: (.+)$/gm;
       let m;
       while ((m = re.exec(a.patch))) out.push(m[2].trim());
+      const mv = /^\*\*\* Move File: (.+?) -> (.+)$/gm;
+      while ((m = mv.exec(a.patch))) out.push(m[1].trim());
     }
     return out;
   }
@@ -185,8 +208,17 @@
     const path = pathOf(a) || files[0] || "";
     const diff = c.diff || str(res.diff);
     const parts = diff ? splitDiff(diff) : [];
-    const many = Math.max(files.length, parts.length) > 1 && !pathOf(a);
+    const nfiles = Math.max(files.length, parts.length, arr(res.files_modified).length);
+    const many = nfiles > 1 && !pathOf(a);
     const verbW = c.done ? "Edited " : "Editing ";
+    const mv = /^# Moved: (.+?) -> (.+)$/m.exec(diff) || /\*\*\* Move File: (.+?) -> (.+)$/m.exec(str(a.patch));
+    if (mv && files.length <= 1) {
+      out.title = [c.done ? "Moved " : "Moving ", { code: base(mv[1].trim()) }, " to ", { code: base(mv[2].trim()) }];
+      if (c.done && !c.failed) out.status = "Moved";
+      const f = folder(mv[2].trim(), false);
+      if (f) out.sub = { parts: f, dim: true, mono: true };
+      return out;
+    }
     if (many) out.title = verbW + plural(Math.max(files.length, parts.length), "file");
     else {
       const t = [verbW, { code: base(path) || "a file" }];
@@ -221,6 +253,12 @@
     }
     out.status = add || del ? "+" + add + " -" + del : "No change";
     const bits = [];
+    const created = arr(res.files_created).length;
+    const deleted = arr(res.files_deleted).length;
+    if (many && (created || deleted)) bits.push([created ? created + " new" : "", deleted ? deleted + " deleted" : ""].filter(Boolean).join(", "));
+    if (lintPassed(res)) bits.push("syntax OK");
+    const bad = lintFailure(res);
+    if (bad) out.lines = [{ parts: [{ tone: "bad", text: "Syntax check failed: " + bad }] }];
     if (a.replace_all === true) {
       const n = [res.replacements, res.replacement_count, res.count].find((x) => typeof x === "number");
       bits.push("every match" + (n ? " (" + n + ")" : ""));

@@ -23,6 +23,7 @@ window.HubApprovals = (() => {
   // when it is open.
   function model(rec) {
     const p = rec.prompt || {};
+    const lg = p.login_grant && typeof p.login_grant === "object" ? p.login_grant : null;
     const out = { icon: "lock", title: "Approval:", blocks: [], lines: [], idle: !rec.closed && rec.allowed === null };
     out.status = rec.head;
     if (rec.allowed === true) out.tone = "ok";
@@ -47,6 +48,7 @@ window.HubApprovals = (() => {
         if (k > 0) head.push(command.slice(0, k) + " ", { code: command.slice(k + 1).trim() });
         else head.push({ code: command });
       } else if (words) head.push(words);
+      else if (lg && lg.host) head.push("Sign in with the saved login on ", { code: String(lg.host) });
       if (p.subagent) head.push(" ", { chip: "Subagent" }, " " + p.subagent);
       if (head.length) out.lines.push({ parts: head, closed: true });
       const why = p.rule ? p.rule + (p.reason ? ": " + line(p.reason) : "") : command ? words : "";
@@ -60,6 +62,8 @@ window.HubApprovals = (() => {
     const rows = [];
     if (p.subagent) rows.push({ k: "Asked by", v: [{ chip: "Subagent" }, " " + p.subagent] });
     if (p.rule) rows.push({ k: "Rule", v: p.rule });
+    if (lg && lg.host) rows.push({ k: "Site", v: [{ code: String(lg.host) }] });
+    if (lg && lg.device_name) rows.push({ k: "Computer", v: String(lg.device_name) });
     const reason = String(p.reason || "").split("\n").map((t) => t.trim()).filter(Boolean).join(" ");
     if (reason) rows.push({ k: "Why", v: reason });
     else if (words && !p.rule) rows.push({ k: "Action", v: words });

@@ -123,5 +123,165 @@
     }
    ]
   }
+ },
+ {
+  "id": "sr01",
+  "name": "process_manage",
+  "args": {
+   "action": "list"
+  },
+  "result": {
+   "processes": [
+    {
+     "session_id": "proc_6e1a4a12f62d",
+     "command": "cat",
+     "cwd": "/home/alice/work",
+     "pid": 331723,
+     "owner_task_id": "t1",
+     "started_at": "2026-11-16T23:40:21",
+     "started_at_unix": 1794894021.9598646,
+     "uptime_seconds": 0,
+     "status": "exited",
+     "output_preview": "",
+     "exit_code": 0,
+     "exited_at": 1794894022.102051,
+     "completion_reason": "exited"
+    },
+    {
+     "session_id": "proc_87ea91cb2ccb",
+     "command": "echo boom >&2; exit 3",
+     "cwd": "/home/alice/work",
+     "pid": 331758,
+     "owner_task_id": "t1",
+     "started_at": "2026-11-16T23:40:22",
+     "started_at_unix": 1794894022.1182923,
+     "uptime_seconds": 0,
+     "status": "exited",
+     "output_preview": "boom\n",
+     "exit_code": 3,
+     "exited_at": 1794894022.3066142,
+     "completion_reason": "exited"
+    },
+    {
+     "session_id": "proc_54cd8fe4944d",
+     "command": "echo hello; echo world; sleep 1",
+     "cwd": "/home/alice/work",
+     "pid": 331703,
+     "owner_task_id": "t1",
+     "started_at": "2026-11-16T23:40:21",
+     "started_at_unix": 1794894021.8625689,
+     "uptime_seconds": 0,
+     "status": "running",
+     "output_preview": "hello\nworld\n"
+    },
+    {
+     "session_id": "proc_fa8e4f2a3e27",
+     "command": "sleep 300",
+     "cwd": "/home/alice/work",
+     "pid": 331712,
+     "owner_task_id": "t1",
+     "started_at": "2026-11-16T23:40:21",
+     "started_at_unix": 1794894021.9210796,
+     "uptime_seconds": 0,
+     "status": "running",
+     "output_preview": ""
+    },
+    {
+     "session_id": "proc_2f9c964e806a",
+     "command": "cat",
+     "cwd": "/home/alice/work",
+     "pid": 331740,
+     "owner_task_id": "t1",
+     "started_at": "2026-11-16T23:40:22",
+     "started_at_unix": 1794894022.0006528,
+     "uptime_seconds": 0,
+     "status": "running",
+     "output_preview": ")  Exit, creating the file ~/.zshrc containing just a comment.\r\n     That will prevent this function being run again.\r\n\r\n(1)  Continue to the main menu.\r\n\r\n--- Type one of the keys in parentheses --- "
+    }
+   ]
+  }
+ },
+ {
+  "id": "sr02",
+  "name": "process_manage",
+  "args": {
+   "action": "wait",
+   "session_id": "proc_54cd8fe4944d",
+   "timeout": 5
+  },
+  "result": {
+   "status": "exited",
+   "command": "echo hello; echo world; sleep 1",
+   "started_at": 1794894021.8625689,
+   "exit_code": 0,
+   "completion_reason": "exited",
+   "termination_source": "",
+   "exited_at": 1794894023.008769,
+   "output": "hello\nworld\n"
+  }
+ },
+ {
+  "id": "sr03",
+  "name": "process_manage",
+  "args": {
+   "action": "kill",
+   "session_id": "proc_fa8e4f2a3e27"
+  },
+  "result": {
+   "status": "already_exited",
+   "command": "sleep 300",
+   "started_at": 1794894021.9210796,
+   "exit_code": -15,
+   "completion_reason": "killed",
+   "termination_source": "process.kill",
+   "exited_at": 1794894024.3650348,
+   "output": ""
+  }
+ },
+ {
+  "id": "sr04",
+  "name": "process_manage",
+  "args": {
+   "action": "write",
+   "session_id": "proc_6e1a4a12f62d",
+   "data": "hi\n"
+  },
+  "result": {
+   "status": "already_exited",
+   "error": "Process has already finished. It was started without stdin (terminal background=true without pty=true), so if it read stdin, it got end-of-file at once. Relaunch it with terminal(background=true, pty=true) to send input."
+  }
+ },
+ {
+  "id": "sr05",
+  "name": "process_manage",
+  "args": {
+   "action": "poll",
+   "session_id": "proc_87ea91cb2ccb"
+  },
+  "result": {
+   "session_id": "proc_87ea91cb2ccb",
+   "command": "echo boom >&2; exit 3",
+   "status": "exited",
+   "started_at": 1794894022.1182923,
+   "pid": 331758,
+   "uptime_seconds": 0,
+   "output_preview": "boom\n",
+   "exit_code": 3,
+   "completion_reason": "exited",
+   "termination_source": "",
+   "exited_at": 1794894022.3066142
+  }
+ },
+ {
+  "id": "sr06",
+  "name": "process_manage",
+  "args": {
+   "action": "poll",
+   "session_id": "proc_nope"
+  },
+  "result": {
+   "status": "not_found",
+   "error": "No process with ID proc_nope"
+  }
  }
 ]

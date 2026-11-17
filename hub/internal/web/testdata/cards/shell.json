@@ -1019,5 +1019,606 @@
     "Commands"
    ]
   }
+ },
+ {
+  "name": "real pm list",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "list"
+   },
+   "result": {
+    "processes": [
+     {
+      "session_id": "proc_6e1a4a12f62d",
+      "command": "cat",
+      "cwd": "/home/alice/work",
+      "pid": 331723,
+      "owner_task_id": "t1",
+      "started_at": "2026-11-16T23:40:21",
+      "started_at_unix": 1794894021.9598646,
+      "uptime_seconds": 0,
+      "status": "exited",
+      "output_preview": "",
+      "exit_code": 0,
+      "exited_at": 1794894022.102051,
+      "completion_reason": "exited"
+     },
+     {
+      "session_id": "proc_87ea91cb2ccb",
+      "command": "echo boom >&2; exit 3",
+      "cwd": "/home/alice/work",
+      "pid": 331758,
+      "owner_task_id": "t1",
+      "started_at": "2026-11-16T23:40:22",
+      "started_at_unix": 1794894022.1182923,
+      "uptime_seconds": 0,
+      "status": "exited",
+      "output_preview": "boom\n",
+      "exit_code": 3,
+      "exited_at": 1794894022.3066142,
+      "completion_reason": "exited"
+     },
+     {
+      "session_id": "proc_54cd8fe4944d",
+      "command": "echo hello; echo world; sleep 1",
+      "cwd": "/home/alice/work",
+      "pid": 331703,
+      "owner_task_id": "t1",
+      "started_at": "2026-11-16T23:40:21",
+      "started_at_unix": 1794894021.8625689,
+      "uptime_seconds": 0,
+      "status": "running",
+      "output_preview": "hello\nworld\n"
+     },
+     {
+      "session_id": "proc_fa8e4f2a3e27",
+      "command": "sleep 300",
+      "cwd": "/home/alice/work",
+      "pid": 331712,
+      "owner_task_id": "t1",
+      "started_at": "2026-11-16T23:40:21",
+      "started_at_unix": 1794894021.9210796,
+      "uptime_seconds": 0,
+      "status": "running",
+      "output_preview": ""
+     },
+     {
+      "session_id": "proc_2f9c964e806a",
+      "command": "cat",
+      "cwd": "/home/alice/work",
+      "pid": 331740,
+      "owner_task_id": "t1",
+      "started_at": "2026-11-16T23:40:22",
+      "started_at_unix": 1794894022.0006528,
+      "uptime_seconds": 0,
+      "status": "running",
+      "output_preview": ")  Exit, creating the file ~/.zshrc containing just a comment.\r\n     That will prevent this function being run again.\r\n\r\n(1)  Continue to the main menu.\r\n\r\n--- Type one of the keys in parentheses --- "
+     }
+    ]
+   }
+  },
+  "want": {
+   "icon": "list",
+   "title": "Listed background commands",
+   "status": "5 commands",
+   "state": "ok",
+   "lines": [
+    "cat, echo boom >&2; exit 3, echo hello; echo world; sleep 1, sleep 300, cat"
+   ],
+   "blocks": [
+    "Commands"
+   ]
+  }
+ },
+ {
+  "name": "real pm list empty",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "list"
+   },
+   "result": {
+    "processes": []
+   }
+  },
+  "want": {
+   "icon": "list",
+   "title": "Listed background commands",
+   "status": "0 commands",
+   "state": "ok",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm poll running",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "proc_fa8e4f2a3e27"
+   },
+   "result": {
+    "session_id": "proc_fa8e4f2a3e27",
+    "command": "sleep 300",
+    "status": "running",
+    "started_at": 1794894021.9210796,
+    "pid": 331712,
+    "uptime_seconds": 0,
+    "output_preview": ""
+   },
+   "now": 1794894021921
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Checked background command sleep 300",
+   "status": "Still running, up 0 s",
+   "state": "ok",
+   "lines": [
+    "No output yet"
+   ],
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm poll output",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "proc_54cd8fe4944d"
+   },
+   "result": {
+    "session_id": "proc_54cd8fe4944d",
+    "command": "echo hello; echo world; sleep 1",
+    "status": "running",
+    "started_at": 1794894021.8625689,
+    "pid": 331703,
+    "uptime_seconds": 0,
+    "output_preview": "hello\nworld\n"
+   },
+   "now": 1794894021863
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Checked background command echo hello; echo world; sleep 1",
+   "status": "Still running, up 0 s",
+   "state": "ok",
+   "lines": [
+    "world"
+   ],
+   "blocks": [
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "real pm log",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "log",
+    "session_id": "proc_54cd8fe4944d"
+   },
+   "result": {
+    "session_id": "proc_54cd8fe4944d",
+    "command": "echo hello; echo world; sleep 1",
+    "status": "running",
+    "started_at": 1794894021.8625689,
+    "output": "hello\nworld",
+    "total_lines": 2,
+    "showing": "2 lines"
+   },
+   "now": 1794894021863
+  },
+  "want": {
+   "icon": "list",
+   "title": "Read the output of background command echo hello; echo world; sleep 1",
+   "status": "2 lines",
+   "state": "ok",
+   "lines": [
+    "world"
+   ],
+   "blocks": [
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "real pm wait done",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "proc_54cd8fe4944d",
+    "timeout": 5
+   },
+   "result": {
+    "status": "exited",
+    "command": "echo hello; echo world; sleep 1",
+    "started_at": 1794894021.8625689,
+    "exit_code": 0,
+    "completion_reason": "exited",
+    "termination_source": "",
+    "exited_at": 1794894023.008769,
+    "output": "hello\nworld\n"
+   },
+   "now": 1794894021863
+  },
+  "want": {
+   "icon": "clock",
+   "title": "Waited for background command echo hello; echo world; sleep 1",
+   "status": "Exited 0 after 1 s",
+   "state": "ok",
+   "lines": [
+    "world"
+   ],
+   "blocks": [
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "real pm wait timeout",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "wait",
+    "session_id": "proc_fa8e4f2a3e27",
+    "timeout": 1
+   },
+   "result": {
+    "status": "timeout",
+    "command": "sleep 300",
+    "output": "",
+    "started_at": 1794894021.9210796,
+    "process_running": true,
+    "timeout_note": "The process is still running and has printed nothing new since your last check. Hermes has turned on notify_on_complete for it: when it exits, a message with its exit code and final output starts a new turn automatically, even after you end this turn. Do NOT call process_manage wait or poll on proc_fa8e4f2a3e27 again, and do not sleep or loop to wait for it. If you have other work, do it now; otherwise end your turn with a one-line status and report the result when the completion message arrives.",
+    "notify_on_complete": true
+   },
+   "now": 1794894021921
+  },
+  "want": {
+   "icon": "clock",
+   "title": "Could not wait for background command sleep 300",
+   "status": "Still running",
+   "state": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm write",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "write",
+    "session_id": "proc_6e1a4a12f62d",
+    "data": "hi\n"
+   },
+   "result": {
+    "status": "already_exited",
+    "error": "Process has already finished. It was started without stdin (terminal background=true without pty=true), so if it read stdin, it got end-of-file at once. Relaunch it with terminal(background=true, pty=true) to send input."
+   }
+  },
+  "want": {
+   "icon": "send",
+   "title": "Could not send input to background command",
+   "status": "Not sent, the command had already finished",
+   "state": "bad",
+   "tone": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm write pty",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "write",
+    "session_id": "proc_2f9c964e806a",
+    "data": "hi\n"
+   },
+   "result": {
+    "status": "ok",
+    "bytes_written": 3
+   }
+  },
+  "want": {
+   "icon": "send",
+   "title": "Sent input to background command",
+   "status": "Sent",
+   "state": "ok",
+   "lines": [
+    "hi"
+   ],
+   "blocks": [
+    "Sent"
+   ]
+  }
+ },
+ {
+  "name": "real pm submit pty",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "submit",
+    "session_id": "proc_2f9c964e806a",
+    "data": "there"
+   },
+   "result": {
+    "status": "ok",
+    "bytes_written": 6
+   }
+  },
+  "want": {
+   "icon": "send",
+   "title": "Sent input to background command",
+   "status": "Sent",
+   "state": "ok",
+   "lines": [
+    "there then Enter"
+   ],
+   "blocks": [
+    "Sent"
+   ]
+  }
+ },
+ {
+  "name": "real pm poll pty",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "proc_2f9c964e806a"
+   },
+   "result": {
+    "session_id": "proc_2f9c964e806a",
+    "command": "cat",
+    "status": "running",
+    "started_at": 1794894022.0006528,
+    "pid": 331740,
+    "uptime_seconds": 2,
+    "output_preview": "This is the Z Shell configuration function for new users,\r\nzsh-newuser-install.\r\nYou are seeing this message because you have no zsh startup files\r\n(the files .zshenv, .zprofile, .zshrc, .zlogin in the directory\r\n~).  This function can help you with a few settings that should\r\nmake your use of the shell easier.\r\n\r\nYou can:\r\n\r\n(q)  Quit and do nothing.  The function will be run again next time.\r\n\r\n(0)  Exit, creating the file ~/.zshrc containing just a comment.\r\n     That will prevent this function being run again.\r\n\r\n(1)  Continue to the main menu.\r\n\r\n--- Type one of the keys in parentheses --- hi^Jthere\r\n\r\nAborting.\r\nThe function will be run again next time.  To prevent this, execute:\r\n  touch ~/.zshrc\r\ni\r\nthere\r\n"
+   },
+   "now": 1794894024001
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Checked background command cat",
+   "status": "Still running, up 2 s",
+   "state": "ok",
+   "lines": [
+    "there"
+   ],
+   "blocks": [
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "real pm close pty",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "close",
+    "session_id": "proc_2f9c964e806a"
+   },
+   "result": {
+    "status": "ok",
+    "message": "EOF sent"
+   }
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Closed the input of background command",
+   "status": "Closed",
+   "state": "ok",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm close",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "close",
+    "session_id": "proc_6e1a4a12f62d"
+   },
+   "result": {
+    "status": "already_exited",
+    "error": "Process has already finished. It was started without stdin (terminal background=true without pty=true), so if it read stdin, it got end-of-file at once. Relaunch it with terminal(background=true, pty=true) to send input."
+   }
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Could not close the input of background command",
+   "status": "Not closed, the command had already finished",
+   "state": "bad",
+   "tone": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm failed",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "proc_87ea91cb2ccb"
+   },
+   "result": {
+    "session_id": "proc_87ea91cb2ccb",
+    "command": "echo boom >&2; exit 3",
+    "status": "exited",
+    "started_at": 1794894022.1182923,
+    "pid": 331758,
+    "uptime_seconds": 0,
+    "output_preview": "boom\n",
+    "exit_code": 3,
+    "completion_reason": "exited",
+    "termination_source": "",
+    "exited_at": 1794894022.3066142
+   },
+   "now": 1794894022118
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Checked background command echo boom >&2; exit 3",
+   "status": "Exited 3 after 0 s",
+   "state": "bad",
+   "tone": "bad",
+   "lines": [
+    "boom"
+   ],
+   "blocks": [
+    "Output"
+   ]
+  }
+ },
+ {
+  "name": "real pm kill",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "kill",
+    "session_id": "proc_fa8e4f2a3e27"
+   },
+   "result": {
+    "status": "killed",
+    "session_id": "proc_fa8e4f2a3e27",
+    "completion_reason": "killed",
+    "termination_source": "process.kill",
+    "output": ""
+   }
+  },
+  "want": {
+   "icon": "stop",
+   "title": "Stopped background command",
+   "status": "Stopped",
+   "state": "ok",
+   "lines": [
+    "No output yet"
+   ],
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm kill again",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "kill",
+    "session_id": "proc_fa8e4f2a3e27"
+   },
+   "result": {
+    "status": "already_exited",
+    "command": "sleep 300",
+    "started_at": 1794894021.9210796,
+    "exit_code": -15,
+    "completion_reason": "killed",
+    "termination_source": "process.kill",
+    "exited_at": 1794894024.3650348,
+    "output": ""
+   },
+   "now": 1794894021921
+  },
+  "want": {
+   "icon": "stop",
+   "title": "Stopped background command sleep 300",
+   "status": "Had already been stopped",
+   "state": "ok",
+   "lines": [
+    "No output yet"
+   ],
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm unknown id",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll",
+    "session_id": "proc_nope"
+   },
+   "result": {
+    "status": "not_found",
+    "error": "No process with ID proc_nope"
+   }
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Could not check background command",
+   "status": "Failed: No process with ID proc_nope",
+   "state": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm no id",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "poll"
+   },
+   "result": {
+    "error": "session_id is required for poll"
+   }
+  },
+  "want": {
+   "icon": "activity",
+   "title": "Could not check background command",
+   "status": "Failed: session_id is required for poll",
+   "state": "bad",
+   "blocks": []
+  }
+ },
+ {
+  "name": "real pm bad action",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "zap",
+    "session_id": "proc_54cd8fe4944d"
+   },
+   "result": {
+    "error": "Unknown process action: zap. Use: list, poll, log, wait, kill, write, submit, close, handoff"
+   }
+  },
+  "want": {
+   "icon": "list",
+   "title": "Could not list background commands",
+   "status": "Failed: Unknown process action: zap. Use: list, poll, log, wait, kill, write, submit, cl…",
+   "state": "bad",
+   "blocks": [
+    "Error"
+   ]
+  }
+ },
+ {
+  "name": "real pm handoff",
+  "call": {
+   "name": "process_manage",
+   "args": {
+    "action": "handoff",
+    "session_id": "proc_54cd8fe4944d",
+    "data": "x"
+   },
+   "result": {
+    "error": "handoff is only available to a running subagent with a live parent; you are not one."
+   }
+  },
+  "want": {
+   "icon": "send",
+   "title": "Could not hand off background command",
+   "status": "Failed: handoff is only available to a running subagent with a live parent; you are not…",
+   "state": "bad",
+   "lines": [
+    "x"
+   ],
+   "blocks": [
+    "Note"
+   ]
+  }
  }
 ]

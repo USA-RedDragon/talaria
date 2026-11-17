@@ -221,6 +221,9 @@
       if (topic) out.title = [verb(c, "Read", "Reading") + " the topic ", { code: topic }, " of " + where];
       else if (pnote) out.title = [verb(c, "Read", "Reading") + " the path note ", { code: pnote }, " of " + where];
       else if (query) out.title = [verb(c, "Searched", "Searching") + " the notes of " + where + " for ", { code: query }];
+      else if (str(a.action) === "list") out.title = verb(c, "Listed", "Listing") + " the topics and path notes of " + where;
+      else if (str(a.action) === "write") out.title = failed ? "Could not change the notes of " + where : verb(c, "Changed", "Changing") + " the notes of " + where;
+      else if (str(a.action) && !["read", "list"].includes(str(a.action))) out.title = failed ? "Could not use the notes of " + where : verb(c, "Used", "Using") + " the notes of " + where;
       else out.title = verb(c, "Read", "Reading") + " the notes of " + where;
       const list = entryList(res.entries || res.notes);
       const matches = Array.isArray(res.matches) ? res.matches : null;
@@ -235,8 +238,20 @@
       } else if (topic || pnote) {
         out.status = "Done";
         const text = str(res.content) || str(res.text);
+        // A long note comes in pages: say which part this is.
+        if (typeof res.total === "number" && typeof res.offset === "number" && text && res.total > text.length) out.status = "Characters " + (res.offset + 1).toLocaleString("en-US") + " to " + (res.offset + text.length).toLocaleString("en-US") + " of " + res.total.toLocaleString("en-US");
+        else if (typeof res.total === "number" && text) out.status = plural(res.total, "character");
         if (str(res.description)) note([str(res.description)]);
+        const globs = arr(res.paths).map(str).filter(Boolean);
+        if (globs.length) note(["Applies to " + globs.join(", ")]);
         if (text) out.blocks.push({ label: topic ? "Topic text" : "Path note", text, pre: true });
+      } else if (str(a.action) === "list" && (Array.isArray(res.topics) || Array.isArray(res.path_notes))) {
+        const ts = arr(res.topics).filter(isObj);
+        const ps = arr(res.path_notes).filter(isObj);
+        out.status = ts.length || ps.length ? [ts.length ? plural(ts.length, "topic") : "", ps.length ? plural(ps.length, "path note") : ""].filter(Boolean).join(", ") : "No topics or path notes yet";
+        if (ts.length || ps.length) note([cut(ts.concat(ps).map((x) => str(x.name)).filter(Boolean).join(", "), 80)]);
+        if (ts.length) out.blocks.push({ label: "Topics", kind: "list", items: ts.map((x) => ({ parts: [{ code: str(x.name) }, str(x.description) ? " " + cut(squash(x.description), 80) : ""] })) });
+        if (ps.length) out.blocks.push({ label: "Path notes", kind: "list", items: ps.map((x) => ({ parts: [{ code: str(x.name) }, arr(x.paths).length ? " " + arr(x.paths).map(str).join(", ") : ""] })) });
       } else if (Array.isArray(res.entries) || Array.isArray(res.notes)) {
         out.status = list.length ? plural(list.length, "note") + (usage ? ", " + usageText(usage) : "") : "No notes yet";
         if (list.length) {
@@ -244,9 +259,11 @@
           out.blocks.push({ label: "Notes", kind: "list", items: list.map((x) => ({ parts: [x] })) });
         }
         const topics = arr(res.topics).map((t) => (isObj(t) ? str(t.name) || str(t.topic) : str(t))).filter(Boolean);
-        if (topics.length) out.blocks.push({ label: "Topics", kind: "list", items: topics.map((x) => ({ parts: [{ code: x }] })) });
+        const desc = new Map(arr(res.topics).filter(isObj).map((t) => [str(t.name), str(t.description)]));
+        if (topics.length) out.blocks.push({ label: "Topics", kind: "list", items: topics.map((x) => ({ parts: [{ code: x }, desc.get(x) ? " " + cut(squash(desc.get(x)), 80) : ""] })) });
         const paths = arr(res.path_notes).map((t) => (isObj(t) ? str(t.name) || str(t.path_note) : str(t))).filter(Boolean);
-        if (paths.length) out.blocks.push({ label: "Path notes", kind: "list", items: paths.map((x) => ({ parts: [{ code: x }] })) });
+        const globs = new Map(arr(res.path_notes).filter(isObj).map((t) => [str(t.name), arr(t.paths).map(str).join(", ")]));
+        if (paths.length) out.blocks.push({ label: "Path notes", kind: "list", items: paths.map((x) => ({ parts: [{ code: x }, globs.get(x) ? " " + globs.get(x) : ""] })) });
       } else out.status = "Done";
     } else if (!added && !edited && !removed && (topicOps.length || pathOps.length)) {
       // Topics and path notes: the detail behind the index, and the rules for
@@ -272,11 +289,12 @@
       if (t && !/remove/.test(str(o.action))) note([cut(t, 80)]);
     } else {
       let head;
-      if (kinds > 1) head = verb(c, "Changed ", "Changing ") + noteWord(ops.length) + (name ? " in " + name : "");
+      if (!kinds) head = failed ? "Could not change the notes" + (name ? " in " + name : "") : verb(c, "Changed", "Changing") + " the notes" + (name ? " in " + name : "");
+      else if (kinds > 1) head = verb(c, "Changed ", "Changing ") + noteWord(ops.length) + (name ? " in " + name : "");
       else if (added) head = verb(c, "Added ", "Adding ") + noteWord(added) + (name ? " to " + name : "");
       else if (edited) head = verb(c, "Edited ", "Editing ") + noteWord(edited) + (name ? " in " + name : "");
       else head = verb(c, "Removed ", "Removing ") + noteWord(removed) + (name ? " from " + name : "");
-      if (failed) head = head.replace(/^Added /, "Could not add ").replace(/^Edited /, "Could not edit ").replace(/^Removed /, "Could not remove ").replace(/^Changed /, "Could not change ");
+      if (failed && kinds) head = head.replace(/^Added /, "Could not add ").replace(/^Edited /, "Could not edit ").replace(/^Removed /, "Could not remove ").replace(/^Changed /, "Could not change ");
       out.title = head;
       out.status = "Saved";
       out.blocks.push(...noteBlocks(ops));
@@ -622,6 +640,11 @@
     out.status = "Done";
     out.statusLast = true;
     if (c.failed) return;
+    // A second read of the same file in a chat comes back without the text: Hermes says it is unchanged.
+    if (res.dedup === true || str(res.status) === "unchanged") {
+      out.status = "Unchanged since the earlier read in this chat";
+      return;
+    }
     const desc = sentence(res.description);
     if (desc) out.lines.push({ parts: [desc] });
     const tags = arr(res.tags).map(str).filter(Boolean);
@@ -778,6 +801,15 @@
   // else the text as the job reports it.
   function cronWords(s) {
     const t = squash(s);
+    // An interval is stored in minutes or hours: "every 1440m", "every 2h".
+    const iv = /^every\s+(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)$/i.exec(t);
+    if (iv) {
+      const n = +iv[1];
+      const mins = /^m/i.test(iv[2]) ? n : /^h/i.test(iv[2]) ? n * 60 : n * 1440;
+      if (mins > 0 && mins % 1440 === 0) return mins === 1440 ? "Every day" : "Every " + mins / 1440 + " days";
+      if (mins > 0 && mins % 60 === 0) return mins === 60 ? "Every hour" : "Every " + mins / 60 + " hours";
+      return mins === 1 ? "Every minute" : "Every " + mins + " minutes";
+    }
     const f = t.split(" ");
     if (f.length !== 5 || /[^\d*/,\-\sA-Za-z]/.test(t)) return t;
     const [m, h, dom, mon, dow] = f;
@@ -830,6 +862,8 @@
     remove: ["Removed a job", "Removing a job", "remove a job"], run: ["Ran a job now", "Running a job now", "run a job"], cancel: ["Stopped a job", "Stopping a job", "stop a job"],
   };
 
+  const gatewayNote = "The gateway is not running, so jobs will not fire until it starts";
+
   function cronjob(c) {
     const a = obj(c.args);
     const res = obj(c.res);
@@ -856,17 +890,35 @@
           out.blocks.push({ kind: "list", items: jobs.map((j) => ({ parts: [str(j.name) || "Unnamed job", " · " + (scheduleOf(j, {}) || "no schedule") + (str(j.state) ? " · " + str(j.state) : "") + (nextRun(j) ? " · next " + nextRun(j) : "")] })) });
         }
       } else out.status = "Done";
+      if (res.gateway_running === false && jobs.length) out.lines.push({ parts: [{ tone: "warn", text: gatewayNote }] });
       return out;
     }
+    const executed = job.executed === true;
     if (act === "run") {
-      out.status = "Running in the background";
-      out.tone = "warn";
+      // Hermes answers once the run is over: say how it went.
+      if (executed && job.execution_success === false) {
+        out.status = "Ran now, but it failed";
+        out.tone = "bad";
+        out.bad = true;
+        const why = cut(squash(str(job.execution_error) || str(job.last_error)), 120);
+        if (why) out.lines.push({ parts: [why], dim: true });
+      } else if (executed) {
+        out.status = "Ran now";
+        out.tone = "ok";
+      } else {
+        out.status = "Running in the background";
+        out.tone = "warn";
+      }
     } else if (act === "pause") {
       out.status = "Paused";
       out.tone = "warn";
+      if (str(job.paused_reason)) out.lines.push({ parts: ["Reason: " + cut(squash(job.paused_reason), 100)], dim: true });
     } else if (act === "resume") out.status = "Resumed";
     else if (act === "remove") out.status = "Removed";
-    else if (act === "cancel") out.status = "Stopped";
+    else if (act === "cancel") {
+      out.status = res.cancelled === false ? "Nothing was running" : "Stopped";
+      if (res.cancelled === false) out.title = "Tried to stop a job" + (name ? ": " + name : "");
+    }
     else if (act === "update") out.status = sched || "Updated";
     else if (act === "create") {
       out.status = sched || "Done";
@@ -883,11 +935,16 @@
     }
     if (act === "remove" && sched) out.lines.push(dimLine([sched]));
     if (when && !paused && act !== "remove" && act !== "cancel") out.lines.push(dimLine(["Next run " + when]));
-    for (const k of ["warning", "notice"]) if (str(res[k])) out.lines.push({ parts: [{ tone: "warn", text: squash(res[k]) }] });
+    // Hermes words its gateway warning for the model; the card says it plainly.
+    if (res.gateway_running === false) out.lines.push({ parts: [{ tone: "warn", text: gatewayNote }] });
+    else if (str(res.warning)) out.lines.push({ parts: [{ tone: "warn", text: squash(res.warning) }] });
+    if (str(res.notice)) out.lines.push({ parts: [{ tone: "warn", text: squash(res.notice) }] });
     if (act === "create" || act === "update") {
       const rows = [];
       if (str(job.last_run_at) || str(job.last_status) || res.job) rows.push({ k: "Last run", v: lastRun(job) });
       if (str(job.paused_reason)) rows.push({ k: "Paused reason", v: str(job.paused_reason) });
+      const to = str(job.deliver) || str(a.deliver);
+      if (to) rows.push({ k: "Sends to", v: to === "local" ? "Nowhere, the output is only saved" : to === "origin" ? "This chat" : to });
       const wd = str(job.workdir) || str(a.workdir);
       if (wd) rows.push({ k: "Folder", v: [{ code: wd }] });
       const sk = arr(job.skills || a.skills).map(str).filter(Boolean);

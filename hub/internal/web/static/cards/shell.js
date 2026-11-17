@@ -197,7 +197,9 @@
     const exited = res.status === "exited" || res.status === "already_exited" || (typeof res.exit_code === "number" && res.status !== "killed");
     const exit = exitCode(res);
     const ran = ranFor(res);
-    const exitText = (exit === null ? "Exited" : "Exited " + exit) + (ran && exited ? " after " + ran : "");
+    // A command that was stopped has the exit code of the signal (-15): say so in words.
+    const stopped = str(res.completion_reason) === "killed" || (exit !== null && exit < 0);
+    const exitText = (stopped ? "Stopped" : exit === null ? "Exited" : "Exited " + exit) + (ran && exited ? " after " + ran : "");
     const now = typeof c.now === "number" ? c.now : Date.now();
     const ok = !c.failed || exited;
     // The title: a verb, then the command in monospace; a command that is
@@ -219,7 +221,10 @@
       case "kill":
         out.icon = "stop";
         out.title = title("Stopped", "Stopping", "Could not stop");
-        out.status = res.status === "already_exited" ? exitText : "Stopped";
+        if (res.status === "already_exited") {
+          // Nothing was left to stop; a command that was stopped before has no exit code to show.
+          out.status = stopped ? "Had already been stopped" : exitText;
+        } else out.status = "Stopped";
         tailLine();
         outBlock();
         break;
@@ -274,6 +279,13 @@
         out.title = title("Sent input to", "Sending input to", "Could not send input to");
         out.status = "Sent";
         const data = str(a.data);
+        if (res.status === "already_exited") {
+          out.title = [(c.done ? "Could not send input to" : "Sending input to") + " background command" + (cmd ? " " : ""), ...(cmd ? [{ code: cmd }] : [])];
+          out.status = "Not sent, the command had already finished";
+          out.ownFailure = true;
+          out.tone = "bad";
+          break;
+        }
         const enter = act === "submit";
         const text = data.replace(/\n+$/, "");
         if (text.trim()) out.lines.push({ parts: [{ code: short(text) }, ...(enter ? [" then Enter"] : [])], dim: true });
@@ -284,6 +296,12 @@
       case "close":
         out.title = title("Closed the input of", "Closing the input of", "Could not close the input of");
         out.status = "Closed";
+        if (res.status === "already_exited") {
+          out.title = [(c.done ? "Could not close the input of" : "Closing the input of") + " background command" + (cmd ? " " : ""), ...(cmd ? [{ code: cmd }] : [])];
+          out.status = "Not closed, the command had already finished";
+          out.ownFailure = true;
+          out.tone = "bad";
+        }
         break;
       case "handoff": {
         out.icon = "send";
