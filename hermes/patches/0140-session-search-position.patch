@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 22:49:53 -0600
+Subject: [PATCH] fix(session_search): say where a read or scroll sits in the
+ chat
+
+A scroll result gave messages_before and messages_after, capped at the window size, so a caller could not tell which messages of the chat it had, nor how long the chat was. It now also carries window_start, window_end (1-based) and total_messages. A read that shows only the first and last messages now says how many of each (head_count, tail_count).
+---
+ tests/tools/test_session_search_position.py | 50 +++++++++++++++++++++
+ tools/session_search_tool.py                | 19 ++++++++
+ 2 files changed, 69 insertions(+)
+ create mode 100644 tests/tools/test_session_search_position.py
+
+diff --git a/tests/tools/test_session_search_position.py b/tests/tools/test_session_search_position.py
+new file mode 100644
+index 00000000..1740fa01
+--- /dev/null
++++ b/tests/tools/test_session_search_position.py
+@@ -0,0 +1,50 @@
++"""session_search read and scroll say where the shown messages sit in the chat."""
++import json
++
++import pytest
++
++from hermes_state import SessionDB
++from tools.session_search_tool import session_search
++
++
++@pytest.fixture
++def db(tmp_path):
++    d = SessionDB(tmp_path / "state.db")
++    d.create_session("old", source="cli")
++    d.set_session_title("old", "Fix split DNS on router")
++    ids = [d.append_message("old", role="user" if i % 2 == 0 else "assistant", content=f"message {i}")
++           for i in range(1, 41)]
++    d.create_session("live", source="cli")
++    d.append_message("live", role="user", content="current chat")
++    d.ids = ids
++    return d
++
++
++def _call(db, **kw):
++    return json.loads(session_search(db=db, current_session_id="live", **kw))
++
++
++def test_scroll_reports_position_in_the_chat(db):
++    res = _call(db, session_id="old", around_message_id=db.ids[19], window=5)
++    assert res["mode"] == "scroll"
++    assert res["session_meta"]["title"] == "Fix split DNS on router"
++    assert (res["window_start"], res["window_end"], res["total_messages"]) == (15, 25, 40)
++
++
++def test_scroll_at_the_start_and_end(db):
++    first = _call(db, session_id="old", around_message_id=db.ids[0], window=5)
++    assert (first["window_start"], first["window_end"]) == (1, 6)
++    last = _call(db, session_id="old", around_message_id=db.ids[-1], window=5)
++    assert (last["window_start"], last["window_end"], last["total_messages"]) == (35, 40, 40)
++
++
++def test_long_read_says_how_many_head_and_tail_messages(db):
++    res = _call(db, session_id="old")
++    assert res["mode"] == "read" and res["truncated"] is True
++    assert (res["head_count"], res["tail_count"], res["message_count"]) == (20, 10, 40)
++    assert len(res["messages"]) == 30
++
++
++def test_short_read_has_no_head_and_tail(db):
++    res = _call(db, session_id="live")
++    assert res["truncated"] is False and "head_count" not in res
+diff --git a/tools/session_search_tool.py b/tools/session_search_tool.py
+index 014fa739..2c641428 100644
+--- a/tools/session_search_tool.py
++++ b/tools/session_search_tool.py
+@@ -542,6 +542,23 @@ def _resolve_profile_db(profile: str):
+     return SessionDB(db_path=profiles_mod.get_profile_dir(canon) / "state.db", read_only=True)
+ 
+ 
++def _scroll_position(db, session_id: str, messages: list) -> dict[str, Any]:
++    """Where a scroll window sits in its chat: 1-based first and last message and the total.
++    ``messages_before``/``_after`` stop at the window size, so they cannot say this."""
++    ids = [m.get("id") for m in messages if m.get("id") is not None]
++    if not ids:
++        return {}
++
++    def _count():
++        with db._read_ctx() as conn:
++            before = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ? AND id < ?",
++                                  (session_id, min(ids))).fetchone()[0]
++            total = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?",
++                                 (session_id,)).fetchone()[0]
++        return {"window_start": before + 1, "window_end": before + len(ids), "total_messages": total}
++    return _quiet(_count, {}, "scroll position failed for %s: %s", session_id, with_exc=True)
++
++
+ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_profile: str | None = None) -> str:
+     """Read shape: whole session, or ``head`` + ``tail`` messages with a scroll pointer."""
+     meta = _get_session_meta(db, session_id)
+@@ -556,6 +573,7 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
+     return _ok(mode="read", session_id=session_id, link=_session_link(session_id, link_profile),
+                session_meta=_session_meta_block(meta), message_count=total, truncated=truncated,
+                messages=shaped[:head] + shaped[-tail:] if truncated else shaped,
++               **({"head_count": head, "tail_count": tail} if truncated else {}),
+                **({"message": (f"Session has {total} messages; showing first {head} + last {tail}. "
+                                "Pass around_message_id (any id above) to scroll the middle.")} if truncated else {}))
+ 
+@@ -665,6 +683,7 @@ def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
+         mode="scroll", session_id=session_id, around_message_id=around_message_id,
+         session_meta=_session_meta_block(session_meta), window=window,
+         messages=[_shape_message(m, anchor_id=around_message_id) for m in messages],
++        **_scroll_position(db, session_id, messages),
+         messages_before=view.get("messages_before", 0), messages_after=view.get("messages_after", 0),
+         hint=("Scroll forward: re-call with around_message_id = the LAST message's "
+               "id; backward: the FIRST message's id (the boundary message repeats "
+-- 
+2.56.0
+
