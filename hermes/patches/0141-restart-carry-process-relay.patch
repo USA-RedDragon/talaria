@@ -1,0 +1,1005 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 05:58:04 +0000
+Subject: [PATCH] fix(gateway): a per-turn restart relays each background
+ process to the next gateway at once instead of holding it on a busy carrier
+
+---
+ gateway/run_notifications.py                  |   4 +-
+ gateway/turn_carry.py                         |  58 +++-
+ .../test_restart_carry_process_relay.py       | 242 +++++++++++++
+ .../test_restart_carry_subagent_relay.py      |  82 +++++
+ tools/process_registry.py                     |  38 +-
+ tools/process_registry_checkpoint.py          |  12 +-
+ tools/process_registry_handoff.py             |   5 +
+ tools/process_registry_relay.py               | 326 ++++++++++++++++++
+ 8 files changed, 752 insertions(+), 15 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_process_relay.py
+ create mode 100644 tests/tools/test_restart_carry_subagent_relay.py
+ create mode 100644 tools/process_registry_relay.py
+
+diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
+index bca2e083..f09aceed 100644
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -1882,8 +1882,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
+         while True:
+             await asyncio.sleep(retry_interval)
+             session = process_registry.get(session_id)
+-            if session is None:
+-                break
++            if session is None or getattr(session, "_carry_relay", ""):
++                break  # gone, or relayed to the next gateway, which reports it (gateway.restart_turn_handoff_per_turn)
+             surface = should_surface_notification({
+                 "owner_task_id": getattr(session, "owner_task_id", ""),
+                 "task_id": getattr(session, "task_id", ""),
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index d06e1a3b..21226d13 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -11,7 +11,9 @@ The old gateway (the *carrier*), at the restart:
+ * asks every running turn to stop at its next step boundary, hands a turn parked on its own clarify or
+   approval over at once (0131's withdraw), closes admission and asks the tool workers of the running turns to
+   yield (a foreground terminal command moves to the background, so the process handoff takes it along);
+-* hands background subagents and processes over as a restart stop does, stops cron, and records itself as
++* hands background subagents and processes over as a restart stop does (while a carried turn runs a tool call,
++  each process goes to the next gateway at once and this gateway only relays its output, exit and kill until the
++  real handoff, ``tools/process_registry_relay.py``), stops cron, and records itself as
+   the carrier of its claims in state.db (``hermes_state_runtime.CARRY_KEY``, its runtime epoch and turns) and
+   holds ``$HERMES_HOME/.turn-carry.lock`` (flock) for the rest of its life;
+ * then releases the profile (PID file, lock, host role, socket tickets) and relays its listeners to the next
+@@ -41,6 +43,7 @@ The next gateway:
+ from __future__ import annotations
+ 
+ import asyncio
++import contextlib
+ import json
+ import logging
+ import os
+@@ -199,6 +202,11 @@ class _Carry:
+         # the carried turns' foreground commands use stay open here.
+         self.processes_handed = asyncio.Event()
+         self.processes_deferred = False
++        # Processes relayed to the next gateway before the real handoff (tools/process_registry_relay.py), and
++        # whether the next gateway was told to reattach them.
++        self.relayed: set[str] = set()
++        self.relay_announced = False
++        self.relay_checked = 0.0
+ 
+ 
+ def _platform(turn) -> str:
+@@ -321,17 +329,55 @@ def _in_tool_round(carry) -> bool:
+     return any(aid not in carry.done and getattr(t.agent, "_executing_tools", False) for aid, t in carry.turns.items())
+ 
+ 
++# How often a busy carrier looks for background processes to relay (new ones, or one a tool call stopped waiting on).
++RELAY_CHECK_S = 0.5
++
++
++def relay_dir(home, epoch) -> Path:
++    return Path(home) / RELAY_DIR / f"{int(epoch)}.proc"
++
++
++async def _relay_processes(carry) -> None:
++    """While the real handoff waits: every background process no tool call here waits on becomes the next gateway's
++    at once, and this gateway only relays its output, exit and kill (``ProcessRelayMixin``)."""
++    if time.monotonic() - carry.relay_checked < RELAY_CHECK_S:
++        return
++    carry.relay_checked = time.monotonic()
++    from tools.process_registry_handoff import configured_handoff_backends
++    try:
++        from tools.process_registry import process_registry
++        backends = configured_handoff_backends()
++        relayed = await asyncio.to_thread(process_registry.relay_to_successor, relay_dir(carry.home, carry.epoch),
++                                          str(lock_path(carry.home)), backends) if backends else []
++    except Exception:
++        logger.warning("Relay of the background processes to the next gateway failed", exc_info=True)
++        return
++    if relayed:
++        carry.relayed.update(relayed)
++        carry.relay_announced = False
++    _announce_relay(carry)
++
++
++def _announce_relay(carry) -> None:
++    if carry.relayed and not carry.relay_announced and carry.events is not None:
++        carry.relay_announced = True
++        # The next gateway reattaches them (the relay kind) and adopts the subagents that wait on them.
++        _write_frame(carry, {"type": PROCESSES_HANDED, "session_id": ""})
++
++
+ async def _hand_off_processes_when_idle(carry) -> bool:
+     """Hand the background processes (``terminal.process_handoff_backends``) to the next gateway, unless a carried
+     turn is in a tool round: its foreground command may run on a device whose one connection the handoff closes.
+-    The carry loop retries at each poll. True once handed off (or nothing was to hand off)."""
++    Until then each process is relayed to the next gateway (``_relay_processes``). The carry loop retries at each
++    poll. True once handed off (or nothing was to hand off)."""
+     if carry.processes_handed.is_set():
+         return True
+     if _in_tool_round(carry) and time.monotonic() < carry.started + ceiling_seconds(carry.runner):
+         if not carry.processes_deferred:
+             carry.processes_deferred = True
+-            logger.info("Restart: background processes go to the next gateway once the carried turns' tool calls "
+-                        "end (gateway.restart_turn_handoff_per_turn)")
++            logger.info("Restart: background processes are relayed to the next gateway and handed over once the "
++                        "carried turns' tool calls end (gateway.restart_turn_handoff_per_turn)")
++        await _relay_processes(carry)
+         return False
+     from gateway.run_shutdown import GatewayShutdownMixin
+     try:
+@@ -394,6 +440,8 @@ async def _record(carry) -> None:
+         # Handed before the release: the next gateway adopts the handed-off subagents once it reads this frame
+         # (``defers_delegations``), after the processes they wait on were reattached.
+         _write_frame(carry, {"type": PROCESSES_HANDED, "session_id": ""})
++        carry.relay_announced = True
++    _announce_relay(carry)
+     record = {"pid": os.getpid(), "since": time.time(),
+               "turns": {aid: {"session_id": t.session_id, "generation": t.generation}
+                         for aid, t in carry.turns.items()}}
+@@ -1056,6 +1104,8 @@ async def _finish(remote: _Remote) -> None:
+             logger.debug("Schedule after the carrier left failed", exc_info=True)
+     await _reattach_processes(runner)
+     _adopt_delegations()
++    with contextlib.suppress(OSError):
++        relay_dir(remote.home, remote.epoch).rmdir()  # once its relayed processes were read (they remove their files)
+     await asyncio.to_thread(end_turn_carry, authority.db, epoch=remote.epoch)
+     for path in (events_path(remote.home, remote.epoch), control_path(remote.home, remote.epoch)):
+         path.unlink(missing_ok=True)
+diff --git a/tests/gateway/test_restart_carry_process_relay.py b/tests/gateway/test_restart_carry_process_relay.py
+new file mode 100644
+index 00000000..249f09ee
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_process_relay.py
+@@ -0,0 +1,242 @@
++"""gateway.restart_turn_handoff_per_turn and the background processes of a busy carrier.
++
++The real process handoff closes the device connections, so the carrier makes it only once no carried turn runs a
++tool call. On a busy instance (a carried turn always in a tool round) that moment came only at the end of the
++carry: a process held back until then kept running and reporting on the old gateway alone, its output reached no
++viewer, and one that ended meanwhile was never handed over, so the next gateway had no record of it and the
++subagent waiting on it ran its command again. Now:
++
++- every background process goes to the next gateway at once and the carrier relays its output, exit and kill;
++- a process a carried tool call waits on stays until that call returns, then goes;
++- the real handoff at the end of the carry continues a relayed process on the next gateway from its state.
++"""
++import asyncio
++import json
++import os
++import threading
++import time
++from pathlib import Path
++
++import pytest
++
++import tools.process_registry as pr
++import tools.process_registry_handoff as handoff
++from gateway import turn_boundary, turn_carry, turn_handoff
++from tools.process_registry import ProcessRegistry
++
++from tests.gateway.test_restart_turn_carry import _NextAuthority, _claimed_turn, _old_runner, _reserve_profile, _until
++from tests.tools.test_process_handoff import ShellEnv, _completions
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_hand_off_background", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++
++
++@pytest.fixture
++def gateways(tmp_path, monkeypatch):
++    """The carrier's process registry (the process-global one) and the next gateway's, on one device env."""
++    monkeypatch.setattr(pr, "CHECKPOINT_PATH", tmp_path / "processes.json")
++    monkeypatch.setattr(pr, "ENV_POLL_INTERVAL_SECONDS", 0.05)
++    monkeypatch.setattr(handoff, "configured_handoff_backends", lambda: ["device"])
++    (tmp_path / "device").mkdir()
++    env = ShellEnv(tmp_path / "device")
++    monkeypatch.setattr(handoff, "_environment_for", lambda backend, s: env)
++    carrier, nxt = ProcessRegistry(), ProcessRegistry()
++    monkeypatch.setattr(pr, "process_registry", carrier)
++    shown = []
++    nxt.on_output = lambda session, chunk: shown.append((time.monotonic(), session.id, chunk))
++    nxt.shown = shown
++    return carrier, nxt, env
++
++
++def _spawn(registry, env, command):
++    session = registry.spawn_via_env(env, command, task_id="t1", session_key="agent:main:webapp:dm:1",
++                                     backend="device")
++    session.notify_on_complete = True
++    session.parent_session_id = "sess-1"
++    registry._write_checkpoint()
++    return session
++
++
++def _watch(monkeypatch, owner, tmp_path, nxt):
++    """The next gateway's watch of the carrier; its process reattach reads the checkpoint into *nxt*."""
++    from hermes_state_runtime import turn_carry_record
++    reattached = []
++
++    async def reattach(_runner):
++        reattached.append(await asyncio.to_thread(nxt.recover_from_checkpoint))
++    monkeypatch.setattr(turn_carry, "_reattach_processes", reattach)
++    import tools.delegate_tool_handoff as dth
++    monkeypatch.setattr(dth, "resume_handed_off_delegations", lambda: 0)
++    authority = _NextAuthority(owner.db)
++    remote = turn_carry._Remote(owner.runner, authority, turn_carry_record(owner.db), tmp_path)
++    authority._turn_carrier = remote
++    return reattached, asyncio.ensure_future(turn_carry._watch(remote))
++
++
++async def _busy_carry(owner, tmp_path):
++    """A carry whose only turn is in a tool round for good."""
++    _reserve_profile(tmp_path)
++    row, _live, agent = _claimed_turn(owner, "busy")
++    agent._executing_tools = True
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    return row, agent, runner, carry
++
++
++async def _end_carry(owner, row, runner, carry, watch):
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 10.0)
++    os.close(runner._turn_carry.lock_fd)  # the carrier exits
++    await asyncio.wait_for(watch, 10.0)
++
++
++@pytest.mark.platforms("linux")
++@pytest.mark.asyncio
++async def test_a_busy_carrier_hands_a_process_over_at_once_and_its_output_and_exit_reach_the_next_gateway(
++        owner, tmp_path, monkeypatch, gateways):
++    carrier, nxt, env = gateways
++    session = _spawn(carrier, env, "for i in 1 2 3 4 5 6; do echo tick$i; sleep 0.4; done; echo zd-sub-done")
++    row, agent, runner, carry = await _busy_carry(owner, tmp_path)
++    started = time.monotonic()
++    _reattached, watch = _watch(monkeypatch, owner, tmp_path, nxt)
++    await _until(lambda: nxt.get(session.id) is not None, timeout=3.0)
++    assert agent._executing_tools and not session.exited  # handed over while the carried turn is still busy
++    took = time.monotonic() - started
++    assert took < 3.0
++    # Its output reaches the next gateway's viewers while it runs, from what it printed before the handoff on.
++    await _until(lambda: any("tick3" in chunk for _t, _sid, chunk in nxt.shown), timeout=5.0)
++    assert not nxt.get(session.id).exited
++    resumed = nxt.get(session.id)
++    assert await asyncio.to_thread(resumed._completion_event.wait, 10)
++    assert resumed.exit_code == 0 and resumed.completion_reason == "exited"
++    for i in range(1, 7):
++        assert resumed.output_buffer.count(f"tick{i}\n") == 1
++    assert "zd-sub-done" in resumed.output_buffer
++    (event,) = _completions(nxt)  # the next gateway reports it, once
++    assert event["session_id"] == session.id and event["exit_code"] == 0 and "zd-sub-done" in event["output"]
++    assert _completions(carrier) == []  # the carrier read it to its end but reports nothing
++    assert session.exited  # ended on the carrier while it was still busy
++    await _end_carry(owner, row, runner, carry, watch)
++    assert nxt.get(session.id).exit_code == 0
++    assert _completions(nxt) == []
++
++
++@pytest.mark.platforms("linux")
++@pytest.mark.asyncio
++async def test_a_relayed_process_still_running_at_the_end_of_the_carry_goes_on_from_the_real_handoff(
++        owner, tmp_path, monkeypatch, gateways):
++    carrier, nxt, env = gateways
++    session = _spawn(carrier, env, "echo first; sleep 2; echo second; exit 4")
++    row, _agent, runner, carry = await _busy_carry(owner, tmp_path)
++    _reattached, watch = _watch(monkeypatch, owner, tmp_path, nxt)
++    await _until(lambda: nxt.get(session.id) is not None and "first" in nxt.get(session.id).output_buffer,
++                 timeout=3.0)
++    # The carried turn ends while the process still runs: the carry ends with the real handoff.
++    await _end_carry(owner, row, runner, carry, watch)
++    assert session.handed_off and not session.exited
++    resumed = nxt.get(session.id)
++    assert await asyncio.to_thread(resumed._completion_event.wait, 10)
++    assert resumed.exit_code == 4
++    assert resumed.output_buffer.count("first") == 1 and resumed.output_buffer.count("second") == 1
++    (event,) = _completions(nxt)
++    assert event["exit_code"] == 4
++    assert _completions(carrier) == []
++    assert not list(turn_carry.relay_dir(tmp_path, owner.epoch).glob("*"))  # the relay files are gone
++
++
++@pytest.mark.platforms("linux")
++@pytest.mark.asyncio
++async def test_a_process_a_carried_tool_call_waits_on_goes_over_once_the_wait_returns(
++        owner, tmp_path, monkeypatch, gateways):
++    carrier, nxt, env = gateways
++    waited = _spawn(carrier, env, "sleep 4; echo waited")
++    other = _spawn(carrier, env, "sleep 4; echo other")
++    result = {}
++    in_wait = threading.Event()
++
++    def carried_wait():  # a carried turn's process_manage wait, in its tool round
++        in_wait.set()
++        result.update(carrier.wait(waited.id, timeout=2))
++    thread = threading.Thread(target=carried_wait, daemon=True)
++    thread.start()
++    in_wait.wait(5)
++    await asyncio.sleep(0.1)
++    row, _agent, runner, carry = await _busy_carry(owner, tmp_path)
++    _reattached, watch = _watch(monkeypatch, owner, tmp_path, nxt)
++    # The long tool round of the carried turn does not keep the other process back.
++    await _until(lambda: nxt.get(other.id) is not None, timeout=3.0)
++    assert nxt.get(waited.id) is None and thread.is_alive()
++    await asyncio.to_thread(thread.join, 10)
++    assert result["status"] == "timeout"
++    await _until(lambda: nxt.get(waited.id) is not None, timeout=3.0)
++    for session in (waited, other):
++        resumed = nxt.get(session.id)
++        assert await asyncio.to_thread(resumed._completion_event.wait, 10)
++        assert resumed.exit_code == 0
++    assert "waited" in nxt.get(waited.id).output_buffer and "other" in nxt.get(other.id).output_buffer
++    await _end_carry(owner, row, runner, carry, watch)
++
++
++@pytest.mark.platforms("linux")
++@pytest.mark.asyncio
++async def test_a_kill_on_the_next_gateway_stops_a_process_the_carrier_relays(owner, tmp_path, monkeypatch, gateways):
++    carrier, nxt, env = gateways
++    session = _spawn(carrier, env, "echo up; sleep 30")
++    row, _agent, runner, carry = await _busy_carry(owner, tmp_path)
++    _reattached, watch = _watch(monkeypatch, owner, tmp_path, nxt)
++    await _until(lambda: nxt.get(session.id) is not None and "up" in nxt.get(session.id).output_buffer, timeout=3.0)
++    host_pid = int(Path(session.env_files[1]).read_text())
++    result = await asyncio.to_thread(nxt.kill_process, session.id)
++    assert result["status"] == "killed" and "up" in result["output"]
++    assert nxt.get(session.id).exited and session.exited
++    deadline = time.monotonic() + 5
++    while time.monotonic() < deadline:
++        try:
++            os.kill(host_pid, 0)
++        except OSError:
++            break
++        await asyncio.sleep(0.05)
++    else:
++        pytest.fail("the relayed process still runs")
++    assert _completions(carrier) == []
++    await _end_carry(owner, row, runner, carry, watch)
++
++
++@pytest.mark.platforms("linux")
++def test_a_carrier_that_exits_without_relaying_the_end_leaves_the_process_reported_lost_once(tmp_path, gateways):
++    import fcntl
++    carrier, nxt, env = gateways
++    session = _spawn(carrier, env, "echo up; sleep 30")
++    lock = tmp_path / ".turn-carry.lock"
++    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
++    fcntl.flock(fd, fcntl.LOCK_EX)
++    assert carrier.relay_to_successor(tmp_path / "relay", lock, ["device"]) == [session.id]
++    assert nxt.recover_from_checkpoint() == 1
++    carrier._relaying.clear()  # the carrier dies without writing the exit or the handoff state
++    os.close(fd)
++    resumed = nxt.get(session.id)
++    assert resumed._completion_event.wait(10)
++    assert resumed.completion_reason == "lost" and resumed.termination_source == "handoff_lost"
++    assert len(_completions(nxt)) == 1
++    # Its checkpoint entry is settled: a later gateway does not report it again.
++    later = ProcessRegistry()
++    assert later.recover_from_checkpoint() == 0 and later.get(session.id) is None
++    assert session.id not in [e["session_id"] for e in json.loads((tmp_path / "processes.json").read_text())]
++    carrier._relay_init()
++    carrier.kill_process(session.id)  # this test's own leftover
+diff --git a/tests/tools/test_restart_carry_subagent_relay.py b/tests/tools/test_restart_carry_subagent_relay.py
+new file mode 100644
+index 00000000..e6d76ec7
+--- /dev/null
++++ b/tests/tools/test_restart_carry_subagent_relay.py
+@@ -0,0 +1,82 @@
++"""gateway.restart_turn_handoff_per_turn: a background subagent waiting (resume_on_exit) on a process that a busy carrier
++held back.
++
++Live, the carrier kept the process until its last carried tool call ended; the process ended on the carrier first, so
++it was never handed over, the next gateway had no record of it and the woken subagent ran its command again. Now the
++carrier relays the process to the next gateway at once: the adopted subagent waits on it there and is woken with its
++real exit and output, and the command runs once.
++"""
++
++import fcntl
++import os
++
++from tests.tools.test_delegate_child_wait import _waiting_child
++from tests.tools.test_delegate_resume_action import (  # fixtures too
++    _Parent, _call, _clean_state, _completions, _db, _fake_child, _finished_child, seams,
++)
++from tests.waiting import wait_until
++from tools import async_delegation as ad
++from tools import delegate_tool_handoff as handoff
++import tools.process_registry as pr
++import tools.process_registry_handoff as prh
++from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
++from tools.process_registry import ProcessRegistry
++
++
++def _delegation_events(registry, delegation_id) -> list:
++    events = []
++    while not registry.completion_queue.empty():
++        event = registry.completion_queue.get_nowait()
++        if isinstance(event, dict) and event.get("type") == "async_delegation" and event.get(
++                "delegation_id") == delegation_id:
++            events.append(event)
++    return events
++
++
++def test_a_subagent_waiting_on_a_held_process_is_woken_with_its_real_output_on_the_next_gateway(
++        seams, monkeypatch, tmp_path):
++    monkeypatch.setattr(pr, "CHECKPOINT_PATH", tmp_path / "processes.json")
++    monkeypatch.setattr(prh, "configured_handoff_backends", lambda: ["device"])
++    db = _db()
++    _finished_child(db)
++    child = _waiting_child(f"for i in 1 2 3 4; do echo tick$i >> {tmp_path}/runs; echo tick$i; sleep 0.5; done; "
++                           "echo zd-sub-done")
++    seams(child)
++    run_id = _call(_Parent(db), subagent_id="sa-0-abcd", message="run it and wait")["run_id"]
++    wait_until(lambda: any(r.get("status") == "waiting" for r in _active_subagents.values()), what="waiting")
++    session = child.seen["session"]
++    session.backend = "device"  # a device command, as live
++
++    # The restart hands the waiting subagent over (0016); the busy carrier relays its process (this patch).
++    assert ad.hand_off_for_restart(2.0, 8.0) == 1
++    carrier = pr.process_registry
++    lock = tmp_path / ".turn-carry.lock"
++    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
++    fcntl.flock(fd, fcntl.LOCK_EX)
++    try:
++        assert carrier.relay_to_successor(tmp_path / "relay", lock, ["device"]) == [session.id]
++
++        # The next gateway: its own process registry reattaches the relayed process, then adopts the subagent.
++        nxt = ProcessRegistry()
++        monkeypatch.setattr(pr, "process_registry", nxt)
++        assert nxt.recover_from_checkpoint() == 1
++        ad._reset_for_tests()
++        with _active_subagents_lock:
++            _active_subagents.clear()
++        second = _fake_child()
++        seams(second)
++        assert ad.adopt_handed_off_delegations(handoff._resume_unit) == 1
++
++        # The next gateway delivers the subagent's result (its registry's queue).
++        event = wait_until(lambda: _delegation_events(nxt, run_id), timeout=30, what="the woken subagent's result")[0]
++        assert session.exited  # it ended on the carrier, which still runs
++    finally:
++        os.close(fd)
++    assert event["status"] == "completed"
++    assert len(second.conversations) == 1
++    woken = second.conversations[0]["user_message"]
++    assert "zd-sub-done" in woken and "exited with code 0" in woken and "no record" not in woken
++    assert (tmp_path / "runs").read_text().splitlines() == ["tick1", "tick2", "tick3", "tick4"]  # ran once
++    assert nxt.get(session.id).exit_code == 0
++    assert all(e.get("type") != "completion" for e in list(carrier.completion_queue.queue))
++    assert _completions(run_id) == []  # nothing from the carrier
+diff --git a/tools/process_registry.py b/tools/process_registry.py
+index 8ddc4018..ef69d2dd 100644
+--- a/tools/process_registry.py
++++ b/tools/process_registry.py
+@@ -37,6 +37,7 @@ from tools.process_registry_notifications import (
+     format_process_notification, heartbeat_output_tail, is_child_process_notification, should_surface_notification)
+ from tools.process_registry_checkpoint import ProcessCheckpointMixin
+ from tools.process_registry_handoff import ProcessHandoffMixin
++from tools.process_registry_relay import ProcessRelayMixin
+ from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, worker_output_log
+ from tools.process_registry_ownership import ProcessOwnershipMixin
+ from tools.process_registry_termination import ProcessTerminationMixin
+@@ -603,6 +604,11 @@ class ProcessSession:
+     env_offset: int = 0
+     reattach: dict = field(default_factory=dict)
+     handed_off: bool = False                    # handed to the next gateway: never finished here
++    # gateway.restart_turn_handoff_per_turn (tools/process_registry_relay.py): the relay directory of a process the
++    # carrier only relays (it is the next gateway's), and of one the next gateway reads from the carrier's relay.
++    _carry_relay: str = field(default="", repr=False)
++    _relay_in: str = field(default="", repr=False)
++    _relay_lock: str = field(default="", repr=False)
+     _heartbeat_last: float = field(default=0.0, repr=False)          # time of the last heartbeat (or spawn)
+     _heartbeat_total_at_last: int = field(default=0, repr=False)     # total_output_chars at that moment
+     _heartbeat_seq: int = field(default=0, repr=False)
+@@ -721,7 +727,7 @@ def _last_line_int(output: str) -> Optional[int]:
+ 
+ 
+ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOutputLogMixin, ProcessOwnershipMixin,
+-                      ProcessHandoffMixin):
++                      ProcessHandoffMixin, ProcessRelayMixin):
+     """In-memory registry of running and finished background processes.
+     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
+     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
+@@ -770,6 +776,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+         self.on_output = None
+         self.on_close = None
+         self._heartbeat_thread: Optional[threading.Thread] = None
++        self._relay_init()
+ 
+     # ── heartbeat ───────────────────────────────────────────────────────────
+     def arm_heartbeat(self, session: ProcessSession, seconds: int) -> int:
+@@ -799,7 +806,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+             now = time.time()
+             with self._lock:
+                 due = [s for s in self._running.values()
+-                       if s.heartbeat_seconds > 0 and not s.exited and not s.handed_off
++                       if s.heartbeat_seconds > 0 and not s.exited and not s.handed_off and not s._carry_relay
+                        and now - s._heartbeat_last >= s.heartbeat_seconds]
+             for session in due:
+                 self._emit_heartbeat(session, now)
+@@ -852,8 +859,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+         window, a match inside the window is one strike, WATCH_STRIKE_LIMIT consecutive
+         strikes or WATCH_LIFETIME_MAX_HITS total deliveries disable watching and
+         promote the session to notify_on_complete."""
+-        if not session.watch_patterns or session._watch_disabled:
+-            return
++        if not session.watch_patterns or session._watch_disabled or session._carry_relay:
++            return  # a relayed process's matches are the next gateway's to report
+         # Late chunks after the reader declared exit are post-exit noise; dropping them
+         # avoids stale notifications minutes after the process ended.
+         if session.exited:
+@@ -1674,7 +1681,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+     def _publish_finished(self, session: ProcessSession, was_running: bool) -> None:
+         self._release_finished_handles(session)
+         self._write_checkpoint()
+-        if was_running and session.notify_on_complete:
++        if was_running and session.notify_on_complete and not session._carry_relay:
+             notification = {
+                 "type": "completion",
+                 "session_id": session.id,
+@@ -2154,8 +2161,6 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+         with status exited|timeout|interrupted|not_found|error and an output snapshot.
+         ``release`` (a subagent's wait): a non-empty answer releases the wait as interrupted with that text as its
+         ``released_by``; ``max_seconds`` clamps the wait further."""
+-        from tools.interrupt import consume_yield as _consume_yield, is_interrupted as _is_interrupted
+-
+         try:
+             max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
+         except (ValueError, TypeError):
+@@ -2174,6 +2179,15 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+         session = self.get(session_id)
+         if session is None:
+             return _not_found(session_id)
++        # Held by the tool call that waits on it (a per-turn restart relays it once the wait returns).
++        self.note_sync_wait(session_id, 1)
++        try:
++            return self._wait_loop(session_id, session, effective_timeout, timeout_note, release)
++        finally:
++            self.note_sync_wait(session_id, -1)
++
++    def _wait_loop(self, session_id, session, effective_timeout, timeout_note, release) -> dict:
++        from tools.interrupt import consume_yield as _consume_yield, is_interrupted as _is_interrupted
+         deadline = time.monotonic() + effective_timeout
+         while time.monotonic() < deadline:
+             session = self._refresh_detached_session(session)
+@@ -2249,6 +2263,15 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+         if session.handed_off:
+             return {"status": "handed_off", "session_id": session.id,
+                     "error": "The process was handed to the next gateway; stop it there."}
++        if session._relay_in and not session.exited:
++            if consume_output:
++                self._completion_consumed.add(session_id)
++            refused = self._relay_kill(session)
++            if refused is not None:
++                return refused
++            with session._lock:
++                status = "killed" if session.completion_reason == "killed" else "already_exited"
++                return {**self._exit_snapshot(session, status), "session_id": session.id}
+         if session.exited:
+             # A double-forked descendant may still be alive in the systemd scope even
+             # though the main process exited — stop the scope to reap survivors.
+@@ -2665,6 +2688,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+                 s for s in (*self._running.values(), *self._finished.values())
+                 if (task_id is None or s.owner_task_id == task_id)
+                 and s.id not in exclude_ids and (not s.exited or s._scope_stop_pending) and not s.handed_off
++                and not s._carry_relay  # the next gateway's process now; it stops it through the relay
+                 and not (lifecycle and s.persist_on_release)
+             ]
+         results = [self.kill_process(s.id, source=source, consume_output=consume_output) for s in targets]
+diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_checkpoint.py
+index 51b6e454..0b05ef12 100644
+--- a/tools/process_registry_checkpoint.py
++++ b/tools/process_registry_checkpoint.py
+@@ -24,8 +24,11 @@ class ProcessCheckpointMixin:
+         try:
+             with self._lock:
+                 entries = []
+-                for s in self._running.values():
+-                    if s.exited:
++                # A relayed process that ended here stays listed while this carrier lives: the next gateway that
++                # has not reattached it yet reads its exit from the relay (tools/process_registry_relay.py).
++                relayed_done = [s for s in self._finished.values() if s._carry_relay and not s.handed_off]
++                for s in (*self._running.values(), *relayed_done):
++                    if s.exited and not s._carry_relay:
+                         continue
+                     # Backfill the start time so recovery can detect PID recycling
+                     # even for sessions spawned before this field existed.
+@@ -65,7 +68,9 @@ class ProcessCheckpointMixin:
+             on_disk = json.loads(path.read_text(encoding="utf-8-sig"))
+         except (OSError, ValueError):
+             return []
++        from tools.process_registry_relay import stale_relay
+         return [entry for entry in on_disk if isinstance(entry, dict) and entry.get("session_id") not in known
++                and not stale_relay(entry)
+                 and (entry.get("reattach")
+                      or ((log := adoptable_log(entry.get("output_log"))) and Path(log).exists()
+                          and (_exit_path(log).exists() or self._detached_host_fate(
+@@ -101,6 +106,9 @@ class ProcessCheckpointMixin:
+             if already_tracked:
+                 continue
+             if entry.get("reattach"):
++                from tools.process_registry_relay import stale_relay
++                if stale_relay(entry):
++                    continue  # a relay a gateway already settled
+                 # Handed off by the last gateway's graceful restart (terminal.process_handoff_backends).
+                 if self.reattach_from_checkpoint(entry):
+                     recovered += 1
+diff --git a/tools/process_registry_handoff.py b/tools/process_registry_handoff.py
+index 8211d76b..8ac579b7 100644
+--- a/tools/process_registry_handoff.py
++++ b/tools/process_registry_handoff.py
+@@ -24,6 +24,7 @@ HANDOFF_OUTPUT_TAIL_CHARS = 20_000
+ # How long a handoff waits for an env poller that is inside a probe to notice it must stop.
+ HANDOFF_POLLER_JOIN_SECONDS = 20.0
+ ENV_KIND = "env"
++RELAY_KIND = "carry"  # tools/process_registry_relay.py
+ 
+ 
+ def configured_handoff_backends() -> list[str]:
+@@ -81,6 +82,8 @@ class ProcessHandoffMixin:
+                 state["total_output_chars"] = session.total_output_chars
+                 session.reattach = state
+                 session.handed_off = True
++            # A process the next gateway reads through the relay goes on from this state there.
++            self._relay_switch(session, state)
+             handed += 1
+         for name, provider in providers.items():
+             self._call_provider(name, provider, "commit")
+@@ -159,6 +162,8 @@ class ProcessHandoffMixin:
+         try:
+             if kind == ENV_KIND:
+                 started = self._reattach_env_session(session, state)
++            elif kind == RELAY_KIND:
++                started = self._reattach_relay_session(session, state)
+             else:
+                 started = self._reattach_provider_session(session, kind, state)
+         except Exception:
+diff --git a/tools/process_registry_relay.py b/tools/process_registry_relay.py
+new file mode 100644
+index 00000000..a4d79641
+--- /dev/null
++++ b/tools/process_registry_relay.py
+@@ -0,0 +1,326 @@
++"""Move background processes to the next gateway while the old one still holds their backend's connection.
++
++``gateway.restart_turn_handoff_per_turn``: the old gateway (the carrier) carries its running turns on after the next
++gateway took the profile over. The real process handoff (``ProcessHandoffMixin.hand_off_for_restart``) closes the
++device connections, so the carrier makes it only once no carried turn runs a tool call there. Until then each
++background process belongs to the next gateway already and the carrier only relays it:
++
++* the carrier (:meth:`ProcessRelayMixin.relay_to_successor`) keeps reading the process as before, but writes every
++  chunk of its output to ``<dir>/<id>.out`` and its exit to ``<id>.exit``, never reports it itself (no completion,
++  watch match or heartbeat) and kills it when the next gateway asks (``<id>.kill``); the process goes into the
++  checkpoint with the reattach kind ``carry``;
++* the next gateway reattaches it from the checkpoint (:meth:`ProcessRelayMixin._reattach_relay_session`), shows its
++  output to its viewers and reports its exit to its owner (a waiting subagent's wake included);
++* when the carrier makes the real handoff it writes the process's handoff state to ``<id>.switch`` once the output
++  before it is in ``<id>.out``, and the next gateway goes on reading the process from there itself;
++* a carrier that exits without either file left the process unreported: it is reported lost once.
++"""
++
++import codecs
++import json
++import logging
++import os
++import threading
++import time
++from contextlib import suppress
++from pathlib import Path
++from typing import Iterable, Optional
++
++logger = logging.getLogger("tools.process_registry")
++
++RELAY_KIND = "carry"
++RELAY_POLL_SECONDS = 0.1
++# How long a kill on the next gateway waits for the carrier to report the relayed process ended.
++RELAY_KILL_WAIT_SECONDS = 15.0
++_TAIL_CHARS = 20_000
++
++
++def _paths(directory, session_id) -> dict:
++    base = Path(directory)
++    return {ext: base / f"{session_id}.{ext}" for ext in ("out", "exit", "switch", "kill")}
++
++
++def _write_json(path: Path, value: dict) -> None:
++    tmp = path.with_name(path.name + ".tmp")
++    with open(tmp, "w", encoding="utf-8") as fh:
++        json.dump(value, fh)
++        fh.flush()
++        os.fsync(fh.fileno())
++    os.replace(tmp, path)
++
++
++def _read_json(path: Path) -> Optional[dict]:
++    try:
++        value = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    return value if isinstance(value, dict) else None
++
++
++def _holder_alive(lock) -> bool:
++    """Whether the carrier still holds its lock file (a flock ends with its process)."""
++    if not lock:
++        return False
++    import fcntl
++    try:
++        fd = os.open(lock, os.O_RDONLY)
++    except FileNotFoundError:
++        return False
++    except OSError:
++        return True
++    try:
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except OSError:
++            return True
++        fcntl.flock(fd, fcntl.LOCK_UN)
++        return False
++    finally:
++        os.close(fd)
++
++
++def stale_relay(entry: dict) -> bool:
++    """A checkpoint entry of a relay whose files are gone: the next gateway settled it already."""
++    state = entry.get("reattach") or {}
++    if not isinstance(state, dict) or state.get("kind") != RELAY_KIND:
++        return False
++    return not _paths(state.get("dir") or ".", entry.get("session_id") or "")["out"].exists()
++
++
++class ProcessRelayMixin:
++    """Mixed into ``ProcessRegistry``; the registry supplies ``_running``, ``_finished``, ``_lock``,
++    ``_track_started``, ``_ingest_output``, ``_finish_exited``, ``_write_checkpoint`` and ``kill_process``."""
++
++    # ── the carrier ──────────────────────────────────────────────────────────────────────────────────────
++
++    def _relay_init(self) -> None:
++        if getattr(self, "_relaying", None) is None:
++            self._relaying: dict = {}
++            self._relay_thread: Optional[threading.Thread] = None
++            self._sync_waits: dict = {}
++            # Orders the writes of one relay: output, then the exit or the switch after it.
++            self._relay_io = threading.RLock()
++
++    def note_sync_wait(self, session_id: str, delta: int) -> None:
++        """``wait()`` blocks a tool call on *session_id*: the process stays here until that call returns."""
++        self._relay_init()
++        with self._lock:
++            count = self._sync_waits.get(session_id, 0) + delta
++            if count > 0:
++                self._sync_waits[session_id] = count
++            else:
++                self._sync_waits.pop(session_id, None)
++
++    def relay_to_successor(self, directory, lock, backends: Iterable[str]) -> list[str]:
++        """Relay every running process of *backends* to the next gateway, except one a tool call waits on here;
++        returns the ids relayed now. *lock* is the file the carrier holds for the rest of its life."""
++        self._relay_init()
++        backends = {name for name in backends if name}
++        if not backends:
++            return []
++        with self._lock:
++            candidates = [s for s in self._running.values()
++                          if not s.exited and not s.handed_off and not s._carry_relay and s.backend in backends
++                          and s.id not in self._sync_waits]
++        if not candidates:
++            return []
++        Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
++        relayed = []
++        for session in candidates:
++            paths = _paths(directory, session.id)
++            with session._lock:
++                if session.exited or session.handed_off:
++                    continue
++                paths["out"].touch(mode=0o600)
++                session.reattach = {"kind": RELAY_KIND, "dir": str(directory), "lock": str(lock),
++                                    "output_tail": session.output_buffer[-_TAIL_CHARS:],
++                                    "total_output_chars": session.total_output_chars}
++                session._carry_relay = str(directory)
++                self._relaying[session.id] = [session, session.total_output_chars]
++            relayed.append(session.id)
++        if relayed:
++            self._write_checkpoint()
++            self._ensure_relay_thread()
++            logger.info("Relaying %d background process(es) to the next gateway: %s", len(relayed), ", ".join(relayed))
++        return relayed
++
++    def _ensure_relay_thread(self) -> None:
++        with self._lock:
++            if self._relay_thread is not None and self._relay_thread.is_alive():
++                return
++            self._relay_thread = threading.Thread(target=self._relay_writer_loop, name="process-relay", daemon=True)
++            self._relay_thread.start()
++
++    def _relay_writer_loop(self) -> None:
++        while True:
++            with self._lock:
++                items = list(self._relaying.items())
++                if not items:
++                    self._relay_thread = None
++                    return
++            for session_id, (session, _written) in items:
++                try:
++                    self._relay_step(session)
++                except Exception:
++                    logger.warning("Relay of process %s failed", session_id, exc_info=True)
++            time.sleep(RELAY_POLL_SECONDS)
++
++    def _relay_flush(self, session) -> None:
++        """Append the output read since the last flush to ``<id>.out``. Caller holds no session lock."""
++        with self._relay_io:
++            self._relay_flush_locked(session)
++
++    def _relay_flush_locked(self, session) -> None:
++        with self._lock:
++            item = self._relaying.get(session.id)
++        if item is None:
++            return
++        with session._lock:
++            delta = session.total_output_chars - item[1]
++            text = session.output_buffer[-delta:] if delta > 0 else ""
++            lost = max(0, delta - len(session.output_buffer))
++            item[1] = session.total_output_chars
++        if lost:
++            text = f"\n[{lost} characters of output were not relayed]\n" + text
++        if text:
++            with open(_paths(session._carry_relay, session.id)["out"], "a", encoding="utf-8") as fh:
++                fh.write(text)
++
++    def _relay_step(self, session) -> None:
++        paths = _paths(session._carry_relay, session.id)
++        if paths["kill"].exists() and not session.exited:
++            with suppress(OSError):
++                paths["kill"].unlink()
++            logger.info("Next gateway asked to stop relayed process %s", session.id)
++            self.kill_process(session.id, source="process.kill", consume_output=False)
++        exited = session.exited and session._completion_event.is_set()
++        with self._relay_io:
++            with self._lock:
++                if session.id not in self._relaying:
++                    return  # switched meanwhile
++            self._relay_flush_locked(session)
++            if not exited:
++                return
++            _write_json(paths["exit"], {"exit_code": session.exit_code, "completion_reason": session.completion_reason,
++                                        "termination_source": session.termination_source,
++                                        "exited_at": session.exited_at,
++                                        "consumed": session.id in self._completion_consumed})
++            with self._lock:
++                self._relaying.pop(session.id, None)
++
++    def _relay_switch(self, session, state: dict) -> None:
++        """The real handoff took *session* (``hand_off_for_restart``): the next gateway reads it itself from here."""
++        self._relay_init()
++        if not session._carry_relay:
++            return
++        with self._relay_io:
++            with self._lock:
++                if session.id not in self._relaying:
++                    return  # its exit was relayed already
++            self._relay_flush_locked(session)
++            with self._lock:
++                self._relaying.pop(session.id, None)
++            clean = {k: v for k, v in state.items() if k not in ("output_tail", "total_output_chars")}
++            _write_json(_paths(session._carry_relay, session.id)["switch"], clean)
++
++    def relaying(self) -> int:
++        self._relay_init()
++        with self._lock:
++            return len(self._relaying)
++
++    # ── the next gateway ─────────────────────────────────────────────────────────────────────────────────
++
++    def _reattach_relay_session(self, session, state: dict) -> bool:
++        directory = state.get("dir") or ""
++        if not directory or not _paths(directory, session.id)["out"].exists():
++            return False
++        session._relay_in = directory
++        session._relay_lock = str(state.get("lock") or "")
++        session.backend = session.backend or ""
++        self._track_started(session, self._relay_reader_loop, f"proc-relay-{session.id}")
++        return True
++
++    def _relay_reader_loop(self, session) -> None:
++        """Read a relayed process: its output as the carrier writes it, then its exit or its handoff state."""
++        paths = _paths(session._relay_in, session.id)
++        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
++        offset = 0
++        last_check = 0.0
++        holder_gone = False
++
++        def read_out() -> None:
++            nonlocal offset
++            try:
++                with open(paths["out"], "rb") as fh:
++                    fh.seek(offset)
++                    chunk = fh.read()
++            except OSError:
++                return
++            offset += len(chunk)
++            if text := decoder.decode(chunk):
++                self._ingest_output(session, text, unless_exited=True)
++
++        while not session.exited:
++            # Decided before the read: the carrier writes these only after the output before them.
++            ended = paths["exit"].exists() or paths["switch"].exists() or holder_gone
++            read_out()
++            if ended:
++                break
++            now = time.monotonic()
++            if now - last_check >= 1.0:
++                last_check = now
++                holder_gone = not _holder_alive(session._relay_lock)
++                if holder_gone:
++                    continue  # one more read of what it wrote before it exited
++            time.sleep(RELAY_POLL_SECONDS)
++        if tail := decoder.decode(b"", final=True):
++            self._ingest_output(session, tail, unless_exited=True)
++        if session.exited:  # a kill here settled it
++            self._relay_cleanup(paths)
++            return
++        exit_info = _read_json(paths["exit"])
++        switch = _read_json(paths["switch"])
++        self._relay_cleanup(paths)
++        if exit_info is not None:
++            if exit_info.get("consumed"):  # a carried tool call already read its result there
++                self._completion_consumed.add(session.id)
++            code = exit_info.get("exit_code")
++            self._finish_exited(session, -1 if code is None else code,
++                                reason=str(exit_info.get("completion_reason") or "exited"),
++                                source=str(exit_info.get("termination_source") or ""))
++            return
++        if switch is not None:
++            session._relay_in = ""
++            if self._continue_relayed(session, switch):
++                return
++        logger.info("Relayed process %s was neither ended nor handed over by the carrier; reported lost", session.id)
++        self._finish_exited(session, -1, reason="lost", source="handoff_lost")
++
++    def _continue_relayed(self, session, state: dict) -> bool:
++        """Read the process from its backend as the real handoff left it."""
++        from tools.process_registry_handoff import ENV_KIND
++        kind = state.get("kind")
++        try:
++            if kind == ENV_KIND:
++                return bool(self._reattach_env_session(session, state))
++            return bool(self._reattach_provider_session(session, kind, state))
++        except Exception:
++            logger.warning("Could not take over relayed process %s (%s)", session.id, kind, exc_info=True)
++            return False
++
++    @staticmethod
++    def _relay_cleanup(paths) -> None:
++        for path in paths.values():
++            with suppress(OSError):
++                path.unlink()
++
++    def _relay_kill(self, session) -> Optional[dict]:
++        """A kill here of a process the carrier still runs: the carrier kills it and relays the exit. None once it
++        ended (the caller answers as for an exited process), else an error result."""
++        paths = _paths(session._relay_in, session.id)
++        with suppress(OSError):
++            paths["kill"].touch(mode=0o600)
++        if session._completion_event.wait(RELAY_KILL_WAIT_SECONDS):
++            return None
++        return {"status": "error", "session_id": session.id, "process_running": True,
++                "error": "The old gateway still runs this process and did not stop it in time; try again."}
+-- 
+2.56.0
+
