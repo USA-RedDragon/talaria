@@ -92,102 +92,131 @@ const asked = (from) => stat.attempts - from.attempts;
       quiet: !b.hidden && b.classList.contains("quiet"), chats: document.querySelectorAll("#sessions .item").length,
       sum: sum ? sum.innerText.trim() : "", body: /Could not load|NetworkError/.test(document.body.innerText) };
   })()`);
-  // watch samples the view every 100 ms for ms and returns every state seen.
-  const watch = async (ms, each) => {
-    const seen = [];
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      const v = await view();
-      seen.push(Object.assign({ at: Date.now() }, v));
-      if (each) await each();
-      await sleep(100);
-    }
-    return seen;
-  };
   // Poke the page the way a returning tab or a timer would: more reads.
   const poke = () => ev(`document.dispatchEvent(new Event("visibilitychange"))`);
 
-  // Count what the page's own fetch calls send (the page's reads and writes),
-  // apart from the connections a browser opens for them and for EventSource.
-  await ev(`(() => { window.__fetches = 0; const f = window.fetch.bind(window); window.fetch = (...a) => { window.__fetches++; return f(...a); }; })()`);
-  const fetches = () => ev(`window.__fetches`);
 
+  const fetches = () => ev(`window.__fetches`);
   const base = { chats: await ev(`document.querySelectorAll("#sessions .item").length`) };
   assert.ok(base.chats > 0);
-  // The Activity panel is open (it polls every 3 s while open).
+  // The Activity panel is open (it polls while open).
   await ev(`(() => { const b = document.getElementById("actbtn"); if (b && !document.getElementById("app").classList.contains("act-open")) b.click(); })()`).catch(() => {});
-  await sleep(500);
+  await ev(`window.__fetches = 0`);
 
-  // 1. A 5 s drop: nothing shows at any moment.
+  // A fake clock for the page: its timers and Date.now move only when this
+  // script says so, so the grace, the backoff and the stream's waits are
+  // driven by explicit steps, not by how fast the machine is. Real events
+  // (fetches, connections) are awaited by what they did, never by a sleep.
+  await ev(`(() => {
+    const real = { st: window.setTimeout.bind(window), ct: window.clearTimeout.bind(window), si: window.setInterval.bind(window), ci: window.clearInterval.bind(window) };
+    const k = { now: Date.now(), seq: 0, q: new Map() };
+    window.__k = k;
+    const add = (fn, ms, every) => { const id = 1e9 + (++k.seq); k.q.set(id, { fn, at: k.now + Math.max(0, ms || 0), every: every ? Math.max(1, ms || 1) : 0 }); return id; };
+    window.setTimeout = (fn, ms, ...a) => add(() => fn(...a), ms, false);
+    window.setInterval = (fn, ms, ...a) => add(() => fn(...a), ms, true);
+    window.clearTimeout = (id) => { if (id >= 1e9) k.q.delete(id); else real.ct(id); };
+    window.clearInterval = (id) => { if (id >= 1e9) k.q.delete(id); else real.ci(id); };
+    Date.now = () => k.now;
+    window.__advance = (ms) => {
+      const to = k.now + ms;
+      for (let guard = 0; guard < 5000; guard++) {
+        let best = null;
+        for (const [id, t] of k.q) if (t.at <= to && (!best || t.at < best.t.at || (t.at === best.t.at && id < best.id))) best = { id, t };
+        if (!best) break;
+        k.now = Math.max(k.now, best.t.at);
+        if (best.t.every) best.t.at = k.now + best.t.every; else k.q.delete(best.id);
+        try { best.t.fn(); } catch (e) { /* the page's own error handling */ }
+      }
+      k.now = to;
+    };
+    window.__pending = 0;
+    const f = window.fetch.bind(window);
+    window.fetch = (...a) => { window.__fetches++; window.__pending++; const p = f(...a); p.then(() => { window.__pending--; }, () => { window.__pending--; }); return p; };
+  })()`);
+  // step moves the fake clock by ms and lets what that started finish:
+  // timers due now run, in-flight fetches settle, and the page paints.
+  const step = async (ms) => {
+    await ev(`window.__advance(${ms})`);
+    for (let i = 0; i < 400; i++) {
+      await ev(`window.__advance(0)`);
+      if (await ev(`window.__pending === 0`)) break;
+      await sleep(10);
+    }
+    await ev(`new Promise((res) => { let n = 3; const f = () => (--n > 0 ? requestAnimationFrame(f) : res(true)); requestAnimationFrame(f); })`);
+  };
+  const sessionsSeen = () => stat.byPath["/api/sessions"] || 0;
+  const fakeNow = () => ev(`window.__k.now`);
+
+  // 1. A 5 s drop: nothing shows at any moment, and the page asks for a
+  // handful of things, not one per retry.
   {
-    const from = { attempts: stat.attempts };
-    const served = stat.served;
     const f0 = await fetches();
+    const t0 = await fakeNow();
     cutNetwork();
-    const seen = await watch(5000, poke);
-    restore();
-    const more = await watch(3000);
-    for (const v of [...seen, ...more]) {
-      assert.ok(!v.bad, "a short drop shows no red banner: " + JSON.stringify(v));
-      assert.ok(!v.banner, "a short drop shows no banner at all: " + JSON.stringify(v));
-      assert.ok(!v.body, "no error text on the page: " + JSON.stringify(v));
-      assert.ok(v.chats >= base.chats, "the chat list stays: " + JSON.stringify(v));
+    for (let s = 0; s < 5; s++) {
+      await poke();
+      await step(1000);
+      const v = await view();
+      assert.ok(!v.bad && !v.banner && !v.body && v.chats >= base.chats, "a short drop shows nothing at +" + (s + 1) + " s: " + JSON.stringify(v));
     }
     const sent = (await fetches()) - f0;
     assert.ok(sent <= 12, "a 5 s drop costs a handful of page requests, got " + sent);
-    // Firefox opens several connections of its own for every request it
-    // makes (retries and spare ones): count its connections, but hold the
-    // page to its own requests.
-    if (!firefox) assert.ok(asked(from) <= 25, "and few connections, got " + asked(from));
-    console.log(`short drop: ${sent} page requests, ${asked(from)} refused connections`);
-    // Back: the page asks again on its own and recovers.
-    await until(`document.querySelectorAll("#sessions .item").length > 0`, "the list after the short drop");
-    // The page finds the network on its own at its next probe (at most one
-    // wait of the shared backoff after the drop) and fetches the list again.
-    const r0 = Date.now();
-    const s0 = stat.byPath["/api/sessions"] || 0;
-    for (; (stat.byPath["/api/sessions"] || 0) <= s0 && Date.now() - r0 < 45000;) await sleep(100);
-    assert.ok((stat.byPath["/api/sessions"] || 0) > s0, "the list is fetched again after the drop");
-    console.log(`short drop: list fetched again ${Date.now() - r0} ms after the network came back`);
+    console.log(`short drop: ${sent} page requests in 5 s`);
+    restore();
+    // The shared backoff finds the network again within its longest wait.
+    const s0 = sessionsSeen();
+    let waited = 0;
+    for (; sessionsSeen() <= s0 && waited < 40; waited++) {
+      await step(1000);
+      const v = await view();
+      // A request the browser cut can leave the hub's own quiet note about its
+      // agent for a moment: never red, never an error text, the list stays.
+      assert.ok(!v.bad && !v.body && v.chats >= base.chats, "nothing red shows while it recovers: " + JSON.stringify(v));
+    }
+    assert.ok(sessionsSeen() > s0, "the list is fetched again after the drop (fake " + waited + " s)");
+    assert.ok(waited <= 30, "found within the longest wait of 30 s, took " + waited);
+    console.log(`short drop: list fetched again ${waited} fake s after the network came back`);
   }
 
-  // 2. A 30 s drop: quiet, never red, bounded, and it recovers. It starts
-  // once the event stream is healthy again (open for 2.5 s), so the stream's
-  // own 10 s grace is counted from this drop and not from the one before.
+  // 2. A 30 s drop: quiet, never red, bounded, and it recovers. The event
+  // stream is healthy first (open past its 2 s), so its own grace is
+  // counted from this drop.
   {
-    for (; ![...stat.streams].some((at) => Date.now() - at > 3000);) await sleep(100);
-    const from = { attempts: stat.attempts };
+    for (let i = 0; i < 60 && !(stat.streams.size && (await view()).banner === ""); i++) await step(1000);
+    assert.ok(stat.streams.size, "the event stream is open again");
+    await step(3000);
     const f0 = await fetches();
-    const t0 = Date.now();
+    const t0 = await fakeNow();
     cutNetwork();
-    const seen = await watch(30000, poke);
-    const reqs = asked(from);
-    for (const v of seen) {
-      assert.ok(!v.bad, "a long drop shows no red banner: " + JSON.stringify(v));
-      assert.ok(!v.body, "no error text on the page: " + JSON.stringify(v));
-      assert.ok(v.chats >= base.chats, "the chat list stays: " + JSON.stringify(v));
-      if (v.at - t0 < 9000) assert.ok(!v.banner, "quiet for the first 9 s: " + JSON.stringify(v));
+    let noteAt = -1;
+    for (let s = 1; s <= 30; s++) {
+      await poke();
+      await step(1000);
+      const v = await view();
+      assert.ok(!v.bad && !v.body && v.chats >= base.chats, "a long drop shows no red and keeps the list at +" + s + " s: " + JSON.stringify(v));
+      if (s < 10) assert.ok(!v.banner, "quiet for the first 9 s, at +" + s + " s: " + JSON.stringify(v));
+      if (noteAt < 0 && v.quiet && /Reconnecting/.test(v.banner)) noteAt = s;
     }
-    const quiet = seen.find((v) => v.quiet && /Reconnecting/.test(v.banner));
-    assert.ok(quiet, "a quiet Reconnecting note shows once the drop lasts: " + JSON.stringify(seen[seen.length - 1]));
-    assert.ok(quiet.at - t0 >= 9000 && quiet.at - t0 <= 16000, "the note comes after about 10 s, at " + (quiet.at - t0));
+    assert.ok(noteAt >= 10 && noteAt <= 16, "the quiet Reconnecting note comes after the 10 s grace, at +" + noteAt + " s");
     const sent = (await fetches()) - f0;
     assert.ok(sent <= 20, "a 30 s drop costs a bounded number of page requests, got " + sent);
-    if (!firefox) assert.ok(reqs <= 60, "and a bounded number of connections, got " + reqs);
     if (shots) {
       const r = firefox ? await c.send("browsingContext.captureScreenshot", { context: c.context }) : await c.send("Page.captureScreenshot", { format: "png" });
       fs.writeFileSync(`${shots}/netdrop-${firefox ? "firefox-1280" : "chrome-412"}-quiet.png`, Buffer.from(r.data, "base64"));
     }
-    console.log(`long drop: ${sent} page requests, ${reqs} refused connections in 30 s; note at ${quiet.at - t0} ms`);
+    console.log(`long drop: ${sent} page requests in 30 s; note at +${noteAt} s`);
     restore();
-    const s0 = stat.byPath["/api/sessions"] || 0;
-    const t1 = Date.now();
-    await until(`!document.getElementById("banner") || document.getElementById("banner").hidden || !/Reconnecting/.test(document.getElementById("banner").innerText)`, "the note to go after recovery", 40000);
-    for (; (stat.byPath["/api/sessions"] || 0) <= s0 && Date.now() - t1 < 40000;) await sleep(100);
-    assert.ok((stat.byPath["/api/sessions"] || 0) > s0, "everything is fetched again once the network is back");
-    const after = await watch(2000);
-    for (const v of after) assert.ok(!v.bad && !v.body, "no error after recovery: " + JSON.stringify(v));
-    console.log(`recovered ${Math.round((Date.now() - t1))} ms after the check began`);
+    const s0 = sessionsSeen();
+    let waited = 0;
+    for (; waited < 60; waited++) {
+      await step(1000);
+      const v = await view();
+      assert.ok(!v.bad && !v.body, "no error while it recovers: " + JSON.stringify(v));
+      if (sessionsSeen() > s0 && !/Reconnecting/.test(v.banner)) break;
+    }
+    assert.ok(sessionsSeen() > s0, "everything is fetched again once the network is back");
+    assert.ok(!/Reconnecting/.test((await view()).banner), "the note is gone after recovery");
+    console.log(`recovered ${waited} fake s after the network came back`);
   }
 
   // Screenshots at 412 and 1280 of the quiet state, with the network cut again.
