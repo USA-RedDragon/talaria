@@ -16,9 +16,14 @@ import (
 // The config carries the daemon's and the plugin's versions, so an older
 // extension asks Firefox for an update, and the extension's update state
 // reaches Connected.
+const (
+	daemonV = "0.32.0"
+	pluginV = "0.33.0"
+)
+
 func TestConfigCarriesVersionsAndUpdateStatus(t *testing.T) {
 	t.Parallel()
-	b, sock := startVersioned(t, "0.32.0")
+	b, sock := startVersioned(t, daemonV)
 	conn := dialRaw(t, sock)
 	send := func(m any) {
 		if err := nativemsg.Write(conn, mustJSON(t, m), nativemsg.MaxToBrowser); err != nil {
@@ -39,7 +44,7 @@ func TestConfigCarriesVersionsAndUpdateStatus(t *testing.T) {
 	}
 	send(broker.Message{Type: broker.TypeHostHello, ExtensionID: host.ExtensionID, HostPID: 1})
 	send(broker.Message{Type: broker.TypeHello, Version: "0.28.1", Update: "checking"})
-	if m := read(); m.Type != broker.TypeConfig || m.DaemonVersion != "0.32.0" || m.PluginVersion != "" {
+	if m := read(); m.Type != broker.TypeConfig || m.DaemonVersion != daemonV || m.PluginVersion != "" {
 		t.Fatalf("config = %+v", m)
 	}
 	read() // legacy auth_status
@@ -49,19 +54,19 @@ func TestConfigCarriesVersionsAndUpdateStatus(t *testing.T) {
 	if err != nil || h.Update != "checking" {
 		t.Fatalf("hello = %+v, %v", h, err)
 	}
-	b.SetPluginVersion("0.33.0")
-	if m := read(); m.Type != broker.TypeConfig || m.DaemonVersion != "0.32.0" || m.PluginVersion != "0.33.0" {
+	b.SetPluginVersion(pluginV)
+	if m := read(); m.Type != broker.TypeConfig || m.DaemonVersion != daemonV || m.PluginVersion != pluginV {
 		t.Fatalf("config after SetPluginVersion = %+v", m)
 	}
-	b.SetPluginVersion("0.33.0") // unchanged: nothing is sent
+	b.SetPluginVersion(pluginV) // unchanged: nothing is sent
 	ch := b.Changed()
-	send(broker.Message{Type: broker.TypeUpdateStatus, Update: "pending", UpdateVersion: "0.32.0"})
+	send(broker.Message{Type: broker.TypeUpdateStatus, Update: "pending", UpdateVersion: daemonV})
 	select {
 	case <-ch:
 	case <-time.After(5 * time.Second):
 		t.Fatal("an update status did not signal a change")
 	}
-	if h, _ := b.Connected(); h.Update != "pending" || h.UpdateVersion != "0.32.0" || h.Version != "0.28.1" {
+	if h, _ := b.Connected(); h.Update != "pending" || h.UpdateVersion != daemonV || h.Version != "0.28.1" {
 		t.Fatalf("hello after update_status = %+v", h)
 	}
 }
