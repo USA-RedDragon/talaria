@@ -1,0 +1,14 @@
+# Neighbors
+tests/agent/test_skill_utils.py
+tests/agent/test_skill_cache_thrash.py
+tests/agent/test_skills_index_format.py
+tests/gateway/test_local_session_recovery.py
+tests/gateway/test_local_session_orphan_end.py
+tests/gateway/test_local_restore_lock_free.py
+tests/gateway/test_viewer_close_lifecycle.py
+tests/gateway/test_bootstrap_deferred_integrity_scan.py
+tests/gateway/test_bootstrap_early_exit_teardown.py
+tests/gateway/test_standby_marker_stale.py
+tests/gateway/test_startup_restart_race.py
+tests/gateway/test_restart_takeover_gap.py
+tests/gateway/test_parked_profile_rescan.py
