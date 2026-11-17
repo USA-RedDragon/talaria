@@ -36,6 +36,23 @@ KEEP_S = 86400.0
 SWEEP_S = 15.0
 FAILS_MAX = 20
 VERSION = 1
+# Longest wait for tabs.json.lock. A save or adopt that cannot get it is skipped (the records stay
+# in memory and the next save writes them), so a browser call never waits on the file.
+FLOCK_WAIT_S = 5.0
+
+
+def _flock(fh: Any) -> None:
+    """Take an exclusive flock on ``fh`` within FLOCK_WAIT_S; OSError when it stays taken."""
+    import fcntl
+    deadline = time.monotonic() + FLOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise OSError(f"{fh.name} stayed locked for {FLOCK_WAIT_S:g}s") from None
+            time.sleep(0.02)
 
 
 def _alive(pid: int) -> bool:
@@ -274,14 +291,14 @@ class Ledger:
         return raw
 
     def save(self) -> None:
-        """Write this process's records, keeping those of other processes."""
+        """Write this process's records, keeping those of other processes. Lock order, here and
+        in adopt: the ledger lock, then the file lock (callers already hold the ledger lock)."""
         if not self._path:
             return
-        import fcntl
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(str(self._path) + ".lock", "a", encoding="utf-8") as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            with self._lock, open(str(self._path) + ".lock", "a", encoding="utf-8") as lock:
+                _flock(lock)
                 others = [t for t in self._read().get("tabs", []) if isinstance(t, dict) and t.get("pid") != self._pid]
                 mine = [dict(rec, device=d, tab=t) for (d, t), rec in sorted(self._tabs.items())]
                 fd, tmp = tempfile.mkstemp(prefix=".tabs-", suffix=".tmp", dir=str(self._path.parent))
@@ -303,12 +320,13 @@ class Ledger:
         """Take over the records of processes that died, so their tabs close. Their grace starts now."""
         if not self._path or not self._path.exists():
             return 0
-        import fcntl
         n = 0
         now = self._clock()
         try:
-            with open(str(self._path) + ".lock", "a", encoding="utf-8") as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            # The ledger lock first, as save takes them: the opposite order deadlocked with a save of
+            # a parallel browser call, and every later call then hung in begin_call.
+            with self._lock, open(str(self._path) + ".lock", "a", encoding="utf-8") as lock:
+                _flock(lock)
                 kept = []
                 for t in self._read().get("tabs", []):
                     if not isinstance(t, dict) or not isinstance(t.get("device"), str) or not isinstance(t.get("tab"), int):

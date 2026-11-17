@@ -539,6 +539,56 @@ class PersistTests(unittest.TestCase):
         self.assertEqual(sorted(t["tab"] for t in doc["tabs"]), [5, 6])
         self.assertEqual({t["tab"]: t["pid"] for t in doc["tabs"]}[5], me._pid)
 
+    def test_adopt_and_a_save_in_another_thread_do_not_deadlock(self):
+        """adopt() (the handler's start_reaper after every browser call) and a save under the
+        ledger lock (a tab opened or closed by a parallel call) take the ledger lock and the file
+        lock in the same order. With opposite orders both threads waited forever, and every
+        later browser call hung in begin_call before it reached the device."""
+        tabs.Ledger(self.path, pid=2 ** 22 + 12345).opened("old", "d", 5)
+        me = tabs.Ledger(self.path)
+        in_adopt, holds_lock = threading.Event(), threading.Event()
+        real_alive = tabs._alive
+
+        def alive(pid):
+            in_adopt.set()
+            holds_lock.wait(2)
+            return real_alive(pid)
+
+        def save_under_lock():
+            in_adopt.wait(2)
+            with me._lock:
+                holds_lock.set()
+                me.opened("s", "d", 9)
+
+        with mock.patch.object(tabs, "_alive", alive):
+            a = threading.Thread(target=me.adopt, daemon=True)
+            b = threading.Thread(target=save_under_lock, daemon=True)
+            a.start()
+            b.start()
+            a.join(10)
+            b.join(10)
+        self.assertFalse(a.is_alive() or b.is_alive(), "adopt and save deadlocked")
+        self.assertIsNotNone(me.get("d", 5))
+        self.assertIsNotNone(me.get("d", 9))
+
+    def test_a_held_file_lock_does_not_block_a_browser_call(self):
+        """Another process holding tabs.json.lock costs at most FLOCK_WAIT_S; the save is skipped
+        and the record stays in memory."""
+        import fcntl
+        import time
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(self.path) + ".lock", "a") as other, mock.patch.object(tabs, "FLOCK_WAIT_S", 0.3):
+            # Another open file description: flock contends with it as with another process.
+            fcntl.flock(other.fileno(), fcntl.LOCK_EX)
+            me = tabs.Ledger(self.path)
+            t = time.monotonic()
+            worker = threading.Thread(target=lambda: (me.opened("s", "d", 3), me.adopt()), daemon=True)
+            worker.start()
+            worker.join(5)
+            self.assertFalse(worker.is_alive(), "the ledger waited on the file lock without a bound")
+            self.assertLess(time.monotonic() - t, 3)
+        self.assertIsNotNone(me.get("d", 3))
+
     def test_the_file_is_private(self):
         led = tabs.Ledger(self.path)
         led.opened("s", "d", 1)
