@@ -633,9 +633,13 @@ class ToolTests(BrowserBase):
         self.assertTrue(guard["sensitive"])
         self.assertFalse(guard["confirmed"])
 
-    def test_eval_without_hook_sends_empty_guard(self):
-        self.registry.dispatch("browser_eval", {"tab_id": 7, "script": "return 1"}, task_id="t", session_id=self.session)
-        self.assertEqual(self.last("eval")["args"]["guard"], {"script_hosts": [], "write_hosts": [], "sensitive": False})
+    def test_eval_without_hook_is_checked_by_the_handler(self):
+        """No grant from the hook: the handler decides, and an unapproved script is not sent."""
+        with mock.patch.object(browser, "approved", lambda k: False):
+            out = json.loads(self.registry.dispatch("browser_eval", {"tab_id": 7, "script": "return 1"}, task_id="t",
+                                                    session_id=self.session))
+        self.assertIn("browser:script:example.com", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
 
     def test_unattended_blocks_what_was_not_approved(self):
         with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: False):
@@ -725,6 +729,74 @@ class ToolTests(BrowserBase):
         self.fake.inspect.update(host="pay.example.com", url="https://pay.example.com/x")
         self.run_tool("browser_click", tab_id=7, ref="e9")
         self.assertEqual(self.decision["rule_key"].rsplit(":", 1)[-1], "pay.example.com")
+
+    def hook_misses(self, tool: str, **args):
+        """Like hook_misses_inspect, for any tool."""
+        self.fake.fail["inspect"] = (core.BROWSER_FAILED, "timed out")
+        decision = browser.pre_tool_call(tool_name=tool, args=args, task_id="t", session_id=self.session)
+        self.assertFalse(decision and decision.get("rule_key", "").startswith("browser:script"), decision)
+        del self.fake.fail["inspect"]
+        out = self.registry.dispatch(tool, args, task_id="t", session_id=self.session)
+        return out if isinstance(out, dict) else json.loads(out)
+
+    def test_salesforce_eval_without_hook_inspect_uses_the_always_grant(self):
+        """A scheduled run: the script rule is in command_allowlist, the hook's inspect timed out.
+        The extension refused with 'running scripts ... needs the user's approval' before."""
+        self.salesforce()
+        rule = "browser:script:acme.lightning.force.com"
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: k == rule):
+            out = self.hook_misses("browser_eval", tab_id=7, script="return document.title")
+        self.assertNotIn("error", out)
+        self.assertEqual(self.last("eval")["args"]["guard"]["script_hosts"], ["acme.lightning.force.com"])
+
+    def test_eval_without_hook_inspect_still_needs_approval(self):
+        self.salesforce()
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: False):
+            out = self.hook_misses("browser_eval", tab_id=7, script="return document.title")
+        self.assertIn("browser:script:acme.lightning.force.com", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
+
+    def test_eval_write_without_hook_inspect_is_still_blocked_on_salesforce(self):
+        self.salesforce()
+        with mock.patch.object(browser, "approved", lambda k: True):
+            out = self.hook_misses("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.assertIn("never allowed on Salesforce", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
+
+    def test_navigate_without_hook_inspect_uses_the_always_grant(self):
+        rule = "browser:visit:bank.example.org"
+        real = self.fake.answer
+
+        def answer(msg):
+            if msg["op"] == "inspect" and "url" in (msg.get("args") or {}):
+                self.fake.requests.append(msg)
+                return {"ok": True, "result": {"url_host": "bank.example.org", "host": "example.com"}}
+            return real(msg)
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: k == rule):
+            self.fake.fail["inspect"] = (core.BROWSER_FAILED, "timed out")
+            args = {"url": "https://bank.example.org/", "tab_id": 7}
+            browser.pre_tool_call(tool_name="browser_navigate", args=args, task_id="t", session_id=self.session)
+            del self.fake.fail["inspect"]
+            self.fake.answer = answer
+            out = json.loads(self.registry.dispatch("browser_navigate", args, task_id="t", session_id=self.session))
+        self.assertNotIn("error", out)
+        self.assertEqual(self.last("navigate")["args"]["guard"], {"visit_hosts": ["bank.example.org"]})
+
+    def test_handler_checks_get_the_normal_timeout(self):
+        """The hook's inspect is capped by the hook timeout; the handler's late check is not."""
+        seen = []
+        real = self.hub.browser_call
+
+        def browser_call(device_id, op, args, timeout=60, **kw):
+            if op == "inspect":
+                seen.append(timeout)
+            return real(device_id, op, args, timeout, **kw)
+        self.salesforce()
+        with mock.patch.object(self.hub, "browser_call", browser_call), \
+                mock.patch.object(browser, "approved", lambda k: True):
+            self.hook_misses("browser_eval", tab_id=7, script="return 1")
+        self.assertEqual(seen[-1], core.BROWSER_DEFAULT_TIMEOUT_S)
+        self.assertLess(seen[0], core.BROWSER_DEFAULT_TIMEOUT_S)
 
     def login_page(self, listed: bool = True):
         self.fake.inspect = {"url": "https://login.example.com/authsvc", "host": "login.example.com",
@@ -897,9 +969,12 @@ class ToolTests(BrowserBase):
         self.assertTrue(out["submitted"])
         self.assertEqual(self.confirmed.call_count, 0)
 
-    def test_login_without_hook_sends_empty_guard(self):
-        self.registry.dispatch("browser_login", {"tab_id": 7}, task_id="t", session_id=self.session)
-        self.assertEqual(self.last("login")["args"]["guard"], {"login_hosts": []})
+    def test_login_without_hook_is_checked_by_the_handler(self):
+        """No grant from the hook: the handler decides; a host the user did not allow is not signed in on."""
+        with mock.patch.object(browser, "approved", lambda k: False):
+            out = json.loads(self.registry.dispatch("browser_login", {"tab_id": 7}, task_id="t", session_id=self.session))
+        self.assertIn("error", out)
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "login"])
 
     def test_login_bad_arguments(self):
         self.assertEqual(self.run_tool("browser_login")["code"], "bad_arguments")

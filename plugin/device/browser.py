@@ -15,6 +15,7 @@ that changed after the check cannot slip an action past the user.
 from __future__ import annotations
 
 import base64
+import contextvars
 import binascii
 import hashlib
 import json
@@ -741,12 +742,19 @@ def _hook_wait() -> float:
     return min(limit, cap / 4) if cap > 0 else limit
 
 
+# Set while a tool handler runs: its checks are not bound by the hook timeout, so an inspect that
+# the hook could not finish (a page busy loading) gets the normal timeout there.
+_IN_HANDLER: contextvars.ContextVar[bool] = contextvars.ContextVar("hermes_device_browser_handler", default=False)
+
+
 def _hook_call(device_id: str, op: str, req: dict) -> Any:
     """One browser operation from the pre_tool_call hook, which must end well inside Hermes's hook
     timeout: a call past it makes Hermes block every tool call the hook sees, in every session,
     for a while. The whole wait, the device's own timeout and the slack after it, takes at most
-    half of that timeout."""
+    half of that timeout. In a tool handler the operation gets the normal timeout."""
     core = _core()
+    if _IN_HANDLER.get():
+        return core.hub().browser_call(device_id, op, req, core.BROWSER_DEFAULT_TIMEOUT_S)
     total = INSPECT_TIMEOUT_S + core.BROWSER_SLACK_S
     cap = _hook_timeout()
     if cap > 0:
@@ -1755,6 +1763,7 @@ def _tool(fn: Callable[[dict, Any, str], Any], name: str) -> Callable[..., Any]:
         device = ""
         counted = False
         who: Optional[dict] = None
+        in_handler = _IN_HANDLER.set(True)
         try:
             _, conn = target(session_id)
             device = conn.device_id
@@ -1782,6 +1791,8 @@ def _tool(fn: Callable[[dict, Any, str], Any], name: str) -> Callable[..., Any]:
             if name in _CHANGES_PAGE and tab is not None:
                 forget_snapshot(conn.device_id, tab)
             return _with_target(result, who)
+        except _Refused as exc:
+            return str(exc)
         except Started as exc:
             return _err(str(exc), "started")
         except Unavailable as exc:
@@ -1791,6 +1802,7 @@ def _tool(fn: Callable[[dict, Any, str], Any], name: str) -> Callable[..., Any]:
         except ValueError as exc:
             return _with_target(_fail(name, str(exc), "bad_arguments", tab), who)
         finally:
+            _IN_HANDLER.reset(in_handler)
             if counted:
                 ledger().end_call(sid, device, tab)
     handler.__name__ = fn.__name__
@@ -2106,9 +2118,45 @@ def schedule_note(tool_name: str, args: Any, result: Any, session_id: str) -> Op
     return json.dumps(data, ensure_ascii=False)
 
 
-def _visit_guard(tool: str, args: dict, sid: str) -> dict:
+def _visit_guard(tool: str, args: dict, sid: str, conn: Any) -> dict:
     grant = _take_grant(_grant_key(_session(sid), tool, args))
+    if not grant:
+        grant = _late_grant(tool, args, conn)
     return {"visit_hosts": grant.get("visit_hosts") or []}
+
+
+class _Refused(Exception):
+    """A late check refused the call; the message is the tool's error result."""
+
+
+def _late_grant(tool: str, args: dict, conn: Any) -> dict:
+    """The grant of a call that pre_tool_call left none for: its short inspect failed or timed
+    out (a page busy loading), so nothing decided what the call needs, and the extension refused
+    it on an empty guard even when the user had approved it. Decided here with the normal timeout
+    (the handler sets _IN_HANDLER). This runs after the approval gate, which never saw the page,
+    so anything that needs an approval must already be approved; else :class:`_Refused`."""
+    try:
+        grant, approval = decide(tool, args, conn)
+    except _core().BrowserError as exc:
+        _core().logger.info("device-browser: late check before %s failed: %s", tool, exc)
+        return {}
+    if approval and approval.get("action") == "block":
+        raise _Refused(_err(str(approval.get("message") or "blocked"), "refused"))
+    if approval and approval.get("login_grant"):
+        raise _Refused(_err(f"{tool} was not run: signing in there needs the user's answer on a card, and the check "
+                            f"before it could not read the page, so nobody was asked. Try again.", "approval"))
+    key = str((approval or {}).get("rule_key") or "")
+    if key == _rule("visit", "unknown"):
+        return {}  # the page still cannot be read: the extension decides on its own lists, as before
+    if key and not approved(key):
+        raise _Refused(_err(f"{tool} was not run: it needs the user's approval (rule {key}), and the check before it "
+                            f"could not read the page, so nobody was asked. Try again; approving once with \"always\" "
+                            f"in a chat, or adding plugin_rule:{key} to command_allowlist, lets it run unattended.",
+                            "approval"))
+    if grant.get("confirm") and no_user():
+        raise _Refused(_err(f"{tool} was not run: {grant.get('confirm_text') or 'it needs the user'} This asks the user "
+                            f"every time, and no user is present in this run.", "approval"))
+    return grant
 
 
 def _decorate(result: Any, sid: str, device: str) -> Any:
@@ -2131,7 +2179,7 @@ def _tabs(args: dict, conn: Any, sid: str) -> str:
         url = str(args.get("url") or "").strip()
         if not url:
             raise ValueError("url is required to open a tab")
-        return _ok(_page(call(conn, "tab_open", {"url": url, "guard": _visit_guard("browser_tabs", args, sid)})))
+        return _ok(_page(call(conn, "tab_open", {"url": url, "guard": _visit_guard("browser_tabs", args, sid, conn)})))
     if action == "close":
         if _tab_id(args) is None:
             raise ValueError("tab_id is required to close a tab; browser_tabs with action list shows the tab ids")
@@ -2164,7 +2212,7 @@ def _navigate(args: dict, conn: Any, sid: str) -> str:
     url = str(args.get("url") or "").strip()
     if not url:
         raise ValueError("url is required")
-    guard = _visit_guard("browser_navigate", args, sid)
+    guard = _visit_guard("browser_navigate", args, sid, conn)
     tab = _tab_id(args)
     core = _core()
     if tab is None and not _wants_new_tab(args) and cleanup_enabled():
@@ -2502,7 +2550,7 @@ def _eval(args: dict, conn: Any, sid: str) -> Any:
     if not script.strip():
         raise ValueError("give script (the body of an async function that ends with return <value>) or script_ref "
                          "(a script file of a skill)")
-    grant = _take_grant(_grant_key(_session(sid), "browser_eval", args))
+    grant = _take_grant(_grant_key(_session(sid), "browser_eval", args)) or _late_grant("browser_eval", args, conn)
     if grant.get("confirm") and not _confirm(grant.get("confirm_text") or "Allow this script?"):
         return _err("the user did not allow this script", "declined")
     waited = _wait(args, conn, tab)
@@ -2532,7 +2580,7 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     url = str(args.get("url") or "").strip()
     if (tab is None) == (not url):
         raise ValueError("give tab_id (a tab that shows the login page) or url (the login page to open), not both")
-    grant = _take_grant(_grant_key(_session(sid), "browser_login", args))
+    grant = _take_grant(_grant_key(_session(sid), "browser_login", args)) or _late_grant("browser_login", args, conn)
     req: dict = {"guard": {"login_hosts": grant.get("login_hosts") or []},
                  "timeout_ms": int(_int(args, "wait_seconds", 15, 1, 60) * 1000)}
     if tab is not None:
