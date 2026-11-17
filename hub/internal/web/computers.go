@@ -170,7 +170,13 @@ func computerError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, hub.ErrUnknownDevice):
 		errorJSON(w, http.StatusNotFound, "No such computer. It may have been removed")
 	case errors.Is(err, hub.ErrComputerOffline):
-		errorJSON(w, http.StatusConflict, "That computer is offline. Turn it on and check that talaria runs on it, then try again")
+		// A move names the computer: "upstairs-pc went offline; try again
+		// when it is back". A computer name keeps its own case.
+		msg := "That computer is offline. Turn it on and check that talaria runs on it, then try again"
+		if _, named, ok := strings.Cut(err.Error(), ": "); ok && strings.HasSuffix(named, hub.WentOfflineSuffix) {
+			msg = named
+		}
+		errorJSON(w, http.StatusConflict, msg)
 	case errors.Is(err, hub.ErrLoginGrantsUnsupported):
 		errorJSON(w, http.StatusNotImplemented, "That computer's talaria is too old to keep sign-in grants. Update talaria on it")
 	case errors.Is(err, hub.ErrLoginGrantRefused):

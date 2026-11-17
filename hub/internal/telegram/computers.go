@@ -319,6 +319,9 @@ func (b *Bot) computerErr(ctx context.Context, to dest, err error) bool {
 		text = "Unknown computer. Send /devices to list yours."
 	case errors.Is(err, hub.ErrComputerOffline):
 		text = "That computer is offline. Turn it on and check that talaria runs on it."
+		if _, named, ok := strings.Cut(err.Error(), ": "); ok && strings.HasSuffix(named, hub.WentOfflineSuffix) {
+			text = named + "."
+		}
 	case errors.Is(err, hub.ErrFolderRefused), errors.Is(err, hub.ErrCannotMove):
 		text = reason()
 	case errors.Is(err, hub.ErrOtherBackend):

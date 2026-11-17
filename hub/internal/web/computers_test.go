@@ -143,7 +143,7 @@ func TestComputersAPI(t *testing.T) {
 	base := e.url + "/api/sessions/pc/" + plainID
 	var off map[string]any
 	if s := apiJSON(t, c, http.MethodPost, base+"/move", m.CSRF, map[string]string{keyDeviceID: e.id, keyDir: homeAlice}, &off); s != http.StatusConflict ||
-		!strings.Contains(errText(off), "offline") {
+		errText(off) != pcName+" went offline; try again when it is back" {
 		t.Fatalf("move to an offline computer = %d %v", s, off)
 	}
 	var now hub.Place

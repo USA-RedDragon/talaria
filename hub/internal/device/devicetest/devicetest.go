@@ -29,15 +29,16 @@ import (
 )
 
 const (
-	stateKey    = "state"
-	keyVia      = "via"
-	keyDeviceID = "device_id"
-	keyName     = "name"
-	keyPath     = "path"
-	keyDir      = "dir"
-	keyEntries  = "entries"
-	stateBound  = "bound"
-	stateNever  = "never_bound"
+	stateKey        = "state"
+	keyVia          = "via"
+	keyDeviceID     = "device_id"
+	keyName         = "name"
+	keyPath         = "path"
+	keyDir          = "dir"
+	keyEntries      = "entries"
+	stateBound      = "bound"
+	stateNever      = "never_bound"
+	stateFailClosed = "fail_closed"
 )
 
 // Binding is a session binding of the fake plugin.
@@ -123,6 +124,13 @@ type Plugin struct {
 	fr *fileRoutes
 	// lg is the state of the sign-in grant routes (logingrants.go).
 	lg loginGrants
+	// legacy ignores move assertions, as plugins before them did; strict
+	// applies all of the device rules (Strict).
+	legacy, strict bool
+	// moves counts the binds a move assertion allowed; moveClaims are
+	// their claims.
+	moves      int
+	moveClaims []assertion.Claims
 }
 
 // NewPlugin mounts a fake plugin for backendID on gw. It accepts
@@ -367,6 +375,11 @@ func (p *Plugin) parent(id string) string {
 func (p *Plugin) resolve(sid string) (Binding, map[string]any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.resolveLocked(sid)
+}
+
+// resolveLocked is resolve with p.mu held.
+func (p *Plugin) resolveLocked(sid string) (Binding, map[string]any) {
 	ever := false
 	for cur, hops := sid, 0; cur != "" && hops < 100; cur, hops = p.parent(cur), hops+1 {
 		if b, ok := p.bindings[cur]; ok {
@@ -375,7 +388,7 @@ func (p *Plugin) resolve(sid string) (Binding, map[string]any) {
 		ever = ever || p.ever[cur]
 	}
 	if ever {
-		return Binding{}, map[string]any{stateKey: "fail_closed", keyVia: nil}
+		return Binding{}, map[string]any{stateKey: stateFailClosed, keyVia: nil}
 	}
 	res := map[string]any{stateKey: stateNever, keyVia: nil}
 	if p.sandbox != "" {
@@ -445,6 +458,27 @@ func (p *Plugin) putBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if token, ok := body["assertion"]; ok && !p.legacy {
+		if code := p.checkMove(sid, deviceID, dir, token); code != "" {
+			pluginError(w, http.StatusForbidden, code)
+			return
+		}
+		p.moves++
+	} else if p.strict {
+		// The plugin's device rules (protocol.md section 9, PUT rules).
+		cur, res := p.resolveLocked(sid)
+		if res[stateKey] == stateBound && cur.DeviceID != deviceID {
+			pluginError(w, http.StatusConflict, "bound_to_other_device")
+			return
+		}
+		if res[stateKey] == stateFailClosed {
+			pluginError(w, http.StatusConflict, "not_bindable")
+			return
+		}
+	} else if old, had := p.bindings[sid]; had && old.DeviceID != deviceID {
+		pluginError(w, http.StatusConflict, "bound_to_other_device")
+		return
+	}
 	if code := p.refuse[sid]; code != "" {
 		pluginError(w, http.StatusConflict, code)
 		return
@@ -471,10 +505,6 @@ func (p *Plugin) putBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	old, had := p.bindings[sid]
-	if had && old.DeviceID != deviceID {
-		pluginError(w, http.StatusConflict, "bound_to_other_device")
-		return
-	}
 	if had && old.Dir == dir {
 		answer(w, old)
 		return
@@ -483,6 +513,59 @@ func (p *Plugin) putBinding(w http.ResponseWriter, r *http.Request) {
 	p.bindings[sid] = b
 	p.ever[sid] = true
 	answer(w, b)
+}
+
+// checkMove verifies the move assertion of a PUT binding as the plugin
+// does (protocol.md section 9, move rules): "" when it holds, else the
+// error code. p.mu is held.
+func (p *Plugin) checkMove(sid, deviceID, dir string, token any) string {
+	s, _ := token.(string)
+	c, err := p.verifier.Verify(s, assertion.Expect{Audience: p.BackendID, Leg: assertion.LegMove, Method: http.MethodPut,
+		Path: "/api/plugins/device/sessions/" + sid + "/binding"})
+	if err != nil || c.SessionID != sid || c.DeviceID != deviceID || c.Dir != dir {
+		p.refused++
+		return "move_refused"
+	}
+	if conn := p.conns[deviceID]; conn != nil && conn.Claims.Sub != "" && conn.Claims.Sub != c.Sub {
+		p.refused++
+		return "move_refused"
+	}
+	p.moveClaims = append(p.moveClaims, *c)
+	return ""
+}
+
+// Strict makes the fake apply all of the plugin's device rules to a bind
+// without a move assertion: it refuses a session that resolves to another
+// device, also through an ancestor, and one that resolves fail-closed.
+// Without it, it refuses only a session bound to another device itself.
+func (p *Plugin) Strict(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.strict = on
+}
+
+// Legacy makes the fake a plugin from before move assertions: it ignores
+// them and applies its device rules to every bind.
+func (p *Plugin) Legacy(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.legacy = on
+}
+
+// MoveClaims returns the claims of every move assertion the fake accepted.
+func (p *Plugin) MoveClaims() []assertion.Claims {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.moveClaims)
+}
+
+// Unbound removes a session's binding as /device off would: the session
+// then fails closed.
+func (p *Plugin) Unbound(sessionID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.bindings, sessionID)
+	p.ever[sessionID] = true
 }
 
 func (p *Plugin) deleteBinding(w http.ResponseWriter, r *http.Request) {

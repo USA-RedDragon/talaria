@@ -45,7 +45,7 @@ func loginGrantError(err error) error {
 		return err
 	}
 	switch {
-	case pe.Status == http.StatusConflict, pe.Code == codeOffline, pe.Code == "unknown_device":
+	case pe.Status == http.StatusConflict, pe.Code == codeOffline, pe.Code == codeUnknownDevice:
 		return hub.ErrComputerOffline
 	case pe.Status == http.StatusNotImplemented, pe.Code == "unsupported":
 		return hub.ErrLoginGrantsUnsupported

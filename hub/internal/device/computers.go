@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/USA-RedDragon/talaria/assertion"
 	"github.com/USA-RedDragon/talaria/hub/internal/hub"
 )
 
@@ -262,29 +264,60 @@ func (s *Server) Folders(ctx context.Context, user, deviceID, dir string) (hub.F
 	return out, nil
 }
 
-// computerError turns a plugin refusal into a hub error.
+// computerError turns a plugin refusal into a hub error. The plugin's own
+// message never reaches the user: it names sessions and devices by id.
 func computerError(err error) error {
 	var pe *PluginError
 	if !errors.As(err, &pe) {
 		return err
 	}
 	switch pe.Code {
-	case codeOffline, "unknown_device":
+	case codeOffline, codeUnknownDevice:
 		return hub.ErrComputerOffline
 	case "bad_dir":
 		return fmt.Errorf("%w: pick a full folder path", hub.ErrFolderRefused)
 	case "dir_refused":
-		msg := "the computer does not allow that folder"
-		if pe.Message != "" {
-			msg += " (" + pe.Message + ")"
-		}
-		return fmt.Errorf("%w: %s", hub.ErrFolderRefused, msg)
+		return fmt.Errorf("%w: the computer does not allow that folder. It does not exist there, or talaria may not use it", hub.ErrFolderRefused)
 	case "not_device_session":
 		return fmt.Errorf("%w: this chat cannot run on a computer. Start a new chat on the computer instead", hub.ErrCannotMove)
-	case "bound_to_other_device":
+	case codeOtherDevice:
 		return fmt.Errorf("%w: this chat is on another computer", hub.ErrCannotMove)
 	}
 	return err
+}
+
+// wentOffline is the error of a move to a computer that is not connected
+// (any more).
+func wentOffline(name string) error {
+	return fmt.Errorf("%w: %s %s", hub.ErrComputerOffline, name, hub.WentOfflineSuffix)
+}
+
+// moveError turns an error of a plugin step of a move to the computer
+// name into a hub error with a sentence for the user.
+func moveError(err error, name string) error {
+	var pe *PluginError
+	switch {
+	case errors.As(err, &pe):
+		switch pe.Code {
+		case codeOffline, codeUnknownDevice:
+			return wentOffline(name)
+		case codeOtherDevice, "not_bindable":
+			// Only a plugin that ignores the move assertion refuses these.
+			return fmt.Errorf("%w: the agent server runs a talaria plugin that is too old to move this chat. "+
+				"Update talaria on the agent server, or type /device %s <folder> in the chat", hub.ErrCannotMove, name)
+		case "move_refused":
+			return fmt.Errorf("%w: the agent server could not confirm that this move came from you. "+
+				"Check that it has this hub's current public key, then try again", hub.ErrCannotMove)
+		case "state_unavailable", "state_write_failed":
+			return fmt.Errorf("%w: the agent server could not save where this chat runs. Try again in a moment", hub.ErrCannotMove)
+		case "bad_dir", "dir_refused", "not_device_session":
+			return computerError(err)
+		}
+		return fmt.Errorf("%w: the agent server did not accept the move. Try again in a moment", hub.ErrCannotMove)
+	case errors.Is(err, hub.ErrComputerOffline), errors.Is(err, hub.ErrFolderRefused), errors.Is(err, hub.ErrCannotMove):
+		return err
+	}
+	return fmt.Errorf("%w: the agent server did not answer. Try again in a moment", hub.ErrCannotMove)
 }
 
 // Places says where each session runs. See hub.Computers.
@@ -460,9 +493,15 @@ func (s *Server) StartOn(ctx context.Context, user, deviceID, dir string) (hub.S
 		b.forgetPlaceholder()
 		return hub.Session{}, hub.Place{}, err
 	}
-	bctx, cancel := context.WithTimeout(ctx, pluginTimeout)
-	bound, err := b.plugin.Bind(bctx, sess.ID, d.ID, dir)
-	cancel()
+	// The user's own start on their computer: the bind carries a move
+	// assertion, so a session the plugin cannot look up yet still binds.
+	tok, err := SignMove(s.opts.Key, d, sess.ID, dir, s.opts.Now())
+	var bound Binding
+	if err == nil {
+		bctx, cancel := context.WithTimeout(ctx, pluginTimeout)
+		bound, err = b.plugin.Move(bctx, sess.ID, d.ID, dir, tok)
+		cancel()
+	}
 	if err != nil {
 		s.log.Warn("bind after starting a session on a computer failed; deleting the session", "device", d.ID,
 			"session_id", sess.ID, "error", err.Error())
@@ -471,7 +510,7 @@ func (s *Server) StartOn(ctx context.Context, user, deviceID, dir string) (hub.S
 			s.log.Warn("deleting the unbound session failed", "device", d.ID, "session_id", sess.ID, "error", derr.Error())
 		}
 		cancel()
-		return hub.Session{}, hub.Place{}, computerError(err)
+		return hub.Session{}, hub.Place{}, moveError(err, d.Name)
 	}
 	s.usedDir(ctx, d.ID, bound.Dir)
 	s.log.Info("session started on a computer", "user", user, "device", d.ID, "session_id", sess.ID)
@@ -501,9 +540,12 @@ func (s *Server) owned(ctx context.Context, user string, v view, deviceID string
 	return !ok || d.User == user, nil
 }
 
-// MoveTo binds a session to a computer. A session bound to another of
-// user's computers is unbound from it first; if the new bind then fails,
-// the hub binds it back. See hub.Computers.
+// MoveTo binds a session to a computer. The bind carries a move assertion
+// the hub signs for user, so the plugin binds with the authority of
+// /device in the session: no lineage, fail-closed or other-device rule
+// refuses it (docs/protocol.md section 9, move rules). A plugin too old to
+// know the assertion gets the move of before: unbind, bind, and bind back
+// when the bind fails. See hub.Computers.
 func (s *Server) MoveTo(ctx context.Context, user, backendID, sessionID, deviceID, dir string) (hub.Place, error) {
 	b, err := s.deviceBackend(ctx, user, backendID)
 	if err != nil {
@@ -518,11 +560,11 @@ func (s *Server) MoveTo(ctx context.Context, user, backendID, sessionID, deviceI
 	}
 	v, err := s.view(ctx, user, b)
 	if err != nil {
-		return hub.Place{}, err
+		return hub.Place{}, moveError(err, d.Name)
 	}
 	conn, ok := v.online[d.ID]
 	if !ok {
-		return hub.Place{}, hub.ErrComputerOffline
+		return hub.Place{}, wentOffline(d.Name)
 	}
 	if dir, err = cleanDir(dir, conn); err != nil {
 		return hub.Place{}, err
@@ -533,38 +575,91 @@ func (s *Server) MoveTo(ctx context.Context, user, backendID, sessionID, deviceI
 	defer s.resolved.forget(hub.SessionRef{BackendID: backendID, SessionID: sessionID})
 	cur, err := withTimeout(ctx, func(ctx context.Context) (Binding, error) { return b.plugin.Resolve(ctx, sessionID) })
 	if err != nil {
-		return hub.Place{}, err
+		return hub.Place{}, moveError(err, d.Name)
 	}
 	if cur.Resolved.State == StateBound && cur.DeviceID != d.ID {
 		mine, err := s.owned(ctx, user, v, cur.DeviceID)
 		if err != nil {
-			return hub.Place{}, err
+			return hub.Place{}, moveError(err, d.Name)
 		}
 		if !mine {
 			return hub.Place{}, fmt.Errorf("%w: this chat is on someone else's computer", hub.ErrCannotMove)
 		}
 	}
-	var prev *Binding
-	if cur.Resolved.State == StateBound && cur.SessionID == sessionID && cur.DeviceID != d.ID {
-		if _, err := withTimeout(ctx, func(ctx context.Context) (Dirs, error) { return b.plugin.Dirs(ctx, d.ID, dir) }); err != nil {
-			return hub.Place{}, computerError(err)
+	tok, err := SignMove(s.opts.Key, d, sessionID, dir, s.opts.Now())
+	if err != nil {
+		return hub.Place{}, moveError(err, d.Name)
+	}
+	bound, err := withTimeout(ctx, func(ctx context.Context) (Binding, error) { return b.plugin.Move(ctx, sessionID, d.ID, dir, tok) })
+	if err != nil {
+		var pe *PluginError
+		if errors.As(err, &pe) && pe.Code == codeOtherDevice && cur.Resolved.State == StateBound &&
+			cur.SessionID == sessionID && cur.DeviceID != d.ID {
+			return s.legacyMove(ctx, v, b, user, sessionID, d, dir, cur)
 		}
-		if _, err := withTimeout(ctx, func(ctx context.Context) (struct{}, error) { return struct{}{}, b.plugin.Unbind(ctx, sessionID) }); err != nil {
-			return hub.Place{}, computerError(err)
+		// A bind that timed out may still have gone through.
+		if now, ok := s.landed(ctx, b, sessionID, d.ID, cur, err); ok {
+			bound = now
+		} else {
+			s.log.Warn("move to a computer failed", "user", user, "device", d.ID, "session_id", sessionID, "error", err.Error())
+			return hub.Place{}, moveError(err, d.Name)
 		}
-		prev = &cur
+	}
+	return s.moved(ctx, v, user, sessionID, d.ID, bound), nil
+}
+
+// landed reports the binding a move to deviceID made when its bind got no
+// answer (bindErr) but went through all the same.
+func (s *Server) landed(ctx context.Context, b *backend, sessionID, deviceID string, cur Binding, bindErr error) (Binding, bool) {
+	if !errors.Is(bindErr, ErrUnavailable) {
+		return Binding{}, false
+	}
+	now, err := withTimeout(ctx, func(ctx context.Context) (Binding, error) { return b.plugin.Resolve(ctx, sessionID) })
+	if err != nil || now.Resolved.State != StateBound || now.SessionID != sessionID || now.DeviceID != deviceID ||
+		now.Generation == cur.Generation {
+		return Binding{}, false
+	}
+	return now, true
+}
+
+// SignMove signs the move assertion of a bind of sessionID to dir on d,
+// for d's user (docs/protocol.md section 9, move rules).
+func SignMove(key ed25519.PrivateKey, d hub.Device, sessionID, dir string, now time.Time) (string, error) {
+	return assertion.Sign(key, assertion.Claims{
+		Aud: d.BackendID, Leg: assertion.LegMove, Method: http.MethodPut, Path: MovePath(sessionID),
+		Sub: d.User, DeviceID: d.ID, DeviceName: d.Name, SessionID: sessionID, Dir: dir,
+		IssuedAt: now.Unix(), Expires: now.Add(AssertionLifetime).Unix(),
+	})
+}
+
+// MovePath is the htp claim of a move assertion: the plugin's PUT binding
+// route of the session, with the session id not escaped.
+func MovePath(sessionID string) string {
+	return PluginBase + "/sessions/" + sessionID + "/binding"
+}
+
+func (s *Server) moved(ctx context.Context, v view, user, sessionID, deviceID string, bound Binding) hub.Place {
+	s.usedDir(ctx, deviceID, bound.Dir)
+	s.log.Info("session moved to a computer", "user", user, "device", deviceID, "session_id", sessionID)
+	bound.Resolved = Resolved{State: StateBound}
+	return v.place(sessionID, bound)
+}
+
+// legacyMove moves a session bound to another computer through a plugin
+// that does not know the move assertion: it unbinds the session, binds it,
+// and binds it back when the bind fails.
+func (s *Server) legacyMove(ctx context.Context, v view, b *backend, user, sessionID string, d hub.Device, dir string, cur Binding) (hub.Place, error) {
+	if _, err := withTimeout(ctx, func(ctx context.Context) (Dirs, error) { return b.plugin.Dirs(ctx, d.ID, dir) }); err != nil {
+		return hub.Place{}, moveError(err, d.Name)
+	}
+	if _, err := withTimeout(ctx, func(ctx context.Context) (struct{}, error) { return struct{}{}, b.plugin.Unbind(ctx, sessionID) }); err != nil {
+		return hub.Place{}, moveError(err, d.Name)
 	}
 	bound, err := withTimeout(ctx, func(ctx context.Context) (Binding, error) { return b.plugin.Bind(ctx, sessionID, d.ID, dir) })
 	if err != nil {
-		if prev == nil {
-			return hub.Place{}, computerError(err)
-		}
-		return s.moveBack(ctx, v, b, sessionID, d.ID, *prev, err)
+		return s.moveBack(ctx, v, b, sessionID, d, cur, err)
 	}
-	s.usedDir(ctx, d.ID, bound.Dir)
-	s.log.Info("session moved to a computer", "user", user, "device", d.ID, "session_id", sessionID)
-	bound.Resolved = Resolved{State: StateBound}
-	return v.place(sessionID, bound), nil
+	return s.moved(ctx, v, user, sessionID, d.ID, bound), nil
 }
 
 // withTimeout runs one plugin step with a time limit of its own.
@@ -577,12 +672,13 @@ func withTimeout[T any](ctx context.Context, fn func(context.Context) (T, error)
 // moveBack binds a session back to the computer it left after the bind
 // to deviceID failed. A bind that timed out may still have gone through,
 // so when the way back fails the hub reports where the session is now.
-func (s *Server) moveBack(ctx context.Context, v view, b *backend, sessionID, deviceID string, prev Binding, bindErr error) (hub.Place, error) {
+func (s *Server) moveBack(ctx context.Context, v view, b *backend, sessionID string, d hub.Device, prev Binding, bindErr error) (hub.Place, error) {
+	deviceID := d.ID
 	_, err := withTimeout(ctx, func(ctx context.Context) (Binding, error) {
 		return b.plugin.Bind(ctx, sessionID, prev.DeviceID, prev.Dir)
 	})
 	if err == nil {
-		return hub.Place{}, computerError(bindErr)
+		return hub.Place{}, moveError(bindErr, d.Name)
 	}
 	s.log.Warn("binding a session back after a failed move failed", "session_id", sessionID, "device", prev.DeviceID,
 		"error", err.Error())
@@ -592,16 +688,16 @@ func (s *Server) moveBack(ctx context.Context, v view, b *backend, sessionID, de
 		return v.place(sessionID, now), nil
 	}
 	return hub.Place{}, fmt.Errorf("%w: the move failed (%s) and the chat could not go back, so it is on no computer now. "+
-		"Move it again", hub.ErrCannotMove, userReason(bindErr))
+		"Move it again", hub.ErrCannotMove, userReason(bindErr, d.Name))
 }
 
 // userReason is the part of a computer error a user reads.
-func userReason(err error) string {
-	_, msg, ok := strings.Cut(computerError(err).Error(), ": ")
+func userReason(err error, name string) string {
+	_, msg, ok := strings.Cut(moveError(err, name).Error(), ": ")
 	if !ok {
 		return "the computer did not answer"
 	}
-	return msg
+	return strings.TrimSuffix(msg, ". Try again in a moment")
 }
 
 // UseBrowser makes one of user's computers the browser device of a

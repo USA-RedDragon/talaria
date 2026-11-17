@@ -27,6 +27,14 @@ const codeBusy = "busy"
 // codeOffline is the plugin's answer for a device that is not connected.
 const codeOffline = "device_offline"
 
+// Plugin error codes and body keys of the bind routes (docs/protocol.md
+// section 9).
+const (
+	codeUnknownDevice = "unknown_device"
+	codeOtherDevice   = "bound_to_other_device"
+	keyDir            = "dir"
+)
+
 // Plugin error codes of file routes.
 const (
 	codeRunsOnPod = "runs_on_pod"

@@ -256,10 +256,20 @@ func (p *Plugin) Resolve(ctx context.Context, sessionID string) (Binding, error)
 	return Binding{}, e
 }
 
-// Bind binds a session to a directory of a device.
+// Bind binds a session to a directory of a device, under the plugin's
+// device rules.
 func (p *Plugin) Bind(ctx context.Context, sessionID, deviceID, dir string) (Binding, error) {
 	var out Binding
-	return out, p.call(ctx, http.MethodPut, sessionPath(sessionID), map[string]string{keyDeviceID: deviceID, "dir": dir}, &out)
+	return out, p.call(ctx, http.MethodPut, sessionPath(sessionID), map[string]string{keyDeviceID: deviceID, keyDir: dir}, &out)
+}
+
+// Move binds a session to a directory of a device for a move the user
+// made in the hub: token is the hub's move assertion for exactly this
+// session, device and dir (docs/protocol.md section 9, move rules).
+func (p *Plugin) Move(ctx context.Context, sessionID, deviceID, dir, token string) (Binding, error) {
+	var out Binding
+	body := map[string]string{keyDeviceID: deviceID, keyDir: dir, "assertion": token}
+	return out, p.call(ctx, http.MethodPut, sessionPath(sessionID), body, &out)
 }
 
 // Unbind removes a session's own binding.

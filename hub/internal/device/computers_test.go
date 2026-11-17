@@ -3,6 +3,7 @@ package device_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -311,9 +312,20 @@ func TestReleaseAndMoveEdges(t *testing.T) {
 			t.Fatalf("child place after the parent's release = %+v", p)
 		}
 
-		// A move whose bind fails goes back to the computer it left.
+		// A move the plugin refuses leaves the chat where it was: the bind
+		// with a move assertion replaces the binding in one step.
 		e.plugin.SetBinding("s1", id, deviceDir)
 		e.plugin.RefuseBindsTo(id2, "state_write_failed")
+		if _, err := e.a.dev.MoveTo(ctx, userAlice, backendID, "s1", id2, deviceDir); err == nil {
+			t.Fatal("a refused move worked")
+		}
+		if b := e.plugin.Bindings()["s1"]; b.DeviceID != id || b.Dir != deviceDir {
+			t.Fatalf("binding after a refused move = %+v", b)
+		}
+
+		// Through a plugin that does not know move assertions, a move whose
+		// bind fails goes back to the computer it left.
+		e.plugin.Legacy(true)
 		if _, err := e.a.dev.MoveTo(ctx, userAlice, backendID, "s1", id2, deviceDir); err == nil {
 			t.Fatal("a refused move worked")
 		}
@@ -328,6 +340,86 @@ func TestReleaseAndMoveEdges(t *testing.T) {
 		_, err := e.a.dev.MoveTo(ctx, userAlice, backendID, "s1", id2, deviceDir)
 		if !errors.Is(err, hub.ErrCannotMove) || !strings.Contains(err.Error(), "on no computer now") {
 			t.Fatalf("move that cannot go back = %v", err)
+		}
+	})
+}
+
+// TestMoveCarriesTheUsersAuthority checks that a move the user makes in
+// the hub binds every session the plugin's device rules refuse: one bound
+// to another computer, one that follows another computer through an
+// ancestor, and one that fails closed. The plugin applies all of its
+// device rules (Strict) to a bind without a move assertion.
+func TestMoveCarriesTheUsersAuthority(t *testing.T) {
+	t.Parallel()
+	stores(t, func(t *testing.T, st *store.Store) {
+		e := setup(t, st)
+		ctx := context.Background()
+		id := e.computer(deviceName)
+		id2 := e.computer(laptop)
+		e.plugin.Strict(true)
+		e.plugin.SetBinding(sessionDirect, id, deviceDir)
+		e.plugin.SetBinding("s-parent", id, deviceDir)
+		e.plugin.SetParent("s-branch", "s-parent")
+		e.plugin.SetBinding("s-gone", id, deviceDir)
+		e.plugin.Unbound("s-gone")
+		e.plugin.SetParent("s-gone-child", "s-gone")
+		for _, sid := range []string{sessionDirect, "s-branch", "s-gone", "s-gone-child"} {
+			p, err := e.a.dev.MoveTo(ctx, userAlice, backendID, sid, id2, otherDir)
+			if err != nil || p.Kind != hub.PlaceComputer || p.DeviceID != id2 || p.Dir != otherDir || p.Inherited {
+				t.Fatalf("move of %s = %+v, %v", sid, p, err)
+			}
+			if b := e.plugin.Bindings()[sid]; b.DeviceID != id2 || b.Dir != otherDir {
+				t.Fatalf("binding of %s after the move = %+v", sid, b)
+			}
+		}
+		if b := e.plugin.Bindings()["s-parent"]; b.DeviceID != id {
+			t.Fatalf("moving the branch moved its parent: %+v", b)
+		}
+		claims := e.plugin.MoveClaims()
+		if len(claims) != 4 {
+			t.Fatalf("move assertions = %d, want 4", len(claims))
+		}
+		if c := claims[0]; c.Sub != userAlice || c.DeviceID != id2 || c.DeviceName != laptop || c.SessionID != sessionDirect ||
+			c.Dir != otherDir || c.Aud != backendID || c.Method != http.MethodPut || c.Path != "/api/plugins/device/sessions/s-direct/binding" ||
+			c.Expires-c.IssuedAt > 30 {
+			t.Fatalf("move claims = %+v", c)
+		}
+		// A move to a computer that went offline names it, in words.
+		e.plugin.Disconnect(id)
+		_, err := e.a.dev.MoveTo(ctx, userAlice, backendID, sessionDirect, id, deviceDir)
+		if !errors.Is(err, hub.ErrComputerOffline) || !strings.HasSuffix(err.Error(), deviceName+" went offline; try again when it is back") {
+			t.Fatalf("move to an offline computer = %v", err)
+		}
+		// The plugin's own wording, with session ids, never reaches the user.
+		e.plugin.RefuseBinds(sessionDirect, "state_write_failed")
+		_, err = e.a.dev.MoveTo(ctx, userAlice, backendID, sessionDirect, id2, deviceDir)
+		if !errors.Is(err, hub.ErrCannotMove) || strings.Contains(err.Error(), sessionDirect) || strings.Contains(err.Error(), "state_") {
+			t.Fatalf("move the plugin could not save = %v", err)
+		}
+	})
+}
+
+// TestMoveWithAnOldPlugin checks the move through a plugin that ignores
+// move assertions: a session on another computer still moves by unbind and
+// bind, and a refusal gets a plain sentence.
+func TestMoveWithAnOldPlugin(t *testing.T) {
+	t.Parallel()
+	stores(t, func(t *testing.T, st *store.Store) {
+		e := setup(t, st)
+		ctx := context.Background()
+		id := e.computer(deviceName)
+		id2 := e.computer(laptop)
+		e.plugin.Legacy(true)
+		e.plugin.SetBinding("s1", id, deviceDir)
+		if p, err := e.a.dev.MoveTo(ctx, userAlice, backendID, "s1", id2, otherDir); err != nil || p.DeviceID != id2 {
+			t.Fatalf("move through an old plugin = %+v, %v", p, err)
+		}
+		e.plugin.Strict(true)
+		e.plugin.SetBinding("s-gone", id, deviceDir)
+		e.plugin.Unbound("s-gone")
+		_, err := e.a.dev.MoveTo(ctx, userAlice, backendID, "s-gone", id2, otherDir)
+		if !errors.Is(err, hub.ErrCannotMove) || !strings.Contains(err.Error(), "too old to move this chat") || strings.Contains(err.Error(), "s-gone") {
+			t.Fatalf("fail-closed move through an old plugin = %v", err)
 		}
 	})
 }

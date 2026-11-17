@@ -248,6 +248,11 @@ type Computers interface {
 	UseBrowser(ctx context.Context, user, backendID, sessionID, deviceID string) error
 }
 
+// WentOfflineSuffix ends the message of an ErrComputerOffline that names
+// the computer a move was for: "<name> went offline; try again when it is
+// back".
+const WentOfflineSuffix = "went offline; try again when it is back"
+
 // Computer errors. ErrFolderRefused and ErrCannotMove wrap a message for
 // the user.
 var (

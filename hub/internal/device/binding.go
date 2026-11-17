@@ -157,7 +157,7 @@ func (s *Server) handleBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status, data, err := b.plugin.Raw(ctx, http.MethodPut, sessionPath(sid),
-		map[string]string{keyDeviceID: d.ID, "dir": *body.Dir})
+		map[string]string{keyDeviceID: d.ID, keyDir: *body.Dir})
 	if err != nil {
 		s.log.Warn("forward bind", "device", d.ID, "error", err.Error())
 		apiError(w, http.StatusBadGateway, codeBackendUnavailable, "the hub could not reach the device plugin")

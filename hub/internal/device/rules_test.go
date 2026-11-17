@@ -117,10 +117,10 @@ func TestBindTakeover(t *testing.T) {
 		}
 		e.plugin.SetBinding(sessionOther, otherDevice, "/home/bob")
 		e.plugin.SetParent("s-other-child", sessionOther)
-		if s, out := bind("s-other-child"); s != http.StatusConflict || out["error"] != "bound_to_other_device" {
+		if s, out := bind("s-other-child"); s != http.StatusConflict || out["error"] != codeOtherDevice {
 			t.Fatalf("bind of an inherited session = %d %v", s, out)
 		}
-		if s, out := bind(sessionOther); s != http.StatusConflict || out["error"] != "bound_to_other_device" {
+		if s, out := bind(sessionOther); s != http.StatusConflict || out["error"] != codeOtherDevice {
 			t.Fatalf("bind of another device's session = %d %v", s, out)
 		}
 		if _, ok := e.plugin.Bindings()["s-other-child"]; ok {

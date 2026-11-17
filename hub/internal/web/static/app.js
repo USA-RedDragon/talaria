@@ -4290,11 +4290,13 @@
       this.frame(this.opts.move ? "Move to a computer" : "New chat on a computer", [el("p", "status", "Loading your computers...")]);
       if (!this.dlg.open) this.dlg.showModal();
       await loadComputers();
-      this.list = computers.filter((c) => !this.opts.move || c.backend_id === this.opts.move.backend_id);
-      const online = this.list.filter((c) => c.online);
-      const want = this.opts.computer && this.list.find((c) => c.id === this.opts.computer.id && c.online);
+      // Only computers that are online now: a chat cannot start on or move
+      // to an offline one, so the picker does not offer it.
+      this.all = computers.filter((c) => !this.opts.move || c.backend_id === this.opts.move.backend_id);
+      this.list = this.all.filter((c) => c.online);
+      const want = this.opts.computer && this.list.find((c) => c.id === this.opts.computer.id);
       if (want) this.folders(want, "");
-      else if (online.length === 1 && this.list.length === 1) this.folders(online[0], "");
+      else if (this.list.length === 1 && this.all.length === 1) this.folders(this.list[0], "");
       else this.computers();
     },
     close() { if (this.dlg && this.dlg.open) this.dlg.close(); },
@@ -4321,21 +4323,24 @@
     },
     computers() {
       const title = this.opts.move ? "Move to a computer" : "New chat on a computer";
-      if (!this.list.length) {
+      if (!this.all.length) {
         this.frame(title, [el("p", "", this.opts.move ? "None of your computers works with this chat's agent." :
           "You have no computers yet. To connect one, run talaria setup on it.")]);
         return;
       }
+      const off = this.all.filter((c) => !c.online).map((c) => c.name);
+      if (!this.list.length) {
+        this.frame(title, [el("p", "status", (off.length === 1 ? off[0] + " is" : "All your computers are") +
+          " offline. Turn one on and check that talaria runs on it.")]);
+        return;
+      }
       const body = [el("div", "label", "Pick a computer")];
       for (const c of this.list) {
-        const b = button("choice" + (c.online ? " on" : ""), "", () => this.folders(c, ""));
-        b.append(el("span", "", c.name), el("span", "meta", c.online ? "Online" : "Offline"));
-        b.disabled = !c.online;
+        const b = button("choice on", "", () => this.folders(c, ""));
+        b.append(el("span", "", c.name), el("span", "meta", "Online"));
         body.push(b);
       }
-      if (!this.list.some((c) => c.online)) {
-        body.push(el("p", "status", "All your computers are offline. Turn one on and check that talaria runs on it."));
-      }
+      if (off.length) body.push(el("p", "status", "Offline, so not shown: " + off.join(", ") + "."));
       this.frame(title, body);
     },
     // crumbs splits path into the steps from the computer root that holds it.
