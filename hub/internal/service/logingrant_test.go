@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -47,7 +48,7 @@ func (f *fakeGrants) GrantLogin(ctx context.Context, req hub.LoginGrantRequest) 
 func (f *fakeGrants) LoginGrants(context.Context, string, string) (hub.LoginGrantList, error) {
 	return hub.LoginGrantList{}, nil
 }
-func (f *fakeGrants) RevokeLoginGrant(context.Context, string, string, string) (bool, error) {
+func (f *fakeGrants) RevokeLoginGrant(context.Context, string, string, string, string) (bool, error) {
 	return false, nil
 }
 func (f *fakeGrants) ComputerName(_, id string) string {
@@ -134,7 +135,7 @@ func TestLoginGrantIsDeliveredBeforeTheAnswer(t *testing.T) {
 	}
 	want := hub.LoginGrantRequest{User: userAlice, BackendID: backendPC, DeviceID: loginDevice, Host: loginHost, Method: emailLink, Scope: scopeDevice,
 		SessionID: sLive, ChatTitle: liveTitle, Via: "telegram"}
-	if calls[0] != want {
+	if !reflect.DeepEqual(calls[0], want) {
 		t.Fatalf("request = %+v, want %+v", calls[0], want)
 	}
 	waitSettled(t, e)
@@ -230,4 +231,47 @@ func waitSettled(t *testing.T, e *env) {
 		}
 	}
 	t.Fatal("the answer did not settle the prompt")
+}
+
+// Post hosts on a card keep only valid names that are not the site, once
+// each, at most logingrant.MaxPostHosts of them, and the allowing answer
+// signs exactly those.
+const apiHost = "portal-api.example.com"
+
+func TestLoginGrantPostHosts(t *testing.T) {
+	t.Parallel()
+	e, g := loginEnv(t)
+	ctx := context.Background()
+	p := loginGrantPrompt()
+	p.LoginGrant.PostHosts = []string{apiHost, "not a host", loginHost, apiHost, "a.example.net", "b.example.net", "c.example.net", "d.example.net"}
+	e.gw.Ask(sLive, p)
+	waitPrompt(t, e)
+	pp, err := e.svc.PendingPrompt(ctx, userAlice, backendPC, sLive, loginPrompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{apiHost, "a.example.net", "b.example.net", "c.example.net"}
+	if !slices.Equal(pp.LoginGrant.PostHosts, want) {
+		t.Fatalf("post hosts = %v, want %v", pp.LoginGrant.PostHosts, want)
+	}
+	if err := e.svc.AnswerPrompt(ctx, userAlice, backendPC, sLive, loginPrompt, hub.Answer{Choice: hub.ChoiceOnce}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := g.calls(); len(calls) != 1 || !slices.Equal(calls[0].PostHosts, want) {
+		t.Fatalf("calls = %+v", calls)
+	}
+}
+
+// A card with no post hosts signs none.
+func TestLoginGrantNoPostHosts(t *testing.T) {
+	t.Parallel()
+	e, g := loginEnv(t)
+	e.gw.Ask(sLive, loginGrantPrompt())
+	waitPrompt(t, e)
+	if err := e.svc.AnswerPrompt(context.Background(), userAlice, backendPC, sLive, loginPrompt, hub.Answer{Choice: hub.ChoiceOnce}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := g.calls(); len(calls) != 1 || len(calls[0].PostHosts) != 0 {
+		t.Fatalf("calls = %+v", calls)
+	}
 }

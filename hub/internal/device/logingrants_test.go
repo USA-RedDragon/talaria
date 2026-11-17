@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -57,6 +58,8 @@ func TestHubKeys(t *testing.T) {
 
 // The hub signs the grant with its device key for the computer, the user and
 // the chat, and the plugin gets it; the same key verifies it.
+const postHost = "api.example.com"
+
 func TestGrantLoginSignsAndDelivers(t *testing.T) {
 	t.Parallel()
 	stores(t, func(t *testing.T, st *store.Store) {
@@ -65,6 +68,7 @@ func TestGrantLoginSignsAndDelivers(t *testing.T) {
 		id := e.computer(deviceName)
 		req := hub.LoginGrantRequest{User: userAlice, BackendID: backendID, DeviceID: id, Host: grantHost, Method: methodPass, Scope: logingrant.ScopeDevice,
 			SessionID: "s1", ChatTitle: "Pay the bill", Via: grantVia}
+		req.PostHosts = []string{postHost}
 		if err := e.a.dev.GrantLogin(ctx, req); err != nil {
 			t.Fatal(err)
 		}
@@ -77,7 +81,7 @@ func TestGrantLoginSignsAndDelivers(t *testing.T) {
 			t.Fatal(err)
 		}
 		if c.Sub != userAlice || c.DeviceID != id || c.Host != grantHost || c.Method != methodPass || c.Scope != logingrant.ScopeDevice ||
-			c.SessionID != "s1" || c.ChatTitle != "Pay the bill" || c.Via != grantVia || c.Expires-c.IssuedAt != int64((2*time.Minute).Seconds()) {
+			!slices.Equal(c.PostHosts, []string{postHost}) || c.SessionID != "s1" || c.ChatTitle != "Pay the bill" || c.Via != grantVia || c.Expires-c.IssuedAt != int64((2*time.Minute).Seconds()) {
 			t.Fatalf("claims = %+v", c)
 		}
 	})
@@ -160,20 +164,29 @@ func TestLoginGrantsListAndRevoke(t *testing.T) {
 		if _, err := e.a.dev.LoginGrants(ctx, userBob, id); !errors.Is(err, hub.ErrUnknownDevice) {
 			t.Fatalf("bob's list: %v", err)
 		}
-		if _, err := e.a.dev.RevokeLoginGrant(ctx, userBob, id, grantHost); !errors.Is(err, hub.ErrUnknownDevice) {
+		if _, err := e.a.dev.RevokeLoginGrant(ctx, userBob, id, grantHost, ""); !errors.Is(err, hub.ErrUnknownDevice) {
 			t.Fatalf("bob's revoke: %v", err)
 		}
-		if _, err := e.a.dev.RevokeLoginGrant(ctx, userAlice, id, "not a host"); !errors.Is(err, hub.ErrBadValue) {
+		if _, err := e.a.dev.RevokeLoginGrant(ctx, userAlice, id, "not a host", ""); !errors.Is(err, hub.ErrBadValue) {
 			t.Fatalf("bad host revoke: %v", err)
 		}
 		if got := e.plugin.RevokedLoginGrants(id); len(got) != 0 {
 			t.Fatalf("a refused revoke reached the plugin: %v", got)
 		}
-		if ok, err := e.a.dev.RevokeLoginGrant(ctx, userAlice, id, grantHost); err != nil || !ok {
+		if ok, err := e.a.dev.RevokeLoginGrant(ctx, userAlice, id, grantHost, ""); err != nil || !ok {
 			t.Fatalf("revoke = %v, %v", ok, err)
 		}
 		if got := e.plugin.RevokedLoginGrants(id); len(got) != 1 || got[0] != grantHost {
 			t.Fatalf("revoked = %v", got)
+		}
+		if _, err := e.a.dev.RevokeLoginGrant(ctx, userAlice, id, grantHost, "not a host"); !errors.Is(err, hub.ErrBadValue) {
+			t.Fatalf("bad post host revoke: %v", err)
+		}
+		if ok, err := e.a.dev.RevokeLoginGrant(ctx, userAlice, id, grantHost, postHost); err != nil || !ok {
+			t.Fatalf("post host revoke = %v, %v", ok, err)
+		}
+		if got := e.plugin.RevokedLoginGrantPostHosts(id); !slices.Equal(got, []string{"", postHost}) {
+			t.Fatalf("post hosts revoked = %q", got)
 		}
 		if n := e.a.dev.ComputerName(backendID, id); n != deviceName {
 			t.Fatalf("name = %q", n)

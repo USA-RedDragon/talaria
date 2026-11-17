@@ -416,6 +416,11 @@ async function questionCards() {
       assert.strictEqual(note ? note.text() : "", warn ? note.text() : "", text);
       if (warn) assert.ok(note.text().startsWith(warn), note.text());
     }
+    // Post hosts: a line names the extra sites the login goes to; none, no line.
+    const pp = harness();
+    pp.tracker.offer(lgPrompt({ prompt_id: "pp", login_grant: { device_id: "d1", device_name: "pc", host: "portal.salad.example", saved_logins: 1, post_hosts: ["portal-api.salad.example", "b.example.net"] } }));
+    assert.ok(pp.shown[0].text().includes("Also sends the login to") && pp.shown[0].text().includes("portal-api.salad.example, b.example.net"), pp.shown[0].text());
+    assert.ok(!card.text().includes("Also sends the login to"), "no post hosts: no line");
     // A computer the hub does not know cannot be allowed.
     const unk = harness();
     unk.tracker.offer(lgPrompt({ prompt_id: "u", login_grant: { device_id: "dx", host: "a.example.com", saved_logins: 1 } }));

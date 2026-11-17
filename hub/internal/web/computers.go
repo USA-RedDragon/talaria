@@ -221,7 +221,7 @@ func (s *Server) handleRevokeLoginGrant(w http.ResponseWriter, r *http.Request) 
 		errorJSON(w, http.StatusNotFound, msgNoLoginGrants)
 		return
 	}
-	revoked, err := s.loginGrants.RevokeLoginGrant(r.Context(), userFrom(r), r.PathValue("device"), r.PathValue("host"))
+	revoked, err := s.loginGrants.RevokeLoginGrant(r.Context(), userFrom(r), r.PathValue("device"), r.PathValue("host"), r.URL.Query().Get("post_host"))
 	if err != nil {
 		s.fail(w, err)
 		return

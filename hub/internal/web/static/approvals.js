@@ -220,6 +220,8 @@ window.HubApprovals = (() => {
         list.append(el("dt", "", "Site"), el("dd", "", String(lg.host || "")));
         list.append(el("dt", "", "Computer"), el("dd", "", computer || "A computer this hub does not know"));
         list.append(el("dt", "", "Saved logins"), el("dd", "", savedLogins(lg.saved_logins)));
+        const posts = Array.isArray(lg.post_hosts) ? lg.post_hosts.filter((h) => typeof h === "string" && h) : [];
+        if (posts.length) list.append(el("dt", "", "Also sends the login to"), el("dd", "", posts.join(", ")));
         box.append(list);
         const note = fillNote(lg.saved_logins);
         if (note) box.append(el("div", "fillnote", note));

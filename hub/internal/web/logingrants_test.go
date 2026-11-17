@@ -57,6 +57,15 @@ func TestLoginGrantsAPI(t *testing.T) {
 	if got := e.plugin.RevokedLoginGrants(e.id); len(got) != 1 || got[0] != grantSite {
 		t.Fatalf("plugin revoked = %v", got)
 	}
+	if code, _, _ := call(t, c, http.MethodDelete, base+"/portal.example.com?post_host=not+a+host", m.CSRF, nil); code != http.StatusBadRequest {
+		t.Fatalf("revoke of a bad post host = %d", code)
+	}
+	if code, body, text := call(t, c, http.MethodDelete, base+"/portal.example.com?post_host=api.example.com", m.CSRF, nil); code != http.StatusOK || body["revoked"] != true {
+		t.Fatalf("post host revoke = %d %s", code, text)
+	}
+	if got := e.plugin.RevokedLoginGrantPostHosts(e.id); len(got) != 2 || got[0] != "" || got[1] != "api.example.com" {
+		t.Fatalf("plugin post hosts = %q", got)
+	}
 	if code, _, _ := call(t, c, http.MethodDelete, base+"/not-a-host", m.CSRF, nil); code != http.StatusBadRequest {
 		t.Fatalf("revoke of a bad host = %d", code)
 	}
@@ -70,7 +79,7 @@ func TestLoginGrantsAPI(t *testing.T) {
 	if code, _, _ := call(t, bob, http.MethodDelete, base+"/portal.example.com", bm.CSRF, nil); code != http.StatusNotFound {
 		t.Fatalf("bob revokes = %d", code)
 	}
-	if got := e.plugin.RevokedLoginGrants(e.id); len(got) != 1 {
+	if got := e.plugin.RevokedLoginGrants(e.id); len(got) != 2 {
 		t.Fatalf("bob's revoke reached the plugin: %v", got)
 	}
 	// An offline computer, and one whose talaria is too old.

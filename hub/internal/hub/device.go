@@ -289,6 +289,8 @@ type LoginGrantRequest struct {
 	ChatTitle string
 	// Via is "web" or "telegram".
 	Via string
+	// PostHosts are the other sites the login form may send the login to.
+	PostHosts []string
 }
 
 // LoginGrant is one sign-in grant of a computer, as the device keeps it.
@@ -304,6 +306,10 @@ type LoginGrant struct {
 	// LastUsed is 0 for a grant that was never used.
 	LastUsed  int64 `json:"last_used"`
 	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// PostHosts are the other sites the login may go to until the grant is
+	// revoked. OncePostHosts are allowed for the next sign-in only.
+	PostHosts     []string `json:"post_hosts,omitempty"`
+	OncePostHosts []string `json:"once_post_hosts,omitempty"`
 }
 
 // LoginGrantHost is a site the computer's own config allows.
@@ -329,8 +335,9 @@ type LoginGrants interface {
 	GrantLogin(ctx context.Context, req LoginGrantRequest) error
 	// LoginGrants lists what a computer allows.
 	LoginGrants(ctx context.Context, user, deviceID string) (LoginGrantList, error)
-	// RevokeLoginGrant takes back the grant of a host.
-	RevokeLoginGrant(ctx context.Context, user, deviceID, host string) (bool, error)
+	// RevokeLoginGrant takes back the grant of a host, or only its post host
+	// postHost when that is not empty.
+	RevokeLoginGrant(ctx context.Context, user, deviceID, host, postHost string) (bool, error)
 	// ComputerName is the hub's name for the computer deviceID on
 	// backendID, "" when the hub has no such computer.
 	ComputerName(backendID, deviceID string) string

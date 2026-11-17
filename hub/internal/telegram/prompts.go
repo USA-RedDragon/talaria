@@ -77,6 +77,9 @@ func loginGrantBody(g *hub.LoginGrantCard) string {
 		"<b>Computer:</b> " + escapeHTML(truncate(computer, 80)),
 		"<b>Saved login:</b> " + loginGrantSaved(g.SavedLogins),
 	}
+	if len(g.PostHosts) > 0 {
+		lines = append(lines, "<b>Also sends the login to:</b> "+escapeHTML(truncate(strings.Join(g.PostHosts, ", "), 300)))
+	}
 	if g.Existing == hub.LoginGrantExistingDevice {
 		lines = append(lines, "This computer already allows sign-in here. Pick a method to change it.")
 	}

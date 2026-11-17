@@ -197,6 +197,8 @@ type LoginGrant struct {
 	Method      string   `json:"method,omitempty"`
 	Existing    string   `json:"existing,omitempty"`
 	JobID       string   `json:"job_id,omitempty"`
+	// PostHosts are the other sites the login form sends the login to.
+	PostHosts []string `json:"post_hosts,omitempty"`
 }
 
 // Prompt kinds.

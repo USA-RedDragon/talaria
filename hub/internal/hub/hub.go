@@ -447,6 +447,9 @@ type LoginGrantCard struct {
 	// site, so the card changes its method.
 	Existing string `json:"existing,omitempty"`
 	JobID    string `json:"job_id,omitempty"`
+	// PostHosts are the other sites the login form sends the login to. An
+	// allowing answer signs them too.
+	PostHosts []string `json:"post_hosts,omitempty"`
 }
 
 // LoginGrantExistingDevice is LoginGrantCard.Existing for a computer that

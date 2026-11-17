@@ -30,11 +30,15 @@ func (p *Plugin) AddLoginGrant(ctx context.Context, deviceID, token string) erro
 }
 
 // RevokeLoginGrant takes back the grant of a host on a computer.
-func (p *Plugin) RevokeLoginGrant(ctx context.Context, deviceID, host string) (bool, error) {
+func (p *Plugin) RevokeLoginGrant(ctx context.Context, deviceID, host, postHost string) (bool, error) {
 	var out struct {
 		Revoked bool `json:"revoked"`
 	}
-	err := p.call(ctx, http.MethodDelete, "/devices/"+url.PathEscape(deviceID)+"/login-grants/"+url.PathEscape(host), nil, &out)
+	path := "/devices/" + url.PathEscape(deviceID) + "/login-grants/" + url.PathEscape(host)
+	if postHost != "" {
+		path += "?post_host=" + url.QueryEscape(postHost)
+	}
+	err := p.call(ctx, http.MethodDelete, path, nil, &out)
 	return out.Revoked, err
 }
 
@@ -77,7 +81,7 @@ func (s *Server) GrantLogin(ctx context.Context, req hub.LoginGrantRequest) erro
 		title = string([]rune(title)[:logingrant.MaxTitleLen])
 	}
 	token, err := logingrant.Sign(s.opts.Key, logingrant.Claims{Sub: req.User, DeviceID: d.ID, Host: req.Host, Method: req.Method,
-		Scope: req.Scope, SessionID: req.SessionID, ChatTitle: title, Via: req.Via, IssuedAt: now.Unix(), Expires: now.Add(grantLifetime).Unix()})
+		Scope: req.Scope, PostHosts: req.PostHosts, SessionID: req.SessionID, ChatTitle: title, Via: req.Via, IssuedAt: now.Unix(), Expires: now.Add(grantLifetime).Unix()})
 	if err != nil {
 		return fmt.Errorf("%w: %w", hub.ErrBadValue, err)
 	}
@@ -110,7 +114,7 @@ func (s *Server) LoginGrants(ctx context.Context, user, deviceID string) (hub.Lo
 
 // RevokeLoginGrant takes back a grant of one of user's computers. See
 // hub.LoginGrants.
-func (s *Server) RevokeLoginGrant(ctx context.Context, user, deviceID, host string) (bool, error) {
+func (s *Server) RevokeLoginGrant(ctx context.Context, user, deviceID, host, postHost string) (bool, error) {
 	_, b, err := s.computer(ctx, user, deviceID)
 	if err != nil {
 		return false, err
@@ -118,9 +122,12 @@ func (s *Server) RevokeLoginGrant(ctx context.Context, user, deviceID, host stri
 	if !logingrant.ValidHost(host) {
 		return false, fmt.Errorf("%w: that is not a site name", hub.ErrBadValue)
 	}
+	if postHost != "" && !logingrant.ValidHost(postHost) {
+		return false, fmt.Errorf("%w: that is not a site name", hub.ErrBadValue)
+	}
 	cctx, cancel := context.WithTimeout(ctx, pluginTimeout)
 	defer cancel()
-	ok, err := b.plugin.RevokeLoginGrant(cctx, deviceID, host)
+	ok, err := b.plugin.RevokeLoginGrant(cctx, deviceID, host, postHost)
 	return ok, loginGrantError(err)
 }
 

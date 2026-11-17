@@ -19,10 +19,12 @@ type loginGrants struct {
 	unsupported bool
 	// revoked are the hosts the DELETE route took, by device id.
 	revoked map[string][]string
+	// revokedPost are the post_host values of those requests, "" when none.
+	revokedPost map[string][]string
 }
 
 func (p *Plugin) mountLoginGrants(base string) {
-	p.lg = loginGrants{tokens: map[string][]string{}, lists: map[string]map[string]any{}, revoked: map[string][]string{}}
+	p.lg = loginGrants{tokens: map[string][]string{}, lists: map[string]map[string]any{}, revoked: map[string][]string{}, revokedPost: map[string][]string{}}
 	p.gw.Handle("GET "+base+"/devices/{device}/login-grants", http.HandlerFunc(p.listLoginGrants), true)
 	p.gw.Handle("POST "+base+"/devices/{device}/login-grants", http.HandlerFunc(p.addLoginGrant), true)
 	p.gw.Handle("DELETE "+base+"/devices/{device}/login-grants/{host}", http.HandlerFunc(p.revokeLoginGrant), true)
@@ -63,6 +65,14 @@ func (p *Plugin) RevokedLoginGrants(deviceID string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return slices.Clone(p.lg.revoked[deviceID])
+}
+
+// RevokedLoginGrantPostHosts returns the post_host query of each revoke on a
+// device, in order, "" for a revoke of the whole grant.
+func (p *Plugin) RevokedLoginGrantPostHosts(deviceID string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.lg.revokedPost[deviceID])
 }
 
 // loginGrantGate answers the requests every login grant route refuses, and
@@ -132,6 +142,7 @@ func (p *Plugin) revokeLoginGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Lock()
 	p.lg.revoked[id] = append(p.lg.revoked[id], r.PathValue("host"))
+	p.lg.revokedPost[id] = append(p.lg.revokedPost[id], r.URL.Query().Get("post_host"))
 	p.mu.Unlock()
 	answer(w, map[string]any{"revoked": true})
 }

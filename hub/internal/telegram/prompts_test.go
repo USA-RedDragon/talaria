@@ -626,6 +626,21 @@ func TestLoginGrantCard(t *testing.T) {
 	}
 }
 
+// A card with post hosts names them.
+func TestLoginGrantCardPostHosts(t *testing.T) {
+	t.Parallel()
+	h := startBot(t, nil)
+	sid := h.startTurn(t)
+	card := loginCard()
+	lg, _ := card["login_grant"].(map[string]any)
+	lg["post_hosts"] = []string{"portal-api.example.com", "b.example.net"}
+	h.hub.emit(t, sid, hub.KindApprovalRequest, card)
+	req := h.tg.wait(mSend, "Sign in with the saved login on portal.example.com?")
+	if want := "<b>Also sends the login to:</b> portal-api.example.com, b.example.net"; !strings.Contains(req.text(), want) {
+		t.Fatalf("card %q lacks %q", req.text(), want)
+	}
+}
+
 // With methods on the card, an allowing button asks which method first, and
 // the answer carries the one picked. Deny asks nothing.
 func TestLoginGrantMethodPicker(t *testing.T) {

@@ -257,12 +257,12 @@ window.HubSettings = (ctx) => {
     if (dlg.open) drawDevices();
   }
 
-  async function revokeGrant(d, host) {
+  async function revokeGrant(d, host, postHost) {
     busy = true;
     try {
-      await api("DELETE", "/api/computers/" + encodeURIComponent(d.id) + "/login-grants/" + encodeURIComponent(host));
+      await api("DELETE", "/api/computers/" + encodeURIComponent(d.id) + "/login-grants/" + encodeURIComponent(host) + (postHost ? "?post_host=" + encodeURIComponent(postHost) : ""));
     } catch (e) {
-      note = "Could not take back the sign-in on " + host + ": " + e.message;
+      note = "Could not take back the sign-in on " + (postHost || host) + ": " + e.message;
     }
     busy = false;
     await loadGrants(d);
@@ -319,6 +319,18 @@ window.HubSettings = (ctx) => {
       acts.append(button("danger-text", "Revoke", () => revokeGrant(d, x.host)));
       row.append(top, meta, acts);
       rows.append(row);
+      // The other sites the login form sends the login to, each taken back on its own.
+      const posts = [...(x.post_hosts || []).map((h) => [h, false]), ...(x.once_post_hosts || []).map((h) => [h, true])];
+      for (const [h, once] of posts) {
+        const sub = el("div", "set-row set-grant set-postgrant");
+        const line = el("span", "meta");
+        line.append(el("span", "", "Also sends the login to "), el("span", "nm", h));
+        if (once) line.append(el("span", "pill", "Next sign-in only"));
+        const pacts = el("div", "acts");
+        pacts.append(button("danger-text", "Revoke", () => revokeGrant(d, x.host, h)));
+        sub.append(line, pacts);
+        rows.append(sub);
+      }
     }
     for (const c of config) {
       const row = el("div", "set-row set-grant");

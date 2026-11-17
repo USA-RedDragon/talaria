@@ -55,6 +55,7 @@ func (s *Service) vetLoginGrant(backendID string, p *gateway.Prompt) bool {
 			v.Methods = append(v.Methods, m)
 		}
 	}
+	v.PostHosts = vetPostHosts(v.Host, g.PostHosts)
 	if logingrant.ValidMethod(g.Method) {
 		v.Method = g.Method
 	}
@@ -92,6 +93,19 @@ func withLoginGrant(payload json.RawMessage, g *gateway.LoginGrant) json.RawMess
 	return out
 }
 
+// vetPostHosts keeps the post hosts a card may show: valid names that are
+// not the site itself, without duplicates. More than logingrant.MaxPostHosts
+// is not a card the hub can sign, so the extra ones are dropped.
+func vetPostHosts(host string, in []string) []string {
+	var out []string
+	for _, h := range in {
+		if logingrant.ValidHost(h) && h != host && !slices.Contains(out, h) && len(out) < logingrant.MaxPostHosts {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 func truncateRunes(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s
@@ -108,7 +122,7 @@ func loginGrantCard(g *gateway.LoginGrant) *hub.LoginGrantCard {
 		n = *g.SavedLogins
 	}
 	return &hub.LoginGrantCard{DeviceID: g.DeviceID, DeviceName: g.DeviceName, Host: g.Host, SavedLogins: n, Methods: slices.Clone(g.Methods),
-		Method: g.Method, Existing: g.Existing, JobID: g.JobID}
+		Method: g.Method, Existing: g.Existing, JobID: g.JobID, PostHosts: slices.Clone(g.PostHosts)}
 }
 
 // grantScope is the scope of the grant a sign-in card's choice gives.
@@ -165,5 +179,5 @@ func (s *Service) answerLoginGrant(ctx context.Context, user, backendID, session
 		return fmt.Errorf("%w: this hub does not keep sign-in grants. Turn computers on in the hub's config", hub.ErrBadValue)
 	}
 	return gr.GrantLogin(ctx, hub.LoginGrantRequest{User: user, BackendID: backendID, DeviceID: g.DeviceID, Host: g.Host, Method: a.Method,
-		Scope: grantScope(a.Choice), SessionID: sessionID, ChatTitle: strings.TrimSpace(title), Via: via})
+		Scope: grantScope(a.Choice), SessionID: sessionID, ChatTitle: strings.TrimSpace(title), Via: via, PostHosts: g.PostHosts})
 }
