@@ -128,6 +128,23 @@ func (l *loginServer) handler(other string) http.HandlerFunc {
 			_, _ = io.WriteString(w, form("/bounce", "post"))
 		case "/get-form":
 			_, _ = io.WriteString(w, form("/login", "get"))
+		case "/spa-form":
+			// A form with no method and no action that a script submits, as a
+			// single-page app does.
+			_, _ = io.WriteString(w, `<!doctype html><title>Sign in</title><h1>Sign in</h1><div id="root"><form id="f">`+
+				`<label>Email <input name="user" autocomplete="username"></label>`+
+				`<label>Password <input type="password" name="pass" autocomplete="current-password"></label>`+
+				`<button type="submit">Sign in</button></form></div>`+
+				`<script>document.getElementById("f").addEventListener("submit", async (e) => {`+
+				`e.preventDefault(); const f = e.target;`+
+				`const body = new URLSearchParams({user: f.user.value, pass: f.pass.value});`+
+				`await fetch("/login-api", {method: "POST", body});`+
+				`location.href = "/home"; });</script>`)
+		case "/login-api":
+			body, _ := io.ReadAll(r.Body)
+			l.mu.Lock()
+			l.posts = append(l.posts, r.Method+" "+string(body))
+			l.mu.Unlock()
 		case "/picker":
 			_, _ = io.WriteString(w, pickerPage("Passkey", "Password", "Approve on phone"))
 		case "/picker-nomatch":
@@ -535,11 +552,27 @@ func loginEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 
 	pickerEdges(ctx, t, rig, tabID)
 
-	// A GET form would put the password into the address.
+	// A GET form would put the password into the address: the request is
+	// cancelled and the tool says so.
+	before := len(rig.main.got())
 	rig.r.must(ctx, t, "navigate", map[string]any{keyTab: tabID, keyURL: rig.mainURL + "/get-form"}, nil)
 	res = rig.login(ctx, t, map[string]any{keyTab: tabID, keyGuard: approve(loginHost)})
-	if !res.Filled || res.Submitted || !strings.Contains(res.Reason, "POST") {
+	if !res.Filled || res.Submitted || !strings.Contains(res.Reason, "in the address") {
 		t.Errorf("login on a GET form = %+v", res)
+	}
+	if got := rig.main.got(); len(got) != before {
+		t.Errorf("the GET form request reached the server: %q", got)
+	}
+
+	// A single-page app form has no method and posts through a script: it
+	// works.
+	rig.r.must(ctx, t, "navigate", map[string]any{keyTab: tabID, keyURL: rig.mainURL + "/spa-form"}, nil)
+	res = rig.login(ctx, t, map[string]any{keyTab: tabID, keyGuard: approve(loginHost)})
+	if !res.Filled || !res.Submitted || res.Reason != "" {
+		t.Errorf("login on a script form = %+v", res)
+	}
+	if got := rig.main.got(); len(got) != before+1 || !strings.HasPrefix(got[before], "POST user=alice&pass=") {
+		t.Errorf("the script form post = %q", got)
 	}
 
 	// A 307 redirect would post the form again to another host: cancelled.

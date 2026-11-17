@@ -589,6 +589,43 @@ function privateHost(host) {
     h.endsWith(".home.arpa") || privateAddress(h);
 }
 
+// carriesSecret reports whether the path or query of an address holds one
+// of the secrets, as typed, percent-encoded or form-encoded, or after the
+// address is decoded. The host is not looked at.
+function carriesSecret(raw, secrets) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch (e) {
+    return false;
+  }
+  const rest = u.pathname + u.search + u.hash;
+  const views = new Set([rest]);
+  let cur = rest;
+  for (let i = 0; i < 3; i++) {
+    try {
+      cur = decodeURIComponent(cur.replace(/\+/g, " "));
+    } catch (e) {
+      break;
+    }
+    views.add(cur);
+  }
+  try {
+    views.add(decodeURIComponent(rest));
+  } catch (e) {
+    // not valid percent-encoding: the raw view still counts
+  }
+  for (const secret of secrets) {
+    const enc = [secret, encodeURIComponent(secret), encodeURI(secret), encodeURIComponent(secret).replace(/%20/g, "+")];
+    for (const v of views) {
+      if (enc.some((e) => e && v.includes(e))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Every request from an agent tab, including redirects, links, forms and
 // subresources, is checked: a page or an injected instruction must not
 // reach loopback or LAN services through the user's browser. Host names
@@ -611,6 +648,12 @@ browser.webRequest.onBeforeRequest.addListener(
     const lg = loginGuards.get(details.tabId);
     if (lg && lg.submitting && details.method !== "GET" && details.method !== "HEAD" &&
       (!/^https:/.test(details.url) || !lg.hosts.has(hostOf(details.url)))) {
+      return { cancel: true };
+    }
+    if (lg && lg.secrets.length && carriesSecret(details.url, lg.secrets)) {
+      // A page that puts the filled password into an address (a plain GET
+      // form, or a script) gets no request. Nothing of the value is kept.
+      lg.leaked = true;
       return { cancel: true };
     }
     const own = taints.get(details.tabId);
@@ -905,7 +948,7 @@ function pageVisibility() {
 // username field, the way Firefox's login autofill does for a simple form,
 // and reports only whether each is filled. With submit it also submits
 // that form, after checking that the page and the form's target are on an
-// autologin host, that it posts, and that it stays in this tab. It never
+// autologin host and that it stays in this tab. It never
 // returns a field value. It is self-contained, so nothing a page or an
 // earlier script left in this world is used.
 function pageLogin(hosts, tabHost, submit) {
@@ -957,6 +1000,11 @@ function pageLogin(hosts, tabHost, submit) {
   if (!submit) {
     return out;
   }
+  if (submit === "secret") {
+    // Only for the background script's address guard; it is never returned
+    // to the agent.
+    return { secret: pw.value };
+  }
   if (!form) {
     return Object.assign(out, { error: "the password field is not in a form" });
   }
@@ -972,7 +1020,6 @@ function pageLogin(hosts, tabHost, submit) {
   const after = controls.slice(controls.indexOf(pw) + 1);
   const submitter = after.find(isSubmit) || controls.find(isSubmit);
   const has = (a) => submitter && submitter.hasAttribute(a);
-  const method = String(has("formmethod") ? submitter.formMethod : get("method")).toLowerCase();
   const action = String(has("formaction") ? submitter.formAction : get("action"));
   const tgt = String(has("formtarget") ? submitter.formTarget : get("target")).toLowerCase();
   let to;
@@ -983,9 +1030,6 @@ function pageLogin(hosts, tabHost, submit) {
   }
   if (to.protocol !== "https:" || !allowed.has(to.hostname.toLowerCase())) {
     return Object.assign(out, { error: "the login form submits to " + to.hostname + ", which is not in browser.autologin-hosts" });
-  }
-  if (method !== "post") {
-    return Object.assign(out, { error: "the login form does not use POST, so the password would go into the address" });
   }
   if (tgt && tgt !== "_self") {
     return Object.assign(out, { error: "the login form submits into another tab or frame" });
@@ -2365,15 +2409,27 @@ const OPS = {
       }
       // The page's host is checked again in the page right before the
       // submit; the guard keeps the posted form on the autologin hosts.
-      loginGuards.set(tabId, { hosts: new Set(hosts), submitting: true });
+      const read = await inPage(tabId, pageLogin, [hosts, host, "secret"]);
+      const secrets = typeof read.secret === "string" && read.secret ? [read.secret] : [];
+      read.secret = "";
+      if (!secrets.length) {
+        return noted({ tab_id: tabId, filled: true, submitted: false, landed_host: host, reason: read.error || "the login form is no longer filled" });
+      }
+      const guard = { hosts: new Set(hosts), submitting: true, secrets, leaked: false };
+      loginGuards.set(tabId, guard);
       const loaded = waitComplete(tabId, true).catch(() => null);
       const sent = await inPage(tabId, pageLogin, [hosts, host, true]);
       if (sent.error || !sent.submitted) {
+        guard.secrets = [];
         loginGuards.delete(tabId);
         return noted({ tab_id: tabId, filled: true, submitted: false, landed_host: host, reason: sent.error || "not submitted" });
       }
       await Promise.race([loaded, new Promise((r) => setTimeout(r, LOAD_TIMEOUT_MS))]);
       const after = await settle(tabId).catch(() => browser.tabs.get(tabId));
+      if (guard.leaked) {
+        return noted({ tab_id: tabId, filled: true, submitted: false, landed_host: hostOf(after.url),
+          reason: "the site tried to send the password in the address; stopped" });
+      }
       return noted({ tab_id: tabId, filled: true, submitted: true, landed_host: hostOf(after.url) });
     } finally {
       // The redirect rule stays a while for a post that is still pending.
