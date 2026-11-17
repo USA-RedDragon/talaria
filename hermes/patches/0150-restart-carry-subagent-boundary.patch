@@ -14,11 +14,11 @@ The per-turn carry also stopped every background subagent at the release (restar
  agent/turn_tool_round.py                      |   2 +-
  gateway/turn_carry.py                         |  74 +++++-
  .../test_restart_carry_subagent_boundary.py   | 111 ++++++++
- .../test_restart_carry_subagent_boundary.py   | 238 ++++++++++++++++++
+ .../test_restart_carry_subagent_boundary.py   | 241 ++++++++++++++++++
  tools/async_delegation.py                     |  53 ++--
  tools/delegate_tool_child_run.py              |  10 +-
  tools/delegate_tool_handoff.py                |  68 ++++-
- 10 files changed, 558 insertions(+), 41 deletions(-)
+ 10 files changed, 561 insertions(+), 41 deletions(-)
  create mode 100644 tests/gateway/test_restart_carry_subagent_boundary.py
  create mode 100644 tests/tools/test_restart_carry_subagent_boundary.py
 
@@ -400,10 +400,10 @@ index 00000000..0f970de3
 +    os.close(runner._turn_carry.lock_fd)
 diff --git a/tests/tools/test_restart_carry_subagent_boundary.py b/tests/tools/test_restart_carry_subagent_boundary.py
 new file mode 100644
-index 00000000..29f158ca
+index 00000000..6e585097
 --- /dev/null
 +++ b/tests/tools/test_restart_carry_subagent_boundary.py
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,241 @@
 +"""The per-turn carry (gateway.restart_turn_handoff_per_turn) and the background subagents it hands over.
 +
 +- An agent whose turn ended no longer names the thread that ran it: thread idents are reused at once, so a subagent
@@ -595,8 +595,9 @@ index 00000000..29f158ca
 +    ad._reset_for_tests()
 +
 +
-+def _unit(finish):
-+    """A one-child unit whose child runs until its handoff function is called, then ends with ``finish``."""
++def _unit(finish, *, release_on_handoff=True):
++    """A one-child unit whose child runs until its handoff function is called (or until ``release`` is set), then
++    ends with ``finish``."""
 +    started, release, calls = threading.Event(), threading.Event(), []
 +
 +    def runner():
@@ -608,7 +609,8 @@ index 00000000..29f158ca
 +    def handoff_fn(deadline, state, boundary_until=None):
 +        calls.append(boundary_until)
 +        state["0"] = {"session_id": "child-0b"}
-+        release.set()
++        if release_on_handoff:
++            release.set()
 +    spec = {"version": 1, "parent": {"session_id": "parent-sid"}, "task_count": 1, "live_deleg_id": "deleg_call",
 +            "children": {"0": {"goal": "task 0", "subagent_id": "sa-0-0000", "session_id": "child-0",
 +                               "route": {"backend": "default", "route": {}}}}}
@@ -617,11 +619,11 @@ index 00000000..29f158ca
 +        parent_session_id="parent-sid", runner=runner, delegation_id="deleg_call", handoff=spec,
 +        handoff_fn=handoff_fn)
 +    assert handle["status"] == "dispatched" and started.wait(5)
-+    return handle["delegation_id"], calls
++    return handle["delegation_id"], calls, release
 +
 +
 +def test_a_unit_whose_child_finished_during_the_carry_goes_to_the_next_gateway(ledger):
-+    delegation_id, calls = _unit("completed")
++    delegation_id, calls, _release = _unit("completed")
 +    marked = threading.Event()
 +    assert ad.hand_off_for_restart(0.0, 5.0, boundary_seconds=3.0, marked=marked) == 1
 +    assert marked.is_set() and len(calls) == 1 and calls[0] is not None
@@ -636,12 +638,13 @@ index 00000000..29f158ca
 +
 +
 +def test_a_unit_already_handed_off_by_the_carry_is_not_stopped_again(ledger):
-+    _delegation_id, calls = _unit("interrupted")
-+    threading.Thread(target=ad.hand_off_for_restart, args=(0.0, 5.0), kwargs={"boundary_seconds": 3.0},
-+                     daemon=True).start()
-+    wait_until(lambda: calls, what="the carry's handoff")
-+    assert ad.hand_off_for_restart(0.0, 0.5) == 0  # the stop after the carry
++    _delegation_id, calls, release = _unit("interrupted", release_on_handoff=False)
++    # The carry's handoff: its child is still on the way to its boundary when this returns.
++    ad.hand_off_for_restart(0.0, 0.2, boundary_seconds=0.0)
 +    assert len(calls) == 1
++    assert ad.hand_off_for_restart(0.0, 0.2) == 0  # the stop after the carry
++    assert len(calls) == 1
++    release.set()
 diff --git a/tools/async_delegation.py b/tools/async_delegation.py
 index e99f12a0..2e021f0e 100644
 --- a/tools/async_delegation.py
