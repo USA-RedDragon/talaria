@@ -1,0 +1,7 @@
+# Neighbors
+tests/agent/test_context_notice.py
+tests/agent/test_iteration_budget_warning.py
+tests/agent/test_turn_budget_durable_rows.py
+tests/tools/test_delegate_child_wait.py
+tests/tools/test_delegate.py
+tests/agent/test_review_engine.py

@@ -1,0 +1,229 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 00:57:24 -0600
+Subject: [PATCH] fix(agent): tell agents their context compacts on its own and
+ how full it is
+
+Subagents stopped and handed off saying their context was nearly full, judging by length alone, long before compaction. The subagent brief now says the conversation compacts on its own and to stop only when the task is done, blocked or out of iterations. Every agent also gets one line on the newest tool result at each 10% step from 50% of the window ('Context: 62% used, compacts on its own at 80%'), from the compressor's last prompt size. It is append-only and never in the system prompt, so the prompt cache holds.
+---
+ agent/tool_executor.py             |  3 +-
+ agent/turn_iteration_prep.py       | 73 +++++++++++++++++++++++++-----
+ tests/agent/test_context_notice.py | 66 +++++++++++++++++++++++++++
+ tools/delegate_tool_progress.py    |  5 ++
+ 4 files changed, 134 insertions(+), 13 deletions(-)
+ create mode 100644 tests/agent/test_context_notice.py
+
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+index 260b222f..2540c215 100644
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -203,7 +203,7 @@ def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str)
+     """Flush tool-call progress to the session DB before projecting it to any UI: tool side
+     effects can kill/restart the process before turn-end persistence runs."""
+     from agent.conversation_loop import _maybe_inject_run_budget_wrapup
+-    from agent.turn_iteration_prep import _maybe_inject_iteration_budget_warning
++    from agent.turn_iteration_prep import _maybe_inject_context_notice, _maybe_inject_iteration_budget_warning
+     from agent.turn_boundary_handoff import withdrawn
+ 
+     if withdrawn(agent):
+@@ -216,6 +216,7 @@ def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str)
+     # this tool result as durable. Already-written rows must never be rewritten later.
+     _maybe_inject_run_budget_wrapup(agent, messages)
+     _maybe_inject_iteration_budget_warning(agent, messages)
++    _maybe_inject_context_notice(agent, messages)
+     try:
+         persisted = agent._flush_messages_to_session_db(messages) is not False
+         if not persisted:
+diff --git a/agent/turn_iteration_prep.py b/agent/turn_iteration_prep.py
+index 31667395..313cee0d 100644
+--- a/agent/turn_iteration_prep.py
++++ b/agent/turn_iteration_prep.py
+@@ -45,6 +45,65 @@ ITERATION_BUDGET_WARNING_TEMPLATE = (
+ )
+ 
+ 
++def _append_to_tail_tool_result(messages: Any, notice: str) -> bool:
++    """Append ``notice`` to the newest tool result when it is not yet durable.
++
++    Only the current tool-result tail is mutable; an older turn may already be cached.
++    """
++    from agent.context_compressor import _DB_PERSISTED_MARKER
++    if (not messages or messages[-1].get("role") != "tool"
++            or messages[-1].get(_DB_PERSISTED_MARKER)):
++        return False
++    message = messages[-1]
++    content = message.get("content", "")
++    if isinstance(content, str):
++        message["content"] = content + f"\n\n{notice}"
++    elif isinstance(content, list) or content is None:
++        message["content"] = [*(content or []), {"type": "text", "text": notice}]
++    else:
++        return False
++    return True
++
++
++CONTEXT_NOTICE_FROM_PERCENT = 50
++CONTEXT_NOTICE_TEMPLATE = (
++    "[SYSTEM NOTICE — context] Context: {percent}% used. The conversation compacts on its own at "
++    "{threshold}%; never stop or hand off because the context seems long."
++)
++
++
++def _maybe_inject_context_notice(agent: Any, messages: Any) -> bool:
++    """Tell the agent how full its context is, once per 10% step from 50% up.
++
++    The figure is the last real prompt size over the window. The line goes on the newest tool
++    result (append-only, so the prompt cache holds), at most five times between compactions, and
++    never into the system prompt. The step latch clears once compaction brings use under 50%.
++    """
++    if getattr(agent, "_interrupt_requested", False):
++        return False
++    comp = getattr(agent, "context_compressor", None)
++    try:
++        used = int(getattr(comp, "last_prompt_tokens", 0) or 0)
++        window = int(getattr(comp, "context_length", 0) or 0)
++        trigger = int(getattr(comp, "threshold_tokens", 0) or 0)
++    except (TypeError, ValueError):
++        return False
++    if used <= 0 or window <= 0:
++        return False
++    percent = used * 100 // window
++    if percent < CONTEXT_NOTICE_FROM_PERCENT:
++        agent._context_notice_step = 0
++        return False
++    step = percent // 10 * 10
++    if step <= getattr(agent, "_context_notice_step", 0):
++        return False
++    notice = CONTEXT_NOTICE_TEMPLATE.format(percent=percent, threshold=min(100, trigger * 100 // window))
++    if not _append_to_tail_tool_result(messages, notice):
++        return False
++    agent._context_notice_step = step
++    return True
++
++
+ def _maybe_inject_iteration_budget_warning(agent: Any, messages: Any) -> bool:
+     """Append the opt-in one-shot warning to the newest tool result."""
+     import os
+@@ -82,18 +141,7 @@ def _maybe_inject_iteration_budget_warning(agent: Any, messages: Any) -> bool:
+             "review; otherwise persist a kanban_comment handoff and "
+             "continue. A diff or commit alone is not completion evidence."
+         )
+-    # Only the current tool-result tail is mutable; an older turn may already be cached.
+-    from agent.context_compressor import _DB_PERSISTED_MARKER
+-    if (not messages or messages[-1].get("role") != "tool"
+-            or messages[-1].get(_DB_PERSISTED_MARKER)):
+-        return False
+-    message = messages[-1]
+-    content = message.get("content", "")
+-    if isinstance(content, str):
+-        message["content"] = content + f"\n\n{notice}"
+-    elif isinstance(content, list) or content is None:
+-        message["content"] = [*(content or []), {"type": "text", "text": notice}]
+-    else:
++    if not _append_to_tail_tool_result(messages, notice):
+         return False
+     agent._iteration_budget_warning_injected = True
+     return True
+@@ -193,6 +241,7 @@ def prepare_iteration(
+ 
+     # Appended to the newest tool result; never a synthetic user/system row.
+     _maybe_inject_iteration_budget_warning(agent, messages)
++    _maybe_inject_context_notice(agent, messages)
+ 
+     request_logger = getattr(agent, "logger", None) or logger  # same name as the origin module
+     # Per-agent validation cursor skips re-parsing tool_call args already validated.
+diff --git a/tests/agent/test_context_notice.py b/tests/agent/test_context_notice.py
+new file mode 100644
+index 00000000..af6335f1
+--- /dev/null
++++ b/tests/agent/test_context_notice.py
+@@ -0,0 +1,66 @@
++"""A subagent is told its context compacts on its own, and every agent sees how full it is."""
++from types import SimpleNamespace
++
++from agent.turn_iteration_prep import _maybe_inject_context_notice
++from tools.delegate_tool_progress import _build_child_system_prompt
++
++
++def _agent(used, window=1000, threshold=800):
++    comp = SimpleNamespace(last_prompt_tokens=used, context_length=window, threshold_tokens=threshold)
++    return SimpleNamespace(context_compressor=comp, _interrupt_requested=False)
++
++
++def _msgs():
++    return [{"role": "user", "content": "go"}, {"role": "tool", "tool_call_id": "t", "content": "result"}]
++
++
++def test_child_prompt_says_compaction_is_automatic():
++    prompt = _build_child_system_prompt("g")
++    assert "compacts on its own" in prompt
++    assert "never stop or hand off because the context seems long" in prompt
++
++
++def test_no_notice_under_half():
++    agent, msgs = _agent(490), _msgs()
++    assert not _maybe_inject_context_notice(agent, msgs)
++    assert msgs[-1]["content"] == "result"
++
++
++def test_notice_once_per_ten_percent_step():
++    agent, msgs = _agent(620), _msgs()
++    assert _maybe_inject_context_notice(agent, msgs)
++    assert "Context: 62% used" in msgs[-1]["content"]
++    assert "compacts on its own at 80%" in msgs[-1]["content"]
++    assert not _maybe_inject_context_notice(agent, _msgs())  # same step
++    agent.context_compressor.last_prompt_tokens = 671
++    assert not _maybe_inject_context_notice(agent, _msgs())  # still the 60s
++    agent.context_compressor.last_prompt_tokens = 705
++    assert _maybe_inject_context_notice(agent, _msgs())
++
++
++def test_notice_rearms_after_compaction():
++    agent = _agent(900)
++    assert _maybe_inject_context_notice(agent, _msgs())
++    agent.context_compressor.last_prompt_tokens = 200
++    assert not _maybe_inject_context_notice(agent, _msgs())
++    agent.context_compressor.last_prompt_tokens = 550
++    assert _maybe_inject_context_notice(agent, _msgs())
++
++
++def test_notice_never_rewrites_a_durable_result_or_list_content():
++    from agent.context_compressor import _DB_PERSISTED_MARKER
++    agent, msgs = _agent(700), _msgs()
++    msgs[-1][_DB_PERSISTED_MARKER] = True
++    assert not _maybe_inject_context_notice(agent, msgs)
++    assert msgs[-1]["content"] == "result"
++    msgs = _msgs()
++    msgs[-1]["content"] = [{"type": "text", "text": "result"}]
++    assert _maybe_inject_context_notice(agent, msgs)
++    assert msgs[-1]["content"][-1]["text"].startswith("[SYSTEM NOTICE")
++
++
++def test_no_notice_without_a_reading_or_when_interrupted():
++    assert not _maybe_inject_context_notice(_agent(0), _msgs())
++    agent = _agent(900)
++    agent._interrupt_requested = True
++    assert not _maybe_inject_context_notice(agent, _msgs())
+diff --git a/tools/delegate_tool_progress.py b/tools/delegate_tool_progress.py
+index 936abd0c..3aaa2166 100644
+--- a/tools/delegate_tool_progress.py
++++ b/tools/delegate_tool_progress.py
+@@ -155,6 +155,10 @@ _COMPLETION_INSTRUCTIONS = (
+     "whole process. Your response is returned to the parent agent as a summary, and overlong summaries crowd out the "
+     "parent's context window."
+ )
++CONTEXT_NOTE = (
++    "The conversation compacts on its own when it nears the window, so never stop or hand off because the context "
++    "seems long. Stop only when the task is done, blocked, or the iteration budget is used up."
++)
+ _ORCHESTRATOR_BLOCK = (
+     "\n## Subagent Spawning (Orchestrator Role)\n"
+     "You have access to the `delegate_task` tool and CAN spawn your own subagents to parallelize independent work.\n\n"
+@@ -216,6 +220,7 @@ def _build_child_system_prompt(
+     parts.append(_COMPLETION_INSTRUCTIONS)
+     from tools.delegate_tool_wait import WAIT_NOTE
+     parts.append("\n" + WAIT_NOTE)
++    parts.append("\n" + CONTEXT_NOTE)
+     if role == "orchestrator":
+         child_note = _LEAF_CHILDREN_NOTE if child_depth + 1 >= max_spawn_depth else _NESTED_CHILDREN_NOTE
+         parts.append(
