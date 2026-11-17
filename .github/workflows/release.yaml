@@ -10,8 +10,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The Firefox end-to-end suite is not part of the other test workflows' required set, so a
+  # tag runs it here and nothing is built or published unless it passes.
+  firefox-e2e:
+    name: Firefox end-to-end
+    uses: ./.github/workflows/firefox-e2e.yaml
+
   release:
     name: Release
+    needs: firefox-e2e
     permissions:
       contents: write
       packages: write

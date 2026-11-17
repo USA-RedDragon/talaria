@@ -645,7 +645,7 @@ Prompt injection: page text reaches the model. The confirmation rules in section
 - Unit tests: `internal/device/browser_test.go` (also `browser_start`), `internal/browser/*/..._test.go` (also the launch environment and command line), and `plugin/device/tests/test_browser.py` (the tools, the approvals, Salesforce, unattended runs, starting Firefox, hiding `browser_vault` and the negotiation with a fake device and browser, through a fresh Hermes `ToolRegistry`).
 - `internal/browser/bidi` and `internal/browser/firefoxtest`: an end-to-end test that builds the binary, writes the host manifest into a fresh `HOME`, starts headless Firefox on a fresh profile with `--no-remote`, loads the extension as a temporary add-on over BiDi (`webExtension.install`; temporary add-ons skip signing), and drives it through the broker. When `hermes` is on `PATH` it then runs the real device client against the broker, with `plugin/device/tests/test_browser_e2e.py` on the other end of the exec leg in the Hermes runtime, and drives Firefox through the plugin's tools and approval hook.
 
-Run the end-to-end test (it needs the network for example.com):
+Run the end-to-end test (it needs the network for example.com; CI runs it in `.github/workflows/firefox-e2e.yaml`, and a release tag needs it green):
 
 ```sh
 HERMES_BROWSER_E2E=1 go test -count=1 -v -run TestFirefoxEndToEnd ./internal/browser/firefoxtest/

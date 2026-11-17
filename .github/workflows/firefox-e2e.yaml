@@ -1,0 +1,74 @@
+name: Firefox end-to-end
+
+# Drives a throwaway headless Firefox through the extension, the broker, the device client and the
+# plugin's browser tools (docs/browser.md section 10). The release workflow runs it too, so a tag
+# needs it green. The ubuntu-24.04 runner image ships Firefox; the plugin leg needs the Hermes
+# runtime, installed as in plugins-test.yaml.
+
+on:
+  pull_request:
+    paths:
+      - extension/**
+      - internal/browser/**
+      - internal/device/**
+      - plugin/**
+      - scripts/test-plugin.sh
+      - .github/workflows/firefox-e2e.yaml
+  push:
+    branches: [main]
+    paths:
+      - extension/**
+      - internal/browser/**
+      - internal/device/**
+      - plugin/**
+      - scripts/test-plugin.sh
+      - .github/workflows/firefox-e2e.yaml
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }} @ ${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  firefox:
+    name: Firefox end-to-end
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - run: go generate ./...
+
+      - name: Firefox of the runner image
+        run: firefox --version
+
+      - name: Check out Hermes
+        run: |
+          version=$(tr -d '[:space:]' < plugins/.hermes-version)
+          echo "HERMES_AGENT_SRC=$RUNNER_TEMP/hermes-agent" >> "$GITHUB_ENV"
+          echo "Hermes $version" >> "$GITHUB_STEP_SUMMARY"
+          git clone --quiet --depth 1 --branch "$version" -c advice.detachedHead=false \
+            https://github.com/NousResearch/hermes-agent "$RUNNER_TEMP/hermes-agent"
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Install Hermes
+        working-directory: ${{ env.HERMES_AGENT_SRC }}
+        run: |
+          uv sync --locked --python 3.14 --extra all --extra anthropic --group dev --group test
+          echo "HERMES_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: End-to-end test
+        env:
+          HERMES_BROWSER_E2E: "1"
+        run: go test -count=1 -v -timeout 15m -run 'TestFirefoxEndToEnd|TestFirefoxBatchFlow' ./internal/browser/firefoxtest/
