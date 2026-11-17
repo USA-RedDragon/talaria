@@ -86,6 +86,7 @@ var (
 	ranOn          = regexp.MustCompile(`(?m)^Ran on route ([^:\n]+): [^\n]*\.$`)
 	totalDuration  = regexp.MustCompile(`(?m)^Role: .*   Total duration: ([0-9.]+)s$`)
 	liveTranscript = regexp.MustCompile(`(?m)^(?:Full live transcript \(complete tool/assistant trace\)|Live transcript): [^\n]*$`)
+	resumedHead    = regexp.MustCompile(`(?m)^Subagent resumed and finished: (.+?)(?: \((?:subagent|delegation) [^)]*\))?\. You sent it `)
 	goalEnd        = regexp.MustCompile(`(?m)^(?:Context you provided: |Toolsets: |Role: )`)
 )
 
@@ -266,8 +267,23 @@ func parseBatch(body string) *Notice {
 	if total, _ := strconv.Atoi(body[idx[0][6]:idx[0][7]]); total > len(rows) {
 		part = partLabel(seen, strconv.Itoa(total))
 	}
+	// A resumed subagent's notice names its goal in the line under the head
+	// when the task line does not.
+	resumedGoal := ""
+	rg := resumedHead.FindStringSubmatch(head)
+	if rg != nil && strings.TrimSpace(rg[1]) != "the task" {
+		resumedGoal = strings.TrimSpace(rg[1])
+	}
 	if len(rows) == 1 {
-		n := rowNotice(rows[0])
+		r0 := rows[0]
+		if r0.Goal == "" && resumedGoal != "" {
+			r0.Goal = resumedGoal
+			r0.Title += ": " + short(resumedGoal)
+		}
+		n := rowNotice(r0)
+		if rg != nil && strings.HasPrefix(n.Title, "Subagent finished") {
+			n.Title = "Subagent resumed and finished" + strings.TrimPrefix(n.Title, "Subagent finished")
+		}
 		if part != "" {
 			n.Meta = append(n.Meta, part)
 		}
@@ -338,7 +354,7 @@ func taskRow(goal, status, secs, calls, route, body string, truncated bool) Row 
 	case truncated:
 		label, state = "Incomplete", StateBad
 	}
-	title := strings.TrimSuffix(prefix, " ")
+	title := strings.TrimSuffix(strings.TrimSuffix(prefix, " "), ":")
 	if t := short(goal); t != "" {
 		title = prefix + t
 	}

@@ -1,0 +1,22 @@
+[
+ {
+  "id": "resumed",
+  "text": "[ASYNC DELEGATION BATCH COMPLETE — deleg_77aa]\nSubagent resumed and finished: Land parallel-rdp with VI scan-out (subagent sa-1-ab12cd34, delegation deleg_77aa). You sent it a new message and it continued with its full earlier context; its result for that round is below. You may have moved on since — act on it, or resume it again.\n\nDispatched: 2025-11-12 18:23:20 (1h50m ago)\nRole: leaf   Model: claude-opus-5-5   Total duration: 6600.2s\n\n--- ✓ TASK 1/1: Land parallel-rdp with VI scan-out  (status=completed, api_calls=2, 6600.2s) ---\nThe word-swapped RDRAM work is in your group gate, and parallel-rdp is ready to land with VI scan-out through it.\nDetails follow."
+ },
+ {
+  "id": "resumed-nogoal",
+  "text": "[ASYNC DELEGATION BATCH COMPLETE — deleg_77aa]\nSubagent resumed and finished: the task (subagent sa-1-ab12cd34, delegation deleg_77aa). You sent it a new message and it continued with its full earlier context; its result for that round is below. You may have moved on since — act on it, or resume it again.\n\nDispatched: 2025-11-12 18:23:20 (1h50m ago)\nRole: leaf   Model: claude-opus-5-5   Total duration: 6600.2s\n\n--- ✓ TASK 1/1  (status=completed, api_calls=2, 6600.2s) ---\nThe word-swapped RDRAM work is in your group gate, and parallel-rdp is ready to land with VI scan-out through it.\nDetails follow."
+ },
+ {
+  "id": "batch-one",
+  "text": "[ASYNC DELEGATION BATCH COMPLETE — deleg_99cc]\nA background fan-out unit you dispatched earlier — 1 subagent(s) — has finished; its consolidated results are below. Any other units from the same delegate_task call report separately as they finish. You may have moved on since dispatching — act on these or re-dispatch if things have changed. If you are still waiting on siblings, end your turn after acting on this one.\n\nDispatched: 2025-11-12 18:23:20 (1h50m ago)\nRole: leaf   Model: claude-opus-5-5   Total duration: 6600.2s\n\n--- ✓ TASK 1/1: Land parallel-rdp with VI scan-out  (status=completed, api_calls=2, 6600.2s) ---\nThe word-swapped RDRAM work is in your group gate, and parallel-rdp is ready to land with VI scan-out through it.\nDetails follow."
+ },
+ {
+  "id": "batch",
+  "text": "[ASYNC DELEGATION BATCH COMPLETE — deleg_88bb]\nA background fan-out unit you dispatched earlier — 2 subagent(s) — has finished; its consolidated results are below. Any other units from the same delegate_task call report separately as they finish. You may have moved on since dispatching — act on these or re-dispatch if things have changed. If you are still waiting on siblings, end your turn after acting on this one.\n\nDispatched: 2025-11-12 18:23:20 (1h50m ago)\nRole: leaf   Model: claude-opus-5-5   Total duration: 6600.2s\n\n--- ✓ TASK 1/2: Port the RDRAM word swap  (status=completed, api_calls=2, 6600.2s) ---\nThe word-swapped RDRAM work is in your group gate, and parallel-rdp is ready to land with VI scan-out through it.\nDetails follow.\n\n--- ✓ TASK 2/2: Land parallel-rdp with VI scan-out  (status=completed, api_calls=5, 1200.0s) ---\nSecond one done."
+ },
+ {
+  "id": "resumed-long",
+  "text": "[ASYNC DELEGATION BATCH COMPLETE — deleg_77aa]\nSubagent resumed and finished: Land parallel-rdp with VI scan-out through the word-swapped RDRAM group gate on the Thor, then measure the frame pacing in three games and report (subagent sa-1-ab12cd34, delegation deleg_77aa). You sent it a new message and it continued with its full earlier context; its result for that round is below. You may have moved on since — act on it, or resume it again.\n\nDispatched: 2025-11-12 18:23:20 (1h50m ago)\nRole: leaf   Model: claude-opus-5-5   Total duration: 6600.2s\n\n--- ✓ TASK 1/1: Land parallel-rdp with VI scan-out through the word-swapped RDRAM group gate on the Thor, then measure the frame pacing in three games and report  (status=completed, api_calls=2, 6600.2s) ---\nThe word-swapped RDRAM work is in your group gate, and parallel-rdp is ready to land with VI scan-out through it.\nDetails follow."
+ }
+]

@@ -189,7 +189,7 @@ button.primary.ib:hover { filter: brightness(1.08); }
 .notice-title .tcode, .act .row-head .now2 .lbl .tcode { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; font-weight: 600; }
 .notice-title { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .notice-meta { grid-column: 2 / 4; margin-top: .15rem; color: var(--muted); font-size: .85rem; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.notice-meta .nowrap { white-space: nowrap; }
+.notice-meta .nowrap, .notice-meta .notice-when { white-space: nowrap; }
 .notice-head.flat { cursor: default; }
 .notice-head.flat:hover { background: none; }
 .notice-head.flat > .notice-chev { display: none; }
@@ -1642,7 +1642,14 @@ button.link svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; s
    rows, lists and the closed Raw toggle. */
 .tool.notice[data-state="bad"] { border-color: color-mix(in srgb, var(--bad) 55%, var(--line)); }
 .tool > .notice-head.chipped { grid-template-columns: auto minmax(0, 1fr) auto auto; }
-.tool > .notice-head > .notice-meta, .tool > .notice-head > .tool-sub, .tool > .notice-head > .tool-lines { grid-column: 2 / -1; }
+/* Every line under a card's title (the status, the line under it, the short
+   lines) spans from the title's column to the end: an item left to auto
+   placement lands in the icon's column and its unwrapped text widens that
+   column until the title has no room (a subagent notice in v0.26.125). */
+.notice-head > .notice-meta, .notice-head > .tool-sub, .notice-head > .tool-lines { grid-column: 2 / -1; min-width: 0; }
+/* A finished subagent's goal takes a second line on a phone. */
+.notice[data-kind="delegation"] > .notice-head > .notice-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .tool-chips { display: flex; gap: .3rem; flex-wrap: nowrap; min-width: 0; overflow: hidden; }
 .tchip { display: inline-block; padding: 0 .45rem; border-radius: 999px; background: var(--code); color: var(--accent); font-size: .75rem; font-weight: 600;
   line-height: 1.45; white-space: nowrap; vertical-align: baseline; }

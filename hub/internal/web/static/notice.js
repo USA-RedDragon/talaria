@@ -176,8 +176,16 @@ window.HubNotice = (() => {
     // A unit holds some of a call's tasks; say which.
     const total = Number(heads[0][3]);
     const part = total > rows.length ? partLabel(heads.map((m) => m[2]), String(total)) : "";
+    // A resumed subagent's notice names its goal in the line under the head,
+    // "Subagent resumed and finished: <goal> (subagent sa-…, delegation …).",
+    // when the task line does not.
+    const rg = /^Subagent resumed and finished: (.+?)(?: \((?:subagent|delegation) [^)]*\))?\. You sent it /m.exec(head);
+    const resumedGoal = rg && rg[1].trim() !== "the task" ? rg[1].trim() : "";
     if (rows.length === 1) {
-      const one = rowNotice(rows[0]);
+      let r0 = rows[0];
+      if (!r0.goal && resumedGoal) r0 = Object.assign({}, r0, { goal: resumedGoal, title: r0.title + ": " + short(resumedGoal) });
+      const one = rowNotice(r0);
+      if (rg) one.title = one.title.replace(/^Subagent finished\b/, "Subagent resumed and finished");
       if (part) one.meta = (one.meta || []).concat(part);
       return one;
     }
@@ -486,8 +494,10 @@ window.HubNotice = (() => {
   // cardTitle is a delegation's title on the card: the goal after
   // "Finished:" or "Failed:" (the notice's own title says "Subagent finished:").
   function cardTitle(kind, title) {
-    if (kind !== "delegation") return title;
-    return title.replace(/^Subagent finished: /, "Finished: ").replace(/^Subagent failed: /, "Failed: ");
+    const t = String(title || "").trim();
+    if (kind !== "delegation") return t || "Notice from the agent";
+    return t.replace(/^Subagent finished: /, "Finished: ").replace(/^Subagent resumed and finished: /, "Resumed and finished: ")
+      .replace(/^Subagent failed: /, "Failed: ") || "Subagent finished";
   }
 
   // commandTitle is the title of a card: the command of a background
