@@ -26,7 +26,7 @@ extension/firefox/embed.go	45	39
 internal/acpbridge/acpbridge.go	489	427
 internal/acpbridge/inline.go	38	35
 internal/acpbridge/place.go	160	146
-internal/acphost/acphost.go	291	232
+internal/acphost/acphost.go	291	231
 internal/acphost/proc_unix.go	3	1
 internal/acphost/rewrite.go	260	237
 internal/acphost/sweep.go	30	28
@@ -43,10 +43,10 @@ internal/autoupdate/release.go	109	86
 internal/browser/bidi/bidi.go	51	0
 internal/browser/broker/broker.go	200	161
 internal/browser/broker/peercred_linux.go	13	9
-internal/browser/grants/gate.go	153	139
+internal/browser/grants/gate.go	186	166
 internal/browser/grants/keys.go	19	17
 internal/browser/grants/logins.go	62	51
-internal/browser/grants/store.go	135	115
+internal/browser/grants/store.go	178	156
 internal/browser/headless/group_unix.go	6	5
 internal/browser/headless/headless.go	72	57
 internal/browser/host/host.go	47	30
@@ -115,6 +115,6 @@ internal/splice/splice.go	225	201
 internal/tokenstore/tokenstore.go	104	72
 internal/userdir/userdir.go	3	2
 internal/winshell/winshell.go	52	42
-logingrant/logingrant.go	65	57
+logingrant/logingrant.go	72	64
 main.go	11	0
 plugin/embed.go	4	3
