@@ -224,6 +224,9 @@ func startFirefoxGrants(ctx context.Context, t *testing.T) (*broker.Broker, *bid
 		"TMPDIR=" + os.TempDir(),
 		"PATH=" + os.Getenv("PATH"),
 		"MOZ_HEADLESS=1",
+		// Firefox 160 (the CI runner) ignores --remote-allow-system-access and wants this variable;
+		// 157 accepts either.
+		"MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1",
 		broker.SocketEnv + "=" + sock,
 	})
 
