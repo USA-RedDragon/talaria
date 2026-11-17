@@ -23,10 +23,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // The proxy: counts what the page asks, and can be cut.
 const up = new URL(url);
 const sockets = new Set();
-const stat = { cut: false, attempts: 0, served: 0, byPath: {} };
+const stat = { cut: false, attempts: 0, served: 0, byPath: {}, streams: new Set() };
 const proxy = http.createServer((req, res) => {
   stat.served++;
   const p = req.url.split("?")[0];
+  if (p.endsWith("/events")) { const at = Date.now(); stat.streams.add(at); res.on("close", () => stat.streams.delete(at)); }
   stat.byPath[p] = (stat.byPath[p] || 0) + 1;
   const r = http.request({ host: up.hostname, port: up.port, path: req.url, method: req.method, headers: req.headers }, (u) => {
     res.writeHead(u.statusCode, u.headers);
@@ -150,9 +151,11 @@ const asked = (from) => stat.attempts - from.attempts;
     console.log(`short drop: list fetched again ${Date.now() - r0} ms after the network came back`);
   }
 
-  // 2. A 30 s drop: quiet, never red, bounded, and it recovers.
+  // 2. A 30 s drop: quiet, never red, bounded, and it recovers. It starts
+  // once the event stream is healthy again (open for 2.5 s), so the stream's
+  // own 10 s grace is counted from this drop and not from the one before.
   {
-    await sleep(2000);
+    for (; ![...stat.streams].some((at) => Date.now() - at > 3000);) await sleep(100);
     const from = { attempts: stat.attempts };
     const f0 = await fetches();
     const t0 = Date.now();
