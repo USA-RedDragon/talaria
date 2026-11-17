@@ -1,0 +1,1745 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 01:16:04 +0000
+Subject: [PATCH] feat(gateway): a graceful restart hands each running turn
+ over at its own step boundary
+
+gateway.restart_turn_handoff_per_turn (false = off) and restart_turn_carry_ceiling_seconds (1080), with
+restart_turn_handoff_boundary. The restarting gateway releases the profile at once and carries only its
+running turns: each is handed off at its own step boundary and resumed by the next gateway within a poll,
+or settles where it ends. The next gateway leaves the carrier's claims alone while its lock is held,
+relays its event frames to its own viewers and forwards Stop, steer and prompt answers to it. New API
+requests on the carrier are forwarded to the next gateway; its open runs finish where they are. A step
+past restart_turn_handoff_wait_seconds is not stopped; only the ceiling stops a turn the 0048 way.
+---
+ gateway/config.py                        |  16 +-
+ gateway/config_loader.py                 |   2 +
+ gateway/platforms/api_server.py          |   5 +-
+ gateway/run.py                           |   3 +
+ gateway/run_bootstrap.py                 |  18 +-
+ gateway/run_shutdown.py                  |  11 +
+ gateway/run_startup.py                   |   5 +
+ gateway/session_authority.py             |  14 +-
+ gateway/session_events.py                |   9 +
+ gateway/session_results.py               |   2 +-
+ gateway/session_settlement_recovery.py   |   2 +-
+ gateway/turn_carry.py                    | 893 +++++++++++++++++++++++
+ hermes_state_runtime.py                  |  83 ++-
+ tests/gateway/test_restart_turn_carry.py | 413 +++++++++++
+ 14 files changed, 1455 insertions(+), 21 deletions(-)
+ create mode 100644 gateway/turn_carry.py
+ create mode 100644 tests/gateway/test_restart_turn_carry.py
+
+diff --git a/gateway/config.py b/gateway/config.py
+index a9658b39..92c0dcaf 100644
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -700,6 +700,17 @@ class GatewayConfig:
+     # it refuses new ones and hands the turns started meanwhile over at their next boundary.
+     # False = restart_turn_handoff's stop-and-continue.
+     restart_turn_handoff_boundary: bool = False
++    # With restart_turn_handoff_boundary: the restart hands the profile to the next gateway at once and each running
++    # turn moves over at its own next step boundary instead of all of them at the slowest one's. This gateway
++    # releases the profile within seconds of the restart (admission, listeners, cron and new turns go to the next
++    # one) and keeps running only the turns that were in flight: a model call finishes and is stored, a tool round
++    # finishes (a foreground terminal command moves to the background first), and the turn is then handed over and
++    # resumed by the next gateway within about a second; a turn that ends is settled here. The next gateway relays
++    # their events to its viewers and routes Stop, steer and prompt answers to them. API runs in flight finish here;
++    # new ones are relayed to the next gateway. Only restart_turn_carry_ceiling_seconds (from the restart) stops a
++    # turn the restart_turn_handoff way. False = restart_turn_handoff_boundary's single handover.
++    restart_turn_handoff_per_turn: bool = False
++    restart_turn_carry_ceiling_seconds: float = 1080.0
+     # In-process loop liveness watchdog: after consecutive missed probes it dumps all-thread stacks
+     # and hard-exits with the service-restart code. The knobs tolerate transient self-recovering
+     # stalls (adapter reconnect doing sync socket I/O) so a short block does not cause restart churn.
+@@ -741,7 +752,8 @@ class GatewayConfig:
+         "restart_ticket_handover", "restart_listener_relay_close_sockets", "restart_reads_grace_seconds",
+         "restart_socket_close_delay_seconds", "restart_memory_shutdown_after_release_seconds",
+         "restart_wait_ws_reads", "restart_turn_handoff", "restart_turn_handoff_wait_seconds",
+-        "restart_turn_handoff_boundary", "loop_watchdog",
++        "restart_turn_handoff_boundary", "restart_turn_handoff_per_turn", "restart_turn_carry_ceiling_seconds",
++        "loop_watchdog",
+         "loop_watchdog_probe_interval_s", "loop_watchdog_probe_timeout_s",
+         "loop_watchdog_max_strikes", "unauthorized_dm_behavior", "unauthorized_dm_decline_message",
+     )
+@@ -893,6 +905,8 @@ class GatewayConfig:
+             restart_turn_handoff=_coerce_bool(pick("restart_turn_handoff"), False),
+             restart_turn_handoff_wait_seconds=bounded_float("restart_turn_handoff_wait_seconds", 0.0, 0.0, 3600.0),
+             restart_turn_handoff_boundary=_coerce_bool(pick("restart_turn_handoff_boundary"), False),
++            restart_turn_handoff_per_turn=_coerce_bool(pick("restart_turn_handoff_per_turn"), False),
++            restart_turn_carry_ceiling_seconds=bounded_float("restart_turn_carry_ceiling_seconds", 1080.0, 0.0, 86400.0),
+             restart_wait_plugin_sockets=[
+                 str(name).strip("/ ") for name in (pick("restart_wait_plugin_sockets") or [])
+                 if isinstance(pick("restart_wait_plugin_sockets"), list) and str(name).strip("/ ")],
+diff --git a/gateway/config_loader.py b/gateway/config_loader.py
+index e6b60dc1..0a03ab45 100644
+--- a/gateway/config_loader.py
++++ b/gateway/config_loader.py
+@@ -113,6 +113,8 @@ _TOPLEVEL_BRIDGE: tuple = (
+     ("restart_turn_handoff", "restart_turn_handoff", "nested", None, None),
+     ("restart_turn_handoff_wait_seconds", "restart_turn_handoff_wait_seconds", "nested", None, None),
+     ("restart_turn_handoff_boundary", "restart_turn_handoff_boundary", "nested", None, None),
++    ("restart_turn_handoff_per_turn", "restart_turn_handoff_per_turn", "nested", None, None),
++    ("restart_turn_carry_ceiling_seconds", "restart_turn_carry_ceiling_seconds", "nested", None, None),
+     ("streaming", "streaming", "dict", None, None),
+     *_presence(
+         "reset_triggers", "always_log_local", "write_sessions_json", "loop_watchdog",
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index a66cb6d2..15686c43 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -3963,8 +3963,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+             return False
+         try:
+             from gateway.platforms.api_server_config_guard import config_unavailable_middleware
++            # gateway.restart_turn_handoff_per_turn: a restart's carrier forwards new requests to the next gateway.
++            from gateway.turn_carry import api_forward_middleware
+             mws = [mw for mw in (  # the config guard outermost: entering a profile scope reads config
+-                config_unavailable_middleware, self._make_profile_prefix_middleware(), cors_middleware,
++                api_forward_middleware(), config_unavailable_middleware, self._make_profile_prefix_middleware(),
++                cors_middleware,
+                 body_limit_middleware, security_headers_middleware) if mw is not None]
+             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
+             assert self._app is not None
+diff --git a/gateway/run.py b/gateway/run.py
+index 429da8eb..a607d4cd 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -3682,6 +3682,9 @@ class GatewayRunner(
+     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
+         if getattr(self, "_startup_cleanup_only", False):
+             return  # cleanup of a start that never ran keeps its startup verdict (startup_failed)
++        from gateway import turn_carry
++        if turn_carry.released():
++            return  # gateway.restart_turn_handoff_per_turn: the next gateway's status, not this carrier's
+         # ``active_work`` names each unit only while draining — that is when an observer (``hermes
+         # update``) needs to know WHAT holds the gateway open; a per-turn write would be wasted I/O.
+         active_work = self._describe_active_work() if gateway_state == "draining" else None
+diff --git a/gateway/run_bootstrap.py b/gateway/run_bootstrap.py
+index 2705383f..e3ad8810 100644
+--- a/gateway/run_bootstrap.py
++++ b/gateway/run_bootstrap.py
+@@ -214,6 +214,16 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
+             logger.info("Received SIGTERM with gateway.sigterm_restart_wait: restarting gracefully "
+                         "(active turns finish first; a second SIGTERM stops now)")
+             return
++        from gateway import turn_carry
++        if (received_signal == signal.SIGTERM and turn_carry.released()
++                and getattr(runner, "_stop_task", None) is None):
++            # gateway.restart_turn_handoff_per_turn: the next gateway owns the profile and this process only carries
++            # its running turns to their boundaries, bounded by restart_turn_carry_ceiling_seconds. A supervisor's
++            # SIGTERM to the old pod's containers (a sidecar is signalled once the main containers exit) must not
++            # cut those turns; SIGKILL at the end of the grace period still ends it.
++            logger.info("Received SIGTERM while carrying turns for the next gateway; they go on "
++                        "(gateway.restart_turn_carry_ceiling_seconds)")
++            return
+         _shutdown_ctx = _best_effort(_snapshot, "snapshot_shutdown_context failed: %s")
+         sig_name = _shutdown_ctx["signal"] if _shutdown_ctx else None
+ 
+@@ -1037,10 +1047,10 @@ def _import_handed_over_tickets(config) -> None:
+ def _export_tickets_for_successor(runner) -> None:
+     """``gateway.restart_ticket_handover``: just before a restart releases the profile, hand the unused
+     socket tickets to the gateway that takes it over."""
+-    from gateway import ticket_handover
++    from gateway import ticket_handover, turn_carry
+     if (runner is None or not getattr(runner, "_restart_requested", False)
+-            or not ticket_handover.enabled(getattr(runner, "config", None))):
+-        return
++            or not ticket_handover.enabled(getattr(runner, "config", None)) or turn_carry.released()):
++        return  # a carrier exported them when it released the profile (gateway.restart_turn_handoff_per_turn)
+     from gateway.run import get_hermes_home
+     try:
+         ticket_handover.export_tickets(get_hermes_home())
+@@ -1248,6 +1258,8 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
+ 
+         cron_stop, cron_provider, cron_thread, housekeeping_thread = (
+             _start_gateway_start_cron_and_housekeeping(runner))
++        # gateway.restart_turn_handoff_per_turn: a restart that releases the profile early stops both first.
++        runner._cron_stop_event, runner._cron_provider = cron_stop, cron_provider
+         # From here every exit (a READY publication that raises included) runs the shutdown tail,
+         # which stops the cron ticker and housekeeping before the adapters they deliver through close.
+         from gateway.run_runtime import publish_gateway_runtime_ready, wait_gateway_runtime
+diff --git a/gateway/run_shutdown.py b/gateway/run_shutdown.py
+index 2d7098cb..a5bc8126 100644
+--- a/gateway/run_shutdown.py
++++ b/gateway/run_shutdown.py
+@@ -1652,6 +1652,11 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+         handoff = turn_handoff.enabled(self)
+         if handoff:
+             from gateway import turn_boundary
++            from gateway import turn_carry
++            if turn_carry.enabled(self) and await turn_carry.carry_restart(self):
++                # gateway.restart_turn_handoff_per_turn: the profile went to the next gateway at once and each running
++                # turn moved over at its own boundary (or ended here); only the ceiling stops one the 0048 way.
++                return False
+             if turn_boundary.enabled(self):
+                 # gateway.restart_turn_handoff_boundary: each running turn goes to the next gateway at its next step
+                 # boundary (up to restart_turn_handoff_wait_seconds); one past the cap is stopped as below.
+@@ -2400,6 +2405,12 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+             return _shutdown_gateway_health_export(self)
+         # Clean-shutdown marker skips crash-turn recovery next boot; a timed-out drain left
+         # half-finished sessions, so no marker — the next startup recovers their turn markers.
++        from gateway import turn_carry
++        if turn_carry.released():
++            # gateway.restart_turn_handoff_per_turn: the next gateway owns the profile and its markers already.
++            logger.info("Gateway stopped after carrying its turns (total teardown %.2fs)", ctx.elapsed())
++            self._draining = False
++            return _shutdown_gateway_health_export(self)
+         if not ctx.timed_out:
+             with suppress(Exception):
+                 (_hermes_home / ".clean_shutdown").touch()
+diff --git a/gateway/run_startup.py b/gateway/run_startup.py
+index de5faaa5..b23919a2 100644
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -1674,6 +1674,11 @@ class GatewayStartupMixin:
+             from gateway.run import get_hermes_home
+             self._retain_background_task(asyncio.create_task(
+                 turn_handoff.continue_handed_off_turns(self, get_hermes_home())))
++        # gateway.restart_turn_handoff_per_turn: the previous gateway may still run turns it claimed; relay them here
++        # and resume each the moment it is handed over.
++        from gateway import turn_carry
++        with _log_suppressed(logging.WARNING, "Relay of the carrying gateway's turns failed to start: %s"):
++            turn_carry.start_watch(self)
+         # Surface state.db init failures to messaging platforms before the user loses data.
+         # See #88235.
+         await self._send_session_db_warning_notifications()
+diff --git a/gateway/session_authority.py b/gateway/session_authority.py
+index de956f53..8f51af20 100644
+--- a/gateway/session_authority.py
++++ b/gateway/session_authority.py
+@@ -955,6 +955,10 @@ class SessionAuthority:
+         handle = self._handle(ref)
+         if handle.execution_generation != generation:
+             raise RuntimeStoreError('stale_generation')
++        from gateway import turn_carry
++        if turn_carry.forward_interrupt(self, ref, generation):
++            # gateway.restart_turn_handoff_per_turn: the previous gateway still runs this turn; the Stop goes there.
++            return handle
+         live, agent = self.sessions[ref.session_id], None
+         if handle.execution_state == 'running':
+             # Latches are written under the lock adopt_agent takes on the executor thread, BEFORE the
+@@ -1015,6 +1019,10 @@ class SessionAuthority:
+         ``(None, True)``. A claim with no steer seam (cron, managed worker) latches nothing."""
+         adopted_generation, agent = self.adopted.get(ref.session_id, (None, None))
+         if adopted_generation != generation:
++            from gateway import turn_carry
++            carried = turn_carry.remote_agent(self, ref, generation)
++            if carried is not None:  # gateway.restart_turn_handoff_per_turn: the previous gateway runs this turn
++                return carried, False
+             agent = self.agent(ref) if self._runs_own_agent(ref) else None
+         from gateway.session_busy_controls import adopts_owner_agent
+         if agent is not None or text is None or not adopts_owner_agent(self, ref):
+@@ -1545,9 +1553,13 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
+     # yielding, so no other task observes a half-registered authority.
+     from pathlib import Path
+     db_key = await asyncio.to_thread(Path(db.db_path).resolve)
++    # gateway.restart_turn_handoff_per_turn: a previous gateway that released the profile but still runs its claimed
++    # turns keeps them; they are not lost work (gateway.turn_carry).
++    from gateway import turn_carry
++    carrying = (await asyncio.to_thread(turn_carry.live_carry_epoch, db)) if turn_carry.configured(runner) else None
+     epoch = await asyncio.to_thread(begin_runtime_epoch, db, instance_id=instance_id)
+     # Hot-serve builds a profile while the loop serves the others: both writes stay off it.
+-    await asyncio.to_thread(recover_session_inputs, db, epoch=epoch)
++    await asyncio.to_thread(recover_session_inputs, db, epoch=epoch, keep_epoch=carrying)
+     # A lost automation turn has nobody to resolve it: it settles interrupted before any FIFO runs.
+     from gateway.session_unattended_unknown import settle_recovered_unattended
+     await asyncio.to_thread(settle_recovered_unattended, db, epoch)
+diff --git a/gateway/session_events.py b/gateway/session_events.py
+index 679f3280..6c0a5972 100644
+--- a/gateway/session_events.py
++++ b/gateway/session_events.py
+@@ -40,6 +40,10 @@ class SessionEvents:
+         # viewer that joins mid-turn shows the whole turn (its tool calls and the reply so far) however
+         # far the turn ran past what the bounded replay ring holds.
+         self._turn = None
++        # gateway.restart_turn_handoff_per_turn: on a gateway that released the profile but still runs this
++        # session's turn, every published frame is also handed to this callable (``gateway.turn_carry``), which
++        # writes it for the next gateway to relay to its viewers.
++        self.mirror = None
+ 
+     # The most a running turn's frames keep; past it the oldest tool results are shortened.
+     TURN_BYTES = 4 << 20
+@@ -184,6 +188,11 @@ class SessionEvents:
+                     'type': 'session.replay_gap', 'session_id': session_id,
+                     'payload': {'replay_epoch': self.epoch, 'latest_seq': self.sequence}}}
+             delivered = self.fanout.write(frame, overflow=overflow)
++            if self.mirror is not None:
++                try:
++                    self.mirror(frame['params'])
++                except Exception:
++                    logging.getLogger(__name__).warning('Session event mirror failed for %s', session_id, exc_info=True)
+             for observer in tuple(self.observers):
+                 try:
+                     observer(frame)
+diff --git a/gateway/session_results.py b/gateway/session_results.py
+index 946bfe53..a0df56ea 100644
+--- a/gateway/session_results.py
++++ b/gateway/session_results.py
+@@ -78,7 +78,7 @@ def finish_result(db, *, epoch, row, response, outcome, result=None, prepared=No
+     `transfers` are the queued steers handed to this claim; they settle in the same write.
+     """
+     with db._read_ctx() as conn:
+-        _epoch(conn, epoch)
++        _epoch(conn, epoch, carried=True)  # gateway.restart_turn_handoff_per_turn: the carrier settles its own claims
+         current = _admission(conn, row['admission_id'])
+         if current['owner_epoch'] != epoch or current['generation'] != row['generation']:
+             raise RuntimeStoreError('stale_generation')
+diff --git a/gateway/session_settlement_recovery.py b/gateway/session_settlement_recovery.py
+index 34c49570..a2cdad28 100644
+--- a/gateway/session_settlement_recovery.py
++++ b/gateway/session_settlement_recovery.py
+@@ -13,7 +13,7 @@ def _mark_unknown(authority, row):
+     transfers = _transfers(authority, authority.sessions.get(row['target_session_id']), row)
+ 
+     def write(conn):
+-        _epoch(conn, authority.epoch)
++        _epoch(conn, authority.epoch, carried=True)
+         current = _admission(conn, row['admission_id'])
+         if current['owner_epoch'] != authority.epoch or current['generation'] != row['generation']:
+             raise RuntimeStoreError('stale_generation')
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+new file mode 100644
+index 00000000..4b9400c0
+--- /dev/null
++++ b/gateway/turn_carry.py
+@@ -0,0 +1,893 @@
++"""``gateway.restart_turn_handoff_per_turn`` (false = off): each running turn moves to the next gateway at its
++own step boundary, while the next gateway already serves everything else.
++
++``gateway.restart_turn_handoff_boundary`` (0131) waits on the old gateway until every running turn reached a
++boundary, then the next gateway takes the profile over and resumes them all at once: a turn that reached its
++boundary early waits for the slowest one (up to ``restart_turn_handoff_wait_seconds``), and new input and API
++runs wait for the takeover. With this key both gateways serve for a while:
++
++The old gateway (the *carrier*), at the restart:
++
++* asks every running turn to stop at its next step boundary, hands a turn parked on its own clarify or
++  approval over at once (0131's withdraw), closes admission and asks the tool workers of the running turns to
++  yield (a foreground terminal command moves to the background, so the process handoff takes it along);
++* hands background subagents and processes over as a restart stop does, stops cron, and records itself as
++  the carrier of its claims in state.db (``hermes_state_runtime.CARRY_KEY``, its runtime epoch and turns) and
++  holds ``$HERMES_HOME/.turn-carry.lock`` (flock) for the rest of its life;
++* then releases the profile (PID file, lock, host role, socket tickets) and relays its listeners to the next
++  gateway (``gateway.restart_listener_relay_seconds``; the API server's port too, for the whole carry), while
++  it keeps running only the turns it had claimed;
++* each of those turns ends at its own boundary: it is handed off with the carried epoch fence
++  (``_epoch(..., carried=True)``: only the carrier, only its own claims) and the next gateway resumes it at
++  once; a turn whose model call is the last one completes here and is settled here; an API run finishes here
++  on its open HTTP connection. Every frame those turns publish is written to
++  ``$HERMES_HOME/.turn-carry/<epoch>.events`` for the next gateway to relay;
++* ``gateway.restart_turn_carry_ceiling_seconds`` after the restart, a turn still running is stopped the
++  0048 way (``restart_turn_handoff``); then the stop runs as before and the process exits.
++
++The next gateway:
++
++* boots as soon as the profile is released; its startup recovery leaves the carrier's started claims alone
++  (``recover_session_inputs(keep_epoch=...)``) while the carrier's lock is held, and its claims never take a
++  session whose claim is still started, so it never runs a turn the carrier runs;
++* relays the carrier's frames to its own viewers (the hub's socket now talks to it): the turn shows as
++  running, its deltas, tool calls and prompts arrive as if it ran here, a prompt it raised is answerable here
++  (the answer goes to the carrier), and Stop and steer reach the carrier's turn
++  (``$HERMES_HOME/.turn-carry/<epoch>.control``);
++* within ``POLL_S`` of a handoff claims the requeued admission and resumes the turn (0131's resume record);
++* once the carrier exited (its lock is free) it settles what the carrier left the 0048 way, reattaches the
++  processes the carrier handed over late, and drops the carry record.
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++import logging
++import os
++import time
++from pathlib import Path
++
++logger = logging.getLogger(__name__)
++
++LOCK_NAME = ".turn-carry.lock"
++RELAY_DIR = ".turn-carry"
++# How often the next gateway reads the carrier's frames and its handoffs, and the carrier its controls.
++POLL_S = 0.05
++# How long the frames of a turn that ended on the carrier are still relayed after its settlement.
++ENDING_RELAY_S = 5.0
++# How long the carrier waits, before it releases the profile, for the tool rounds of its turns to end (a foreground
++# terminal command was asked to move to the background first). A tool call on a device connection must not be in
++# flight when that connection moves to the next gateway; any other tool call still running after this goes on here.
++YIELD_SETTLE_S = 5.0
++# Platforms whose running turns can be carried: their viewers reach the next gateway (LOCAL) or their run
++# finishes on its own HTTP connection here (API_SERVER). A turn of any other platform makes the restart fall back
++# to restart_turn_handoff_boundary's single handover.
++_CARRIED_PLATFORMS = ("local", "api_server")
++
++_released = False
++
++
++def released() -> bool:
++    """This process released the profile to the next gateway and only carries its in-flight turns: nothing
++    of the profile's process-level state (PID file, runtime status, markers) is its to write any more."""
++    return _released
++
++
++def configured(runner) -> bool:
++    cfg = getattr(runner, "config", None)
++    return bool(getattr(cfg, "restart_turn_handoff", False) and getattr(cfg, "restart_turn_handoff_boundary", False)
++                and getattr(cfg, "restart_turn_handoff_per_turn", False))
++
++
++def enabled(runner) -> bool:
++    from gateway import turn_boundary
++    return bool(turn_boundary.enabled(runner) and configured(runner))
++
++
++def ceiling_seconds(runner) -> float:
++    try:
++        return max(0.0, float(getattr(getattr(runner, "config", None), "restart_turn_carry_ceiling_seconds", 1080.0)))
++    except (TypeError, ValueError):
++        return 1080.0
++
++
++def _home_of(db) -> Path:
++    return Path(db.db_path).resolve().parent
++
++
++def lock_path(home) -> Path:
++    return Path(home) / LOCK_NAME
++
++
++def events_path(home, epoch) -> Path:
++    return Path(home) / RELAY_DIR / f"{int(epoch)}.events"
++
++
++def control_path(home, epoch) -> Path:
++    return Path(home) / RELAY_DIR / f"{int(epoch)}.control"
++
++
++def carrier_alive(home) -> bool:
++    """Whether a carrier holds ``.turn-carry.lock`` in *home* (a flock: it ends with that process)."""
++    import fcntl
++    path = lock_path(home)
++    try:
++        fd = os.open(path, os.O_RDONLY)
++    except FileNotFoundError:
++        return False
++    except OSError:
++        return True  # unreadable: never treat a live carrier's claims as lost
++    try:
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            return True
++        except OSError:
++            return True
++        fcntl.flock(fd, fcntl.LOCK_UN)
++        return False
++    finally:
++        os.close(fd)
++
++
++def live_carry_epoch(db) -> int | None:
++    """At startup: the runtime epoch of a carrier that still runs its claims, or None."""
++    from hermes_state_runtime import turn_carry_record
++    record = turn_carry_record(db)
++    if not record or type(record.get("epoch")) is not int:
++        return None
++    return record["epoch"] if carrier_alive(_home_of(db)) else None
++
++
++# ── the carrier (the gateway that restarts) ──────────────────────────────────────────────────────────────
++
++
++class _Carry:
++    def __init__(self, runner, authority, turns, home):
++        self.runner, self.authority, self.home = runner, authority, home
++        self.epoch = authority.epoch
++        self.turns = {t.admission_id: t for t in turns}
++        self.done: set[str] = set()
++        self.started = time.monotonic()
++        self.events = None
++        self.control_offset = 0
++        self.lock_fd = None
++        self.api_relay = None
++
++
++def _platform(turn) -> str:
++    source = getattr(turn.live, "source", None)
++    platform = getattr(source, "platform", None)
++    return str(getattr(platform, "value", platform) or "")
++
++
++def _ineligible(runner, turns) -> str | None:
++    """Why this restart cannot carry its turns (it then hands them over the 0131 way), or None."""
++    from gateway import turn_handoff
++    from gateway.session_authorities import all_authorities
++    if len(all_authorities(runner)) != 1:
++        return "the gateway serves several profiles"
++    if len(turn_handoff.running_turns(runner)) != len(turns):
++        return "a turn runs in a managed worker"
++    try:
++        cron = int(runner._active_cron_job_count()) - int(runner._restart_safe_cron_count())
++    except Exception:
++        cron = 0
++    if cron > 0:
++        return "a cron job runs in this process"
++    for turn in turns:
++        if _platform(turn) not in _CARRIED_PLATFORMS:
++            return f"a turn runs on {_platform(turn) or 'an unknown platform'}"
++    carried = {id(t.agent) for t in turns}
++    items = getattr(runner, "_running_agent_items", None)
++    from gateway.run import _AGENT_PENDING_SENTINEL
++    for _key, agent in (items() if callable(items) else []):
++        if agent is not None and agent is not _AGENT_PENDING_SENTINEL and id(agent) not in carried:
++            return "a turn runs outside a canonical session"
++    return None
++
++
++async def carry_restart(runner) -> bool:
++    """The restart wait with the key: release the profile now and carry the running turns to their own
++    boundaries. False when this restart cannot carry them (the caller falls back to 0131)."""
++    from gateway import turn_boundary
++    from gateway.session_authorities import all_authorities
++    from agent import turn_boundary_handoff as boundary
++    turns = turn_boundary._turns(runner)
++    reason = _ineligible(runner, turns)
++    if reason is not None:
++        logger.info("Restart: turns not carried (%s); handing them over at their boundaries first "
++                    "(gateway.restart_turn_handoff_per_turn)", reason)
++        return False
++    authority = all_authorities(runner)[0]
++    from gateway.run import get_hermes_home
++    carry = _Carry(runner, authority, turns, get_hermes_home())
++    runner._turn_carry = carry
++    for turn in turns:
++        if _platform(turn) != "api_server":  # an API turn finishes here, on its own HTTP connection
++            boundary.request(turn.agent)
++    for turn in turns:
++        if turn_boundary._parked_prompts(turn):
++            try:
++                await turn_boundary._withdraw(turn)
++            except Exception:
++                logger.warning("Could not hand off the parked turn of %s", turn.session_id, exc_info=True)
++    from gateway.drain_control import begin_restart_drain
++    begin_restart_drain(runner)
++    await _yield_tools(carry)
++    await _hand_off_background(runner)
++    await _stop_cron(runner)
++    await _disconnect_messaging(runner)
++    await _record(carry)
++    _mirror(carry)
++    await _release(carry)
++    await _carry_turns(carry)
++    return True
++
++
++async def _yield_tools(carry) -> None:
++    """A foreground terminal command of a carried turn moves to the background now: its device or remote shell
++    reconnects to the next gateway, which reattaches the process (``terminal.process_handoff_backends``)."""
++    asked = []
++    for turn in carry.turns.values():
++        request = getattr(turn.agent, "request_tool_yield", None)
++        if callable(request):
++            try:
++                if request():
++                    asked.append(turn.agent)
++            except Exception:
++                logger.debug("Tool yield request failed", exc_info=True)
++    deadline = time.monotonic() + YIELD_SETTLE_S
++    while time.monotonic() < deadline:
++        if not any(getattr(t.agent, "_executing_tools", False) for t in carry.turns.values()):
++            break
++        await asyncio.sleep(POLL_S)
++    if asked:
++        logger.info("Restart: asked the tool calls of %d carried turn(s) to move to the background", len(asked))
++
++
++async def _disconnect_messaging(runner) -> None:
++    """Platform connections (a bot's polling, its token lock) belong to the next gateway now. The local adapter
++    (the carried turns deliver through it) and the API server (its open runs finish here) stay."""
++    from gateway.config import Platform
++    for platform, adapter in list((getattr(runner, "adapters", None) or {}).items()):
++        if platform in (Platform.LOCAL, Platform.API_SERVER):
++            continue
++        try:
++            await runner._bounded_adapter_teardown(adapter, platform)
++        except Exception:
++            logger.warning("Could not disconnect %s before the carry", platform, exc_info=True)
++        runner.adapters.pop(platform, None)
++
++
++async def _hand_off_background(runner) -> None:
++    from gateway.run_shutdown import GatewayShutdownMixin
++    ctx = GatewayShutdownMixin._StopContext(deferred_count=lambda: 0)
++    ctx.started_at = time.monotonic()
++    for step in (lambda: GatewayShutdownMixin._stop_hand_off_delegations(runner, ctx),
++                 lambda: GatewayShutdownMixin._stop_hand_off_processes(runner)):
++        try:
++            await step()
++        except Exception:
++            logger.warning("Background handoff before the carry failed", exc_info=True)
++
++
++async def _stop_cron(runner) -> None:
++    stop = getattr(runner, "_cron_stop_event", None)
++    if stop is not None:
++        stop.set()
++    provider = getattr(runner, "_cron_provider", None)
++    if provider is not None:
++        from gateway.run import _stop_cron_provider
++        await asyncio.to_thread(_stop_cron_provider, provider)
++
++
++async def _record(carry) -> None:
++    import fcntl
++    from hermes_state_runtime import begin_turn_carry
++    path = lock_path(carry.home)
++    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
++    fcntl.flock(fd, fcntl.LOCK_EX)  # held until this process exits
++    carry.lock_fd = fd
++    (Path(carry.home) / RELAY_DIR).mkdir(mode=0o700, exist_ok=True)
++    for path in (events_path(carry.home, carry.epoch), control_path(carry.home, carry.epoch)):
++        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
++    carry.events = open(events_path(carry.home, carry.epoch), "a", encoding="utf-8")  # noqa: SIM115
++    record = {"pid": os.getpid(), "since": time.time(),
++              "turns": {aid: {"session_id": t.session_id, "generation": t.generation}
++                        for aid, t in carry.turns.items()}}
++    await asyncio.to_thread(begin_turn_carry, carry.authority.db, epoch=carry.epoch, record=record)
++
++
++def _write_frame(carry, params) -> None:
++    line = json.dumps(params, ensure_ascii=False, default=str)
++    carry.events.write(line + "\n")
++    carry.events.flush()
++
++
++def _mirror(carry) -> None:
++    """Every frame of a carried session goes to the events file; the prompts already open go first."""
++    for turn in carry.turns.values():
++        stream = turn.live.event_stream
++        with stream.lock:
++            stream.mirror = lambda params, _c=carry: _write_frame(_c, params)
++            for _pid, (_route, prompt) in list(turn.live.controls.pending.items()):
++                _write_frame(carry, {"type": prompt["kind"] + ".request", "session_id": turn.session_id,
++                                     "payload": prompt, "background": _pid in turn.live.controls.background})
++
++
++async def _release(carry) -> None:
++    """Give the profile to the next gateway: PID file, tickets, lock, host role; then the listeners relay."""
++    global _released
++    runner = carry.runner
++    from gateway.run_bootstrap import _export_tickets_for_successor, _listener_relay_target
++    from gateway.status import remove_pid_file
++    relay_to = _listener_relay_target_for(runner, _listener_relay_target)
++    _export_tickets_for_successor(runner)
++    await _stop_api_listening(runner, carry)
++    remove_pid_file()
++    from gateway.runtime_ownership import process_ownership
++    for home in process_ownership.homes:
++        process_ownership.release(home)
++    _released = True
++    try:
++        from gateway import host_rendezvous as hr
++        hr.release_role(hr.ROLE_GATEWAY)
++    except Exception:
++        logger.debug("Host gateway role release failed", exc_info=True)
++    logger.info("Restart: profile released to the next gateway; carrying %d running turn(s) to their step "
++                "boundaries (gateway.restart_turn_handoff_per_turn)", len(carry.turns))
++    from gateway.run_shutdown import GatewayShutdownMixin
++    GatewayShutdownMixin._begin_listener_handover(runner)
++    if getattr(runner, "_listener_handover", None):
++        ctx = GatewayShutdownMixin._StopContext(deferred_count=lambda: 0)
++        ctx.started_at = time.monotonic()
++        await GatewayShutdownMixin._stop_end_listener_reads(runner, ctx)
++        runner._carry_listener_task = asyncio.ensure_future(runner.stop_handover_listener(relay_to))
++
++
++def _listener_relay_target_for(runner, read):
++    try:
++        if not getattr(runner, "_listener_handover", None):
++            from gateway.run_shutdown import GatewayShutdownMixin
++            GatewayShutdownMixin._begin_listener_handover(runner)
++        return read(runner)
++    except Exception:
++        logger.debug("No listener relay target", exc_info=True)
++        return None
++
++
++async def _stop_api_listening(runner, carry) -> None:
++    """The API server stops accepting here; the requests and runs already open finish on their own connections,
++    and every new request (a new connection, or one more request on a kept-alive connection) goes to the next
++    gateway's API server (``api_forward_middleware``). When the next gateway runs in another network namespace
++    (the new pod of a rolling update) the port keeps accepting and relays new connections to it, so a client the
++    Service still routes here is served there; on the same host the next gateway binds the port itself."""
++    import socket
++    global _api_target
++    from gateway.config import Platform
++    adapter = (getattr(runner, "adapters", None) or {}).get(Platform.API_SERVER)
++    site = getattr(adapter, "_site", None)
++    if site is None:
++        return
++    port = int(getattr(adapter, "_port", 0) or 0)
++    successor = None
++    try:
++        from gateway.listener_relay import successor_target
++        from gateway.run import get_hermes_home
++        from gateway.run_bootstrap import STANDBY_MARKER
++        successor = successor_target(get_hermes_home() / STANDBY_MARKER)
++    except Exception:
++        logger.debug("No API relay target", exc_info=True)
++    if port:
++        host = getattr(adapter, "_host", None) or "127.0.0.1"
++        _api_target = (successor[0], port) if successor is not None else (
++            "127.0.0.1" if host in ("0.0.0.0", "", "::") else host, port)
++    sock = None
++    if successor is not None and port:
++        try:
++            listening = list(getattr(getattr(site, "_server", None), "sockets", None) or ())
++            if listening:
++                sock = socket.socket(fileno=os.dup(listening[0].fileno()))
++        except Exception:
++            logger.debug("API listener could not be kept for the relay", exc_info=True)
++            sock = None
++    try:
++        await site.stop()
++        adapter._site = None
++    except Exception:
++        logger.warning("API server did not stop accepting before the carry", exc_info=True)
++    if sock is not None:
++        from gateway.listener_relay import relay_listener
++        sock.setblocking(False)
++        carry.api_relay = asyncio.ensure_future(relay_listener(sock, _api_target, ceiling_seconds(runner)))
++        logger.info("API port relays new connections to the next gateway at %s:%d", *_api_target)
++
++
++_api_target: tuple[str, int] | None = None
++# How long a forwarded API request waits for the next gateway's API server to listen.
++API_FORWARD_CONNECT_S = 30.0
++_HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
++                          "transfer-encoding", "upgrade", "host", "content-length"})
++
++
++def _local_run(request) -> bool:
++    """A request about a run this carrier still runs (its events, status or stop) stays here."""
++    parts = request.path.strip("/").split("/")
++    if len(parts) >= 3 and parts[0] == "v1" and parts[1] == "runs":
++        from gateway.config import Platform
++        from gateway.run import _gateway_runner_ref
++        runner = _gateway_runner_ref()
++        adapter = (getattr(runner, "adapters", None) or {}).get(Platform.API_SERVER) if runner else None
++        statuses = getattr(adapter, "_run_statuses", None) or {}
++        return parts[2] in statuses
++    return False
++
++
++async def _forward(request, target):
++    import aiohttp
++    from aiohttp import web
++    url = f"http://{target[0]}:{target[1]}{request.rel_url}"
++    headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
++    body = await request.read()
++    loop = asyncio.get_running_loop()
++    deadline = loop.time() + API_FORWARD_CONNECT_S
++    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=2))
++    try:
++        while True:
++            try:
++                upstream = await session.request(request.method, url, headers=headers, data=body,
++                                                 allow_redirects=False)
++                break
++            except aiohttp.ClientConnectorError:
++                if loop.time() >= deadline:
++                    raise
++                await asyncio.sleep(0.1)
++        async with upstream:
++            response = web.StreamResponse(status=upstream.status, reason=upstream.reason)
++            for key, value in upstream.headers.items():
++                if key.lower() not in _HOP_HEADERS:
++                    response.headers.add(key, value)
++            await response.prepare(request)
++            async for chunk in upstream.content.iter_any():
++                await response.write(chunk)
++            await response.write_eof()
++            return response
++    finally:
++        await session.close()
++
++
++def api_forward_middleware():
++    """``gateway.restart_turn_handoff_per_turn``: on a carrier, every API request but those about its own open
++    runs is served by the next gateway, so API clients succeed throughout the restart (a kept-alive connection
++    to the old gateway included)."""
++    from aiohttp import web
++
++    @web.middleware
++    async def forward(request, handler):
++        target = _api_target
++        if not _released or target is None or _local_run(request):
++            return await handler(request)
++        try:
++            return await _forward(request, target)
++        except Exception:
++            logger.warning("Could not forward an API request to the next gateway", exc_info=True)
++            return await handler(request)
++    return forward
++
++
++def _api_live(runner) -> int:
++    try:
++        return int(runner._active_api_run_count())
++    except Exception:
++        return 0
++
++
++async def _carry_turns(carry) -> None:
++    """Run until every carried turn handed off or ended (and every open API run finished), or the ceiling."""
++    from agent import turn_boundary_handoff as boundary
++    from gateway import turn_boundary
++    from hermes_state_runtime import get_session_admission
++    runner = carry.runner
++    deadline = carry.started + ceiling_seconds(runner)
++    last_log = 0.0
++    while True:
++        await _apply_controls(carry)
++        for turn in turn_boundary._turns(runner):
++            if turn.admission_id in carry.turns and turn_boundary._parked_prompts(turn):
++                try:
++                    await turn_boundary._withdraw(turn)
++                except Exception:
++                    logger.warning("Could not hand off the parked turn of %s", turn.session_id, exc_info=True)
++        for aid in list(set(carry.turns) - carry.done):
++            row = await asyncio.to_thread(get_session_admission, carry.authority.db, admission_id=aid)
++            if row is None or row["status"] != "started" or row["owner_epoch"] != carry.epoch:
++                carry.done.add(aid)
++                logger.info("Carried turn of %s %s after %.1fs", carry.turns[aid].session_id,
++                            "handed over" if (row or {}).get("status") == "queued" else "ended",
++                            time.monotonic() - carry.started)
++        left = set(carry.turns) - carry.done
++        api = _api_live(runner)
++        now = time.monotonic()
++        if not left and not api:
++            break
++        if now >= deadline:
++            logger.warning("Restart: %d carried turn(s) and %d API run(s) still running at the ceiling of %.0fs; "
++                           "stopping them (gateway.restart_turn_carry_ceiling_seconds)", len(left), api,
++                           ceiling_seconds(runner))
++            for aid in left:
++                boundary.cancel(carry.turns[aid].agent)
++            break
++        if now - last_log >= 30.0:
++            logger.info("Restart: carrying %d turn(s) and %d API run(s) to their ends", len(left), api)
++            last_log = now
++        await asyncio.sleep(POLL_S)
++    # The listeners relay to the next gateway for their window (gateway.restart_listener_relay_seconds), so a
++    # client routed here before the new pod is ready still reaches it; the API port relays as long.
++    listener = getattr(runner, "_carry_listener_task", None)
++    if listener is not None:
++        try:
++            await listener
++        except Exception:
++            logger.debug("Listener relay ended with an error", exc_info=True)
++    if carry.api_relay is not None:
++        carry.api_relay.cancel()
++        await asyncio.gather(carry.api_relay, return_exceptions=True)
++
++
++async def _apply_controls(carry) -> None:
++    """Stop, steer and prompt answers the next gateway forwarded for a carried turn."""
++    path = control_path(carry.home, carry.epoch)
++    try:
++        with open(path, encoding="utf-8") as fh:
++            fh.seek(carry.control_offset)
++            chunk = fh.read()
++    except OSError:
++        return
++    if not chunk:
++        return
++    complete = chunk[:chunk.rfind("\n") + 1]
++    carry.control_offset += len(complete.encode("utf-8"))
++    for line in complete.splitlines():
++        try:
++            op = json.loads(line)
++            _apply(carry, op)
++        except Exception:
++            logger.warning("Could not apply a forwarded control", exc_info=True)
++
++
++def _carried_turn(carry, session_id, generation=None):
++    for turn in carry.turns.values():
++        if turn.session_id == session_id and (generation is None or turn.generation == generation):
++            return turn
++    return None
++
++
++def _apply(carry, op) -> None:
++    turn = _carried_turn(carry, op.get("session_id"))
++    if turn is None:
++        return
++    kind = op.get("op")
++    if kind == "interrupt" and op.get("generation") == turn.generation:
++        from agent.interrupt_compat import request_hard_interrupt
++        from agent import turn_boundary_handoff as boundary
++        boundary.cancel(turn.agent)  # a Stop ends the turn here; it is not handed over
++        request_hard_interrupt(turn.agent)
++    elif kind in ("steer", "redirect") and op.get("generation") == turn.generation:
++        method = getattr(turn.agent, kind, None)
++        if callable(method):
++            method(str(op.get("text") or ""))
++    elif kind == "respond":
++        field = "answer" if op.get("kind") == "clarify" else "choice"
++        turn.live.controls.respond(turn.session_id, turn.generation, op.get("prompt_id"),
++                                   {field: op.get("value")}, kind=op.get("kind") or "approval",
++                                   prune_generation=turn.generation)
++
++
++# ── the next gateway ─────────────────────────────────────────────────────────────────────────────────────
++
++
++class _Remote:
++    """The next gateway's view of a carrier: its turns, the frames read so far and the controls it sends."""
++
++    def __init__(self, runner, authority, record, home):
++        self.runner, self.authority, self.home = runner, authority, home
++        self.epoch = record["epoch"]
++        self.turns = {aid: dict(t) for aid, t in (record.get("turns") or {}).items()}
++        self.offset = 0
++        self.pending = b""
++        self.open = {aid for aid in self.turns}
++        # A turn that ended on the carrier: its last frames (the reply's message.complete is published right
++        # after the settlement commits) are still relayed for a moment.
++        self.ending: dict[str, float] = {}
++        self.prompts: dict[str, set] = {}
++
++    def session_turn(self, session_id, *, ending=False):
++        for aid in (*self.open, *(self.ending if ending else ())):
++            if self.turns[aid]["session_id"] == session_id:
++                return aid, self.turns[aid]
++        return None, None
++
++    def send(self, op: dict) -> None:
++        line = json.dumps(op, ensure_ascii=False, default=str) + "\n"
++        fd = os.open(control_path(self.home, self.epoch), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
++        try:
++            os.write(fd, line.encode("utf-8"))
++        finally:
++            os.close(fd)
++
++
++def _remote(authority) -> _Remote | None:
++    return getattr(authority, "_turn_carrier", None)
++
++
++def start_watch(runner) -> bool:
++    """After the startup recovery: watch a live carrier's turns (no-op without one). True when watching."""
++    from gateway.session_authorities import serving_authorities
++    from hermes_state_runtime import turn_carry_record
++    if not configured(runner):
++        return False
++    for authority in serving_authorities(runner):
++        record = turn_carry_record(authority.db)
++        home = _home_of(authority.db)
++        if not record or type(record.get("epoch")) is not int or record["epoch"] == authority.epoch:
++            continue
++        remote = _Remote(runner, authority, record, home)
++        authority._turn_carrier = remote
++        task = asyncio.ensure_future(_watch(remote))
++        retain = getattr(runner, "_retain_background_task", None)
++        if callable(retain):
++            retain(task)
++        logger.info("Carrying gateway (epoch %d) still runs %d turn(s); relaying them here "
++                    "(gateway.restart_turn_handoff_per_turn)", remote.epoch, len(remote.open))
++        return True
++    return False
++
++
++async def _watch(remote: _Remote) -> None:
++    try:
++        for aid in list(remote.open):
++            _live(remote.authority, remote.turns[aid]["session_id"])
++        while True:
++            _relay_frames(remote)
++            await _pick_up(remote)
++            if not await asyncio.to_thread(carrier_alive, remote.home):
++                _relay_frames(remote)
++                await _pick_up(remote)
++                await _finish(remote)
++                return
++            await asyncio.sleep(POLL_S)
++    except asyncio.CancelledError:
++        raise
++    except Exception:
++        logger.exception("Relay of the carrying gateway's turns failed")
++
++
++def _live(authority, session_id):
++    live = (getattr(authority, "sessions", None) or {}).get(session_id)
++    if live is not None:
++        return live
++    try:
++        from gateway.session_local_recovery import restore_local_session
++        restore_local_session(authority, session_id)
++    except Exception:
++        logger.debug("Carried session %s not restored here yet", session_id, exc_info=True)
++    return (getattr(authority, "sessions", None) or {}).get(session_id)
++
++
++def _relay_frames(remote: _Remote) -> None:
++    path = events_path(remote.home, remote.epoch)
++    try:
++        with open(path, "rb") as fh:
++            fh.seek(remote.offset)
++            chunk = fh.read()
++    except OSError:
++        return
++    if not chunk:
++        return
++    data = remote.pending + chunk
++    remote.offset += len(chunk)
++    cut = data.rfind(b"\n") + 1
++    remote.pending = data[cut:]
++    for line in data[:cut].splitlines():
++        try:
++            params = json.loads(line)
++        except ValueError:
++            continue
++        try:
++            _relay_one(remote, params)
++        except Exception:
++            logger.debug("Could not relay a carried frame", exc_info=True)
++
++
++def _relay_one(remote: _Remote, params: dict) -> None:
++    authority = remote.authority
++    session_id = params.get("session_id")
++    event_type = params.get("type")
++    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
++    aid, turn = remote.session_turn(session_id, ending=True)
++    if turn is None:
++        return
++    running = aid in remote.open
++    live = _live(authority, session_id)
++    if live is None:
++        return
++    generation = turn["generation"]
++    stream, controls = live.event_stream, live.controls
++    from gateway.session_contract import SessionRef
++    with stream.lock:
++        if event_type == "session.info":
++            authority._publish_pending(SessionRef(authority.profile_id, session_id))
++            return
++        if event_type in ("approval.request", "clarify.request"):
++            pid = payload.get("prompt_id")
++            if not pid:
++                return
++            controls.pending[pid] = (None, dict(payload))
++            controls.background.add(pid)  # answerable whatever generation this gateway reads as running
++            controls.remote_responders[pid] = _forward_answer(remote, session_id, generation)
++            remote.prompts.setdefault(session_id, set()).add(pid)
++            stream.publish(session_id, payload, event_type=event_type)
++            return
++        if event_type in ("approval.settled", "clarify.settled"):
++            pid = payload.get("prompt_id")
++            if pid in controls.pending and pid in controls.remote_responders:
++                controls.pending.pop(pid, None)
++                controls.background.discard(pid)
++                controls.remote_responders.pop(pid, None)
++            remote.prompts.get(session_id, set()).discard(pid)
++            stream.publish(session_id, payload, event_type=event_type)
++            return
++        execution = {k: params[k] for k in ("authority_epoch", "execution_generation", "admission_id") if k in params}
++        if execution:
++            # Served by this gateway now: its viewers check frames against the epoch they attached under.
++            execution["authority_epoch"] = authority.epoch
++        if running and execution.get("execution_generation") == generation and execution.get("admission_id") == aid:
++            stream.execution = execution
++            stream.note_progress(generation, event_type, payload)
++            stream.publish(session_id, payload, event_type=event_type, execution=execution)
++            stream.note_reply(generation, event_type, payload)
++            stream.note_turn(generation, event_type, payload)
++        else:
++            stream.publish(session_id, payload, event_type=event_type, execution=execution or None)
++
++
++def _forward_answer(remote, session_id, generation):
++    def respond(kind, prompt_id, value):
++        remote.send({"op": "respond", "session_id": session_id, "generation": generation,
++                     "prompt_id": prompt_id, "kind": kind, "value": value})
++    return respond
++
++
++async def _pick_up(remote: _Remote) -> None:
++    """A carried turn the carrier handed off is claimed here now; one that ended clears its running state."""
++    from gateway import turn_boundary
++    from gateway.session_contract import SessionRef
++    from hermes_state_runtime import get_session_admission, resume_record
++    authority = remote.authority
++    now = time.monotonic()
++    for aid, until in list(remote.ending.items()):
++        if now >= until:
++            del remote.ending[aid]
++    for aid in list(remote.open):
++        row = await asyncio.to_thread(get_session_admission, authority.db, admission_id=aid)
++        if row is not None and row["status"] == "started" and row["owner_epoch"] == remote.epoch:
++            continue
++        remote.open.discard(aid)
++        if row is None or row["status"] != "queued":
++            remote.ending[aid] = now + ENDING_RELAY_S
++        session_id = remote.turns[aid]["session_id"]
++        live = _live(authority, session_id)
++        _clear_remote(remote, live, session_id)
++        if live is None:
++            continue
++        ref = SessionRef(authority.profile_id, session_id)
++        if row is not None and row["status"] == "queued":
++            record = await asyncio.to_thread(resume_record, authority.db, admission_id=aid)
++            if isinstance(record, dict):
++                turn_boundary._resuming.add(aid)
++                for prompt in record.get("prompts") or []:
++                    turn_boundary._register_waiter(prompt)
++                turn_boundary.show_record(authority, session_id, record)
++            logger.info("Carried turn of %s handed over; resuming it here", session_id)
++        try:
++            authority._publish_pending(ref)
++        except Exception:
++            logger.debug("Pending publish after a carried turn failed", exc_info=True)
++        authority._schedule(ref)
++
++
++def _clear_remote(remote: _Remote, live, session_id) -> None:
++    if live is None:
++        return
++    with live.event_stream.lock:
++        if any(live.event_stream.execution.get("admission_id") == aid for aid in remote.turns):
++            live.event_stream.execution = {}
++        for pid in remote.prompts.pop(session_id, set()):
++            if pid in live.controls.remote_responders:
++                live.controls.pending.pop(pid, None)
++                live.controls.background.discard(pid)
++                live.controls.remote_responders.pop(pid, None)
++
++
++async def _finish(remote: _Remote) -> None:
++    """The carrier exited: what it left running is lost work, continued the 0048 way; the processes it
++    handed over late are reattached here; the carry record goes."""
++    from gateway.session_contract import SessionRef
++    from hermes_state_runtime import end_turn_carry, recover_session_inputs
++    authority, runner = remote.authority, remote.runner
++    left = list(remote.open)
++    for aid in left:
++        session_id = remote.turns[aid]["session_id"]
++        _clear_remote(remote, _live(authority, session_id), session_id)
++    await asyncio.to_thread(recover_session_inputs, authority.db, epoch=authority.epoch)
++    try:
++        from gateway import turn_handoff
++        await turn_handoff.continue_handed_off_turns(runner, remote.home)
++    except Exception:
++        logger.warning("Continuation of the turns the carrier left failed", exc_info=True)
++    for aid in left:
++        try:
++            authority._schedule(SessionRef(authority.profile_id, remote.turns[aid]["session_id"]))
++        except Exception:
++            logger.debug("Schedule after the carrier left failed", exc_info=True)
++    await _reattach_processes(runner)
++    await asyncio.to_thread(end_turn_carry, authority.db, epoch=remote.epoch)
++    for path in (events_path(remote.home, remote.epoch), control_path(remote.home, remote.epoch)):
++        path.unlink(missing_ok=True)
++    authority._turn_carrier = None
++    logger.info("Carrying gateway exited (%d turn(s) left to the 0048 continuation)", len(left))
++
++
++async def _reattach_processes(runner) -> None:
++    try:
++        from tools.process_registry import process_registry
++        recovered = await asyncio.to_thread(process_registry.recover_from_checkpoint)
++        watchers = process_registry.pending_watchers
++        process_registry.pending_watchers = []
++        for watcher in watchers:
++            runner._spawn_supervised(lambda w=watcher: runner._run_process_watcher(w),
++                                     f"process_watcher:{watcher.get('session_id')}", restart=False)
++        if recovered:
++            logger.info("Reattached %d process(es) the carrying gateway handed over", recovered)
++    except Exception:
++        logger.warning("Reattach of the carrier's late process handoff failed", exc_info=True)
++
++
++def forward_interrupt(authority, ref, generation) -> bool:
++    """A Stop for a turn the carrier runs goes to it; True when forwarded."""
++    remote = _remote(authority)
++    if remote is None:
++        return False
++    aid, turn = remote.session_turn(ref.session_id)
++    if turn is None or turn["generation"] != generation:
++        return False
++    remote.send({"op": "interrupt", "session_id": ref.session_id, "generation": generation})
++    return True
++
++
++class _RemoteAgent:
++    """What ``steer_agent`` returns for a turn the carrier runs: its steer goes to the carrier."""
++
++    def __init__(self, remote, session_id, generation):
++        self._remote, self._session_id, self._generation = remote, session_id, generation
++
++    def steer(self, text) -> bool:
++        self._remote.send({"op": "steer", "session_id": self._session_id, "generation": self._generation,
++                           "text": text})
++        return True
++
++    def redirect(self, text) -> bool:
++        self._remote.send({"op": "redirect", "session_id": self._session_id, "generation": self._generation,
++                           "text": text})
++        return True
++
++
++def remote_agent(authority, ref, generation):
++    remote = _remote(authority)
++    if remote is None:
++        return None
++    aid, turn = remote.session_turn(ref.session_id)
++    if turn is None or turn["generation"] != generation:
++        return None
++    return _RemoteAgent(remote, ref.session_id, generation)
+diff --git a/hermes_state_runtime.py b/hermes_state_runtime.py
+index c7afa06a..e8d6b4cd 100644
+--- a/hermes_state_runtime.py
++++ b/hermes_state_runtime.py
+@@ -63,10 +63,61 @@ def _json(value):
+         raise RuntimeStoreError('invalid_params') from exc
+ 
+ 
+-def _epoch(conn, epoch):
++def _epoch(conn, epoch, *, carried=False):
++    """The writer must be the current owner. With *carried*, the owner that released the profile while it
++    still runs its in-flight turns (``gateway.restart_turn_handoff_per_turn``, ``CARRY_KEY``) passes too: it
++    may only settle or hand off the claims it made, which the callers check by ``owner_epoch``."""
+     row = conn.execute('SELECT epoch FROM runtime_epoch WHERE singleton=1').fetchone()
+-    if type(epoch) is not int or row is None or row[0] != epoch:
+-        raise RuntimeStoreError('stale_epoch')
++    if type(epoch) is int and row is not None and row[0] == epoch:
++        return
++    if carried and type(epoch) is int and _carry_epoch(conn) == epoch:
++        return
++    raise RuntimeStoreError('stale_epoch')
++
++
++# gateway.restart_turn_handoff_per_turn: the record of an owner that released the profile to the next gateway
++# and still runs the turns it had claimed (gateway/turn_carry.py). ``epoch`` is that owner's runtime epoch.
++CARRY_KEY = 'gateway.turn_carry.v1'
++
++
++def _carry_epoch(conn):
++    meta = conn.execute('SELECT value FROM state_meta WHERE key=?', (CARRY_KEY,)).fetchone()
++    try:
++        epoch = json.loads(meta[0]).get('epoch') if meta is not None else None
++    except (TypeError, ValueError, AttributeError):
++        return None
++    return epoch if type(epoch) is int else None
++
++
++def begin_turn_carry(db, *, epoch: int, record: dict) -> dict:
++    """The current owner names itself as the carrier of its claimed turns before it releases the profile."""
++    def write(conn):
++        _epoch(conn, epoch)
++        value = {**record, 'epoch': epoch}
++        conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
++                     (CARRY_KEY, _json(value)))
++        return value
++    return db._execute_write(write)
++
++
++def turn_carry_record(db) -> dict | None:
++    with db._read_ctx() as conn:
++        row = conn.execute('SELECT value FROM state_meta WHERE key=?', (CARRY_KEY,)).fetchone()
++    try:
++        value = json.loads(row[0]) if row is not None else None
++    except (TypeError, ValueError):
++        return None
++    return value if isinstance(value, dict) else None
++
++
++def end_turn_carry(db, *, epoch: int) -> bool:
++    """Drop the carry record of *epoch* (its carrier exited or finished); False when it is not that one."""
++    def write(conn):
++        if _carry_epoch(conn) != epoch:
++            return False
++        conn.execute('DELETE FROM state_meta WHERE key=?', (CARRY_KEY,))
++        return True
++    return db._execute_write(write)
+ 
+ 
+ def _session(conn, session_id):
+@@ -260,7 +311,7 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int,
+         raise RuntimeStoreError('invalid_params')
+     from hermes_state_terminal import compact_result, encode_result
+     def write(conn):
+-        _epoch(conn, epoch)
++        _epoch(conn, epoch, carried=True)
+         row = _admission(conn, admission_id)
+         session = _session(conn, row['target_session_id'])
+         if (row['status'] != 'started' or row['owner_epoch'] != epoch
+@@ -294,7 +345,7 @@ def hand_off_session_input(db, *, epoch: int, admission_id: str, generation: int
+     its owner stopped it at a point where every finished step is durable and nothing is half done. Steers
+     it carried settle as in a completed claim (a delivered text is in the transcript the resume reads)."""
+     def write(conn):
+-        _epoch(conn, epoch)
++        _epoch(conn, epoch, carried=True)
+         row = _admission(conn, admission_id)
+         session = _session(conn, row['target_session_id'])
+         if (row['status'] != 'started' or row['owner_epoch'] != epoch or type(generation) is not int
+@@ -423,7 +474,7 @@ def revert_steer_input(db, *, epoch: int, admission_id: str, generation: int) ->
+     """A transfer whose text never reached the claim's agent: the admission is queued again, in its
+     original FIFO place (its ``seq``). False when the claim's settlement already decided it."""
+     def write(conn):
+-        _epoch(conn, epoch)
++        _epoch(conn, epoch, carried=True)
+         return _requeue_transfer(conn, admission_id=admission_id, epoch=epoch, generation=generation)
+     return db._execute_write(write)
+ 
+@@ -522,17 +573,23 @@ def retarget_local_automation(db, *, epoch: int, session_id: str, principal_id:
+     return db._execute_write(write)
+ 
+ 
+-def recover_session_inputs(db, *, epoch: int) -> int:
+-    """Never replay started work. Live worker adoption is a separate explicit operation."""
++def recover_session_inputs(db, *, epoch: int, keep_epoch: int | None = None) -> int:
++    """Never replay started work. Live worker adoption is a separate explicit operation.
++    ``keep_epoch``: the previous owner still runs its claims (``gateway.restart_turn_handoff_per_turn``), so
++    its started work is not lost and stays as it is."""
+     def write(conn):
+         _epoch(conn, epoch)
+-        from hermes_state_runtime_workers import retire_stale_children
+-        retire_stale_children(conn, epoch)
+-        conn.execute("UPDATE worker_executions SET status='unknown' WHERE status IN ('registered','running') AND owner_epoch!=?", (epoch,))
++        if keep_epoch is None:
++            from hermes_state_runtime_workers import retire_stale_children
++            retire_stale_children(conn, epoch)
++        kept = -1 if keep_epoch is None else keep_epoch
++        conn.execute("UPDATE worker_executions SET status='unknown' WHERE status IN ('registered','running') "
++                     "AND owner_epoch!=? AND owner_epoch!=?", (epoch, kept))
+         # A steer handed to a lost claim may or may not have reached its agent: never replayed.
+         conn.execute("UPDATE session_admissions SET outcome='interrupted' WHERE status='terminal' AND outcome=? "
+-                     "AND owner_epoch!=?", (STEERING, epoch))
+-        return conn.execute("UPDATE session_admissions SET status='unknown' WHERE status='started' AND owner_epoch!=?", (epoch,)).rowcount
++                     "AND owner_epoch!=? AND owner_epoch!=?", (STEERING, epoch, kept))
++        return conn.execute("UPDATE session_admissions SET status='unknown' WHERE status='started' AND owner_epoch!=? "
++                            "AND owner_epoch!=?", (epoch, kept)).rowcount
+     return db._execute_write(write)
+ 
+ 
+diff --git a/tests/gateway/test_restart_turn_carry.py b/tests/gateway/test_restart_turn_carry.py
+new file mode 100644
+index 00000000..e369be5a
+--- /dev/null
++++ b/tests/gateway/test_restart_turn_carry.py
+@@ -0,0 +1,413 @@
++"""gateway.restart_turn_handoff_per_turn: a graceful restart releases the profile to the next gateway at once and
++each running turn moves over at its own step boundary, while the turns that did not reach theirs yet keep running
++on the old gateway (the carrier) under its own claims.
++
++The old owner (``owner``) and the next one share one state.db, as two gateways on one volume do."""
++import asyncio
++import json
++import time
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++from gateway.config import GatewayConfig, Platform
++from gateway.session import SessionSource
++from gateway.session_authority import LiveSession
++from hermes_state_runtime import (RuntimeStoreError, admit_session_input, begin_runtime_epoch, claim_session_input,
++                                  get_session_admission, recover_session_inputs, settle_session_input)
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_stop_cron", _noop)
++    monkeypatch.setattr(turn_carry, "_hand_off_background", _noop)
++    monkeypatch.setattr(turn_carry, "_disconnect_messaging", _noop)
++
++
++async def _noop(*_args, **_kwargs):
++    return None
++
++
++def _config(**overrides):
++    values = dict(restart_turn_handoff=True, restart_turn_handoff_boundary=True,
++                  restart_turn_handoff_wait_seconds=540.0, restart_turn_handoff_per_turn=True,
++                  restart_turn_carry_ceiling_seconds=30.0)
++    values.update(overrides)
++    return GatewayConfig(**values)
++
++
++def _claimed_turn(owner, session_id):
++    """A turn the old owner claimed and runs in this process (its agent at work)."""
++    owner.db.create_session(session_id, source="local")
++    admit_session_input(owner.db, epoch=owner.epoch, principal_id="p", session_id=session_id,
++                        request_id="r-" + session_id, payload={"text": "work on " + session_id})
++    row = claim_session_input(owner.db, epoch=owner.epoch, session_id=session_id)
++    live = LiveSession(SessionSource(platform=Platform.LOCAL, chat_id=session_id), "route-" + session_id)
++    live.event_stream.execution = {"authority_epoch": owner.epoch, "execution_generation": row["generation"],
++                                   "admission_id": row["admission_id"]}
++    owner.sessions[session_id] = live
++    agent = SimpleNamespace()
++    owner.adopted[session_id] = (row["generation"], agent)
++    owner.executing[session_id] = row["generation"]
++    return row, live, agent
++
++
++def _old_runner(owner, **config):
++    runner = owner.runner
++    runner.config = _config(**config)
++    runner._restart_requested = True
++    runner.session_authorities = None
++    runner.session_runtime_descriptor = {"state": "ready"}
++    runner._mark_api_runs_shutdown_requested = lambda: 0
++    runner._active_api_run_count = lambda: 0
++    return runner
++
++
++def _reserve_profile(tmp_path):
++    from gateway.runtime_ownership import process_ownership
++    process_ownership.reserve([tmp_path])
++    return process_ownership
++
++
++class _NextAuthority:
++    """The next gateway's authority, as far as the relay and the pick-up use it."""
++
++    def __init__(self, db, profile_id="default"):
++        self.db, self.profile_id = db, profile_id
++        self.epoch = begin_runtime_epoch(db, instance_id="second")
++        self.sessions, self.scheduled = {}, []
++
++    def _schedule(self, ref):
++        self.scheduled.append((ref.session_id, time.monotonic()))
++
++    def _publish_pending(self, _ref):
++        return None
++
++
++async def _until(predicate, timeout=5.0):
++    loop = asyncio.get_running_loop()
++    end = loop.time() + timeout
++    while not predicate():
++        assert loop.time() < end, "timed out"
++        await asyncio.sleep(0.01)
++
++
++async def _hand_off_at_boundary(owner, row, live):
++    """The turn's agent stopped at its boundary; the old owner's drain requeues it (turn_boundary.finish_handed_off)."""
++    await turn_boundary._commit(owner, live, get_session_admission(owner.db, admission_id=row["admission_id"]),
++                                {"prompts": []})
++
++
++@pytest.mark.asyncio
++async def test_early_boundary_turn_resumes_on_the_next_gateway_while_another_still_runs_on_the_old(owner, tmp_path):
++    ownership = _reserve_profile(tmp_path)
++    fast, fast_live, fast_agent = _claimed_turn(owner, "fast")
++    slow, slow_live, slow_agent = _claimed_turn(owner, "slow")
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++
++    # The profile is released while both turns still run: the next gateway can take over at once.
++    await _until(turn_carry.released)
++    assert not ownership.owns(tmp_path)
++    assert fast_agent._handoff_boundary and slow_agent._handoff_boundary
++    assert turn_carry.live_carry_epoch(owner.db) == owner.epoch
++
++    nxt = _NextAuthority(owner.db)
++    recover_session_inputs(owner.db, epoch=nxt.epoch, keep_epoch=turn_carry.live_carry_epoch(owner.db))
++    for sid, live in (("fast", fast_live), ("slow", slow_live)):
++        nxt.sessions[sid] = LiveSession(live.source, live.route)
++    from hermes_state_runtime import turn_carry_record
++    remote = turn_carry._Remote(SimpleNamespace(), nxt, turn_carry_record(owner.db), tmp_path)
++    nxt._turn_carrier = remote
++    watch = asyncio.ensure_future(turn_carry._watch(remote))
++
++    # The fast turn reaches its boundary: the next gateway picks it up within a poll, the slow one keeps running.
++    at_boundary = time.monotonic()
++    await _hand_off_at_boundary(owner, fast, fast_live)
++    await _until(lambda: any(sid == "fast" for sid, _ in nxt.scheduled))
++    picked = next(t for sid, t in nxt.scheduled if sid == "fast") - at_boundary
++    assert picked < 1.0
++    assert not any(sid == "slow" for sid, _ in nxt.scheduled)
++    resumed = claim_session_input(owner.db, epoch=nxt.epoch, session_id="fast")
++    assert resumed["admission_id"] == fast["admission_id"] and resumed["resume"] == {"prompts": []}
++    assert get_session_admission(owner.db, admission_id=slow["admission_id"])["status"] == "started"
++    assert not carry.done()
++
++    # The slow turn's model call was its last step: it completes and settles on the old gateway. Its viewers, now on
++    # the next gateway, get its frames up to the reply, published right after the settlement.
++    seen = []
++    nxt.sessions["slow"].event_stream.observers.add(lambda frame: seen.append(frame["params"]["type"]))
++    with slow_live.event_stream.lock:
++        slow_live.event_stream.publish("slow", {"text": "almost"}, event_type="message.delta")
++    await _until(lambda: "message.delta" in seen)
++    assert nxt.sessions["slow"].event_stream.execution["admission_id"] == slow["admission_id"]
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=slow["admission_id"],
++                         generation=slow["generation"], outcome="completed")
++    await asyncio.sleep(0.2)
++    with slow_live.event_stream.lock:
++        slow_live.event_stream.publish("slow", {"text": "almost done"}, event_type="message.complete")
++    await _until(lambda: "message.complete" in seen)
++    assert nxt.sessions["slow"].event_stream.execution == {}  # it shows as idle there
++    await asyncio.wait_for(carry, 5.0)
++    assert carry.result() is True
++    import os
++    os.close(runner._turn_carry.lock_fd)  # the carrier process exits
++    await asyncio.wait_for(watch, 5.0)
++    assert turn_carry_record(owner.db) is None
++
++
++@pytest.mark.asyncio
++async def test_the_next_gateway_does_not_touch_a_session_the_carrier_runs(owner, tmp_path):
++    import fcntl
++    import os
++    from hermes_state_runtime import begin_turn_carry
++    row, _live, _agent = _claimed_turn(owner, "busy")
++    begin_turn_carry(owner.db, epoch=owner.epoch, record={"turns": {}})
++    fd = os.open(turn_carry.lock_path(tmp_path), os.O_RDWR | os.O_CREAT, 0o600)
++    fcntl.flock(fd, fcntl.LOCK_EX)
++    try:
++        carrying = turn_carry.live_carry_epoch(owner.db)
++        assert carrying == owner.epoch
++        new_epoch = begin_runtime_epoch(owner.db, instance_id="second")
++        assert recover_session_inputs(owner.db, epoch=new_epoch, keep_epoch=carrying) == 0
++        assert get_session_admission(owner.db, admission_id=row["admission_id"])["status"] == "started"
++        # New input for that conversation queues behind the carried turn; nothing is claimed.
++        admit_session_input(owner.db, epoch=new_epoch, principal_id="p", session_id="busy", request_id="r2",
++                            payload={"text": "next"})
++        assert claim_session_input(owner.db, epoch=new_epoch, session_id="busy") is None
++        # The carrier settles its own claim under its old epoch; any other stale writer is still refused.
++        settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                             generation=row["generation"], outcome="completed")
++        with pytest.raises(RuntimeStoreError):
++            admit_session_input(owner.db, epoch=owner.epoch, principal_id="p", session_id="busy",
++                                request_id="r3", payload={"text": "late"})
++        assert claim_session_input(owner.db, epoch=new_epoch, session_id="busy")["request_id"] == "r2"
++    finally:
++        os.close(fd)
++    # Once the carrier is gone its record no longer protects anything.
++    assert turn_carry.live_carry_epoch(owner.db) is None
++
++
++@pytest.mark.asyncio
++async def test_prompts_and_stop_of_a_carried_turn_are_answerable_on_the_next_gateway(owner, tmp_path):
++    ownership = _reserve_profile(tmp_path)
++    row, live, agent = _claimed_turn(owner, "ask")
++    answers = []
++    agent.interrupts = 0
++
++    def hard_interrupt(*_a, **_k):
++        agent.interrupts += 1
++    agent.hard_interrupt = hard_interrupt
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    assert not ownership.owns(tmp_path)
++
++    nxt = _NextAuthority(owner.db)
++    nxt.sessions["ask"] = LiveSession(live.source, live.route)
++    from hermes_state_runtime import turn_carry_record
++    remote = turn_carry._Remote(SimpleNamespace(), nxt, turn_carry_record(owner.db), tmp_path)
++    nxt._turn_carrier = remote
++
++    # On the carrier, a subagent of the turn asks a question (its turn's own prompts are handed over at once).
++    with live.event_stream.lock:
++        live.controls.remote_responders["q1"] = lambda kind, pid, value: answers.append((kind, pid, value))
++        live.controls.background.add("q1")
++        live.controls.pending["q1"] = (None, {"kind": "clarify", "prompt_id": "q1",
++                                              "execution_generation": row["generation"], "question": "which?",
++                                              "choices": ["a", "b"], "multi_select": False})
++        live.event_stream.publish("ask", live.controls.pending["q1"][1], event_type="clarify.request")
++        live.event_stream.publish("ask", {"text": "thinking"}, event_type="message.delta")
++
++    # The next gateway relays both frames: the viewer sees the running turn and the open question there.
++    nxt_live = nxt.sessions["ask"]
++    await _until(lambda: (turn_carry._relay_frames(remote) or True) and "q1" in nxt_live.controls.pending)
++    snapshot = nxt_live.controls.snapshot("ask", row["generation"])
++    assert [p["prompt_id"] for p in snapshot] == ["q1"]
++    assert any(e for e in nxt_live.event_stream.turn_for(row["generation"]))
++    assert nxt_live.event_stream.execution["authority_epoch"] == nxt.epoch
++
++    assert nxt_live.controls.respond("ask", row["generation"], "q1", {"answer": "b"}, kind="clarify")["status"] == "resolved"
++    await _until(lambda: answers == [("clarify", "q1", "b")])
++
++    # A Stop on the next gateway reaches the carried turn.
++    from gateway.session_contract import SessionRef
++    assert turn_carry.forward_interrupt(nxt, SessionRef("default", "ask"), row["generation"]) is True
++    await _until(lambda: agent.interrupts == 1)
++    assert agent._handoff_boundary is False  # a stopped turn ends there; it is not handed over
++
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="interrupted")
++    await asyncio.wait_for(carry, 5.0)
++    import os
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_an_api_request_sent_to_the_old_gateway_during_the_restart_is_served_by_the_next(owner, tmp_path,
++                                                                                               monkeypatch):
++    """The old pod's API port keeps accepting and relays to the next gateway's API server (another network
++    namespace), which serves the request once it listens: no 503 and no refused connection meanwhile."""
++    from aiohttp import ClientSession, web
++    _reserve_profile(tmp_path)
++    def answer(who):
++        async def health(_request):
++            return web.json_response({"who": who})
++        return health
++    old_app = web.Application()
++    old_app.router.add_get("/health", answer("old"))
++    old_runner = web.AppRunner(old_app)
++    await old_runner.setup()
++    site = web.TCPSite(old_runner, "127.0.0.1", 0)
++    await site.start()
++    old_port = site._server.sockets[0].getsockname()[1]
++    new_app = web.Application()
++    new_app.router.add_get("/health", answer("next"))
++    new_runner = web.AppRunner(new_app)
++    await new_runner.setup()
++    new_site = web.TCPSite(new_runner, "127.0.0.1", 0)
++    await new_site.start()
++    new_port = new_site._server.sockets[0].getsockname()[1]
++    await new_site.stop()  # the next gateway binds its API port only once it owns the profile
++
++    adapter = SimpleNamespace(_site=site, _port=new_port)
++    runner = _old_runner(owner)
++    runner.adapters = {Platform.API_SERVER: adapter}
++    import gateway.listener_relay as relay
++    monkeypatch.setattr(relay, "successor_target", lambda _marker: ("127.0.0.1", 1))
++    row, live, _agent = _claimed_turn(owner, "api")
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    assert adapter._site is None
++
++    async def ask():
++        async with ClientSession() as http:
++            async with http.get(f"http://127.0.0.1:{old_port}/health") as response:
++                return response.status, await response.json()
++    pending = asyncio.ensure_future(ask())
++    await asyncio.sleep(0.3)  # the next gateway is still starting: the request waits, it is not refused
++    assert not pending.done()
++    new_site = web.TCPSite(new_runner, "127.0.0.1", new_port)
++    await new_site.start()
++    assert await asyncio.wait_for(pending, 5.0) == (200, {"who": "next"})
++
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 10.0)
++    import os
++    os.close(runner._turn_carry.lock_fd)
++    await old_runner.cleanup()
++    await new_runner.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_an_api_request_on_a_kept_alive_connection_to_the_carrier_runs_on_the_next_gateway(monkeypatch):
++    """A client that keeps its connection to the old gateway's API server open sends its next request there: the
++    carrier forwards it to the next gateway (waiting for it to listen) instead of answering 503 draining."""
++    from aiohttp import ClientSession, web
++
++    async def old_handler(_request):
++        return web.json_response({"error": "Gateway is draining existing work; retry shortly."}, status=503)
++
++    async def new_handler(request):
++        return web.json_response({"who": "next", "body": await request.json()})
++    old_app = web.Application(middlewares=[turn_carry.api_forward_middleware()])
++    old_app.router.add_post("/v1/chat/completions", old_handler)
++    old_runner = web.AppRunner(old_app)
++    await old_runner.setup()
++    old_site = web.TCPSite(old_runner, "127.0.0.1", 0)
++    await old_site.start()
++    old_port = old_site._server.sockets[0].getsockname()[1]
++    new_app = web.Application()
++    new_app.router.add_post("/v1/chat/completions", new_handler)
++    new_runner = web.AppRunner(new_app)
++    await new_runner.setup()
++    probe = web.TCPSite(new_runner, "127.0.0.1", 0)
++    await probe.start()
++    new_port = probe._server.sockets[0].getsockname()[1]
++    await probe.stop()
++    try:
++        async with ClientSession() as http:
++            url = f"http://127.0.0.1:{old_port}/v1/chat/completions"
++            async with http.post(url, json={"n": 1}) as response:
++                assert response.status == 503  # before the restart released the profile: this gateway answers
++            monkeypatch.setattr(turn_carry, "_released", True)
++            monkeypatch.setattr(turn_carry, "_api_target", ("127.0.0.1", new_port))
++            pending = asyncio.ensure_future(http.post(url, json={"n": 2}))  # the same kept-alive connection
++            await asyncio.sleep(0.3)
++            assert not pending.done()  # waits for the next gateway's API server instead of failing
++            site = web.TCPSite(new_runner, "127.0.0.1", new_port)
++            await site.start()
++            response = await asyncio.wait_for(pending, 5.0)
++            assert response.status == 200 and await response.json() == {"who": "next", "body": {"n": 2}}
++            response.release()
++    finally:
++        await old_runner.cleanup()
++        await new_runner.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_a_model_call_past_the_wait_cap_finishes_and_is_handed_over(owner, tmp_path):
++    """restart_turn_handoff_wait_seconds no longer stops a turn: its step finishes and the turn is handed over."""
++    _reserve_profile(tmp_path)
++    row, live, agent = _claimed_turn(owner, "long")
++    runner = _old_runner(owner, restart_turn_handoff_wait_seconds=0.1)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    await asyncio.sleep(0.6)  # the model call streams on, well past the cap
++    assert agent._handoff_boundary is True and not carry.done()
++    await _hand_off_at_boundary(owner, row, live)
++    await asyncio.wait_for(carry, 5.0)
++    assert agent._handoff_boundary is True
++    assert get_session_admission(owner.db, admission_id=row["admission_id"])["status"] == "queued"
++    import os
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_only_the_ceiling_stops_a_carried_turn(owner, tmp_path):
++    _reserve_profile(tmp_path)
++    _row, _live, agent = _claimed_turn(owner, "stuck")
++    runner = _old_runner(owner, restart_turn_carry_ceiling_seconds=0.3)
++    assert await asyncio.wait_for(turn_carry.carry_restart(runner), 5.0) is True
++    assert agent._handoff_boundary is False  # stopped the restart_turn_handoff way by the stop that follows
++    import os
++    os.close(runner._turn_carry.lock_fd)
++
++
++def test_config_off_keeps_the_single_handover(owner, tmp_path):
++    cfg = GatewayConfig.from_dict({"restart_turn_handoff": True, "restart_turn_handoff_boundary": True})
++    assert cfg.restart_turn_handoff_per_turn is False and cfg.restart_turn_carry_ceiling_seconds == 1080.0
++    on = GatewayConfig.from_dict({"restart_turn_handoff": True, "restart_turn_handoff_boundary": True,
++                                  "restart_turn_handoff_per_turn": True,
++                                  "restart_turn_carry_ceiling_seconds": 900})
++    assert on.restart_turn_handoff_per_turn is True and on.restart_turn_carry_ceiling_seconds == 900.0
++    assert json.loads(json.dumps(on.to_dict()))["restart_turn_handoff_per_turn"] is True
++    runner = SimpleNamespace(config=cfg)
++    assert turn_carry.configured(runner) is False and turn_carry.start_watch(runner) is False
++    # Without a carrier the next owner fences the previous owner's started claims as before.
++    row, _live, _agent = _claimed_turn(owner, "lost")
++    new_epoch = begin_runtime_epoch(owner.db, instance_id="second")
++    assert turn_carry.live_carry_epoch(owner.db) is None
++    assert recover_session_inputs(owner.db, epoch=new_epoch) == 1
++    assert get_session_admission(owner.db, admission_id=row["admission_id"])["status"] == "unknown"
++    with pytest.raises(RuntimeStoreError):
++        settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                             generation=row["generation"], outcome="completed")
++
++
++def test_the_keys_load_from_config_yaml(tmp_path):
++    from gateway.config import load_gateway_config
++    (tmp_path / "config.yaml").write_text(
++        "gateway:\n  restart_turn_handoff: true\n  restart_turn_handoff_boundary: true\n"
++        "  restart_turn_handoff_per_turn: true\n  restart_turn_carry_ceiling_seconds: 600\n", encoding="utf-8")
++    cfg = load_gateway_config()
++    assert cfg.restart_turn_handoff_per_turn is True and cfg.restart_turn_carry_ceiling_seconds == 600.0
++    assert turn_carry.configured(SimpleNamespace(config=cfg)) is True

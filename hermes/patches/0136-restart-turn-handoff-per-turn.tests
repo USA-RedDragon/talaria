@@ -1,0 +1,26 @@
+# The boundary handoff (0131, 0135) this patch moves to a per-turn takeover: its resume, wait and admission
+tests/gateway/test_restart_turn_boundary.py
+tests/gateway/test_restart_boundary_admission.py
+tests/gateway/test_restart_turn_resume_pending_call.py
+tests/gateway/test_restart_takeover_gap.py
+tests/agent/test_turn_boundary_handoff.py
+tests/gateway/test_restart_turn_handoff.py
+# The SIGTERM restart, the stop that follows the carry, the standby and the listener and ticket handover
+tests/gateway/test_sigterm_restart_wait.py
+tests/gateway/test_restart_drain.py
+tests/gateway/test_gateway_shutdown.py
+tests/gateway/test_runtime_lock_wait.py
+tests/gateway/test_standby_marker_stale.py
+# The epoch fence the carrier passes for its own claims, the startup recovery that keeps them, settlement
+tests/hermes_state/test_runtime_admission.py
+tests/hermes_state/test_runtime_adoption.py
+tests/hermes_state/test_runtime_worker.py
+tests/hermes_state/test_terminal_retirement.py
+tests/gateway/test_session_authority.py
+tests/gateway/test_session_authority_adopted_stop.py
+tests/gateway/test_active_session_refusal_completion.py
+tests/gateway/test_hosted_stop_executor_recovery.py
+tests/cron/test_cron_recovery.py
+# The event stream mirror and the gateway config
+tests/gateway/test_local_viewer_events_turn.py
+tests/gateway/test_config.py
