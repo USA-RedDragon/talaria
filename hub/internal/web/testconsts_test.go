@@ -13,6 +13,8 @@ const (
 
 	fileToolCard   = "toolcard.js"
 	keyDisplayMeta = "display_metadata"
+	keyDisplayKind = "display_kind"
+	keyIsError     = "is_error"
 	keyDurationMS  = "duration_ms"
 	keyResultSize  = "result_size"
 	keyToolOutcome = "tool_outcome"

@@ -39,7 +39,13 @@ sandbox.window.HubPeer = { names: { sub: () => "" }, who(ref, names) { return { 
 vm.createContext(sandbox);
 const dir = process.argv[2];
 const cardFiles = ["toolcard.js", ...fs.readdirSync(dir + "/cards").filter((f) => f.endsWith(".js")).sort().map((f) => "cards/" + f)];
-for (const f of ["times.js", ...cardFiles, "toolgroup.js", "minichat.js", "todo.js", "activity.js"]) vm.runInContext(fs.readFileSync(dir + "/" + f, "utf8"), sandbox);
+// A subagent's steps draw with the chat's own view (chatview.js), which
+// listens to the page and observes its log.
+class Quiet { observe() {} unobserve() {} disconnect() {} }
+Object.assign(sandbox, { ResizeObserver: Quiet, MutationObserver: Quiet, AbortController, URL, addEventListener: () => {} });
+sandbox.hubMarkdown = { renderUser: (n, t) => n.append(t), render: (n, t) => n.replaceChildren(t) };
+for (const f of ["times.js", "attach.js", "peer.js", "notice.js", "origin.js", ...cardFiles, "toolgroup.js", "uistate.js", "stick.js", "pageblocks.js", "pagesend.js",
+  "plain.js", "chatview.js", "minichat.js", "todo.js", "activity.js"]) vm.runInContext(fs.readFileSync(dir + "/" + f, "utf8"), sandbox);
 
 // What the hub answers to the sidebar's reads.
 let list = [];
@@ -64,7 +70,8 @@ async function api(method, path) {
   }
   return {};
 }
-const act = sandbox.window.HubActivity({ api, el, banner: () => {}, showText: () => {} });
+const env = require("../chatenv.js")(el);
+const act = sandbox.window.HubActivity({ api, el, banner: () => {}, showText: () => {}, chat: () => ({ env, base: "/api/sessions/b/s", backend: "b", session: "s", cards: null }) });
 
 (async () => {
 const chat = { base: "/api/sessions/b/s", backend: "b" };

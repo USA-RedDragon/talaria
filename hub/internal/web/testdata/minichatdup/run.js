@@ -40,7 +40,7 @@ let chrome;
 
   // The brief: whole task, folded after six lines.
   await until(`document.querySelector(".act .mc-brief-text").textContent.includes("Then stop.")`, "the whole task");
-  assert.strictEqual(await ev(`document.querySelector(".act .mc").firstElementChild.className`), "mc-brief");
+  assert.strictEqual(await ev(`document.querySelector(".act .mc > .log").firstElementChild.className`), "mc-brief");
   assert.strictEqual(await ev(`document.querySelector(".act .mc-brief-more").textContent`), "Show all");
   const folded = await ev(`document.querySelector(".act .mc-brief-text").getBoundingClientRect().height`);
   await ev(`document.querySelector(".act .mc-brief-more").click()`);
@@ -66,16 +66,16 @@ let chrome;
   assert.strictEqual(await count(text1), 1, await ev(`document.querySelector(".act .mc").innerText`));
   assert.strictEqual(await count(text2), 1);
   assert.strictEqual(await ev(`document.querySelectorAll(".act .mc .note:not([hidden])").length`), 1); // only "Started"
-  await ev(`document.querySelector(".act .mc").scrollTop = 1e6`);
+  await ev(`document.querySelector(".act .mc > .log").scrollTop = 1e6`);
 
   for (const [w, h, dark, name] of [[412, 915, false, "412-light"], [412, 915, true, "412-dark"], [1280, 800, false, "1280-light"], [1280, 800, true, "1280-dark"]]) {
     await view(w, h, dark);
     await c.frames(3);
     await shot(name);
-    await ev(`document.querySelector(".act .mc").scrollTop = 0`);
+    await ev(`document.querySelector(".act .mc > .log").scrollTop = 0`);
     await c.frames(2);
     await shot(name + "-top");
-    await ev(`document.querySelector(".act .mc").scrollTop = 1e6`);
+    await ev(`document.querySelector(".act .mc > .log").scrollTop = 1e6`);
     assert.strictEqual(await count(text1), 1);
   }
   c.close();

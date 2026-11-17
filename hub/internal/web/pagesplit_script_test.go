@@ -13,14 +13,18 @@ import (
 // text so far has no open fence.
 func TestPiecesInsideAFenceStayOneBubble(t *testing.T) {
 	t.Parallel()
-	b, err := os.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
+	// The chat draws rows and replies through the one chat view (chatview.js).
+	var src string
+	for _, f := range []string{"static/app.js", "static/chatview.js"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src += string(b)
 	}
-	src := string(b)
 	for name, re := range map[string]string{
 		"a stored assistant row": `(?s)if \(text\) \{\s*this\.assistantText\(text\);.*?if \(!window\.HubPageBlocks\.open\(this\.turn\.raw\)\) this\.turn\.text = null;`,
-		"message.interim":        `(?s)case "message\.interim":.*?if \(!window\.HubPageBlocks\.open\(this\.turn\.raw\)\) this\.turn\.text = null;.*?break;`,
+		"message.interim":        `(?s)case "message\.interim":.*?if \(!window\.HubPageBlocks\.open\(this\.turn\.raw\)\) this\.turn\.text = null;.*?return true;`,
 		"message.start":          `case "message\.start":[^}]*?HubPageBlocks\.open\(this\.turn\.raw\)\)\) this\.turn = null;`,
 	} {
 		if !regexp.MustCompile(re).MatchString(src) {

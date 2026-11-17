@@ -70,7 +70,7 @@ func firstSteps() []map[string]any {
 			"tool_calls": []map[string]any{{"id": "c1", fieldName: toolTerminal, kArgs: map[string]any{kCommand: "ls store"}}}},
 		{kRole: stepTool, fieldName: toolTerminal, "tool_call_id": "c1", kTimestamp: 1003.5, kArgs: map[string]any{kCommand: "ls store"},
 			"result": `{"output": "", "exit_code": 2}`, keyResultSize: 30,
-			keyDisplayMeta: map[string]any{keyToolOutcome: map[string]any{keyDurationMS: 2500, "is_error": true}}},
+			keyDisplayMeta: map[string]any{keyToolOutcome: map[string]any{keyDurationMS: 2500, keyIsError: true}}},
 		{kRole: roleAssistant, keyText: "The folder is missing.", kTimestamp: 1004.0},
 	}
 }

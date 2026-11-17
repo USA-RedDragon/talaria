@@ -95,7 +95,7 @@ func cardParity(t *testing.T, bin string) {
 		if s, ok := c.Result.(string); ok {
 			res = []byte(s)
 		}
-		meta := map[string]any{keyToolOutcome: map[string]any{keyDurationMS: c.DurationMS, "is_error": c.IsError}}
+		meta := map[string]any{keyToolOutcome: map[string]any{keyDurationMS: c.DurationMS, keyIsError: c.IsError}}
 		rows = append(rows, map[string]any{kRole: roleAssistant, kText: "", kTimestamp: at, kCalls: []map[string]any{{"id": c.ID, fnKey: map[string]any{fieldName: c.Name, ilArgs: string(args)}}}})
 		child = append(child, map[string]any{kRole: roleAssistant, keyText: "", kTimestamp: at, kCalls: []map[string]any{{"id": c.ID, fieldName: c.Name, kArgs: c.Args}}})
 		if c.Running {

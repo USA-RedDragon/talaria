@@ -37,7 +37,7 @@ func TestNoticeCardChrome(t *testing.T) {
 	msgs = append(msgs, map[string]any{kRole: roleUser, kText: "go", kTimestamp: 1763000000.0})
 	for i, n := range list {
 		msgs = append(msgs,
-			map[string]any{kRole: roleUser, kText: n.Text, "display_kind": "async_delegation_complete", kTimestamp: 1763000100.0 + float64(i)},
+			map[string]any{kRole: roleUser, kText: n.Text, keyDisplayKind: "async_delegation_complete", kTimestamp: 1763000100.0 + float64(i)},
 			map[string]any{kRole: roleAssistant, kText: textOnIt, kTimestamp: 1763000101.0 + float64(i)})
 	}
 	e := setup(t)

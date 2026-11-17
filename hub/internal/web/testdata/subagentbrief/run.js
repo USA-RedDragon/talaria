@@ -49,8 +49,8 @@ let chrome;
   await until(`document.querySelectorAll(".act .mc .mc-brief").length === 2`, "the task and the context");
   const heads = await ev(`[...document.querySelectorAll(".act .mc .mc-brief-head")].map((x) => x.textContent)`);
   assert.deepStrictEqual(heads, ["Task", "Context"]);
-  assert.strictEqual(await ev(`document.querySelector(".act .mc").firstElementChild.className`), "mc-brief");
-  const order = await ev(`[...document.querySelector(".act .mc").children].slice(0, 3).map((x) => x.className.split(" ")[0])`);
+  assert.strictEqual(await ev(`document.querySelector(".act .mc > .log").firstElementChild.className`), "mc-brief");
+  const order = await ev(`[...document.querySelector(".act .mc > .log").children].slice(0, 3).map((x) => x.className.split(" ")[0])`);
   assert.deepStrictEqual(order, ["mc-brief", "mc-brief", "note"]);
   const ctx = await ev(`document.querySelectorAll(".act .mc-brief-text")[1].textContent`);
   assert.ok(ctx.startsWith("Background:\n- The status bar") && ctx.endsWith("End of the context.") && ctx.includes("\n\n"), ctx);
@@ -80,14 +80,14 @@ let chrome;
     await view(w, h2, dark);
     await c.frames(3);
     // The card is open; its title may wrap. Shoot it, folds closed then open.
-    await ev(`document.querySelector(".act .mc").scrollTop = 0`);
+    await ev(`document.querySelector(".act .mc > .log").scrollTop = 0`);
     await c.frames(2);
     await shot(name);
     await ev(`${more(0)}.click(); ${more(1)}.click();`);
     await c.frames(2);
     await shot(name + "-unfolded");
     await ev(`${more(0)}.click(); ${more(1)}.click();`);
-    await ev(`document.querySelector(".act .mc").scrollTop = 0`);
+    await ev(`document.querySelector(".act .mc > .log").scrollTop = 0`);
     assert.strictEqual(await ev(`${more(0)}.textContent + ${more(1)}.textContent`), "Show allShow all");
   }
   c.close();

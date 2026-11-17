@@ -40,6 +40,16 @@ class El {
     const k = this.parentNode.children;
     return k[k.indexOf(this) - 1] || null;
   }
+  get nextElementSibling() {
+    if (!this.parentNode) return null;
+    const k = this.parentNode.children;
+    return k[k.indexOf(this) + 1] || null;
+  }
+  get firstElementChild() { return this.children[0] || null; }
+  get lastElementChild() { const k = this.children; return k[k.length - 1] || null; }
+  contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
+  set innerHTML(v) { this.childNodes = []; this.html = String(v); }
+  getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; }
   get isConnected() { return true; }
   get textContent() { return this.childNodes.map((n) => n.textContent).join(""); }
   set textContent(v) { this.childNodes = []; if (v !== "" && v !== undefined && v !== null) this.append(String(v)); }
@@ -61,6 +71,11 @@ class El {
     if (m[1] && this.tagName !== m[1].toUpperCase()) return false;
     for (const c of m[2].split(".").filter(Boolean)) if (!this._cls().includes(c)) return false;
     for (const a of m[3].match(/\[[^\]]+\]/g) || []) {
+      const has = a.match(/^\[([\w-]+)\]$/);
+      if (has) {
+        if (this.getAttribute(has[1]) === null) return false;
+        continue;
+      }
       const [, k, v] = a.match(/\[([\w-]+)="?([^"\]]*)"?\]/);
       if (this.getAttribute(k) !== v) return false;
     }

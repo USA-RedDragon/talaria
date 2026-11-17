@@ -5,10 +5,10 @@
 // session's subagent.* events and from GET .../activity, which lists the
 // running ones (subagent.list) and the background commands (process.list).
 // /bg prompts come from background.start (sent by the hub) and
-// background.complete. ctx gives it the app's api, el, banner, chat (the
-// open Chat or null), showText (a dialog with a long text), words, and the
-// chat's toast, highlight, diff and page (the card of a published page)
-// for the tool cards of a subagent's steps.
+// background.complete. ctx gives it the app's api, el, showText (a dialog
+// with a long text), drawn, and chat(): the chat view a subagent's steps
+// draw with ({ env, base, backend, session, cards }, see minichat.js), or
+// null when no chat is open.
 // The chat's to-do list (Hermes patch 0126, todo.js) is the Plan section above
 // the subagents, a line above the message box, and, for a subagent, the list
 // of its own in its row: from GET .../todos, from each todo.updated event and
@@ -515,7 +515,7 @@ window.HubActivity = (ctx) => {
   function mini(r) {
     let m = S.minis.get(r.id);
     if (!m) {
-      m = { view: window.HubMiniChat.create({ el, toast, highlight: ctx.highlight, diff: ctx.diff, page: ctx.page, cards: ctx.cards ? ctx.cards() : null }), seq: 0, epoch: null,
+      m = { view: window.HubMiniChat.create({ el, chat: ctx.chat() }), seq: 0, epoch: null,
         busy: false, done: false, top: 0, end: true };
       S.minis.set(r.id, m);
       m.view.empty("Loading the steps…");
@@ -1027,7 +1027,7 @@ window.HubActivity = (ctx) => {
     const m = S.minis.get(r.id);
     const d = el("dialog", "picker steps");
     d.append(el("h2", "", r.goal || "Subagent"));
-    const v = window.HubMiniChat.create({ el, toast, highlight: ctx.highlight, diff: ctx.diff, page: ctx.page, cards: ctx.cards ? ctx.cards() : null, full: true });
+    const v = window.HubMiniChat.create({ el, chat: ctx.chat(), full: true });
     const body = el("div", "pbody");
     body.append(v.node);
     const foot = el("div", "pfoot");
@@ -1036,7 +1036,7 @@ window.HubActivity = (ctx) => {
     shut.onclick = () => d.close();
     foot.append(shut);
     d.append(body, foot);
-    d.addEventListener("close", () => d.remove());
+    d.addEventListener("close", () => { v.dispose(); d.remove(); });
     document.body.append(d);
     d.showModal();
     v.set(miniInfo(r));
@@ -1144,8 +1144,8 @@ window.HubActivity = (ctx) => {
     const top = body.scrollTop;
     // A small chat loses its place when its row is drawn again: keep it.
     for (const m of S.minis.values()) {
-      const n = m.view.node;
-      if (n.isConnected) { m.top = n.scrollTop; m.end = window.HubMiniChat.near(n); }
+      const n = m.view.log;
+      if (n.isConnected) { m.top = n.scrollTop; m.end = m.view.pinned(); }
     }
     const focus = document.activeElement && body.contains(document.activeElement) && document.activeElement.tagName === "INPUT"
       ? { row: document.activeElement.closest("[data-act]"), value: document.activeElement.value, pos: document.activeElement.selectionStart }
@@ -1180,7 +1180,7 @@ window.HubActivity = (ctx) => {
     for (const id of [...S.nodes.keys()]) if (!out.includes(S.nodes.get(id).node)) S.nodes.delete(id);
     clocks();
     for (const m of S.minis.values()) {
-      const n = m.view.node;
+      const n = m.view.log;
       if (n.isConnected) n.scrollTop = m.end ? n.scrollHeight : m.top;
     }
     body.scrollTop = top;

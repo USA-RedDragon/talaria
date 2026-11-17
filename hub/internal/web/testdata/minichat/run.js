@@ -8,11 +8,15 @@ const vm = require("vm");
 const assert = require("assert");
 
 const { el, document } = require("../fakedom.js");
-const sandbox = { window: {}, document, setInterval: () => 1, clearInterval: () => {}, Date, Math, JSON, Intl };
+const chatEnv = require("../chatenv.js");
+const sandbox = chatEnv.sandbox(document);
 sandbox.window.HubIcons = { icon: (name) => el("svg", "ico i-" + name), button: (name, label, cls) => el("button", cls) };
 vm.createContext(sandbox);
 for (const f of process.argv.slice(2)) vm.runInContext(fs.readFileSync(f, "utf8"), sandbox);
 const { HubMiniChat: M, HubToolGroup: G } = sandbox.window;
+// create builds a subagent's view with the chat view of a chat.
+const env = chatEnv(el);
+const create = (o) => M.create(Object.assign({ el, chat: { env, base: "/api/sessions/pc/s1", cards: null } }, o));
 
 const T0 = Date.UTC(2026, 10, 12, 22, 0, 0);
 const iso = (s) => new Date(T0 + s * 1000).toISOString();
@@ -20,8 +24,6 @@ let seq = 0;
 const ev = (o) => Object.assign({ seq: ++seq }, o, { ts: iso(o.at) });
 
 // Pure parts.
-assert.strictEqual(M.pill(1), "1 new step");
-assert.strictEqual(M.pill(3), "3 new steps");
 {
   const box = { scrollHeight: 1000, clientHeight: 200, scrollTop: 760 };
   assert.ok(M.near(box));
@@ -37,9 +39,6 @@ assert.strictEqual(M.pill(3), "3 new steps");
   assert.strictEqual(M.steerState(steer, [steer, ev({ type: "tool_end", at: 9 })], false), "waits");
   assert.strictEqual(M.steerState(steer, [steer, ev({ type: "tool_end", at: 11 })], false), "read");
   assert.strictEqual(M.steerState(steer, [steer, ev({ type: "message", at: 12 })], true), "missed");
-  // A result of a call already shown adds nothing to read.
-  const evs = [ev({ type: "tool_end", call_id: "x", at: 1 }), ev({ type: "tool_start", call_id: "y", at: 2 }), ev({ type: "tool_end", call_id: "y", at: 3 }), ev({ type: "message", at: 4 })];
-  assert.strictEqual(M.steps(evs, ["x"]), 2);
   assert.strictEqual(M.end({ state: "ok", durationS: 1300, result: "Added it." }).head, "Done in 21 min 40 s");
   assert.strictEqual(M.end({ state: "bad", durationS: 723 }).head, "Failed after 12 min 3 s");
   assert.ok(M.end({ state: "bad" }).bad && !M.end({ state: "ok" }).bad);
@@ -53,11 +52,12 @@ assert.strictEqual(M.pill(3), "3 new steps");
   assert.strictEqual(G.summary([card("browser_click"), card("my_tool")]).text, "Used the browser, used my tool");
 }
 
-// The view.
-const v = M.create({ el, toast: () => {} });
-const box = v.node;
+// The view: the chat's own log (chatview.js) in a box, with the chat's jump button under it.
+const v = create();
+const box = v.log;
+assert.ok(v.node.classList.contains("mc") && box.classList.contains("log"));
 const kidsOf = (b) => b.children.map((n) => n.className.split(" ")[0] + (n.classList.contains("running") ? ".running" : ""));
-const kids = () => kidsOf(box);
+const kids = () => kidsOf(box).filter((k) => k !== "when");
 v.set({ model: "claude-opus-5-5" });
 v.add([
   ev({ type: "goal", text: "Count the rows", at: 0 }),
@@ -76,73 +76,76 @@ v.add([
 assert.ok(box.children[0].classList.contains("mc-brief"));
 assert.strictEqual(box.children[0].querySelector(".mc-brief-text").textContent, "Count the rows");
 assert.strictEqual(box.children[0].querySelector(".mc-brief-more"), null);
-assert.ok(box.children[1].textContent.startsWith("Started "), box.textContent);
+assert.ok(box.children[1].textContent.startsWith("Started"), box.textContent);
 assert.ok(box.children[1].textContent.endsWith(" · claude-opus-5-5"));
+// Thinking and replies are the chat's: a closed thinking block, reply
+// bubbles with their time under them.
+const think = box.querySelector("details.reasoning");
+assert.strictEqual(think.querySelector(".body").textContent, "I need the log.");
+assert.strictEqual(think.firstChild.textContent, "Thinking");
+assert.ok(!think.open);
+assert.ok(box.querySelector(".msg.assistant").nextElementSibling.classList.contains("when"));
 // Finished calls before newer text fold into a group with the chat's
 // words; the newest calls of a running subagent stay open as cards, the
 // failed one red, the running one running.
-assert.deepStrictEqual(kids(), ["mc-brief", "note", "reasoning", "msg", "toolgroup", "msg", "tool", "tool.running", "jump"]);
+assert.deepStrictEqual(kids(), ["mc-brief", "note", "reasoning", "msg", "toolgroup", "msg", "tool", "tool.running"]);
 const group = box.querySelector("details.toolgroup");
 assert.strictEqual(group.firstChild.textContent.split(" \u00B7 ")[0], "Ran a command, read a file (2.6 s)");
 assert.strictEqual(group.querySelectorAll(".tool").length, 2);
-const failed = box.children[6];
+const failed = box.querySelectorAll(".tool").filter((c) => c.parentNode === box)[0];
 assert.ok(failed.classList.contains("failed"), failed.className);
 assert.strictEqual(failed.dataset.state, "bad");
 // A cut result says how long it was.
 const readCard = group.querySelectorAll(".tool")[1];
 assert.ok(readCard.call.out.endsWith("(9000 characters in all)"), readCard.call.out);
-// It started at the end, so it followed.
-assert.strictEqual(box.scrollTop, box.scrollHeight - box.clientHeight);
-assert.ok(box.querySelector(".jump").hidden);
+// It started at the end, so it follows (the page keeps a followed log at its end, HubStick).
+assert.ok(v.pinned());
+const jump = v.node.querySelector(".tobottom");
+assert.ok(jump.hidden);
 
 // The running call ends and a reply comes: the reader at the end follows.
 v.add([ev({ type: "tool_end", call_id: "c4", name: "terminal", result: '{"output": "", "exit_code": 0}', duration_ms: 400, at: 110 }),
   ev({ type: "message", text: "Done with the filter.", at: 111 })]);
-assert.deepStrictEqual(kids(), ["mc-brief", "note", "reasoning", "msg", "toolgroup", "msg", "toolgroup", "msg", "jump"]);
-assert.match(box.children[6].firstChild.textContent, /^Ran 2 commands \(1 min 41 s\)/);
-assert.match(box.children[6].textContent, /1 step failed/);
-assert.strictEqual(box.scrollTop, box.scrollHeight - box.clientHeight);
+assert.deepStrictEqual(kids(), ["mc-brief", "note", "reasoning", "msg", "toolgroup", "msg", "toolgroup", "msg"]);
+const g2 = box.querySelectorAll("details.toolgroup")[1];
+assert.match(g2.firstChild.textContent, /^Ran 2 commands \(1 min 41 s\)/);
+assert.match(g2.textContent, /1 step failed/);
+assert.ok(v.pinned());
 
-// Scrolled up, new steps stay below and the pill counts them.
+// Scrolled up, new messages stay below and the chat's jump button counts them.
 box.scrollTop = 0;
-box.dispatch("scroll");
+v.chat.scroll.heard(1000);
+v.chat.scroll.scrolled();
+assert.ok(!v.pinned());
 v.add([ev({ type: "message", text: "Row count is 14.", at: 120 }), ev({ type: "tool_start", call_id: "c5", name: "terminal", args: { command: "wc -l" }, at: 121 })]);
-const jump = box.querySelector(".jump");
 assert.strictEqual(box.scrollTop, 0);
 assert.ok(!jump.hidden);
-assert.strictEqual(jump.lastChild.textContent, "2 new steps");
-// The result of a call already shown is not a new step.
+assert.strictEqual(jump.querySelector(".lbl").textContent, "1 new message");
+// The button takes the reader there.
+jump.dispatch("click");
+assert.ok(jump.hidden);
+assert.ok(v.pinned());
+assert.ok(v.pinned());
 v.add([ev({ type: "tool_end", call_id: "c5", name: "terminal", result: '{"output": "14", "exit_code": 0}', at: 122 })]);
-assert.strictEqual(jump.lastChild.textContent, "2 new steps");
-// Back at the end, the pill goes.
-box.scrollTop = box.scrollHeight;
-box.dispatch("scroll");
-assert.ok(jump.hidden);
-// Or the pill takes the reader there.
-box.scrollTop = 0;
-v.add([ev({ type: "message", text: "One more.", at: 130 })]);
-assert.strictEqual(jump.lastChild.textContent, "1 new step");
-jump.onclick();
-assert.ok(jump.hidden);
-assert.strictEqual(box.scrollTop, box.scrollHeight - box.clientHeight);
 
-// A message the user sent waits for the subagent's next step, and reads as
-// read once a tool result comes after it.
+// A message the user sent shows as the chat's pending bubble: it waits for
+// the subagent's next step, and reads as read once a tool result comes after it.
 v.add([ev({ type: "steer", text: "Also print the count.", at: 140 })]);
 const steerLine = () => box.querySelectorAll(".queued").pop().textContent;
+const mine = () => box.querySelectorAll(".msg.user").pop();
 assert.match(steerLine(), / · waits for its next step$/);
-assert.ok(box.querySelectorAll(".msg.user.sm").pop().classList.contains("pending"));
+assert.ok(mine().classList.contains("pending"));
 v.add([ev({ type: "tool_start", call_id: "c6", name: "terminal", args: { command: "echo 14" }, at: 141 }),
   ev({ type: "tool_end", call_id: "c6", name: "terminal", result: '{"output": "14", "exit_code": 0}', at: 142 })]);
 assert.match(steerLine(), / · read by the subagent$/);
-assert.ok(!box.querySelectorAll(".msg.user.sm").pop().classList.contains("pending"));
+assert.ok(!mine().classList.contains("pending"));
 // One sent after the last step, then the subagent ends: never read.
 v.add([ev({ type: "steer", text: "Stop soon.", at: 150 })]);
 v.set({ model: "claude-opus-5-5", end: { state: "ok", durationS: 1300, result: "Added the flag.", tokens: "3.1k in · 920 out", endedAt: T0 + 160000 } });
 assert.match(steerLine(), / · the subagent ended before reading it$/);
 // Ended: every call is folded, and the Done card closes the chat.
 assert.strictEqual(box.querySelectorAll(".tool").filter((c) => c.parentNode === box).length, 0);
-const endCard = box.children[box.children.length - 2];
+const endCard = box.lastElementChild;
 assert.ok(endCard.classList.contains("mc-end") && !endCard.classList.contains("bad"));
 assert.match(endCard.textContent, /^Done in 21 min 40 s/);
 assert.match(endCard.textContent, /Added the flag\.\n3\.1k in · 920 out/);
@@ -151,17 +154,28 @@ assert.match(endCard.textContent, /Added the flag\.\n3\.1k in · 920 out/);
 v.set({ end: { state: "bad", durationS: 723, result: "Timed out." } });
 assert.ok(box.querySelector(".mc-end").classList.contains("bad"));
 assert.match(box.querySelector(".mc-end").textContent, /^Failed after 12 min 3 s/);
-// Reset clears it all for a transcript Hermes rewrote.
+// Reset clears it all for a transcript Hermes rewrote; the end card stays.
 v.reset();
-assert.deepStrictEqual(kids(), ["jump"]);
+assert.deepStrictEqual(kids(), ["mc-end"]);
+
+// A notice Hermes put into the subagent's transcript is the chat's notice
+// card, not its raw text.
+{
+  const w = create();
+  w.add([ev({ type: "goal", text: "Do it", at: 0 }),
+    ev({ type: "user", text: "A process you were waiting on finished. Continue your task with its result.\n\n`OLD=$(kubectl get pods -A)` (proc_3f2a9c1d0b) exited with code 0 (exited).\nOutput tail:\nNAME READY", at: 3 })]);
+  const card = w.log.querySelector(".notice");
+  assert.ok(card, w.log.textContent);
+  assert.ok(!w.log.querySelector(".msg.user"), "no bubble: " + w.log.textContent);
+}
 
 // A tool_call carries several calls. The small chat draws each as the card of
 // its tool (not one wrench), keys each result to its own call (the results all
 // carry the wrapper's call id and must not overwrite one another), and the
 // cards fold with their neighbors like any others.
 {
-  const w = M.create({ el, toast: () => {} });
-  const b = w.node;
+  const w = create();
+  const b = w.log;
   const titles = () => b.querySelectorAll(".notice-title").map((n) => n.textContent);
   const wrapperArgs = { calls: [
     { name: "process_manage", arguments: { action: "wait", session_id: "proc_283637f9d51", timeout: 180 } },
@@ -192,37 +206,37 @@ assert.deepStrictEqual(kids(), ["jump"]);
   assert.match(line, /^Managed a background command, searched past chats, used a saved login \(3 min\)$/, line);
 
   // A result that names no tool goes to the first call that has none.
-  const w2 = M.create({ el, toast: () => {} });
+  const w2 = create();
   w2.add([ev({ type: "tool_start", call_id: "w2", name: "tool_call", args: { calls: [{ name: "terminal", arguments: { command: "a" } }, { name: "terminal", arguments: { command: "b" } }] }, at: 1 }),
     ev({ type: "tool_end", call_id: "w2", name: "tool_call", result: '{"output": "A", "exit_code": 0}', at: 2 }),
     ev({ type: "tool_end", call_id: "w2", name: "terminal", result: '{"output": "B", "exit_code": 0}', at: 3 })]);
-  assert.deepStrictEqual(w2.node.querySelectorAll(".tool").map((c) => c.call.out), ["A", "B"]);
+  assert.deepStrictEqual(w2.log.querySelectorAll(".tool").map((c) => c.call.out), ["A", "B"]);
   // The same results again change nothing.
   w2.add([ev({ type: "tool_end", call_id: "w2", name: "terminal", result: '{"output": "C", "exit_code": 0}', at: 4 })]);
-  assert.deepStrictEqual(w2.node.querySelectorAll(".tool").map((c) => c.call.out), ["A", "B"]);
+  assert.deepStrictEqual(w2.log.querySelectorAll(".tool").map((c) => c.call.out), ["A", "B"]);
 
   // One call in the wrapper is a plain card, no batch.
-  const w3 = M.create({ el, toast: () => {} });
+  const w3 = create();
   w3.add([ev({ type: "tool_start", call_id: "w3", name: "tool_call", args: { calls: [{ name: "terminal", arguments: { command: "ls" } }] }, at: 1 }),
     ev({ type: "tool_end", call_id: "w3", name: "terminal", result: '{"output": "", "exit_code": 0}', duration_ms: 1500, at: 3 })]);
-  assert.strictEqual(w3.node.querySelectorAll(".tool").length, 1);
-  assert.strictEqual(w3.node.querySelector(".tool").batch, "");
-  assert.deepStrictEqual(w3.node.querySelectorAll(".notice-title").map((n) => n.textContent), ["Ran ls"]);
+  assert.strictEqual(w3.log.querySelectorAll(".tool").length, 1);
+  assert.strictEqual(w3.log.querySelector(".tool").batch, "");
+  assert.deepStrictEqual(w3.log.querySelectorAll(".notice-title").map((n) => n.textContent), ["Ran ls"]);
   w3.set({ end: { state: "ok" } });
-  assert.match(w3.node.querySelector("details.toolgroup").firstChild.textContent, /^Ran a command \(1\.5 s\)/);
+  assert.match(w3.log.querySelector("details.toolgroup").firstChild.textContent, /^Ran a command \(1\.5 s\)/);
 }
 
 // Times that are not known are not shown: no "1 ms" for a call of 0 ms, no
 // time for a step Hermes gave none (the hub sends year 1 or leaves it out),
 // and such steps keep their order.
 {
-  const w = M.create({ el, toast: () => {} });
+  const w = create();
   const none = (o) => Object.assign(ev(Object.assign({ at: 0 }, o)), { ts: o.ts });
   w.add([none({ type: "tool_start", call_id: "z1", name: "terminal", args: { command: "ls" }, ts: "0001-01-01T00:00:00Z" }),
     none({ type: "tool_end", call_id: "z1", name: "terminal", result: '{"output": "", "exit_code": 0}', duration_ms: 0, ts: "0001-01-01T00:00:00Z" }),
     none({ type: "tool_start", call_id: "z2", name: "terminal", args: { command: "pwd" } }),
     none({ type: "tool_end", call_id: "z2", name: "terminal", result: '{"output": "", "exit_code": 0}' })]);
-  const cs = w.node.querySelectorAll(".tool");
+  const cs = w.log.querySelectorAll(".tool");
   assert.strictEqual(cs.length, 2);
   for (const c of cs) {
     assert.strictEqual(c.call.startedAt, 0);
@@ -230,7 +244,7 @@ assert.deepStrictEqual(kids(), ["jump"]);
     assert.strictEqual(c.call.duration, undefined);
     assert.ok(!/\bms\b/.test(c.textContent), c.textContent);
   }
-  assert.deepStrictEqual(w.node.querySelectorAll(".notice-title").map((n) => n.textContent), ["Ran ls", "Ran pwd"]);
+  assert.deepStrictEqual(w.log.querySelectorAll(".notice-title").map((n) => n.textContent), ["Ran ls", "Ran pwd"]);
   // order keeps a step with no time next to the step before it.
   const a = ev({ type: "message", at: 5 });
   const u = Object.assign(ev({ type: "message", at: 0 }), { ts: undefined });
@@ -266,8 +280,8 @@ console.log("ok");
 {
   const open = "[OUT-OF-BAND USER MESSAGE \u2014 a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]";
   const wrap = (t) => open + "\n" + t + "\n[/OUT-OF-BAND USER MESSAGE]";
-  const w = M.create({ el, toast: () => {} });
-  const b = w.node;
+  const w = create();
+  const b = w.log;
   const shown = (t) => b.textContent.split(t).length - 1;
   w.set({ model: "m" });
   w.add([ev({ type: "goal", text: "Do it", at: 0 }), ev({ type: "steer", text: "just a note, look at the status bar", at: 10 }), ev({ type: "steer", text: "it's showing over the game", at: 11 })]);
@@ -275,33 +289,34 @@ console.log("ok");
     ev({ type: "user", text: wrap("just a note, look at the status bar\nit's showing over the game"), at: 13 })]);
   assert.strictEqual(shown("just a note"), 1, b.textContent);
   assert.strictEqual(shown("showing over the game"), 1, b.textContent);
-  assert.strictEqual(b.querySelectorAll(".msg.user.sm").length, 2);
+  assert.strictEqual(b.querySelectorAll(".msg.user").length, 2);
   assert.match(b.querySelectorAll(".queued")[0].textContent, / · read by the subagent$/);
-  assert.strictEqual(b.querySelectorAll(".steerrow").filter((n) => !n.hidden).length, 0);
   // The row can come before the bubble in a batch: still once.
-  const w2 = M.create({ el, toast: () => {} });
+  const w2 = create();
   w2.add([ev({ type: "goal", text: "Do it", at: 0 }), ev({ type: "user", text: wrap("same words"), at: 5 }), ev({ type: "steer", text: "same words", at: 4 })]);
-  assert.strictEqual(w2.node.textContent.split("same words").length - 1, 1);
-  // A steer from elsewhere (a parent's or another agent's) shows once, labeled.
-  const w3 = M.create({ el, toast: () => {} });
+  assert.strictEqual(w2.log.textContent.split("same words").length - 1, 1);
+  // A steer from elsewhere shows as the chat shows it: the user's words as
+  // the user's bubble, another agent's message as its notice card.
+  const w3 = create();
   w3.add([ev({ type: "goal", text: "Do it", at: 0 }), ev({ type: "user", text: wrap("Use the other branch"), at: 5 }),
     ev({ type: "user", text: wrap("[Agent message am_0123456789abcdef from build]\nHold the push."), at: 6 })]);
-  const rows = w3.node.querySelectorAll(".steerrow");
-  assert.match(rows[0].textContent, /^Message from elsewhere: Use the other branch$/);
-  assert.match(rows[1].textContent, /^Message from build: Hold the push\.$/);
-  // An ordinary later user row (a summary) stays a plain note.
+  const bubbles = w3.log.querySelectorAll(".msg.user");
+  assert.strictEqual(bubbles.length, 1);
+  assert.strictEqual(bubbles[0].textContent, "Use the other branch");
+  assert.match(w3.log.querySelectorAll(".notice-title").map((n) => n.textContent).join("|"), /^Message from .*build/);
+  // An ordinary later user row (a summary) shows once.
   w3.add([ev({ type: "user", text: "Summary of earlier steps", at: 7 })]);
-  assert.strictEqual(w3.node.textContent.split("Summary of earlier steps").length - 1, 1);
+  assert.strictEqual(w3.log.textContent.split("Summary of earlier steps").length - 1, 1);
 }
 
 // The brief: short ones show whole; a long one folds after six lines and opens
 // with Show all / Show less, line breaks kept.
 {
   const long = Array.from({ length: 10 }, (_, i) => "line " + (i + 1)).join("\n");
-  const w = M.create({ el, toast: () => {} });
+  const w = create();
   w.add([ev({ type: "goal", text: long, at: 0 })]);
-  const t = w.node.querySelector(".mc-brief-text");
-  const more = w.node.querySelector(".mc-brief-more");
+  const t = w.log.querySelector(".mc-brief-text");
+  const more = w.log.querySelector(".mc-brief-more");
   assert.strictEqual(t.textContent, long);
   assert.ok(t.classList.contains("clamped"));
   assert.strictEqual(more.textContent, "Show all");
@@ -318,9 +333,9 @@ console.log("ok");
 {
   const goal = "Fix the parser\nsecond line";
   const long = Array.from({ length: 12 }, (_, i) => "context " + (i + 1)).join("\n");
-  const w = M.create({ el, toast: () => {} });
+  const w = create();
   w.add([ev({ type: "goal", text: goal, at: 0 }), ev({ type: "context", text: long, at: 0 }), ev({ type: "message", text: "On it.", at: 1 })]);
-  const box = w.node;
+  const box = w.log;
   const heads = box.children.filter((c) => c.classList.contains("mc-brief")).map((c) => c.querySelector(".mc-brief-head").textContent);
   assert.deepStrictEqual(heads, ["Task", "Context"]);
   assert.deepStrictEqual(kidsOf(box).slice(0, 3), ["mc-brief", "mc-brief", "note"]);
@@ -341,13 +356,13 @@ console.log("ok");
   more.onclick();
   assert.ok(t.classList.contains("clamped"));
   // The Task fold stays its own.
-  const w2 = M.create({ el, toast: () => {} });
+  const w2 = create();
   w2.add([ev({ type: "goal", text: "just a goal", at: 0 }), ev({ type: "context", text: "   ", at: 0 })]);
-  assert.strictEqual(w2.node.children.filter((c) => c.classList.contains("mc-brief")).length, 1);
+  assert.strictEqual(w2.log.children.filter((c) => c.classList.contains("mc-brief")).length, 1);
   // A reset draws the brief again, once.
   w.reset();
   w.add([ev({ type: "goal", text: goal, at: 0 }), ev({ type: "context", text: "short context", at: 0 })]);
-  assert.deepStrictEqual(kidsOf(w.node).slice(0, 3), ["mc-brief", "mc-brief", "note"]);
+  assert.deepStrictEqual(kidsOf(w.log).slice(0, 3), ["mc-brief", "mc-brief", "note"]);
 }
 
 // The ledger is the agent's notebook: a call that worked shows no card and is
@@ -359,14 +374,14 @@ console.log("ok");
   const bad = G.summary([card("ledger", 1, true), card("clarify", 1)]);
   assert.strictEqual(bad.text, "Used ledger, asked a question (2.0 s)");
   assert.strictEqual(bad.failed, 1);
-  const lv = M.create({ el, toast: () => {} });
+  const lv = create();
   const t = (id, name, at, result) => [ev({ type: "tool_start", call_id: id, name, args: {}, at }), ev({ type: "tool_end", call_id: id, name, result, at: at + 1 })];
   lv.add([...t("l1", "ledger", 1, '{"ok": true}'), ...t("l2", "ledger", 3, '{"ok": true}'), ev({ type: "message", text: "Noted.", at: 5 }),
     ...t("l3", "ledger", 6, '{"ok": true}'), ...t("t1", "read_file", 8, "x"), ...t("l4", "ledger", 10, '{"ok": true}'), ...t("t2", "read_file", 12, "y"),
     ev({ type: "message", text: "Done.", at: 14 }), ...t("l5", "ledger", 15, '{"error": "blocked: the approval was denied"}'), ev({ type: "message", text: "End.", at: 17 })]);
-  const shown = lv.node.querySelectorAll(".tool").filter((n) => !n.classList.contains("quiet"));
+  const shown = lv.log.querySelectorAll(".tool").filter((n) => !n.classList.contains("quiet"));
   assert.deepStrictEqual(shown.map((n) => n.toolName), ["read_file", "read_file", "ledger"], "ledger cards that worked are hidden, the failed one is shown");
-  assert.ok(lv.node.querySelectorAll(".tool.quiet").length >= 4);
-  const lines = lv.node.querySelectorAll("details.toolgroup").map((g) => g.children[0].textContent);
+  assert.ok(lv.log.querySelectorAll(".tool.quiet").length >= 4);
+  const lines = lv.log.querySelectorAll("details.toolgroup").map((g) => g.children[0].textContent);
   assert.deepStrictEqual(lines.map((l) => l.replace(/ · .*?M/, "")), ["Read 2 files (2.0 s)", "Used ledger (1.0 s) 1 step failed"], "no group of ledger calls only, none counted: " + JSON.stringify(lines));
 }

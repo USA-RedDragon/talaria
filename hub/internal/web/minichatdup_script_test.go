@@ -41,7 +41,7 @@ func TestSubagentMiniChatShowsASteerOnce(t *testing.T) {
 		e.gw.AddChildRows("s9", subA,
 			map[string]any{kRole: roleAssistant, keyText: "", kTimestamp: at, kCalls: []map[string]any{{"id": "c1", fieldName: toolTerminal, kArgs: map[string]any{kCommand: "ls"}}}},
 			map[string]any{kRole: stepTool, fieldName: toolTerminal, kCallID: "c1", kTimestamp: at, kArgs: map[string]any{kCommand: "ls"}, sjResult: "{}", keyResultSize: 2},
-			map[string]any{kRole: roleUser, keyText: gatewaytest.SteerOpen + "\n" + text + "\n" + gatewaytest.SteerClose, "display_kind": "steer", kTimestamp: at})
+			map[string]any{kRole: roleUser, keyText: gatewaytest.SteerOpen + "\n" + text + "\n" + gatewaytest.SteerClose, keyDisplayKind: stepSteer, kTimestamp: at})
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(poke.Close)
