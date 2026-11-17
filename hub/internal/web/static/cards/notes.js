@@ -418,14 +418,58 @@
     return { chip: after || before, rows: [after, before].filter(Boolean) };
   }
 
+  // messageText is the words of one message of a read or scroll result: its
+  // text, else the tools it called (a turn of only tool calls has no text).
+  function messageText(m) {
+    const text = str(m.content).trim();
+    if (text) return text;
+    let calls = m.tool_calls;
+    if (typeof calls === "string") {
+      try {
+        calls = JSON.parse(calls);
+      } catch (e) {
+        calls = null;
+      }
+    }
+    const names = arr(calls).map((t) => str(obj(t.function).name) || str(obj(t).name)).filter(Boolean);
+    return names.length ? "Called " + names.join(", ") : "No text";
+  }
+
+  function messageLabel(m) {
+    const role = str(m.role);
+    if (role === "tool") return str(m.tool_name) ? "Tool: " + m.tool_name : "Tool result";
+    if (role === "user") return "You";
+    if (role === "assistant") return "Agent";
+    return upperFirst(role || "message");
+  }
+
+  // pastMessages draws the messages a read or scroll returned: one block each,
+  // short ones in full, long ones (and tool output) folded under their first
+  // words; a gap between the first and last messages of a long read says how
+  // many were not read.
+  function pastMessages(res, msgs) {
+    const blocks = [];
+    const gap = res.truncated === true && typeof res.head_count === "number" && typeof res.message_count === "number" ? res.message_count - msgs.length : 0;
+    msgs.forEach((m, i) => {
+      if (gap > 0 && i === res.head_count) blocks.push({ plain: true, copy: false, text: "… " + plural(gap, "message") + " in between not read" });
+      const text = messageText(m);
+      const label = messageLabel(m) + (m.anchor === true ? " (starting point)" : "");
+      const long = text.length > 600 || text.split("\n").length > 8 || str(m.role) === "tool";
+      const note = m.content_truncated === true ? "\n… (cut short)" : "";
+      if (long) blocks.push({ label: label + ": " + cut(first(text), 70), text: text + note, fold: true, plain: true });
+      else blocks.push({ label, text, plain: true, copy: false });
+    });
+    return blocks;
+  }
+
   function sessionSearch(c) {
     const a = obj(c.args);
     const res = obj(c.res);
     const out = { icon: "search", blocks: [], lines: [] };
     const sid = str(a.session_id);
-    const mode = str(res.mode) || (sid ? (a.around_message_id !== undefined ? "scroll" : "read") : str(a.query) ? "discover" : "browse");
+    const mode = str(res.mode) || (sid ? (a.around_message_id !== undefined && a.around_message_id !== null ? "scroll" : "read") : str(a.query) ? "discover" : "browse");
     const q = short(str(a.query));
-    const title = short(str(res.title) || str(res.session_title));
+    const title = short(str(obj(res.session_meta).title) || str(res.title) || str(res.session_title));
     const tail = title ? ": " + title : "";
     const failed = c.done && c.failed;
     if (mode === "read") out.title = verb(c, "Read", "Reading") + " a past chat" + tail;
@@ -434,6 +478,7 @@
     else out.title = verb(c, "Browsed", "Browsing") + " recent chats";
     const range = dateRange(a);
     const results = arr(res.results).filter(isObj);
+    const msgs = arr(res.messages).filter(isObj);
     const more = [];
     const warn = [];
     if (res.index_rebuild !== undefined && res.index_rebuild !== null) {
@@ -441,17 +486,32 @@
       if (typeof p === "number") warn.push("search index " + Math.round(p) + "% built, may be incomplete");
     }
     if (results.some((r) => str(r.match) === "any_terms")) warn.push("partial word matches");
+    if (typeof res.skipped_live_context === "number" && res.skipped_live_context > 0) warn.push(plural(res.skipped_live_context, "match", "matches") + " in this chat's own history not shown");
     if (mode === "read" || mode === "scroll") {
-      const from = res.first_message_index ?? res.start ?? res.from;
-      const to = res.last_message_index ?? res.end ?? res.to;
-      const all = res.total_messages ?? res.message_count ?? res.total;
-      out.status = typeof from === "number" && typeof to === "number" && typeof all === "number" ? "Messages " + from + " to " + to + " of " + all : "Done";
+      const total = typeof res.total_messages === "number" ? res.total_messages : typeof res.message_count === "number" ? res.message_count : null;
+      if (mode === "scroll" && typeof res.window_start === "number" && typeof res.window_end === "number") {
+        out.status = "Messages " + res.window_start + " to " + res.window_end + (total !== null ? " of " + total : "");
+      } else if (mode === "read" && res.truncated === true && typeof res.head_count === "number" && typeof res.tail_count === "number" && total !== null) {
+        out.status = "Messages 1 to " + res.head_count + " and " + (total - res.tail_count + 1) + " to " + total + " of " + total;
+      } else if (mode === "read" && msgs.length && total !== null) {
+        out.status = msgs.length === total ? "All " + plural(total, "message") : plural(msgs.length, "message") + " of " + total;
+      } else if (msgs.length) out.status = plural(msgs.length, "message");
+      else out.status = "Done";
       if (out.status !== "Done") out.tone = "ok";
+      if (res.truncated === true && typeof res.head_count === "number" && typeof res.tail_count === "number" && total !== null) {
+        out.lines.push(dimLine(["First " + res.head_count + " and last " + res.tail_count + " shown, " + plural(total - msgs.length, "message") + " in between not read"]));
+      }
+      if (msgs.some((m) => m.content_truncated === true)) out.lines.push(dimLine(["Long messages are cut short"]));
+      if (msgs.length && !out.lines.length) {
+        const m = msgs.find((x) => x.anchor === true) || msgs[0];
+        out.lines.push(dimLine([messageLabel(m) + ": " + cut(squash(messageText(m)), 120)]));
+      }
+      out.blocks.push(...pastMessages(res, msgs));
     } else if (Array.isArray(res.results) || typeof res.count === "number") {
       const n = typeof res.count === "number" ? res.count : arr(res.results).length;
       const searched = typeof res.sessions_searched === "number" ? " of " + res.sessions_searched + " searched" : "";
       if (n) {
-        out.status = plural(n, "chat") + " found" + searched;
+        out.status = mode === "browse" ? plural(n, "recent chat") : plural(n, "chat") + " found" + searched;
         out.tone = "ok";
       } else {
         out.status = q ? "No matches" : "No chats";
@@ -460,11 +520,10 @@
       if (range.chip) more.push({ chip: range.chip });
       if (!n) more.push(...warn.map((w) => ({ tone: "warn", text: w })));
       else if (warn.length) out.lines.push({ parts: [{ tone: "warn", text: warn.join(" · ") }] });
-      if (res.message && mode === "discover") out.lines.push({ parts: [{ tone: "warn", text: squash(res.message) }] });
       if (n && results.length) {
         const top = results[0];
-        const t = str(top.title) || str(top.session_title);
-        if (t) out.lines.push({ parts: [(q ? "Best match: " : "") + t + (str(top.when) ? ", " + dateWords(top.when) : "")] });
+        const t = str(top.title) || str(top.session_title) || (mode === "browse" ? cut(squash(str(top.preview)), 80) : "");
+        if (t) out.lines.push({ parts: [(q ? "Best match: " : "") + t] });
         if (results.length > 1) out.lines.push(dimLine(["+" + (results.length - 1) + " more"]));
       }
     } else out.status = "Done";
@@ -475,17 +534,17 @@
     const roles = str(a.role_filter).split(",").map((x) => x.trim()).filter(Boolean).map((x) => roleWords[x] || x);
     if (roles.length) rows.push({ k: "Roles", v: roles.length === 2 ? roles.join(" and ") : roles.join(", ") });
     if (str(a.profile)) rows.push({ k: "Profile", v: str(a.profile) });
-    if (rows.length) out.blocks.push({ kind: "kv", rows });
+    if (rows.length) out.blocks.unshift({ kind: "kv", rows });
     if (results.length) {
       const items = [];
       for (const r of results) {
         const t = str(r.title) || str(r.session_title) || "Untitled chat";
-        const meta = [dateWords(r.when), r.message_count ? plural(+r.message_count, "message") : ""].filter(Boolean).join(", ");
+        const meta = r.message_count ? plural(+r.message_count, "message") : "";
         items.push({ parts: [t, str(r.source) ? " " : "", ...(str(r.source) ? [{ chip: str(r.source) }] : []), meta ? " " + meta : ""] });
-        const sn = str(r.snippet);
-        if (sn) items.push({ parts: [(str(r.matched_role) ? str(r.matched_role) + ": " : "") + cut(squash(sn), 160)], dim: true, mono: true });
+        const sn = str(r.snippet).replace(/>>>|<<</g, "") || str(r.preview);
+        if (sn) items.push({ parts: [(str(r.matched_role) && str(r.matched_role) !== "session_title" ? str(r.matched_role) + ": " : "") + cut(squash(sn), 160)], dim: true, mono: true });
       }
-      out.blocks.push({ label: "Matches", kind: "list", items });
+      out.blocks.push({ label: mode === "browse" ? "Recent chats" : "Matches", kind: "list", items });
     }
     if (failed && !errorText(c.res) && c.out) out.raw = c.out;
     return out;
