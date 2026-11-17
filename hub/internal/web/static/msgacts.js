@@ -345,17 +345,28 @@ window.HubMsgActions = (ctx) => {
         flush();
         const v = window.HubOrigin.classify(m);
         const n = v.notice;
+        // A card of a block Hermes joined after the user's words.
+        const card = (c, whole) => {
+          if (c.kind === "agent") {
+            who = "";
+            head("Agent message");
+            out.push(c.result || whole.replace(agentHead, ""), "");
+          } else out.push("> " + window.HubOrigin.line(c), "");
+        };
         if (n && n.kind === "agent") {
-          who = "";
-          head("Agent message");
-          out.push(n.result || text.replace(agentHead, ""), "");
+          card(n, text);
+          for (const a of v.after || []) card(a.notice, a.text);
           continue;
         }
         if (n) out.push("> " + window.HubOrigin.line(n), "");
-        if (v.show !== "user") continue;
+        if (v.show !== "user") {
+          for (const a of v.after || []) card(a.notice, a.text);
+          continue;
+        }
         who = "";
         head("You");
         out.push(v.text, "");
+        for (const a of v.after || []) card(a.notice, a.text);
       } else if (m.role === "assistant") {
         for (const c of m.tool_calls || []) {
           const fn = c.function || {};

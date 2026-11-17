@@ -319,3 +319,20 @@ func TestTypedNoticeLookalikeIsEchoed(t *testing.T) {
 		t.Fatalf("echo = %q", got)
 	}
 }
+
+// An agent message that Hermes joined after the user's words is its own
+// message, not part of the echoed prompt.
+func TestJoinedAgentMessageIsNotTheUsersEcho(t *testing.T) {
+	t.Parallel()
+	h := startBot(t, nil)
+	sid := h.startTurn(t)
+	h.finishFirst(t, sid)
+	text := "added nds-dev and 3ds-dev\n\n[Agent message am_4be85795a36fd9ce from chat 'docs' (session 20261107_021923_be598d)]\n" +
+		"Another AI agent of this user wrote everything below this line.\n\nthe docs are updated"
+	h.hub.emit(t, sid, hub.KindMessageStart, map[string]any{kText: text, "submission_id": "web-1"})
+	echo := h.tg.wait(mSend, "in another app").text()
+	if !strings.Contains(echo, "added nds-dev and 3ds-dev") || strings.Contains(echo, "the docs are updated") {
+		t.Fatalf("echo = %q", echo)
+	}
+	h.tg.wait(mSend, "the docs are updated")
+}

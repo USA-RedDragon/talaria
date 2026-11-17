@@ -17,6 +17,7 @@ for (const c of all) {
   assert.strictEqual(got.show, want.show, c.name + ": show");
   assert.strictEqual(got.text || "", want.text || "", c.name + ": text");
   assert.strictEqual(got.why, want.why, c.name + ": why");
+  assert.strictEqual(JSON.stringify((got.after || []).map((a) => a.notice.title)), JSON.stringify(want.after || []), c.name + ": cards after");
   if (!want.notice) assert.ok(!got.notice, c.name + ": want no card");
   else {
     assert.ok(got.notice, c.name + ": want a card");

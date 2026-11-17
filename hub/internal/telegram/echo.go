@@ -187,6 +187,7 @@ func (r *renderer) turnStart(ctx context.Context, ev hub.Event) {
 	row := origin.Row{Text: p.Text, DisplayKind: p.DisplayKind, DisplayText: p.DisplayText, SubmissionID: p.SubmissionID}
 	if v := origin.Classify(row); v.Show == origin.ShowCard && v.Notice.Kind == notice.KindAgent {
 		r.agentMessage(ctx, v.Notice)
+		r.afterCards(ctx, v)
 		r.echoed = true
 		return
 	}
@@ -250,6 +251,7 @@ func (r *renderer) echo(ctx context.Context, row origin.Row, images int) int64 {
 		return 0
 	case v.Show == origin.ShowCard && v.Notice.Kind == notice.KindAgent:
 		r.agentMessage(ctx, v.Notice)
+		r.afterCards(ctx, v)
 		return 0
 	case v.Notice != nil:
 		r.send(ctx, "<i>"+escapeHTML(v.Notice.Line())+"</i>", nil)
@@ -259,16 +261,28 @@ func (r *renderer) echo(ctx context.Context, row origin.Row, images int) int64 {
 	}
 	text, id := v.Text, row.SubmissionID
 	where, show := r.origin(id)
-	if !show {
-		return 0
-	}
-	if html := echoHTML(where, text, images); html != "" {
-		if id := r.send(ctx, html, nil); id != 0 {
-			r.logger.Info("Showed a prompt sent elsewhere", "from", where, "message", id)
-			return id
+	var shown int64
+	if show {
+		if html := echoHTML(where, text, images); html != "" {
+			if id := r.send(ctx, html, nil); id != 0 {
+				r.logger.Info("Showed a prompt sent elsewhere", "from", where, "message", id)
+				shown = id
+			}
 		}
 	}
-	return 0
+	// What Hermes joined after the user's words is not theirs: its own message.
+	r.afterCards(ctx, v)
+	return shown
+}
+
+// afterCards shows the agent messages that Hermes joined to a row, each as
+// its own message.
+func (r *renderer) afterCards(ctx context.Context, v origin.View) {
+	for _, n := range v.After {
+		if n.Kind == notice.KindAgent {
+			r.agentMessage(ctx, n)
+		}
+	}
 }
 
 // echoOpen shows the prompt of the turn a snapshot found running, when no

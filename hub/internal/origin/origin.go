@@ -77,6 +77,10 @@ type View struct {
 	Show   string         `json:"show"`
 	Text   string         `json:"text,omitempty"`
 	Notice *notice.Notice `json:"notice,omitempty"`
+	// After holds a card for each block that Hermes joined to the user's
+	// message (an agent message, a subagent result, a background process
+	// notice): they show after the bubble, never inside it. See Split.
+	After []*notice.Notice `json:"after,omitempty"`
 	// Why names the rule that decided: "kind", "submission", "text" or
 	// "typed".
 	Why string `json:"why"`
@@ -140,6 +144,9 @@ func Classify(r Row) View {
 	}
 	if id := strings.TrimSpace(r.SubmissionID); id != "" {
 		if strings.HasPrefix(id, AgentInputPrefix) {
+			if v, ok := joined(r.Text, whySubmission); ok && v.Show == ShowCard {
+				return v
+			}
 			return View{Show: ShowCard, Notice: agentNotice(r.Text), Why: whySubmission}
 		}
 		if p := producer(id); p != "" {
@@ -149,6 +156,9 @@ func Classify(r Row) View {
 	}
 	if n := steeredAgent(r.Text); n != nil {
 		return View{Show: ShowCard, Notice: n, Why: whyText}
+	}
+	if v, ok := joined(r.Text, whyText); ok && (v.Show == ShowUser || len(v.After) > 0) {
+		return v
 	}
 	if inner, ok := UnwrapSteer(r.Text); ok {
 		return typed(Row{Text: inner, TypedAsk: r.TypedAsk}, whyText)
@@ -162,6 +172,16 @@ func Classify(r Row) View {
 // typed is the bubble of a row the user typed: the typed ask when Hermes
 // kept one, else the text without the notes Hermes appended for the model.
 func typed(r Row, why string) View {
+	v := typedBase(r, why)
+	// A typed send is never read by its text, except for blocks Hermes joined
+	// after what the user typed: those are not theirs.
+	if j, ok := joined(v.Text, why); ok && j.Show == ShowUser {
+		v.Text, v.After = j.Text, j.After
+	}
+	return v
+}
+
+func typedBase(r Row, why string) View {
 	text := r.Text
 	if strings.TrimSpace(r.TypedAsk) != "" {
 		text = r.TypedAsk

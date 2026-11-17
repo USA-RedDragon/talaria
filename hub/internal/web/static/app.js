@@ -1160,6 +1160,19 @@
     // false when the user's bubble with v.text follows. A queued card shows
     // as waiting until its turn starts.
     originCard(v, text, waiting) {
+      const done = this.originCard1(v, text, waiting);
+      if (done) this.afterCards(v, waiting);
+      return done;
+    }
+
+    // afterCards shows the cards of the blocks Hermes joined after the user's words (an agent
+    // message, a subagent result): their own cards, never inside the user's bubble. Call it after
+    // the bubble; originCard does it for a row that is only cards.
+    afterCards(v, waiting) {
+      for (const a of v.after || []) this.originCard1({ show: "card", notice: a.notice }, a.text, waiting);
+    }
+
+    originCard1(v, text, waiting) {
       if (v.show === "hidden") return true;
       const n = v.notice;
       if (!n) return false;
@@ -1414,6 +1427,7 @@
       } else if (v.text) {
         this.userText(v.text);
       }
+      this.afterCards(v);
     }
 
     // computerName is the name of the computer this chat runs its commands
@@ -1762,6 +1776,7 @@
             if (read(v.text != null ? v.text : p.text)) return;
             if (this.originCard(v, p.text, true)) return;
             const bubble = this.userText(v.text, true);
+            this.afterCards(v, true);
             const x = this.pending.find((y) => y.bubble === bubble);
             if (!x) return;
             x.id = window.HubReconcile.idOf(p);
@@ -1770,6 +1785,7 @@
             this.steered(x);
           } else if (!this.originCard(window.HubOrigin.classify(p), p.text, true)) {
             const bubble = this.userText(window.HubOrigin.classify(p).text, true);
+            this.afterCards(window.HubOrigin.classify(p), true);
             this.queued(bubble, p.id);
             const x = this.pending.find((y) => y.bubble === bubble);
             if (x) {
@@ -2003,6 +2019,7 @@
         if (this.originCard(v, text)) return;
         const b = this.userText(v.text);
         if (b && Number.isInteger(rid)) b.dataset.row = rid;
+        this.afterCards(v);
         return;
       }
       if (m.role === "assistant") {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/USA-RedDragon/talaria/hub/internal/origin"
@@ -26,6 +27,8 @@ type testCase struct {
 		// TypedText is the text of the same row sent with a client
 		// submission ID, when notes are cut from it.
 		TypedText *string `json:"typed_text"`
+		// After holds the titles of the cards that follow the bubble.
+		After []string `json:"after"`
 	} `json:"want"`
 }
 
@@ -51,6 +54,13 @@ func TestClassify(t *testing.T) {
 			if got.Show != c.Want.Show || got.Text != c.Want.Text || got.Why != c.Want.Why {
 				t.Fatalf("got show %q text %q why %q, want show %q text %q why %q",
 					got.Show, got.Text, got.Why, c.Want.Show, c.Want.Text, c.Want.Why)
+			}
+			var titles []string
+			for _, n := range got.After {
+				titles = append(titles, n.Title)
+			}
+			if !slices.Equal(titles, c.Want.After) {
+				t.Fatalf("got cards after %q, want %q", titles, c.Want.After)
 			}
 			switch {
 			case c.Want.Notice == nil && got.Notice != nil:
