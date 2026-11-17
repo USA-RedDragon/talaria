@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterable, Optional
 logger = logging.getLogger("hermes_device")
 
 PLUGIN_ID = "device"
-PLUGIN_VERSION = "0.31.2"
+PLUGIN_VERSION = "0.32.0"
 
 PROTOCOL_VERSION = 3
 MIN_PROTOCOL_VERSION = 2
@@ -1118,7 +1118,7 @@ class Hub:
             status = {"connected": msg.get("connected") is True}
             if msg.get("can_start") is True:
                 status["can_start"] = True
-            for key in ("browser", "extension_version"):
+            for key in ("browser", "extension_version", "extension_update", "extension_update_version"):
                 if isinstance(msg.get(key), str) and msg[key]:
                     status[key] = msg[key][:64]
             conn.browser = status

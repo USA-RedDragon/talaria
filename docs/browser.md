@@ -287,9 +287,11 @@ Size: a PNG screenshot of a 1366x682 page is about 80 KB (measured: 79306 bytes)
 ### 4.3 browser_status (device to plugin)
 
 ```json
-{"type": "browser_status", "connected": true, "browser": "Firefox 157.0.1", "extension_version": "0.2.0"}
+{"type": "browser_status", "connected": true, "browser": "Firefox 157.0.1", "extension_version": "0.2.0", "extension_update": "pending", "extension_update_version": "0.31.1"}
 {"type": "browser_status", "connected": false, "can_start": true}
 ```
+
+`extension_update` (optional) is how the extension's own update stands: `checking`, `current`, `pending` (an update waits for no action to be in flight), `throttled` or `error`; `extension_update_version` is the waiting version. `browser_status` and `browser_check` turn it, with the daemon and plugin versions, into an `extension_update_note` when the extension is older than either. The extension updates itself: it calls `runtime.requestUpdateCheck()` at startup, every 4 hours and when the config message from the daemon carries a `daemon_version` or `plugin_version` newer than its own, and applies an update with `runtime.reload()` as soon as no request is in flight. A release's extension reaches a Firefox that runs an older extension only by Firefox's own daily check or a manual check in about:addons; later ones update themselves.
 
 `can_start` is true when the device answers `browser_start` (section 4.4). With `connected` false and `can_start` true, Firefox is closed and the plugin may start it.
 

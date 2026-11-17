@@ -163,6 +163,9 @@ func TestFirefoxEndToEnd(t *testing.T) { //nolint:paralleltest // one Firefox at
 const (
 	e2eHubHost = "hub.example.com"
 	e2eHubURL  = "https://" + e2eHubHost
+	// e2eDaemonVersion is newer than the extension, so the extension asks
+	// Firefox for an update (update_test.go).
+	e2eDaemonVersion = "99.0.0"
 )
 
 // startFirefox builds talaria, registers it as the native host in a
@@ -203,8 +206,8 @@ func startFirefoxGrants(ctx context.Context, t *testing.T) (*broker.Broker, *bid
 
 	sock := filepath.Join(root, "state", broker.SocketName)
 	b, err := broker.Listen(broker.Options{Path: sock, ExtensionID: host.ExtensionID,
-		AllowHosts:     []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost, grantHost},
-		ConfirmHosts:   []string{confirmHost},
+		AllowHosts:   []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost, grantHost},
+		ConfirmHosts: []string{confirmHost}, DaemonVersion: e2eDaemonVersion,
 		AutologinHosts: []string{loginHost, twoLoginHost}, AutologinMethods: map[string]string{loginHost: pickerMethod}, HubURL: e2eHubURL})
 	if err != nil {
 		t.Fatal(err)

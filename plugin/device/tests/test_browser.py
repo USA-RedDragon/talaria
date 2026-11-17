@@ -265,6 +265,29 @@ class ToolTests(BrowserBase):
         self.assertEqual((out["device"], out["browser"], out["extension_version"]), ("pc", "Firefox 157.0.1", "0.2.0"))
         self.assertEqual([t["tab_id"] for t in out["tabs"]], [7])
 
+    def test_status_says_when_the_extension_is_older_and_an_update_waits(self):
+        self.device.conn.client_version = "0.31.1"
+        browser_conn = self.device.conn.browser
+        browser_conn["extension_version"] = "0.99.0"
+        self.assertNotIn("extension_update_note", self.run_tool("browser_status"))
+        browser_conn["extension_version"] = "0.28.1"
+        out = self.run_tool("browser_status")
+        self.assertIn("does not update itself yet", out["extension_update_note"])
+        browser_conn.update(extension_update="pending", extension_update_version="0.31.1")
+        out = self.run_tool("browser_status")
+        self.assertIn("update to 0.31.1 is pending", out["extension_update_note"])
+        self.assertIn("no agent action is running", out["extension_update_note"])
+        browser_conn.update(extension_update="throttled")
+        self.assertIn("check again later", self.run_tool("browser_status")["extension_update_note"])
+        browser_conn.update(extension_update="current")
+        self.assertNotIn("extension_update_note", self.run_tool("browser_status"))
+        browser_conn["extension_version"] = "0.99.0"
+        browser_conn.pop("extension_update")
+        self.assertNotIn("extension_update_note", self.run_tool("browser_status"))
+        self.assertNotIn("extension_update_note", self.run_tool("browser_check"))
+        browser_conn["extension_version"] = "0.28.1"
+        self.assertIn("older than the daemon 0.31.1", self.run_tool("browser_check")["extension_update_note"])
+
     def test_unbound_session_uses_the_only_browser_device(self):
         self.hub.unbind(self.session)
         self.store.rows["fresh"] = None

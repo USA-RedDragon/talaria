@@ -39,6 +39,9 @@ const (
 	TypeResponse  = "response"
 	TypeEvent     = "event"
 	TypeConfig    = "config"
+	// TypeUpdateStatus is the extension telling the daemon how its own
+	// update stands (Message.Update).
+	TypeUpdateStatus = "update_status"
 	// TypeReplaced tells an extension that a newer connection took its
 	// place, so it must not reconnect on its own.
 	TypeReplaced = "replaced"
@@ -78,6 +81,16 @@ type Message struct {
 	HostPID          int               `json:"host_pid,omitempty"`
 	Version          string            `json:"version,omitempty"`
 	Browser          string            `json:"browser,omitempty"`
+	// DaemonVersion and PluginVersion are in the config message: the
+	// release versions of the daemon and of the plugin it talks to. An
+	// extension older than either asks Firefox for an update.
+	DaemonVersion string `json:"daemon_version,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
+	// Update is the extension's own update state: "checking", "current",
+	// "pending" (an update waits for no action to be in flight),
+	// "throttled" or "error". UpdateVersion is the version that waits.
+	Update        string `json:"update,omitempty"`
+	UpdateVersion string `json:"update_version,omitempty"`
 	// HubURL is the daemon's hub.url. The extension keeps agent tabs off
 	// the hub.
 	HubURL string `json:"hub_url,omitempty"`
@@ -100,6 +113,10 @@ type Hello struct {
 	Version     string
 	Browser     string
 	HostPID     int
+	// Update and UpdateVersion are the extension's own update state, as in
+	// Message. Empty from an extension that does not report it.
+	Update        string
+	UpdateVersion string
 }
 
 // Options configure a Broker.
@@ -121,6 +138,10 @@ type Options struct {
 	// AutologinMethods maps an autologin host to the label of the method
 	// button the extension clicks on a sign-in method picker.
 	AutologinMethods map[string]string
+	// DaemonVersion is the daemon's release version, sent to the extension
+	// so it can update itself when it is older. A dev build is no version
+	// and asks for nothing.
+	DaemonVersion string
 	// HelloTimeout bounds the handshake. Defaults to 10 seconds.
 	HelloTimeout time.Duration
 	// HubURL is the daemon's hub.url, which agent tabs may not open.
@@ -151,6 +172,8 @@ type Broker struct {
 	changed  chan struct{}
 	closed   bool
 	deviceID string
+	// pluginVersion is the plugin's version, from its welcome.
+	pluginVersion string
 }
 
 type conn struct {
@@ -237,8 +260,9 @@ func (b *Broker) handshake(c net.Conn) {
 	}
 	_ = c.SetReadDeadline(time.Time{})
 	cn := &conn{
-		c:       c,
-		hello:   Hello{ExtensionID: hh.ExtensionID, Version: eh.Version, Browser: eh.Browser, HostPID: hh.HostPID},
+		c: c,
+		hello: Hello{ExtensionID: hh.ExtensionID, Version: eh.Version, Browser: eh.Browser, HostPID: hh.HostPID,
+			Update: eh.Update, UpdateVersion: eh.UpdateVersion},
 		pending: map[string]chan Message{},
 		done:    make(chan struct{}),
 	}
@@ -286,7 +310,26 @@ func (b *Broker) drop(cn *conn) {
 
 func (b *Broker) configLocked() Message {
 	return Message{Type: TypeConfig, AllowHosts: b.opts.AllowHosts, ConfirmHosts: b.opts.ConfirmHosts,
-		AutologinHosts: b.opts.AutologinHosts, AutologinMethods: b.opts.AutologinMethods, HubURL: b.opts.HubURL, DeviceID: b.deviceID}
+		AutologinHosts: b.opts.AutologinHosts, AutologinMethods: b.opts.AutologinMethods, HubURL: b.opts.HubURL, DeviceID: b.deviceID,
+		DaemonVersion: b.opts.DaemonVersion, PluginVersion: b.pluginVersion}
+}
+
+// SetPluginVersion records the plugin's version and sends the config again
+// to the connected extension when it changed.
+func (b *Broker) SetPluginVersion(v string) {
+	b.mu.Lock()
+	if b.pluginVersion == v {
+		b.mu.Unlock()
+		return
+	}
+	b.pluginVersion = v
+	cn, m := b.cur, b.configLocked()
+	b.mu.Unlock()
+	if cn != nil {
+		if err := cn.write(m); err != nil {
+			slog.Warn("Could not configure the browser extension", "error", err)
+		}
+	}
 }
 
 // SetDeviceID records the id the hub gave this device and sends the config
@@ -436,6 +479,14 @@ func (b *Broker) readLoop(cn *conn) {
 				default:
 				}
 			}
+		case TypeUpdateStatus:
+			b.mu.Lock()
+			cn.hello.Update, cn.hello.UpdateVersion = m.Update, m.UpdateVersion
+			if b.cur == cn {
+				b.notifyLocked()
+			}
+			b.mu.Unlock()
+			slog.Info("Browser extension update", "state", m.Update, "version", m.UpdateVersion)
 		case TypeEvent:
 			slog.Debug("Browser event", "op", m.Op)
 		default:

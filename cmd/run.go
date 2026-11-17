@@ -416,13 +416,14 @@ func startUpdater(ctx context.Context, au *autoupdate.Daemon, dev *device.Client
 }
 
 // startBroker listens on the browser socket and serves it until ctx ends.
-func startBroker(ctx context.Context, cfg *config.Config) (*broker.Broker, error) {
+func startBroker(ctx context.Context, cfg *config.Config, version string) (*broker.Broker, error) {
 	sock, err := browserSocket(cfg)
 	if err != nil {
 		return nil, err
 	}
 	br, err := broker.Listen(broker.Options{Path: sock, ExtensionID: host.ExtensionID, AllowHosts: cfg.Browser.AllowHosts,
-		ConfirmHosts: cfg.Browser.ConfirmHosts, AutologinHosts: cfg.Browser.AutologinHosts, AutologinMethods: cfg.Browser.AutologinMethods, HubURL: cfg.Hub.URL})
+		ConfirmHosts: cfg.Browser.ConfirmHosts, AutologinHosts: cfg.Browser.AutologinHosts, AutologinMethods: cfg.Browser.AutologinMethods, HubURL: cfg.Hub.URL,
+		DaemonVersion: version})
 	if err != nil {
 		return nil, fmt.Errorf("browser socket: %w", err)
 	}
@@ -582,7 +583,7 @@ func setupBrowser(ctx context.Context, cfg *config.Config, version string, hub *
 	if !cfg.Browser.Enabled {
 		return nil, func() {}, nil
 	}
-	br, err := startBroker(ctx, cfg)
+	br, err := startBroker(ctx, cfg, version)
 	if err != nil {
 		return nil, nil, err
 	}

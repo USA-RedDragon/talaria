@@ -572,6 +572,9 @@ func (c *Client) serveOnce(ctx context.Context) (time.Duration, error) {
 	if d, ok := c.opts.Browser.(interface{ SetDeviceID(id string) }); ok && welcome.DeviceID != "" {
 		d.SetDeviceID(welcome.DeviceID)
 	}
+	if d, ok := c.opts.Browser.(interface{ SetPluginVersion(v string) }); ok && welcome.PluginVersion != "" {
+		d.SetPluginVersion(welcome.PluginVersion)
+	}
 	s.mcp = c.opts.MCP != nil && slices.Contains(c.Hello().Capabilities, protocol.CapabilityMCP) &&
 		slices.Contains(welcome.Capabilities, protocol.CapabilityMCP)
 	s.fileRead = !c.opts.NoFileRead && slices.Contains(welcome.Capabilities, protocol.CapabilityFileRead)
@@ -1395,6 +1398,7 @@ func (s *session) browserStatus(ctx context.Context) {
 		st := protocol.BrowserStatus{Type: protocol.TypeBrowserStatus}
 		if h, ok := b.Connected(); ok {
 			st.Connected, st.Browser, st.ExtensionVersion = true, h.Browser, h.Version
+			st.ExtensionUpdate, st.ExtensionUpdateVersion = h.Update, h.UpdateVersion
 		}
 		st.CanStart = s.c.opts.StartBrowser != nil
 		if st != last {

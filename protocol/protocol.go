@@ -398,6 +398,12 @@ type BrowserStatus struct {
 	Connected        bool   `json:"connected"`
 	Browser          string `json:"browser,omitempty"`
 	ExtensionVersion string `json:"extension_version,omitempty"`
+	// ExtensionUpdate is how the extension's own update stands: "checking",
+	// "current", "pending", "throttled" or "error"; empty when the
+	// extension does not report it. ExtensionUpdateVersion is the version
+	// that waits when it is "pending".
+	ExtensionUpdate        string `json:"extension_update,omitempty"`
+	ExtensionUpdateVersion string `json:"extension_update_version,omitempty"`
 	// CanStart: the device can start Firefox on a TypeBrowserStart.
 	CanStart bool `json:"can_start,omitempty"`
 }

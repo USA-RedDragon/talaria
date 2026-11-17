@@ -49,6 +49,11 @@ let port = null;
 let replaced = false;
 let groupId = null;
 let inflight = 0;
+// updateState and updateVersion are what the daemon is told about the
+// extension's own update (update.js): "checking", "current", "pending",
+// "throttled" or "error", and the version that waits.
+let updateState = "";
+let updateVersion = "";
 const agentTabs = new Set();
 // Hosts on loopback or private networks that the device allows, from the
 // daemon's config message. Everything else private is blocked in agent tabs.
@@ -140,6 +145,8 @@ async function connect() {
       type: "hello",
       version: browser.runtime.getManifest().version,
       browser: info.name + " " + info.version,
+      update: updateState,
+      update_version: updateVersion,
     });
     showStatus();
   } catch (e) {
@@ -158,6 +165,9 @@ async function onMessage(msg) {
     hubHost = hostPortOf(msg.hub_url);
     hubURL = hubHost ? new URL(msg.hub_url).origin : "";
     deviceID = typeof msg.device_id === "string" ? msg.device_id : "";
+    // A daemon or plugin newer than this extension means a fix may wait in
+    // an update that Firefox has not fetched yet.
+    updater.noteVersions(msg.daemon_version, msg.plugin_version);
     return;
   }
   if (msg && msg.type === "replaced") {
@@ -185,12 +195,34 @@ async function onMessage(msg) {
   }
   if (--inflight === 0) {
     showStatus();
+    updater.tryReload();
   }
   if (port) {
     port.postMessage(reply);
   }
 }
 
+
+// reportUpdate tells the daemon how the extension's own update stands, so
+// browser_status can say so.
+function reportUpdate(state, version) {
+  updateState = state;
+  updateVersion = version || "";
+  if (port) {
+    port.postMessage({ type: "update_status", update: updateState, update_version: updateVersion });
+  }
+}
+
+// The extension updates itself (update.js) instead of waiting for Firefox's
+// daily check, and reloads for an update only while no agent action, batch,
+// script or login is in flight.
+const updater = createUpdater({
+  runtime: browser.runtime,
+  ownVersion: browser.runtime.getManifest().version,
+  busy: () => inflight > 0 || loginBusy,
+  report: reportUpdate,
+});
+browser.runtime.onUpdateAvailable.addListener((details) => updater.onUpdateAvailable(details));
 
 // Script state per tab (docs/browser.md section 7.2). taints holds the
 // network limits of a tab that ran browser_eval: the sites it may still
@@ -2434,3 +2466,4 @@ const OPS = {
 };
 
 connect();
+updater.start();

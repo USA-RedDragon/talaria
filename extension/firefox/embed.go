@@ -15,7 +15,7 @@ import (
 
 // Files holds the extension's files.
 //
-//go:embed manifest.json background.js pagechat.html pagechat.js pagechat.css icons
+//go:embed manifest.json update.js background.js pagechat.html pagechat.js pagechat.css icons
 var Files embed.FS //nolint:gochecknoglobals // go:embed needs a variable
 
 // ReleasesURL is where each release publishes the signed extension.

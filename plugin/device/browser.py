@@ -1872,6 +1872,44 @@ def _known_user(session_id: str) -> Optional[str]:
         return None
 
 
+def _vtuple(v: Any) -> Optional[tuple]:
+    m = re.fullmatch(r"\d{1,9}(\.\d{1,9}){0,3}", v) if isinstance(v, str) else None
+    return tuple(int(x) for x in v.split(".")) if m else None
+
+
+def _older(a: Any, b: Any) -> bool:
+    x, y = _vtuple(a), _vtuple(b)
+    if x is None or y is None:
+        return False
+    n = max(len(x), len(y))
+    return x + (0,) * (n - len(x)) < y + (0,) * (n - len(y))
+
+
+def extension_update_note(conn: Any) -> str:
+    """Plain words when the Firefox extension is older than the daemon or the plugin, else "".
+
+    The extension version moves only when the extension changes, so older is not always a problem:
+    an extension that reports it asked Firefox and heard there is no update says nothing here."""
+    info = getattr(conn, "browser", None) or {}
+    ext = info.get("extension_version")
+    state = info.get("extension_update") or ""
+    newer = [f"{name} {v}" for name, v in (("the daemon", getattr(conn, "client_version", "")),
+                                           ("the plugin", _core().PLUGIN_VERSION)) if _older(ext, v)]
+    if state == "pending":
+        waits = info.get("extension_update_version") or "a newer version"
+        return (f"The Firefox extension ({ext}) is older than {' and '.join(newer) or 'the daemon'} and an update "
+                f"to {waits} is pending: it installs by itself as soon as no agent action is running. "
+                f"Until then, fixes in the newer extension are not active.")
+    if not newer or state == "current":
+        return ""
+    if state in ("checking", "throttled", "error"):
+        how = {"checking": "is asking Firefox for an update now", "throttled": "was told by Firefox to check again later",
+               "error": "could not ask Firefox for an update"}[state]
+        return f"The Firefox extension ({ext}) is older than {' and '.join(newer)}; it {how} and retries on its own."
+    return (f"The Firefox extension ({ext}) is older than {' and '.join(newer)} and does not update itself yet; "
+            f"Firefox installs the update at its next daily check, or the user can check for updates in about:addons.")
+
+
 def browser_status(args: dict, session_id: str = "", **_kwargs) -> str:
     core = _core()
     try:
@@ -1882,6 +1920,9 @@ def browser_status(args: dict, session_id: str = "", **_kwargs) -> str:
         return _ok({"available": False, "reason": str(exc), "devices": _device_list(_known_user(session_id))})
     out = {"available": True, "device": conn.name, "device_id": conn.device_id, "why": _HOW.get(how, how)}
     out.update({k: v for k, v in conn.browser.items() if k != "connected"})
+    note = extension_update_note(conn)
+    if note:
+        out["extension_update_note"] = note
     try:
         tabs = call(conn, "tabs_list", {}, INSPECT_TIMEOUT_S)
         out["tabs"] = tabs.get("tabs", []) if isinstance(tabs, dict) else []
@@ -2519,6 +2560,9 @@ def _check(args: dict, conn: Any, _sid: str) -> str:
     res = call(conn, "check", req)
     res = dict(res) if isinstance(res, dict) else {}
     res["login_grants"] = _grants_view(res.get("login_grants"), conn)
+    note = extension_update_note(conn)
+    if note:
+        res["extension_update_note"] = note
     return _ok(res)
 
 
