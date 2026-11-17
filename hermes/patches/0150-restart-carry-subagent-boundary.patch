@@ -14,11 +14,11 @@ The per-turn carry also stopped every background subagent at the release (restar
  agent/turn_tool_round.py                      |   2 +-
  gateway/turn_carry.py                         |  74 +++++-
  .../test_restart_carry_subagent_boundary.py   | 111 ++++++++
- .../test_restart_carry_subagent_boundary.py   | 241 ++++++++++++++++++
+ .../test_restart_carry_subagent_boundary.py   | 244 ++++++++++++++++++
  tools/async_delegation.py                     |  53 ++--
  tools/delegate_tool_child_run.py              |  10 +-
  tools/delegate_tool_handoff.py                |  68 ++++-
- 10 files changed, 561 insertions(+), 41 deletions(-)
+ 10 files changed, 564 insertions(+), 41 deletions(-)
  create mode 100644 tests/gateway/test_restart_carry_subagent_boundary.py
  create mode 100644 tests/tools/test_restart_carry_subagent_boundary.py
 
@@ -400,10 +400,10 @@ index 00000000..0f970de3
 +    os.close(runner._turn_carry.lock_fd)
 diff --git a/tests/tools/test_restart_carry_subagent_boundary.py b/tests/tools/test_restart_carry_subagent_boundary.py
 new file mode 100644
-index 00000000..6e585097
+index 00000000..6eb50cbf
 --- /dev/null
 +++ b/tests/tools/test_restart_carry_subagent_boundary.py
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,244 @@
 +"""The per-turn carry (gateway.restart_turn_handoff_per_turn) and the background subagents it hands over.
 +
 +- An agent whose turn ended no longer names the thread that ran it: thread idents are reused at once, so a subagent
@@ -595,7 +595,7 @@ index 00000000..6e585097
 +    ad._reset_for_tests()
 +
 +
-+def _unit(finish, *, release_on_handoff=True):
++def _unit(finish, *, release_on_handoff=True, delegation_id="deleg_call"):
 +    """A one-child unit whose child runs until its handoff function is called (or until ``release`` is set), then
 +    ends with ``finish``."""
 +    started, release, calls = threading.Event(), threading.Event(), []
@@ -611,12 +611,12 @@ index 00000000..6e585097
 +        state["0"] = {"session_id": "child-0b"}
 +        if release_on_handoff:
 +            release.set()
-+    spec = {"version": 1, "parent": {"session_id": "parent-sid"}, "task_count": 1, "live_deleg_id": "deleg_call",
++    spec = {"version": 1, "parent": {"session_id": "parent-sid"}, "task_count": 1, "live_deleg_id": delegation_id,
 +            "children": {"0": {"goal": "task 0", "subagent_id": "sa-0-0000", "session_id": "child-0",
 +                               "route": {"backend": "default", "route": {}}}}}
 +    handle = ad.dispatch_async_delegation_batch(
 +        goals=["task 0"], context=None, toolsets=None, role="leaf", model="m", session_key="agent:main:local:x",
-+        parent_session_id="parent-sid", runner=runner, delegation_id="deleg_call", handoff=spec,
++        parent_session_id="parent-sid", runner=runner, delegation_id=delegation_id, handoff=spec,
 +        handoff_fn=handoff_fn)
 +    assert handle["status"] == "dispatched" and started.wait(5)
 +    return handle["delegation_id"], calls, release
@@ -635,13 +635,16 @@ index 00000000..6e585097
 +    ad._reset_for_tests()
 +    assert ad.adopt_handed_off_delegations(make_runner) == 1
 +    assert seen["kept"][0]["status"] == "completed" and seen["handoff"]["resume"] == []
++    # The adopted unit finalizes on its own thread: let it, so it never lands on another test's record.
++    wait_until(lambda: (ad._records.get(delegation_id) or {}).get("status") not in ("running", "finalizing", None),
++               what="the adopted unit finished")
 +
 +
 +def test_a_unit_already_handed_off_by_the_carry_is_not_stopped_again(ledger):
-+    _delegation_id, calls, release = _unit("interrupted", release_on_handoff=False)
++    _delegation_id, calls, release = _unit("interrupted", release_on_handoff=False, delegation_id="deleg_second")
 +    # The carry's handoff: its child is still on the way to its boundary when this returns.
 +    ad.hand_off_for_restart(0.0, 0.2, boundary_seconds=0.0)
-+    assert len(calls) == 1
++    wait_until(lambda: calls, what="the carry's handoff function")  # it runs on its own thread
 +    assert ad.hand_off_for_restart(0.0, 0.2) == 0  # the stop after the carry
 +    assert len(calls) == 1
 +    release.set()
