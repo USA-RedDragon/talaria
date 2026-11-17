@@ -316,7 +316,7 @@
    "title": "Ran Python root = Path(\"/home/alice/proj\")",
    "status": "Done",
    "state": "ok",
-   "more": "0 tool calls \u00b7 0.3 s",
+   "more": "0.3 s",
    "lines": [
     "12 json files+3 lines"
    ],
@@ -369,7 +369,7 @@
    "title": "Ran Python data = json.loads(open(\"/home/alice/proj/x.json\").read())",
    "status": "Script error: exit 1",
    "state": "bad",
-   "more": "0 tool calls \u00b7 0.1 s",
+   "more": "0.1 s",
    "lines": [
     "json.decoder.JSONDecodeError: Expecting value: line 1 column 1"
    ],

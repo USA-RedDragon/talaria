@@ -90,7 +90,7 @@ window.HubNotice = (() => {
     const d = duration(secs);
     if (d) meta.push(d);
     if (route) meta.push(route);
-    if (calls) meta.push(calls + " calls");
+    if (calls) meta.push(calls + (calls === 1 ? " call" : " calls"));
     let result = body.replace(liveTranscript, "");
     const m = ranOn.exec(result);
     if (m) result = result.slice(0, m.index) + result.slice(m.index + m[0].length);

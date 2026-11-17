@@ -171,6 +171,8 @@
       return out;
     }
     out.title = "Took a screenshot of " + (str(res.title) ? short(res.title) : "the page");
+    // A page title is often long: it takes a second line on a phone.
+    out.titleWrap = true;
     out.status = "Done";
     out.more = [{ chip: a.full_page === true ? "Whole page" : "Visible part" }];
     const where = hostPath(res.url);

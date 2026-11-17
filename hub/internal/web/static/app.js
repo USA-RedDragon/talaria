@@ -1012,7 +1012,8 @@
       this.tools = new Map();
       this.wraps = new Map();
       if (this.cards) this.cards.dispose();
-      this.cards = window.HubApprovals.create({ el, api, base: this.base, words: t, banner, add: (box) => this.add(box) });
+      this.cards = window.HubApprovals.create({ el, api, base: this.base, words: t, banner, add: (box) => this.add(box),
+        proc: (id) => (this.known ? this.known.proc(id) : "") });
       this.pending = [];
       this.failed = [];
       this.at = 0;
@@ -1437,8 +1438,11 @@
       return this.cctx;
     }
 
+    // subCtx is cardCtx without Show in Activity: the subagent's steps are
+    // in Activity already.
     subCtx() {
-      return this.cardCtx();
+      if (!this.sctx) this.sctx = Object.assign({}, this.cardCtx(), { activity: null });
+      return this.sctx;
     }
 
     mainCtx() {

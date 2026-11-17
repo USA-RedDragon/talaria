@@ -355,7 +355,11 @@ async function questionCards() {
       "dt:Rule", "dd:Interfere With Workloads", "dt:Why", "dd:The kill names no process. A kill like this one was blocked earlier."]);
     assert.deepStrictEqual(dl.children[3].children.map((c) => c.textContent), ["The kill names no process.", "A kill like this one was blocked earlier."]);
     assert.ok(!card.text().includes("Asked by a subagent") && !card.text().includes("old text") && !card.text().includes("asks:"));
-    assert.deepStrictEqual(card.children.map((c) => c.tag), ["b", "div", "dl", "pre", "div"]);
+    // The process_manage call is said in words, not as its raw JSON.
+    assert.deepStrictEqual(card.children.map((c) => c.tag), ["b", "div", "dl", "div", "div"]);
+    assert.strictEqual(card.children[3].className, "toolcall");
+    assert.strictEqual(card.children[3].text(), "Stop a background command");
+    assert.ok(!card.text().includes("process_manage") && !card.text().includes("{"), card.text());
     assert.strictEqual(card.children[0].textContent, "Approval needed: run this command");
     assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow", "Deny"]);
     // The chat's own card has no who line; a source row only with the source choice.
@@ -385,7 +389,8 @@ async function questionCards() {
     tracker.offer(lgPrompt());
     const card = shown[0];
     assert.ok(card.text().includes("Sign in with the saved login on portal.example.com?"));
-    assert.ok(card.text().includes("upstairs-pc") && card.text().includes("Firefox has one saved login for this site"));
+    assert.ok(card.text().includes("upstairs-pc") && card.text().includes("1 saved login"));
+    assert.ok(!card.text().includes("will not work"), "one saved login: no warning");
     assert.ok(!card.text().includes("pod text"));
     assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow once", "Allow on upstairs-pc", "Deny"]);
     const radios = []; card.walk((n) => { if (n.tag === "input" && n.attrs !== undefined && n.type === "radio") radios.push(n); });
@@ -400,10 +405,16 @@ async function questionCards() {
     await flush();
     assert.deepStrictEqual(deny.log[0].body, { choice: "deny" });
     // Saved login lines.
-    for (const [n, text] of [[0, "Firefox has no saved login for this site"], [3, "Firefox has 3 saved logins for this site and fills none of them"], [-1, "Whether Firefox has a saved login here is not known"]]) {
+    // The count in plain words; a line of its own says the sign-in will not work, only when that is so.
+    for (const [n, text, warn] of [[0, "No saved login", "Firefox has nothing to fill in here"], [3, "3 saved logins", "Firefox fills in nothing when a site has more than one saved login"],
+      [-1, "Not known", ""]]) {
       const x = harness();
       x.tracker.offer(lgPrompt({ prompt_id: "n" + n, login_grant: { device_id: "d1", device_name: "pc", host: "a.example.com", saved_logins: n } }));
       assert.ok(x.shown[0].text().includes(text), text);
+      assert.ok(!x.shown[0].text().includes("fills none of them"));
+      const note = x.shown[0].children.find((c) => c.className === "fillnote");
+      assert.strictEqual(note ? note.text() : "", warn ? note.text() : "", text);
+      if (warn) assert.ok(note.text().startsWith(warn), note.text());
     }
     // A computer the hub does not know cannot be allowed.
     const unk = harness();

@@ -204,9 +204,9 @@
    ],
    "blocks": [
     "Install guide",
-    "",
+    "Page text",
     "Configuration reference",
-    "",
+    "Page text",
     "Changelog"
    ]
   }
@@ -285,7 +285,7 @@
    "state": "ok",
    "blocks": [
     "list",
-    ""
+    "Page text"
    ],
    "more": "29 characters"
   }

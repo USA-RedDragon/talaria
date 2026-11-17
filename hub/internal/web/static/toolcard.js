@@ -37,11 +37,15 @@
 //   blocks     the expanded part: { label, text, kind } where kind is pre
 //              (default), command, diff, plain, steps (items), page (meta),
 //              kv (rows of { k, v, mono }), list (items of parts), question
-//              (rec, drawn by questioncard.js); copy: false drops the button
+//              (rec, drawn by questioncard.js); copy: false drops the button;
+//              fold: true draws the block closed under its label, opened by
+//              a tap (for one of several long texts)
 //   raw        text for the closed Raw toggle at the end of the expanded part
 //   vision     { kind, url|path, question } of an image the call looked at
 //   page       { path, title } of a page the call published
 //   statusLast the status line comes after the lines
+//   titleWrap  the title takes a second line on a narrow screen instead of
+//              ending in "…"
 //   bad, idle, waiting  the state is bad; the status is muted; it waits
 // Parts are strings or { code }, { chip }, { tone, text } (tone ok, bad,
 // warn, add, del), { link, text } (a web page, opened in a new tab). A list
@@ -649,6 +653,13 @@ window.HubToolCard = (() => {
     }
 
     function drawBlock(b) {
+      if (b.fold) {
+        const d = el("details", "notice-sec tool-sec tool-fold");
+        d.open = false;
+        const inner = drawBlock(Object.assign({}, b, { fold: false, label: "" }));
+        d.append(el("summary", "", b.label || "Text"), ...inner.childNodes);
+        return d;
+      }
       const sec = el("div", "notice-sec tool-sec");
       if (b.label) sec.append(el("b", "", b.label));
       let body;
@@ -879,6 +890,7 @@ window.HubToolCard = (() => {
       else kids.push(sub, meta, lineBox);
       head.replaceChildren(...kids);
       head.classList.toggle("chipped", d.chips.length > 0);
+      title.classList.toggle("wrap", !!d.titleWrap);
       drawTitle(el, title, d);
       title.title = d.title;
       drawMeta(d, c);

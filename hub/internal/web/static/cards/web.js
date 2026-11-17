@@ -166,7 +166,8 @@
         : { parts: chars(p.content.length) + (p.cutDown ? ", cut to " + limit.toLocaleString("en-US") + " (full text saved)" : ""), dim: true });
     for (const p of list) {
       out.blocks.push({ label: n > 1 || bad.length ? p.title || nameOf(p.url) : "", kind: "list", items: [p.url, note(p)] });
-      if (!p.error && p.content.trim()) out.blocks.push({ text: cut(p.content.trim(), pageCap) });
+      // The text of each page starts closed: a tap opens it.
+      if (!p.error && p.content.trim()) out.blocks.push({ label: "Page text", text: cut(p.content.trim(), pageCap), fold: true });
     }
     return out;
   }

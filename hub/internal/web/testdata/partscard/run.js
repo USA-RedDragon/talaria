@@ -53,7 +53,7 @@ async function check(c, card, w, touch, dark) {
       rule: a.querySelector("dl.parts dd.rulename") ? a.querySelector("dl.parts dd.rulename").textContent : null,
       whyBlocks: [...a.querySelectorAll("dl.parts dd.why div")].length,
       dl: a.querySelector("dl.parts") ? rect(a.querySelector("dl.parts")) : null,
-      pre: a.querySelector("pre") ? rect(a.querySelector("pre")) : null,
+      pre: a.querySelector("pre, .toolcall") ? rect(a.querySelector("pre, .toolcall")) : null,
       kids: [...a.children].map((n) => n.tagName.toLowerCase() + (n.className ? "." + n.className.split(" ")[0] : "")),
       asked: a.innerText.includes("Asked by a subagent"),
     };
@@ -71,7 +71,8 @@ async function check(c, card, w, touch, dark) {
     assert.deepStrictEqual(r.dts, card.rows, tag + ": rows");
     assert.strictEqual(r.rule, card.rule);
     assert.ok(!/\bc\d+\b/.test(r.text) && !r.text.includes("old text") && !r.text.includes("asks:"), tag + ": " + r.text);
-    assert.deepStrictEqual(r.kids.slice(0, 1).concat(r.kids.slice(-2)), ["b", "pre", "div.actions"], tag + ": order " + r.kids);
+    // A process_manage call is said in words (div.toolcall), a command is shown as it is (pre).
+    assert.deepStrictEqual(r.kids.slice(0, 1).concat(r.kids.slice(-2)), ["b", card.name === "subagent" ? "div.toolcall" : "pre", "div.actions"], tag + ": order " + r.kids);
     assert.strictEqual(r.kids.includes("div.by"), card.who, tag + ": who line " + r.kids);
     if (card.who) {
       assert.strictEqual(r.chip, "Subagent");

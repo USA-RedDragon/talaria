@@ -151,7 +151,7 @@
       out.status = "Done, " + plural(inner.length, "tool call") + " failed";
       out.tone = "warn";
     } else out.status = "Done";
-    if (calls !== null && !inner.length) more.push(plural(calls, "tool call"));
+    if (calls && !inner.length) more.push(plural(calls, "tool call"));
     if (typeof c.duration !== "number" && dur !== null && !/^Timed out/.test(out.status)) more.push(secs(dur));
     out.more = more.flatMap((m, i) => (i ? [" · ", m] : [m]));
     // The line under the status: the error's last line, or the first line
@@ -160,7 +160,7 @@
     if (out.bad && (err.trim() || body.trim())) out.lines.push({ parts: [tail(err) || tail(body)] });
     else if (body) {
       const n = lines(stripAnsi(body));
-      out.lines.push({ parts: [first(stripAnsi(body)), ...(n > 1 ? [{ chip: "+" + (n - 1) + " lines" }] : [])], dim: true });
+      out.lines.push({ parts: [first(stripAnsi(body)), ...(n > 1 ? [{ chip: "+" + plural(n - 1, "line") }] : [])], dim: true });
     } else if (c.done && !out.bad) out.lines.push({ parts: ["No output"], dim: true });
     if (src) out.blocks.push({ label: "Code", text: src, kind: "pre" });
     let shownOut = stdout;

@@ -68,7 +68,7 @@
           kind: "kv",
           rows: rows.map((r) => {
             const bits = [stateWords(r.status)];
-            if (typeof r.tool_count === "number") bits.push(plural(r.tool_count, "step"));
+            if (typeof r.tool_count === "number" && r.tool_count > 0) bits.push(plural(r.tool_count, "step"));
             const route = routeLabel(r.route) || str(typeof r.route === "string" ? r.route : "") || "";
             if (route) bits.push(route);
             const v = [];

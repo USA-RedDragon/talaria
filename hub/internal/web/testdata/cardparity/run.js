@@ -33,13 +33,21 @@ async function open() {
   return { proc, ev: c.ev, send: c.send, nav: (u) => c.send("Page.navigate", { url: u }), close: c.close };
 }
 
-// shape is a card's DOM with what differs by place taken out: nothing but
-// the times that tick. Every attribute and class stays.
+// shape is a card's DOM with what differs by place taken out: the times
+// that tick, and the Show in Activity link, which only a card outside
+// Activity has (with it, the card opens; without anything else to show, the
+// same card in Activity is flat). Every other attribute and class stays.
 const shape = `((n, tick) => {
+  // A card that shows nothing more when open differs by place only in that.
+  const only = !!n && !!n.view && !n.view.derived.opens;
   const walk = (x) => {
     if (x.nodeType === 3) return JSON.stringify(tick ? x.data.replace(/\\d+(:\\d+)+|\\d+(\\.\\d+)?\\s?(ms|s|m|h)\\b/g, "#") : x.data);
     if (x.nodeType !== 1) return "";
-    const attrs = [...x.attributes].filter((a) => !(tick && a.name === "data-since")).map((a) => a.name + "=" + a.value).sort().join(",");
+    if (x.classList.contains("tool-open")) return "";
+    if (only && x.classList.contains("notice-body-wrap")) return "";
+    const attrs = [...x.attributes].filter((a) => !(tick && a.name === "data-since"))
+      .filter((a) => !(only && a.name === "aria-expanded"))
+      .map((a) => a.name + "=" + (only && a.name === "class" ? a.value.replace(/\\bflat\\b/, "").trim() : a.value)).sort().join(",");
     return x.tagName + (x.hidden ? "[hidden]" : "") + "{" + attrs + "}(" + [...x.childNodes].map(walk).join(" ") + ")";
   };
   return n ? walk(n) : "missing";
@@ -130,6 +138,8 @@ let proc;
   await ev(`document.querySelectorAll("details.toolgroup").forEach((d) => { d.open = true; })`);
 
   const compare = async (state) => {
+    // The subagent's steps never carry Show in Activity: they are in it.
+    assert.strictEqual(await ev(`document.querySelectorAll(".act .mc .tool-open").length`), 0, "Show in Activity inside Activity");
     for (const id of ids) {
       const a = await ev(`${shape}(${main(id)}${argsOf(id)})`);
       const b = await ev(`${shape}(${mini(id)}${argsOf(id)})`);

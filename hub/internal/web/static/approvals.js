@@ -23,7 +23,6 @@ window.HubApprovals = (() => {
   // when it is open.
   function model(rec) {
     const p = rec.prompt || {};
-    const clock = (window.HubTimes && window.HubTimes.clock) || (() => "");
     const out = { icon: "lock", title: "Approval:", blocks: [], lines: [], idle: !rec.closed && rec.allowed === null };
     out.status = rec.head;
     if (rec.allowed === true) out.tone = "ok";
@@ -36,12 +35,14 @@ window.HubApprovals = (() => {
     const split = p.description ? /^([\s\S]*?)\s*\bScript:\s*([\s\S]+)$/.exec(p.description) : null;
     const words = line(split ? split[1] : p.description);
     const command = p.command && !/^<[\w.-]+>/.test(p.command) ? p.command : "";
-    const shown = p.command || (split ? split[2] : "");
+    const asTool = toolCall(p.command);
+    const shown = asTool ? "" : p.command || (split ? split[2] : "");
     if (rec.closed) {
       out.lines.push({ parts: closedWords, dim: true, closed: true });
     } else {
       const head = [];
-      if (command) {
+      if (asTool) head.push(...asTool);
+      else if (command) {
         const k = command.search(/\s/);
         if (k > 0) head.push(command.slice(0, k) + " ", { code: command.slice(k + 1).trim() });
         else head.push({ code: command });
@@ -52,8 +53,8 @@ window.HubApprovals = (() => {
       const dim = [];
       if (why) dim.push(why);
       if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) dim.push("source " + p.grant_source);
-      const place = [rec.where, rec.at && clock(rec.at)].filter(Boolean).join(", ");
-      if (place) dim.push(place);
+      // Where it was answered; the time is the message's, not the card's.
+      if (rec.where) dim.push(rec.where);
       if (dim.length) out.lines.push({ parts: dim.join(" \u00b7 "), dim: true, closed: true });
     }
     const rows = [];
@@ -63,7 +64,7 @@ window.HubApprovals = (() => {
     if (reason) rows.push({ k: "Why", v: reason });
     else if (words && !p.rule) rows.push({ k: "Action", v: words });
     if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) rows.push({ k: "Source", v: p.grant_source });
-    if (rec.where) rows.push({ k: "Answered", v: rec.where.charAt(0).toUpperCase() + rec.where.slice(1) + (rec.at && clock(rec.at) ? ", " + clock(rec.at) : "") });
+    if (rec.where) rows.push({ k: "Answered", v: rec.where.charAt(0).toUpperCase() + rec.where.slice(1) });
     if (rows.length) out.blocks.push({ kind: "kv", rows });
     if (shown) out.blocks.push({ label: "Command", text: shown });
     return out;
@@ -76,10 +77,52 @@ window.HubApprovals = (() => {
   //   may wait for Hermes to confirm it before the card offers a retry).
   // savedLogins says how many logins Firefox keeps for the site. It never shows a name.
   function savedLogins(n) {
-    if (n === 1) return "Firefox has one saved login for this site";
-    if (n === 0) return "Firefox has no saved login for this site";
-    if (Number.isInteger(n) && n > 1) return "Firefox has " + n + " saved logins for this site and fills none of them";
-    return "Whether Firefox has a saved login here is not known";
+    if (n === 1) return "1 saved login";
+    if (n === 0) return "No saved login";
+    if (Number.isInteger(n) && n > 1) return n + " saved logins";
+    return "Not known";
+  }
+
+  // fillNote says, only when it is so, why the sign-in will not work: with
+  // more than one saved login for a site Firefox fills in none of them.
+  function fillNote(n) {
+    if (n === 0) return "Firefox has nothing to fill in here, so this sign-in will not work.";
+    if (Number.isInteger(n) && n > 1) return "Firefox fills in nothing when a site has more than one saved login, so this sign-in will not work.";
+    return "";
+  }
+
+  // toolCall reads the command of an approval for a tool other than the
+  // terminal, "<tool> {json}", as words: "Stop npm run dev" for a
+  // process_manage kill. proc(id) names a background command the chat
+  // started. It returns parts ({ code } for commands), or null for any other
+  // command.
+  const pmWords = { kill: "Stop", write: "Send input to", submit: "Send input to", close: "Close the input of", wait: "Wait for",
+    poll: "Check", log: "Read the output of", handoff: "Hand off" };
+  function toolCall(cmd, proc) {
+    const m = /^<([\w.-]+)>\s*(\{[\s\S]*\})\s*$/.exec(String(cmd || ""));
+    if (!m) return null;
+    let args;
+    try { args = JSON.parse(m[2]); } catch (_) { return null; }
+    if (!args || typeof args !== "object") return null;
+    const tool = m[1];
+    if (tool === "process_manage") {
+      const act = String(args.action || "");
+      if (act === "list") return ["List the background commands"];
+      const id = String(args.session_id || args.process_id || "");
+      const name = id && proc ? proc(id) : "";
+      const verb = pmWords[act] || "Manage";
+      return name ? [verb + " ", { code: name }] : [verb + " a background command"];
+    }
+    const pairs = Object.entries(args).filter(([, v]) => ["string", "number", "boolean"].includes(typeof v)).map(([k, v]) => k + ": " + v).join(", ");
+    const words = "Use " + tool.replace(/[_-]+/g, " ");
+    return pairs ? [words + " ", { code: pairs.length > 160 ? pairs.slice(0, 160) + "…" : pairs }] : [words];
+  }
+
+  // toolCallNode draws toolCall's parts.
+  function toolCallNode(el, parts) {
+    const d = el("div", "toolcall");
+    for (const p of parts) d.append(typeof p === "string" ? p : el("code", "", p.code));
+    return d;
   }
 
   function create(deps) {
@@ -172,8 +215,10 @@ window.HubApprovals = (() => {
         const list = el("dl", "parts");
         list.append(el("dt", "", "Site"), el("dd", "", String(lg.host || "")));
         list.append(el("dt", "", "Computer"), el("dd", "", computer || "A computer this hub does not know"));
-        list.append(el("dt", "", "Saved login"), el("dd", "", savedLogins(lg.saved_logins)));
+        list.append(el("dt", "", "Saved logins"), el("dd", "", savedLogins(lg.saved_logins)));
         box.append(list);
+        const note = fillNote(lg.saved_logins);
+        if (note) box.append(el("div", "fillnote", note));
         if (lg.existing === "device") box.append(el("div", "", "This computer already allows sign-in here. Pick a method to change it."));
         const methods = Array.isArray(lg.methods) ? lg.methods : [];
         if (methods.length) {
@@ -214,7 +259,9 @@ window.HubApprovals = (() => {
         }
         if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) list.append(el("dt", "", "Source"), el("dd", "", p.grant_source));
         box.append(list);
-        if (p.command) box.append(el("pre", "", p.command));
+        const tc = toolCall(p.command, deps.proc);
+        if (tc) box.append(toolCallNode(el, tc));
+        else if (p.command) box.append(el("pre", "", p.command));
       } else {
         // A plugin's description may carry the script it asks to run after "Script:"; that goes in a code box of its
         // own, not in the sentence. The command of a plugin rule is "<tool> (plugin approval rule)", which is
@@ -226,7 +273,9 @@ window.HubApprovals = (() => {
         const sentence = split ? split[1] : p.description;
         for (const line of sentence ? String(sentence).split("\n") : []) if (line.trim()) box.append(el("div", "", line));
         if (split) box.append(el("pre", "", split[2]));
-        if (p.command && !rule) box.append(el("pre", "", p.command));
+        const tc = rule ? null : toolCall(p.command, deps.proc);
+        if (tc) box.append(toolCallNode(el, tc));
+        else if (p.command && !rule) box.append(el("pre", "", p.command));
         if (rule && !p.description) box.append(el("div", "rule", "An approval rule requires approval before the " + rule[1].replace(/_/g, " ") + " tool runs."));
         if (p.subagent && !parted && !clarify) box.append(el("div", "who", "Asked by a subagent: " + p.subagent));
       }
@@ -432,5 +481,5 @@ window.HubApprovals = (() => {
 
     return { offer, settled, outcome, lost, cancelled, restore, retire, dispose, has: (id) => cards.has(id), card: (id) => cards.get(id) };
   }
-  return { create, model, outcomeOf };
+  return { create, model, outcomeOf, toolCall, savedLogins, fillNote };
 })();

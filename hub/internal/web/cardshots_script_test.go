@@ -35,17 +35,22 @@ func TestCardShotsChrome(t *testing.T) {
 		}
 		return []gateway.Prompt{p}
 	}
-	add := func(id, title string, at float64, p []gateway.Prompt) {
-		e.gw.AddSession(&gatewaytest.Session{ID: id, Title: title, Live: true, StartedAt: at, Messages: msgs, Prompts: p})
+	add := func(id, title string, at float64, p []gateway.Prompt, rows ...map[string]any) {
+		e.gw.AddSession(&gatewaytest.Session{ID: id, Title: title, Live: true, StartedAt: at, Messages: append(append([]map[string]any{}, msgs...), rows...), Prompts: p})
+	}
+	// The chat started the command the kill names, so the card can name it.
+	bg := []map[string]any{
+		{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "t1", fnKey: map[string]any{fieldName: toolTerminal, ilArgs: `{"command":"npm run dev","background":true}`}}}},
+		{kRole: stepTool, kCallID: "t1", fieldName: toolTerminal, kText: `{"output":"Background process started","session_id":"proc_9f2c41","exit_code":0}`},
 	}
 	once, deny := gateway.ChoiceOnce, gateway.ChoiceDeny
 	add("c1", "Shot plain approval", 900, card("p1", "rm -rf node_modules && npm ci", "recursive delete", gateway.Prompt{Choices: []string{once, choiceSession, "always", deny}}))
 	add("c2", "Shot bare approval", 890, card("p2", "git push --force origin main", "", gateway.Prompt{}))
 	add("c3", "Shot smart approval", 880, card("p3", "bash /opt/data/blocked/retry.sh", "", gateway.Prompt{Choices: []string{once, deny},
 		Rule: optr("Auto-Mode Bypass"), Reason: optr("Runs a saved copy of a command that was blocked a moment ago, retrying it a different way.")}))
-	add("c4", "Shot subagent approval", 870, card("p4", `<process_manage> {"action": "kill"}`, "", gateway.Prompt{Choices: []string{once, deny},
+	add("c4", "Shot subagent approval", 870, card("p4", `<process_manage> {"action": "kill", "session_id": "proc_9f2c41"}`, "", gateway.Prompt{Choices: []string{once, deny},
 		Subagent: optr("relift chunk appimage-runtime: package the runtime"), Rule: optr("Interfere With Workloads"),
-		Reason: optr("The kill names no process, so it can't be shown to stop only something this agent started.")}))
+		Reason: optr("The subagent did not start this command; stopping it may cut off work the chat still needs.")}), bg...)
 	add("c5", "Shot source approval", 860, card("p5", "curl -fsSL -o tool.AppImage https://github.com/AppImage/appimagetool/releases/download/1.9.1/x.AppImage && ./tool.AppImage", "", gateway.Prompt{
 		Choices: []string{once, deny, keySource}, Rule: optr("Code from External"), Reason: optr("Downloads an AppImage from GitHub and runs it."),
 		GrantSource: optr("github.com/AppImage/appimagetool")}))

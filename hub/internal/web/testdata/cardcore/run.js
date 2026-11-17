@@ -203,6 +203,30 @@ function shape(n) {
   assert.ok(rows[2].classList.contains("gap"));
 }
 
+// A long block can start folded: closed under its label, opened by a tap.
+{
+  H.register({ fold_tool: () => ({ title: "Folded", status: "Done", blocks: [{ label: "Page text", text: "long text", fold: true }] }) });
+  const v = H.create(ctx, { name: "fold_tool", done: true, failed: false, args: {}, res: null, out: "", mem: H.memory() });
+  v.toggle();
+  const d = v.node.querySelector("details.tool-fold");
+  assert.ok(d, "a folded block");
+  assert.ok(!d.open, "starts closed");
+  assert.strictEqual(text(d.querySelector("summary")), "Page text");
+  assert.strictEqual(text(d.querySelector("pre")), "long text");
+  // A title may wrap to a second line.
+  H.register({ wrap_tool: () => ({ title: "A long title", titleWrap: true, status: "Done" }) });
+  const w = H.create(ctx, { name: "wrap_tool", done: true, failed: false, args: {}, res: null, out: "", mem: H.memory() });
+  assert.ok(w.node.querySelector(".notice-title").classList.contains("wrap"));
+}
+
+// A log without Show in Activity (the subagent steps are in Activity) draws
+// no such link.
+{
+  const inAct = Object.assign({}, ctx, { activity: null });
+  const s = H.mount(inAct, { key: "x9", name: "delegate_task", args: { goal: "x" }, mem: H.memory() });
+  assert.strictEqual(s.querySelector(".tool-open"), null);
+}
+
 // A diff shows its lines, not the file and hunk headers.
 {
   const d = H.diffLines("--- a/x.go\n+++ b/x.go\n@@ -1 +1,3 @@\n-\treturn nil\n+\tif err != nil {\n ctx\n@@ -9 +11 @@\n-a\n+b\n");

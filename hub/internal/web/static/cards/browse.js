@@ -579,7 +579,7 @@
     const list = Array.isArray(res.tabs) ? res.tabs : null;
     const others = (Array.isArray(res.devices) ? res.devices : []).filter((d) => isObj(d) && d.selected !== true);
     if (res.available !== false) {
-      const bits = ["Connected", list ? plural(list.length, "agent tab") : "", others.length ? plural(others.length, "other computer") : "", str(res.tabs_error) ? "could not read the tabs" : ""].filter(Boolean);
+      const bits = ["Connected", list && list.length ? plural(list.length, "agent tab") : "", others.length ? plural(others.length, "other computer") : "", str(res.tabs_error) ? "could not read the tabs" : ""].filter(Boolean);
       out.lines.push({ parts: bits.join(" · "), dim: true });
     }
     const rows = [];

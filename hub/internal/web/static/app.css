@@ -260,6 +260,9 @@ details.toolgroup .group-body { display: flex; flex-direction: column; gap: .5re
 .approval pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20rem; overflow: auto; margin: .4rem 0; padding: .5rem; border-radius: 6px; background: var(--code);
   font: .82rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .approval .rule { margin: .2rem 0 0; font-size: .82rem; color: var(--muted); }
+.approval .fillnote { margin: .1rem 0 .5rem; font-size: .88rem; color: var(--warn); }
+.approval .toolcall { margin: .4rem 0; font-size: .94rem; }
+.approval .toolcall code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; font-weight: 600; }
 /* A smart approval card in parts: who asks (a chip and the goal on one line), then Rule, Why and Source, then the command. */
 .approval .by { display: flex; gap: .5rem; align-items: baseline; margin: .35rem 0 .5rem; font-size: .88rem; color: var(--muted); min-width: 0; }
 .approval .by .chip { flex: none; padding: 0 .55rem; border-radius: 999px; font-size: .75rem; font-weight: 600; line-height: 1.4;
@@ -1659,6 +1662,9 @@ button.link svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; s
 .tool-line { margin-top: .15rem; font-size: .86rem; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-line.dim { color: var(--muted); }
 .tool-line.wrap { white-space: normal; overflow-wrap: anywhere; }
+.notice-title.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.tool-fold > summary { cursor: pointer; font-size: .8rem; color: var(--muted); font-weight: 600; margin-bottom: .15rem; }
+.tool-fold[open] > summary { margin-bottom: .3rem; }
 .tool-line.mono, .tool-li.mono, .tool-kv dd.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }
 .tool-line .tcode, .tool-more .tcode, .tool-li .tcode, .tool-kv .tcode { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .tadd { color: var(--ok); }
