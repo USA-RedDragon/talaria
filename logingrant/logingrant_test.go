@@ -53,6 +53,22 @@ func TestSignVerify(t *testing.T) {
 	}
 }
 
+func TestSignVerifyPostHosts(t *testing.T) {
+	t.Parallel()
+	pub, key, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	c := claims(now)
+	c.PostHosts = []string{"login-api.example.com"}
+	tok, err := logingrant.Sign(key, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := logingrant.Verify([]ed25519.PublicKey{pub}, tok, now)
+	if err != nil || len(got.PostHosts) != 1 || got.PostHosts[0] != "login-api.example.com" {
+		t.Fatalf("verify: %+v %v", got, err)
+	}
+}
+
 func TestSignRefusesBadClaims(t *testing.T) {
 	t.Parallel()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
@@ -67,6 +83,15 @@ func TestSignRefusesBadClaims(t *testing.T) {
 		"scope":          func(c *logingrant.Claims) { c.Scope = "always" },
 		"device id":      func(c *logingrant.Claims) { c.DeviceID = "d abc" },
 		"no user":        func(c *logingrant.Claims) { c.Sub = "" },
+		"post host ip":   func(c *logingrant.Claims) { c.PostHosts = []string{"10.0.0.1"} },
+		"post host self": func(c *logingrant.Claims) { c.PostHosts = []string{c.Host} },
+		"post host twice": func(c *logingrant.Claims) {
+			c.PostHosts = []string{"api.example.com", "api.example.com"}
+		},
+		"post host port": func(c *logingrant.Claims) { c.PostHosts = []string{"api.example.com:8443"} },
+		"post hosts many": func(c *logingrant.Claims) {
+			c.PostHosts = []string{"a.example.com", "b.example.com", "c.example.com", "d.example.com", "e.example.com"}
+		},
 	} {
 		c := claims(now)
 		mut(&c)

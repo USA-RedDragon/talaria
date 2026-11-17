@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -55,6 +56,10 @@ const MaxMethodLen = 80
 // MaxTitleLen is the longest chat title a grant carries.
 const MaxTitleLen = 120
 
+// MaxPostHosts is the most extra hosts one grant lets the login form send
+// to.
+const MaxPostHosts = 4
+
 // RefusedMethodPattern matches sign-in method labels that browser_login
 // never clicks: passkeys, security keys and anything that waits for the
 // user on another device (an approval prompt, a push notification, a code
@@ -92,6 +97,10 @@ type Claims struct {
 	// browser_login clicks on a method picker, "" for none.
 	Method string `json:"method,omitempty"`
 	Scope  string `json:"scope"`
+	// PostHosts are other https hosts the login form of Host may send the
+	// login to (a sign-in API on its own host name), which the user allowed
+	// on the same card. The extension allows them for a login on Host only.
+	PostHosts []string `json:"post_hosts,omitempty"`
 	// SessionID and ChatTitle name the chat whose card the user answered.
 	SessionID string `json:"session_id,omitempty"`
 	ChatTitle string `json:"chat_title,omitempty"`
@@ -117,6 +126,21 @@ func ValidHost(h string) bool {
 	}
 	last := labels[len(labels)-1]
 	return strings.Trim(last, "0123456789") != ""
+}
+
+// ValidPostHosts reports whether hosts may be the post hosts of a grant for
+// host: at most MaxPostHosts valid host names, none of them host itself and
+// none twice.
+func ValidPostHosts(host string, hosts []string) bool {
+	if len(hosts) > MaxPostHosts {
+		return false
+	}
+	for i, h := range hosts {
+		if !ValidHost(h) || h == host || slices.Contains(hosts[:i], h) {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidMethod reports whether label may be a grant's method: empty, or
@@ -214,6 +238,8 @@ func checkClaims(c *Claims) error {
 		return fmt.Errorf("%w: method", ErrClaims)
 	case c.Scope != ScopeOnce && c.Scope != ScopeDevice:
 		return fmt.Errorf("%w: scope", ErrClaims)
+	case !ValidPostHosts(c.Host, c.PostHosts):
+		return fmt.Errorf("%w: post_hosts", ErrClaims)
 	case len(c.SessionID) > 256 || len(c.ChatTitle) > MaxTitleLen*4 || len(c.Via) > 32:
 		return fmt.Errorf("%w: chat", ErrClaims)
 	case !noncePattern.MatchString(c.Nonce):
