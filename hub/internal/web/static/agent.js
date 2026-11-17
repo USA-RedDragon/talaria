@@ -380,18 +380,28 @@ window.HubAgent = (() => {
       paint();
       // The value shows while dragging; it is saved once, on release.
       rg.addEventListener("input", paint);
-      rg.addEventListener("change", async () => {
+      // Saves go one at a time, in the order they were made: PUTs sent together
+      // can land out of order, and then the last to arrive, not the last
+      // chosen, would be the value kept.
+      let saves = Promise.resolve();
+      let waiting = 0;
+      rg.addEventListener("change", () => {
         const v = Number(rg.value);
         note(lc);
-        try {
-          await api("PUT", base() + "/settings", { compression_threshold: v / 100 });
-          savedPct = v;
-          note(lc, say("good", "Saved. New chats use it."));
-        } catch (e) {
-          rg.value = String(savedPct);
-          paint();
-          note(lc, say("bad", "Not saved.", [e.message]));
-        }
+        waiting++;
+        saves = saves.then(async () => {
+          try {
+            await api("PUT", base() + "/settings", { compression_threshold: v / 100 });
+            savedPct = v;
+            if (waiting === 1) note(lc, say("good", "Saved. New chats use it."));
+          } catch (e) {
+            if (waiting === 1) {
+              rg.value = String(savedPct);
+              paint();
+              note(lc, say("bad", "Not saved.", [e.message]));
+            }
+          } finally { waiting--; }
+        });
       });
       th.append(thLab, srow, sends, sHint, sFloor);
       // The model's window is a hint only: no line when it cannot be read.

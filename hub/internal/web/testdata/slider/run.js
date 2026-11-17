@@ -28,7 +28,7 @@ let first = true;
       await ev(`window.__old = true`);
       await send("Page.navigate", { url: url + "/auth/login?next=/" });
       await until(ev, `!window.__old && ${q("#qpbtn")} && ${q("#gearbtn")}`, tag + ": the hub page");
-      await ev(`(() => { window.__puts = []; const f = window.fetch; window.fetch = function (u, o) { if (o && o.method === "PUT" && /settings/.test(String(u))) window.__puts.push(o.body); return f.apply(this, arguments); }; })()`);
+      await ev(`(() => { window.__puts = []; window.__done = 0; const f = window.fetch; window.fetch = function (u, o) { const r = f.apply(this, arguments); if (o && o.method === "PUT" && /settings/.test(String(u))) { window.__puts.push(o.body); r.then(() => { window.__done++; }, () => { window.__done++; }); } return r; }; })()`);
       // The gear answers once the page has loaded the session; click until the dialog opens.
       await until(ev, `(() => { if (!document.getElementById("settings").open) ${q("#gearbtn")}.click(); return document.getElementById("settings").open; })()`, tag + ": Settings to open");
       if (process.env.SLIDER_DEBUG) console.log(await ev(`JSON.stringify({ open: document.getElementById("settings").open, tabs: document.getElementById("settab-agent") !== null, body: document.body.innerText.slice(0, 300), err: window.__err })`));
@@ -106,6 +106,8 @@ let first = true;
       assert.strictEqual(s.v, "50", tag + ": back at 50");
       assert.ok(s.floor.includes("75%"), tag + ": line below 75%");
       assert.ok(!s.over, tag + ": no overflow");
+      // The next page load reads what the hub kept: let every save land first.
+      await until(ev, `window.__done === window.__puts.length`, tag + ": every save answered");
       await shot(tag);
     }
   }
