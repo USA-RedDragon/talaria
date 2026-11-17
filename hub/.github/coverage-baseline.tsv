@@ -45,7 +45,7 @@ internal/device/rpc.go	229	210
 internal/device/sessioncheck.go	23	22
 internal/device/usage.go	50	40
 internal/device/views.go	17	17
-internal/gateway/client.go	248	212
+internal/gateway/client.go	248	205
 internal/gateway/gatewaytest/activity.go	109	91
 internal/gateway/gatewaytest/compose.go	209	184
 internal/gateway/gatewaytest/fake.go	836	766
@@ -102,7 +102,7 @@ internal/scheduled/scheduledtest/scheduledtest.go	183	171
 internal/scheduled/service.go	480	418
 internal/secretbox/secretbox.go	37	31
 internal/server/server.go	40	0
-internal/service/activity.go	176	150
+internal/service/activity.go	176	153
 internal/service/agents.go	31	26
 internal/service/attach.go	100	85
 internal/service/claude.go	41	34
@@ -118,7 +118,7 @@ internal/service/outcome.go	95	90
 internal/service/page.go	63	57
 internal/service/pdf.go	74	56
 internal/service/rows.go	22	21
-internal/service/service.go	986	910
+internal/service/service.go	986	909
 internal/service/stopsend.go	93	77
 internal/service/subagentlog.go	186	156
 internal/service/toolout.go	39	32
@@ -127,7 +127,7 @@ internal/service/views.go	145	127
 internal/store/accounts.go	187	157
 internal/store/agents.go	87	74
 internal/store/answers.go	22	20
-internal/store/chats.go	86	71
+internal/store/chats.go	86	72
 internal/store/claudecode.go	97	79
 internal/store/device.go	200	166
 internal/store/import.go	74	61
@@ -135,7 +135,7 @@ internal/store/lock.go	55	48
 internal/store/migrate.go	33	24
 internal/store/notify.go	161	138
 internal/store/prompts.go	58	49
-internal/store/questions.go	32	25
+internal/store/questions.go	32	24
 internal/store/relay.go	37	25
 internal/store/settings.go	27	14
 internal/store/store.go	87	72
@@ -164,7 +164,7 @@ internal/telegram/replymedia.go	114	99
 internal/telegram/sendfile.go	74	58
 internal/telegram/status.go	59	53
 internal/telegram/todo.go	58	51
-internal/telegram/topics.go	521	382
+internal/telegram/topics.go	521	380
 internal/updates/updates.go	95	82
 internal/web/accounts.go	255	192
 internal/web/activity.go	144	100
