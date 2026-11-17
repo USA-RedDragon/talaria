@@ -45,6 +45,11 @@ SEND_TIMEOUT_S = 5.0
 # Device messages for the next gateway kept while its link reconnects; output past this is dropped
 # (the next gateway notes the lost bytes from the offsets).
 BACKLOG_MAX = 16 * 1024 * 1024
+# The handoff waits up to this long for the browser, MCP and file requests that the next gateway sent
+# through a link before it closes the link: the device ends such a request with its leg, and nothing
+# resumes it, so closing at once failed a browser call of a turn on the next gateway (not_connected).
+CALLS_WAIT_MAX_S = 60.0
+CALLS_POLL_S = 0.05
 
 # Links of this carrier, by the conn_id of the device leg they serve.
 _links: dict[str, "Link"] = {}
@@ -167,10 +172,38 @@ async def leg_ended(conn: Any) -> None:
         await link.close(CLOSE_HANDOFF, "device left the carrying gateway")
 
 
+def _calls_kinds() -> frozenset:
+    core = _core()
+    return frozenset({core.TYPE_BROWSER, core.TYPE_BROWSER_START, core.TYPE_MCP, core.TYPE_FILE_STAT,
+                      core.TYPE_FILE_READ})
+
+
+def _wait_for_calls(links: list, limit: float) -> None:
+    """Wait until the browser, MCP and file requests in flight on ``links`` now have their answers,
+    each up to its own timeout plus BROWSER_SLACK_S, and all of them up to ``limit`` seconds. Requests
+    the next gateway sends meanwhile are not waited for."""
+    now = time.monotonic()
+    slack = _core().BROWSER_SLACK_S
+    waits = [(link, rid, min(now + limit, started + timeout + slack))
+             for link in links for rid, (started, timeout) in list(link.calls.items())]
+    if not waits:
+        return
+    logger.info("device: waiting for %d browser, MCP or file requests of the next gateway before the handoff",
+                len(waits))
+    for link, rid, until in waits:
+        while rid in link.calls and not link.ended and time.monotonic() < until:
+            time.sleep(CALLS_POLL_S)
+    left = sum(1 for link, rid, _ in waits if rid in link.calls and not link.ended)
+    if left:
+        logger.warning("device: %d requests of the next gateway still ran at the handoff", left)
+
+
 def stop() -> None:
-    """The handoff (any thread): end every link and remove the key."""
+    """The handoff (any thread): end every link and remove the key. The browser, MCP and file
+    requests in flight on a link get their answers first (CALLS_WAIT_MAX_S)."""
     global _target
     _target = None
+    _wait_for_calls(list(_links.values()), CALLS_WAIT_MAX_S)
     links = list(_links.values())
     _links.clear()
     for link in links:
@@ -196,6 +229,9 @@ class Link:
         self.conn, self.target, self.token = conn, target, token
         # Request ids the next gateway sent through this link; the device's answers go back to it.
         self.ids: set[str] = set()
+        # The browser, MCP and file requests among them still waiting for their answer:
+        # id -> (monotonic start, timeout in seconds).
+        self.calls: dict[str, tuple[float, float]] = {}
         self.ws: Any = None
         self.session: Any = None
         self.backlog: list = []
@@ -217,8 +253,10 @@ class Link:
     async def deliver(self, data: Any, msg: Optional[dict] = None) -> None:
         """Send one device message (text, or a binary frame) to the next gateway, in order."""
         core = _core()
-        if msg is not None and msg.get("type") in (core.TYPE_EXIT, core.TYPE_BROWSER_RESULT, core.TYPE_MCP_RESULT):
+        if msg is not None and msg.get("type") in (core.TYPE_EXIT, core.TYPE_BROWSER_RESULT, core.TYPE_MCP_RESULT,
+                                                   core.TYPE_FILE_RESULT):
             self.ids.discard(msg.get("id"))
+            self.calls.pop(msg.get("id"), None)
         if self.ended:
             return
         ws = self.ws
@@ -343,6 +381,8 @@ class Link:
                     rid = out.get("id")
                     if isinstance(rid, str):
                         self.ids.add(rid)
+                        if kind in _calls_kinds():
+                            self.calls[rid] = (time.monotonic(), _timeout(out))
                     await self.conn.send_text(msg.data)
                 self.ws = None
                 self.connected.clear()
@@ -376,6 +416,15 @@ class Link:
                 await session.close()
             except Exception:
                 pass
+
+
+def _timeout(msg: dict) -> float:
+    """The timeout in seconds a request names, else the browser default."""
+    core = _core()
+    value = msg.get("timeout")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return float(core.MCP_DEFAULT_TIMEOUT_S if msg.get("type") == core.TYPE_MCP else core.BROWSER_DEFAULT_TIMEOUT_S)
+    return float(value)
 
 
 class _Refused(Exception):

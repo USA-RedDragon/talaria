@@ -425,7 +425,7 @@ def target_for(session_id: str, wait: bool = False) -> Target:
             return Target("server", "the Hermes server", "server")
         raise
     device_id = res.binding.device_id
-    conn = core.hub().await_device(device_id)[0] if wait else core.hub().device(device_id)
+    conn = core.hub().await_device(device_id, known=True)[0] if wait else core.hub().device(device_id)
     if conn is None:
         raise core.BindError(409, "device_offline", f"device {device_id} is not connected")
     if res.sandbox:

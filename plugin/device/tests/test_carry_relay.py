@@ -3,9 +3,15 @@
 own Hub, and one scripted version 3 device over real WebSockets that, like ``talaria run``, keeps one
 leg, parks its commands when the leg closes with 1001 and resumes them on its next connection.
 
-Before relay.py the next gateway had no connection to the device until the old gateway handed its
-processes over, so its calls waited for the device and failed (live: ``pre_tool_call plugin callback
-timed out``)."""
+Before relay.py the next gateway had no connection to the device until the old gateway handed over its
+processes, so its calls waited for the device and failed (live: ``pre_tool_call plugin callback
+timed out``).
+
+The device also serves the browser leg (docs/browser.md): its Firefox extension's requests and
+results ride the same exec leg, so they go over the link too. A browser call there did not wait for
+a device that was away, as a terminal call does: a scheduled job's run on the next gateway got
+``not_connected`` before the link was up and while the device moved over at the handoff, and a
+browser call in flight at the handoff was cut."""
 from __future__ import annotations
 
 import json
@@ -27,6 +33,7 @@ from test_routes import plugin_api  # noqa: E402
 DEVICE = "d_desk"
 handoff = core._load_sibling("hermes_device_handoff", "handoff.py")
 relay = core._load_sibling("hermes_device_relay", "relay.py")
+browser = None  # loaded by CarryRelayBrowserTests: a loaded but unregistered module changes the core guard
 
 
 class Device(threading.Thread):
@@ -41,7 +48,9 @@ class Device(threading.Thread):
         self.cmds: dict[str, dict] = {}
         self.legs = 0
         self.execs: list[str] = []
+        self.browser_ops: list[tuple[int, str]] = []
         self.stopped = False
+        self.reconnect_delay = 0.0
 
     def send(self, msg: dict) -> None:
         with self.lock:
@@ -71,9 +80,20 @@ class Device(threading.Thread):
             offset += len(line)
         self._emit(rid, {"type": "exit", "id": rid, "code": p.wait()})
 
+    def _browser(self, msg: dict, ws, leg: int) -> None:
+        # Like talaria run: a browser request belongs to its leg, and the leg's end cancels it.
+        time.sleep(float((msg.get("args") or {}).get("delay") or 0))
+        with self.lock:
+            if self.ws is not ws:
+                return
+        self.send({"type": "browser_result", "id": msg["id"], "ok": True,
+                   "result": {"op": msg.get("op"), "leg": leg}})
+
     def run(self):
         from websockets.sync.client import connect
         while not self.stopped:
+            if self.legs and self.reconnect_delay:
+                time.sleep(self.reconnect_delay)
             try:
                 ws = connect(self.url(), open_timeout=5, max_size=None)
             except Exception:
@@ -81,7 +101,8 @@ class Device(threading.Thread):
                 continue
             ws.send(json.dumps({"type": "hello", "version": 2, "max_version": 3, "roots": [self.root],
                                 "tmp_dir": self.root, "home": self.root, "hostname": "desk", "os": "linux",
-                                "arch": "amd64", "client_version": "v0.0.0-test", "name": DEVICE, "token": "t"}))
+                                "arch": "amd64", "client_version": "v0.0.0-test", "name": DEVICE, "token": "t",
+                                "capabilities": ["browser"]}))
             try:
                 welcome = json.loads(ws.recv(timeout=5))
                 if welcome.get("type") != "welcome":
@@ -103,10 +124,12 @@ class Device(threading.Thread):
                         del self.cmds[rid]
                 self.ws = ws
                 self.legs += 1
+                leg = self.legs
                 for rid, offset in named.items():
                     for m in self.cmds[rid]["log"] if rid in self.cmds else []:
                         if m["type"] == "exit" or m["offset"] + len(m["data"].encode()) > offset:
                             ws.send(json.dumps(m))
+                ws.send(json.dumps({"type": "browser_status", "connected": True, "browser": "firefox"}))
             while True:
                 try:
                     msg = json.loads(ws.recv())
@@ -117,6 +140,9 @@ class Device(threading.Thread):
                 elif msg["type"] == "exec":
                     self.execs.append(msg["cmd"])
                     threading.Thread(target=self._exec, args=(msg,), daemon=True).start()
+                elif msg["type"] == "browser":
+                    self.browser_ops.append((leg, msg["op"]))
+                    threading.Thread(target=self._browser, args=(msg, ws, leg), daemon=True).start()
                 elif msg["type"] == "kill":
                     with self.lock:
                         cmd = self.cmds.get(msg["id"])
@@ -147,7 +173,7 @@ class Gateway:
         self.thread.join(10)
 
 
-class CarryRelayTests(unittest.TestCase):
+class _TwoGateways(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
         self.addCleanup(self.tmp.cleanup)
@@ -198,6 +224,8 @@ class CarryRelayTests(unittest.TestCase):
         reader.proc.stdout.close()
         return code, reader.text()
 
+
+class CarryRelayTests(_TwoGateways):
     def test_the_next_gateway_runs_commands_while_the_old_one_carries_a_foreground_command(self):
         # The carried turn's foreground command, on the old gateway.
         carried = self.start(self.old_hub, 'for i in $(seq 1 40); do echo "old $i"; sleep 0.05; done; exit 7')
@@ -254,6 +282,114 @@ class CarryRelayTests(unittest.TestCase):
                 ws.recv(timeout=5)  # refused before any hello
             self.assertEqual(ws.close_code, core.CLOSE_ASSERTION_REFUSED)
         self.assertIsNone(self.new_hub.device(DEVICE))
+
+
+class CarryRelayBrowserTests(_TwoGateways):
+    """The browser leg of a turn on the next gateway, chat and scheduled job, during a carry."""
+
+    JOB = "job1"
+
+    def setUp(self):
+        global browser
+        if "hermes_device_browser" not in sys.modules:
+            self.addCleanup(sys.modules.pop, "hermes_device_browser", None)
+        browser = core._load_sibling("hermes_device_browser", "browser.py")
+        super().setUp()
+        self.cfg["reconnect_wait_seconds"] = 15
+        choice = {"device_id": DEVICE, "name": DEVICE, "user": ""}
+        jobs = mock.Mock()
+        jobs.job.side_effect = lambda job_id: dict(choice) if job_id == self.JOB else None
+        jobs.session.return_value = None
+        for p in (mock.patch.object(browser, "_core_ref", core), mock.patch.object(browser, "choices", lambda: jobs),
+                  mock.patch.object(browser, "backend_user", lambda: ""),
+                  mock.patch.object(browser, "_session_choice", lambda sid: None),
+                  mock.patch.object(browser, "cron_job_id", lambda sid: self.JOB if sid == "cron_run" else "")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def resolution(self, sid):
+        if sid == "cron_run":
+            return core.Resolution(core.STATE_NEVER_BOUND, sid)
+        return core.Resolution(core.STATE_BOUND, sid, via=sid, root=sid, binding=core.Binding(
+            session_id=sid, device_id=DEVICE, dir=self.root, generation="g1", bound_at=0.0))
+
+    def on_next(self, sid, op, args=None):
+        """A browser tool call of session ``sid`` on the next gateway, as its handler makes it:
+        browser.target, then the operation. Returns a thread whose ``out`` is the result or the error."""
+        def run():
+            try:
+                with mock.patch.object(browser, "resolve", lambda session_id="": (sid, self.resolution(sid))):
+                    _res, conn = browser.target(sid, start=False)
+                th.out = browser.call(conn, op, args or {}, 30)
+            except Exception as exc:  # noqa: BLE001
+                th.out = exc
+        th = threading.Thread(target=run, name="next", daemon=True)
+        th.out = None
+        th.start()
+        return th
+
+    def result(self, th, timeout=30.0):
+        th.join(timeout)
+        self.assertFalse(th.is_alive(), "the browser call did not end")
+        if isinstance(th.out, Exception):
+            self.fail(f"the browser call failed: {th.out!r}")
+        return th.out
+
+    def released(self):
+        handoff.carry_released(("127.0.0.1", self.new.port))
+        self.wait(lambda: (self.new_hub.device(DEVICE) or mock.Mock(browser={})).browser.get("connected"),
+                  "the device's browser on the next gateway", timeout=5)
+
+    def hand_over(self):
+        """The carrier hands its processes over: the device's next leg goes to the next gateway."""
+        self.port = self.new.port
+        handoff.prepare()
+        handoff.handing_off = False  # the old process is gone; the module is shared in this test
+
+    def test_browser_requests_of_the_next_gateway_go_over_the_link(self):
+        self.released()
+        conn = self.new_hub.device(DEVICE)
+        self.assertIn(core.CAPABILITY_BROWSER, conn.capabilities)
+        self.assertEqual(self.new_hub.browser_call(DEVICE, "tabs_list", {}, 10), {"op": "tabs_list", "leg": 1})
+        # The carrier's own browser calls still work on the same leg.
+        self.assertEqual(self.old_hub.browser_call(DEVICE, "snapshot", {}, 10), {"op": "snapshot", "leg": 1})
+        self.assertEqual(self.device.legs, 1)
+        for sid in ("chat", "cron_run"):
+            self.assertEqual(self.result(self.on_next(sid, "navigate")), {"op": "navigate", "leg": 1})
+
+    def test_a_job_run_on_the_next_gateway_before_the_link_waits_for_it(self):
+        # The next gateway took over; its scheduler starts a job run before the carrier's link is up. The job's
+        # device is no binding, so the next gateway has never seen it.
+        th = self.on_next("cron_run", "navigate")
+        time.sleep(0.5)
+        self.assertTrue(th.is_alive(), f"the browser call did not wait for the device: {th.out!r}")
+        handoff.carry_released(("127.0.0.1", self.new.port))
+        self.assertEqual(self.result(th), {"op": "navigate", "leg": 1})
+
+    def test_a_browser_call_in_flight_at_the_handoff_gets_its_result(self):
+        self.released()
+        calls = [self.on_next(sid, "snapshot", {"delay": 1.5}) for sid in ("chat", "cron_run")]
+        self.wait(lambda: len(self.device.browser_ops) >= 2, "the browser calls to reach the device")
+        time.sleep(0.2)
+        mover = threading.Thread(target=self.hand_over, daemon=True)
+        mover.start()
+        for th in calls:
+            self.assertEqual(self.result(th), {"op": "snapshot", "leg": 1})
+        mover.join(10)
+        self.wait(lambda: self.new_hub.device(DEVICE) is not None and self.device.legs >= 2,
+                  "the device's leg to the next gateway")
+        # A call after the move goes over the device's own leg to the next gateway.
+        self.assertEqual(self.result(self.on_next("cron_run", "navigate")), {"op": "navigate", "leg": 2})
+
+    def test_browser_calls_during_the_move_to_the_next_gateway_wait_for_the_device(self):
+        self.released()
+        self.device.reconnect_delay = 1.5
+        self.hand_over()
+        self.assertIsNone(self.new_hub.device(DEVICE))
+        calls = [self.on_next(sid, "navigate") for sid in ("chat", "cron_run")]
+        for th in calls:
+            self.assertEqual(self.result(th), {"op": "navigate", "leg": 2})
+        self.assertIsNone(self.old_hub.device(DEVICE))
 
 
 if __name__ == "__main__":

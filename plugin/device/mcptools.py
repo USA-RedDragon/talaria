@@ -68,7 +68,8 @@ def target(session_id: str = "") -> tuple[Any, Any]:
                               f"servers. Bind it to the user's computer with /device <device> <dir>.")
         raise Unavailable(core.fail_closed_message(res))
     device_id = res.binding.device_id
-    conn = core.hub().device(device_id)
+    # Waits while the device is away (a gateway handoff, docs/protocol.md section 4.7), as a terminal call does.
+    conn, _ = core.hub().await_device(device_id, known=True)
     if conn is None:
         raise Unavailable(f"talaria: device {device_id} is not connected, so its MCP servers cannot be used.")
     if core.CAPABILITY_MCP not in conn.capabilities or not conn.mcp_servers:

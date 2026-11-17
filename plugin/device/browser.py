@@ -457,15 +457,27 @@ def browser_devices(user: Optional[str] = None) -> list[Any]:
                   key=lambda c: (c.name, c.device_id))
 
 
-def sandbox_device(res: Any) -> Optional[Any]:
+def sandbox_device(res: Any, wait: Optional[float] = 0) -> Optional[Any]:
     """The connected sandbox device of a session that no computer serves (its implicit binding,
     ``res.sandbox``), or None. The sandbox runs its own headless Firefox with the extension, on a
     profile of its own with no login of the user's, so it is the default browser of such sessions
-    and of scheduled jobs that have no computer (docs/browser.md section 3.2)."""
-    core = _core()
+    and of scheduled jobs that have no computer (docs/browser.md section 3.2). ``wait``: see
+    :func:`device_now`."""
     if not res.sandbox or res.binding is None:
         return None
-    return core.hub().device(res.binding.device_id)
+    return device_now(res.binding.device_id, wait)
+
+
+def device_now(device_id: str, wait: Optional[float] = 0) -> Optional[Any]:
+    """The connection of ``device_id``. With ``wait`` (seconds, None for reconnect_wait_seconds) a
+    device that is away but may come back is waited for, as a terminal call waits for its device
+    (Hub.await_device): during a gateway handoff the device moves to the next gateway (docs/protocol.md
+    section 4.7), and a browser call there used to fail with not_connected at once. The id comes from
+    stored state (a binding or a browser device choice), so the device counts as known."""
+    hub = _core().hub()
+    if wait is not None and wait <= 0:
+        return hub.device(device_id)
+    return hub.await_device(device_id, timeout=wait, known=True)[0]
 
 
 def backend_user() -> str:
@@ -531,10 +543,10 @@ def _label(choice: dict) -> str:
     return f"{name} [{choice['device_id']}]" if name else choice["device_id"]
 
 
-def _chosen(choice: dict, what: str) -> Any:
+def _chosen(choice: dict, what: str, wait: Optional[float] = 0) -> Any:
     """The connected device of a stored choice, checked against the user it was chosen for."""
     core = _core()
-    conn = core.hub().device(choice["device_id"])
+    conn = device_now(choice["device_id"], wait)
     if conn is None:
         raise Unavailable(f"talaria: device {_label(choice)}, the browser device of {what}, is not connected "
                           f"(it is offline, or was removed from the hub), so its browser cannot be used.")
@@ -544,7 +556,7 @@ def _chosen(choice: dict, what: str) -> Any:
     return conn
 
 
-def _session_user(res: Any) -> Optional[str]:
+def _session_user(res: Any, wait: Optional[float] = 0) -> Optional[str]:
     """The hub user a session acts for, when the plugin can tell: the user of the computer it
     is bound to, else the plugin setting ``user``. None when neither tells."""
     core = _core()
@@ -560,7 +572,7 @@ def _session_user(res: Any) -> Optional[str]:
                               f"users are connected too, so a session that is not bound to a computer cannot use a "
                               f"browser. Bind the session to your computer with /device <device> <dir>.")
         return owner
-    conn = core.hub().device(res.binding.device_id)
+    conn = device_now(res.binding.device_id, wait)
     if conn is None:
         raise Unavailable(f"talaria: device {res.binding.device_id} is not connected, so its browser cannot "
                           f"be used.")
@@ -575,7 +587,7 @@ def _need_user(user: Optional[str]) -> str:
     return user
 
 
-def pick(session_id: str, res: Any) -> tuple[Any, str]:
+def pick(session_id: str, res: Any, wait: Optional[float] = 0) -> tuple[Any, str]:
     """``(connection, how)`` of the browser device a session uses, without checking Firefox:
 
     1. a run of a scheduled job that has a browser device uses that one, and only that one;
@@ -585,11 +597,12 @@ def pick(session_id: str, res: Any) -> tuple[Any, str]:
        browser device), the sandbox's own Firefox (:func:`_default_device`).
 
     The session's user is the user of the computer it is bound to, else the plugin setting
-    ``user``. Every computer must belong to that user; the sandbox needs no user."""
+    ``user``. Every computer must belong to that user; the sandbox needs no user. ``wait``: how long
+    to wait for a device that is away but may come back (:func:`device_now`); 0 does not wait."""
     core = _core()
     user_error: Optional[Unavailable] = None
     try:
-        user = _session_user(res)
+        user = _session_user(res, wait)
     except Unavailable as exc:
         # Only the user's computers need the user; the sandbox does not.
         user, user_error = None, exc
@@ -602,8 +615,8 @@ def pick(session_id: str, res: Any) -> tuple[Any, str]:
             if user is not None and rec["user"] != user:
                 raise Unavailable(f"talaria: device {_label(rec)}, the browser device of scheduled job {job_id}, "
                                   f"belongs to another user than this session, so its browser is not used.")
-            return _chosen(rec, f"scheduled job {job_id}"), "job"
-        return _default_device(session_id, res, user, user_error, job_id)
+            return _chosen(rec, f"scheduled job {job_id}", wait), "job"
+        return _default_device(session_id, res, user, user_error, job_id, wait)
     rec = _session_choice(session_id)
     if rec is not None:
         if user_error is not None:
@@ -611,25 +624,28 @@ def pick(session_id: str, res: Any) -> tuple[Any, str]:
         if rec["user"] != _need_user(user):
             raise Unavailable(f"talaria: device {_label(rec)}, the browser device chosen in this session, "
                               f"belongs to another user than this session. Choose again with browser_use_device.")
-        return _chosen(rec, f"session {session_id}"), "chosen"
+        return _chosen(rec, f"session {session_id}", wait), "chosen"
     if res.state == core.STATE_BOUND and not res.sandbox:
-        conn = core.hub().device(res.binding.device_id)
-        if conn is not None and conn.user == core.SERVICE_USER:
+        conn = device_now(res.binding.device_id, wait)
+        if conn is None:
+            raise Unavailable(f"talaria: device {res.binding.device_id} is not connected, so its browser cannot "
+                              f"be used.")
+        if conn.user == core.SERVICE_USER:
             raise Unavailable(f"talaria: session {session_id or '(none)'} is bound to the service device "
                               f"{conn.name} [{conn.device_id}], which has no browser. Choose your computer with "
                               f"browser_use_device.")
         return conn, "bound"
-    return _default_device(session_id, res, user, user_error, "")
+    return _default_device(session_id, res, user, user_error, "", wait)
 
 
 def _default_device(session_id: str, res: Any, user: Optional[str], user_error: Optional[Unavailable],
-                    job_id: str) -> tuple[Any, str]:
+                    job_id: str, wait: Optional[float] = 0) -> tuple[Any, str]:
     """The browser of a session or job that has no computer of its own: the sandbox's own Firefox
     when the session runs in a sandbox device that offers one. Else, as before the sandbox had a
     browser (an install without a sandbox, or a sandbox image that is not updated yet), the
     user's one connected computer, and no browser for a job."""
     core = _core()
-    conn = sandbox_device(res)
+    conn = sandbox_device(res, wait)
     if conn is not None and core.CAPABILITY_BROWSER in conn.capabilities:
         return conn, "sandbox"
     if job_id:
@@ -660,18 +676,21 @@ def resolve(session_id: str = "") -> tuple[str, Any]:
     return sid, res
 
 
-def target(session_id: str = "", start: bool = True) -> tuple[Any, Any]:
+def target(session_id: str = "", start: bool = True, wait: Optional[float] = None) -> tuple[Any, Any]:
     """``(resolution, connection)`` of the device whose browser this session uses (:func:`pick`).
-    With start, a closed Firefox is started first when the device can (docs/browser.md 5.1)."""
+    With start, a closed Firefox is started first when the device can (docs/browser.md 5.1).
+    ``wait``: how long to wait for that device while it is away (default reconnect_wait_seconds)."""
     core = _core()
     sid, res = resolve(session_id)
-    conn, _ = pick(sid, res)
+    conn, _ = pick(sid, res, wait)
     device_id = conn.device_id
     if core.CAPABILITY_BROWSER not in conn.capabilities:
         raise Unavailable(f"talaria: device {conn.name} [{device_id}] does not offer browser control. On "
                           f"that computer: set browser.enabled to true in the talaria config, run "
                           f"talaria browser install, load the Hermes Firefox extension, and restart "
                           f"talaria run.")
+    if wait is None or wait > 0:
+        _await_status(conn)
     if not_running(conn):
         if not start:
             raise Unavailable(f"talaria: Firefox is not running on device {conn.name} [{device_id}]. Any other "
@@ -686,6 +705,19 @@ def target(session_id: str = "", start: bool = True) -> tuple[Any, Any]:
     return res, conn
 
 
+# How long a browser call waits for the browser_status of a device leg that has just connected.
+STATUS_WAIT_S = 3.0
+
+
+def _await_status(conn: Any) -> None:
+    """Wait up to STATUS_WAIT_S for the first browser_status of a leg that has just connected: the
+    device (or the carrier's link, docs/protocol.md section 4.7 point 8) sends it right after the
+    welcome, so a call that waited for the device read "extension not connected" before it came."""
+    deadline = time.monotonic() + STATUS_WAIT_S
+    while not conn.browser and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
 def call(conn: Any, op: str, args: dict, timeout: float = 0) -> Any:
     core = _core()
     return core.hub().browser_call(conn.device_id, op, args, timeout or core.BROWSER_DEFAULT_TIMEOUT_S)
@@ -698,6 +730,15 @@ def _hook_timeout() -> float:
         return max(0.0, float(_resolve_hook_callback_timeout()))
     except Exception:
         return 30.0
+
+
+def _hook_wait() -> float:
+    """How long the pre_tool_call hook waits for a browser device that is away (a gateway handoff):
+    at most a quarter of Hermes's hook timeout, so the wait and the inspect after it (half of it,
+    :func:`_hook_call`) end inside it. The handler waits the full reconnect_wait_seconds."""
+    limit = _core().reconnect_wait_seconds()
+    cap = _hook_timeout()
+    return min(limit, cap / 4) if cap > 0 else limit
 
 
 def _hook_call(device_id: str, op: str, req: dict) -> Any:
@@ -1231,7 +1272,7 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
     args = args if isinstance(args, dict) else {}
     _take_grant(_grant_key(_session(session_id), tool_name, args))
     try:
-        _, conn = target(session_id, start=False)
+        _, conn = target(session_id, start=False, wait=_hook_wait())
     except Unavailable:
         return None
     args = with_default_tab(tool_name, args, session_id, conn)
@@ -1835,7 +1876,7 @@ def browser_status(args: dict, session_id: str = "", **_kwargs) -> str:
     core = _core()
     try:
         sid, res = resolve(session_id)
-        _, how = pick(sid, res)
+        _, how = pick(sid, res, None)
         _, conn = target(session_id, start=False)
     except Unavailable as exc:
         return _ok({"available": False, "reason": str(exc), "devices": _device_list(_known_user(session_id))})

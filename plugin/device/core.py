@@ -1006,30 +1006,34 @@ class Hub:
         named = [c for c in self._devices.values() if c.name == key]
         return (named[0] if len(named) == 1 else None), len(named) > 1
 
-    def _may_come_back(self, key: str) -> bool:
+    def _may_come_back(self, key: str, known: bool = False) -> bool:
         """Whether a tool call should wait for ``key`` (an id or a name): a device this process
         knows of that dropped within RECONNECT_RECENT_S, or, in a gateway that started that
-        recently, one it has not seen connect yet. Call with the lock."""
+        recently, one it has not seen connect yet. ``known``: the caller read the device id from
+        stored state (a binding, a scheduled job's or a session's browser device), so it counts as
+        known though this process never saw it connect. Call with the lock."""
         handoff = sys.modules.get("hermes_device_handoff")
         if handoff is not None and getattr(handoff, "handing_off", False):
             return False
         device_id = self._names.get(key, key)
         if device_id in self._waited_out:
             return False
-        if device_id not in self._seen and key != fallback_device():
+        if device_id not in self._seen and not known and key != fallback_device():
             return False
         since = self._gone_at.get(device_id, self._born)
         return time.monotonic() - since < RECONNECT_RECENT_S
 
-    def await_device(self, key: str, timeout: Optional[float] = None) -> tuple[Optional[DeviceConn], float]:
+    def await_device(self, key: str, timeout: Optional[float] = None,
+                     known: bool = False) -> tuple[Optional[DeviceConn], float]:
         """``(connection, seconds waited)`` for the device with id or name ``key``. A device that
         is away but may come back (a gateway handoff, a hub restart) is waited for up to
-        ``timeout`` (reconnect_wait_seconds); the connection is None when it did not come back."""
+        ``timeout`` (reconnect_wait_seconds); the connection is None when it did not come back.
+        ``known``: see _may_come_back."""
         limit = reconnect_wait_seconds() if timeout is None else timeout
         start = time.monotonic()
         with self._lock:
             conn, ambiguous = self._lookup(key)
-            if conn is not None or ambiguous or limit <= 0 or not self._may_come_back(key):
+            if conn is not None or ambiguous or limit <= 0 or not self._may_come_back(key, known):
                 return conn, 0.0
             logger.info("device: %s is not connected; waiting up to %ss for it to reconnect", key, limit)
             deadline = start + limit
@@ -1797,7 +1801,9 @@ def await_resolution(res: Resolution) -> tuple[Resolution, float]:
     session, while it reconnects (Hub.await_device). Returns the resolution to use and the seconds
     waited."""
     if res.state == STATE_BOUND and res.binding is not None:
-        _, waited = hub().await_device(res.binding.device_id)
+        # A binding (stored, or a scheduled job's device) names a device this Hermes knows, also when
+        # this process has not seen it connect yet (a gateway that took over from a carrier, 4.7 point 8).
+        _, waited = hub().await_device(res.binding.device_id, known=True)
         return res, waited
     if res.state == STATE_FAIL_CLOSED and res.sandbox and fallback_device():
         conn, waited = hub().await_device(fallback_device())

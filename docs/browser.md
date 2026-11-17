@@ -223,6 +223,8 @@ These messages are gated on the `browser` capability, not on a protocol version 
 
 Browser requests are not kept across a drop: when the leg drops, the device cancels every request in flight and the plugin fails every request it waits for with `not_connected` at once, also on version 3 (resume covers commands only). A request might have taken effect in the browser before the drop.
 
+A browser tool call whose device is away, but may come back (a gateway restart or handoff, a hub restart), waits for it up to the plugin's `reconnect_wait_seconds`, as a terminal call does, and then for the device's first `browser_status`; the `pre_tool_call` check waits at most a quarter of Hermes's hook timeout. A scheduled job's or a session's chosen browser device counts as known, also to a gateway that has not seen it connect yet. During a per-turn restart the next gateway's browser requests go over the carrier link like its commands (protocol.md section 4.7 point 8), and the carrier's handoff waits for the ones in flight (up to 60 seconds, each up to its own timeout) before it closes the link.
+
 ### 4.1 browser (plugin to device)
 
 ```json
