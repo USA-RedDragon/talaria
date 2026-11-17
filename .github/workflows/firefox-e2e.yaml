@@ -28,9 +28,11 @@ on:
 permissions:
   contents: read
 
+# A called workflow sees the caller's github.workflow, so the group names this
+# workflow itself: with the caller's group (Release @ <tag>) the gate never ran.
 concurrency:
-  group: "${{ github.workflow }} @ ${{ github.ref }}"
-  cancel-in-progress: true
+  group: "firefox-e2e @ ${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   firefox:
