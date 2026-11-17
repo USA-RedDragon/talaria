@@ -691,4 +691,4 @@ golangci-lint run ./...
 
 The linter's goconst counts the string literals of a whole package, so several tests that each add the same literal fail Hub Go Static Checks. A new test in `internal/web` reuses the constants of `internal/web/testconsts_test.go` (or adds one there) and does not declare its own copy in a test file.
 
-`go generate` writes `internal/config/config_configulator.go`. The configuration table above, `config.example.yaml` and the marked values in this README are generated: run the configulator pre-commit hooks and `go run github.com/USA-RedDragon/docgen@v0.0.0-20261109224744-ef1962a8c996 update`.
+`go generate` writes `internal/config/config_configulator.go`. The configuration table above, `config.example.yaml` and the marked values in this README are generated: run the configulator pre-commit hooks and `go run github.com/USA-RedDragon/docgen@v0.1.0 update`.
