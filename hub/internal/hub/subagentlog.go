@@ -52,6 +52,9 @@ type SubagentEvent struct {
 	DurationMS *int64 `json:"duration_ms,omitempty"`
 	Error      bool   `json:"error,omitempty"`
 	Text       string `json:"text,omitempty"`
+	// DisplayKind is the display_kind Hermes gave a user row (a failed
+	// turn, a steer): the page shows the row as the chat shows the same row.
+	DisplayKind string `json:"display_kind,omitempty"`
 }
 
 // SubagentEvents is a page of a subagent's steps.

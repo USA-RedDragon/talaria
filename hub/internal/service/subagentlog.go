@@ -271,7 +271,7 @@ func (c *rowConverter) row(row gateway.TranscriptRow) []hub.SubagentEvent {
 			}
 			return out
 		}
-		return []hub.SubagentEvent{{TS: at, Type: kind, Text: capText(row.Text)}}
+		return []hub.SubagentEvent{{TS: at, Type: kind, Text: capText(row.Text), DisplayKind: row.DisplayKind}}
 	case roleAssistant:
 		var out []hub.SubagentEvent
 		if t := rawText(row.Reasoning); t != "" {

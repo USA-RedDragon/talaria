@@ -70,8 +70,8 @@ func (s *Store) insertEvents(ctx context.Context, tx *sql.Tx, k hub.SubagentKey,
 			atMS = e.TS.UnixMilli()
 		}
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO subagent_events ("user", backend_id, session_id, subagent_id, seq, at_ms, kind,
-			call_id, name, args, result, result_size, duration_ms, failed, text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			append(keyArgs(k), e.Seq, atMS, e.Type, e.CallID, e.Name, args, e.Result, e.ResultSize, dur, failed, e.Text)...); err != nil {
+			call_id, name, args, result, result_size, duration_ms, failed, text, display_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			append(keyArgs(k), e.Seq, atMS, e.Type, e.CallID, e.Name, args, e.Result, e.ResultSize, dur, failed, e.Text, e.DisplayKind)...); err != nil {
 			return 0, fmt.Errorf("subagent event: %w", err)
 		}
 	}
@@ -113,7 +113,7 @@ func (s *Store) AppendSubagentEvents(ctx context.Context, k hub.SubagentKey, fro
 
 // SubagentEvents lists up to limit events of the key after seq after.
 func (s *Store) SubagentEvents(ctx context.Context, k hub.SubagentKey, after int64, limit int) ([]hub.SubagentEvent, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT seq, at_ms, kind, call_id, name, args, result, result_size, duration_ms, failed, text
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT seq, at_ms, kind, call_id, name, args, result, result_size, duration_ms, failed, text, display_kind
 		FROM subagent_events WHERE `+subagentKeyWhere+` AND seq > ? ORDER BY seq LIMIT ?`), append(keyArgs(k), after, limit)...)
 	if err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func (s *Store) SubagentEvents(ctx context.Context, k hub.SubagentKey, after int
 		var args string
 		var dur sql.NullInt64
 		var failed int
-		if err := rows.Scan(&e.Seq, &at, &e.Type, &e.CallID, &e.Name, &args, &e.Result, &e.ResultSize, &dur, &failed, &e.Text); err != nil {
+		if err := rows.Scan(&e.Seq, &at, &e.Type, &e.CallID, &e.Name, &args, &e.Result, &e.ResultSize, &dur, &failed, &e.Text, &e.DisplayKind); err != nil {
 			return nil, err
 		}
 		if at > 0 {

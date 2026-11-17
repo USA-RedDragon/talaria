@@ -131,6 +131,9 @@ type TranscriptRow struct {
 	Text      string   `json:"text"`
 	Timestamp *float64 `json:"timestamp"`
 	RowID     *int64   `json:"row_id"`
+	// DisplayKind is how Hermes shows a user row it wrote itself or a
+	// steer (origin.Classify reads it).
+	DisplayKind string `json:"display_kind"`
 	// Reasoning and ReasoningContent are the assistant's reasoning
 	// sidecars, text when Hermes has it as text.
 	Reasoning        json.RawMessage `json:"reasoning"`

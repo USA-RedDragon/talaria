@@ -28,6 +28,7 @@ func TestSubagentLog(t *testing.T) {
 			{TS: now.Add(time.Second), Type: hub.StepToolStart, CallID: "c1", Name: "terminal", Args: json.RawMessage(`{"command":"ls"}`)},
 			{TS: now.Add(3 * time.Second), Type: hub.StepToolEnd, CallID: "c1", Name: "terminal", Result: "out", ResultSize: 9000,
 				DurationMS: &d, Error: true},
+			{TS: now.Add(3 * time.Second), Type: hub.StepUser, Text: "The provider failed.", DisplayKind: "failed_turn"},
 		}
 		if ok, err := s.AppendSubagentEvents(ctx, k, "", "0:3", false, evs); !ok || err != nil {
 			t.Fatalf("append = %v %v", ok, err)
@@ -37,12 +38,16 @@ func TestSubagentLog(t *testing.T) {
 			t.Fatalf("stale append = %v %v", ok, err)
 		}
 		steer, err := s.AddSubagentSteer(ctx, k, "skip the build", now.Add(4*time.Second))
-		if err != nil || steer.Seq != 4 || steer.Type != hub.StepSteer {
+		if err != nil || steer.Seq != 5 || steer.Type != hub.StepSteer {
 			t.Fatalf("steer = %+v %v", steer, err)
 		}
 		got, err := s.SubagentEvents(ctx, k, 0, 100)
-		if err != nil || len(got) != 4 {
+		if err != nil || len(got) != 5 {
 			t.Fatalf("events = %+v %v", got, err)
+		}
+		// A user row keeps how Hermes shows it.
+		if got[3].DisplayKind != "failed_turn" || got[0].DisplayKind != "" {
+			t.Fatalf("display kinds = %q %q", got[3].DisplayKind, got[0].DisplayKind)
 		}
 		end := got[2]
 		if end.Seq != 3 || end.DurationMS == nil || *end.DurationMS != 2500 || !end.Error || end.ResultSize != 9000 ||
@@ -69,7 +74,7 @@ func resetAndPrune(t *testing.T, s *store.Store, k hub.SubagentKey, now time.Tim
 		t.Fatalf("reset = %v %v", ok, err)
 	}
 	got, _ := s.SubagentEvents(ctx, k, 0, 100)
-	if c, epoch, _ := s.SubagentCursor(ctx, k); len(got) != 2 || got[0].Type != hub.StepSteer || got[1].Seq != 5 || c != "1:1" || epoch != 1 {
+	if c, epoch, _ := s.SubagentCursor(ctx, k); len(got) != 2 || got[0].Type != hub.StepSteer || got[1].Seq != 6 || c != "1:1" || epoch != 1 {
 		t.Fatalf("after reset = %+v cursor %q epoch %d", got, c, epoch)
 	}
 	// Logs nobody wrote for long are pruned.
