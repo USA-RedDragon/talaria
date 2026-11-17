@@ -1,0 +1,874 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 22:31:08 +0000
+Subject: [PATCH] fix(gateway): a restart carries background subagents to their
+ boundaries and stops no other thread
+
+An agent kept the ident of the thread that ran its last turn after the turn ended, and thread idents are reused at once (a new thread gets the ident of the last one that ended; gateway turn threads are pooled). A background subagent stopped for a restart handoff (delegation.restart_handoff) while it waited on its processes or helpers aimed its interrupt at that ident, so whatever ran there next was interrupted: another chat's foreground device command ended with "[Command interrupted]" (exit 130) at the old gateway's SIGTERM while the per-turn carry (gateway.restart_turn_handoff_per_turn) was meant to run it to its end. run_conversation now unbinds the execution thread when its outermost call returns; a stop between turns still reaches the next turn through _interrupt_requested.
+
+The per-turn carry also stopped every background subagent at the release (restart_handoff_grace_seconds), cutting its model call, which the next gateway then made again. The carrier now carries them like the turns: each subagent in a turn runs its model call and tool round to their end and stops at the top of its next iteration (turn_boundary_handoff.request(tool_round=False)), its state recorded from its own cleanup; one not in a turn stops at once, and one that has not reached a boundary by the carry ceiling less 60 s is yielded and stopped as before. The release does not wait for them; the carrier keeps its background processes and writes turn_carry.processes_handed (which has the next gateway adopt them) only once they stopped, and a unit whose children all finished meanwhile is still handed over, so the next gateway, which owns the chats, delivers it. A unit the carry hands off is not stopped again by the stop that follows.
+---
+ agent/conversation_loop.py                    |   4 +-
+ agent/turn_boundary_handoff.py                |  18 +-
+ agent/turn_context.py                         |  21 +-
+ agent/turn_tool_round.py                      |   2 +-
+ gateway/turn_carry.py                         |  74 +++++-
+ .../test_restart_carry_subagent_boundary.py   | 111 ++++++++
+ .../test_restart_carry_subagent_boundary.py   | 238 ++++++++++++++++++
+ tools/async_delegation.py                     |  53 ++--
+ tools/delegate_tool_child_run.py              |  10 +-
+ tools/delegate_tool_handoff.py                |  68 ++++-
+ 10 files changed, 558 insertions(+), 41 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_subagent_boundary.py
+ create mode 100644 tests/tools/test_restart_carry_subagent_boundary.py
+
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index 4dd24646..7ebbd182 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -1837,7 +1837,7 @@ def run_conversation(
+     ``{turn_id, current_turn_user_idx}`` pair is stamped beside the exact ``messages`` it
+     addresses, after every history rewrite including post-turn micro-compaction.
+     """
+-    from agent.turn_context import export_current_turn_boundary
++    from agent.turn_context import export_current_turn_boundary, interrupt_scope_of_turn
+     from agent.turn_finalizer import settle_held_final
+     from agent.voice_turn_route import end_voice_turn_route
+     from tools.vision_tools_history_budget import native_turn_images
+@@ -1846,7 +1846,7 @@ def run_conversation(
+     agent._turn_user_intervened = False
+     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
+     # it does not embed the same pixels a second time into the same request (#76411).
+-    with native_turn_images(user_message):
++    with interrupt_scope_of_turn(agent), native_turn_images(user_message):
+         try:
+             result = _run_conversation_turn(
+                 agent,
+diff --git a/agent/turn_boundary_handoff.py b/agent/turn_boundary_handoff.py
+index 1dfdd455..ba09a70d 100644
+--- a/agent/turn_boundary_handoff.py
++++ b/agent/turn_boundary_handoff.py
+@@ -29,8 +29,12 @@ HANDED_OFF_EXIT_REASON = "handed_off"
+ WITHDRAW_TOOL_REASON = "turn handoff"
+ 
+ 
+-def request(agent: Any) -> None:
+-    """Ask *agent*'s running turn to stop at its next step boundary (thread-safe: a flag)."""
++def request(agent: Any, *, tool_round: bool = True) -> None:
++    """Ask *agent*'s running turn to stop at its next step boundary (thread-safe: a flag). ``tool_round=False``
++    stops it only at the top of a loop iteration, after its tool round ran: a background subagent carried by a
++    restart (``gateway.restart_turn_handoff_per_turn``) is resumed from its stored transcript, where a tool call
++    with no result reads as cut, so it stops where every call it made has its result."""
++    agent._handoff_boundary_top_only = not tool_round
+     agent._handoff_boundary = True
+ 
+ 
+@@ -46,6 +50,7 @@ def withdrawn(agent: Any) -> bool:
+ def cancel(agent: Any) -> None:
+     """Take back a request the turn did not reach in time (the restart stops it the other way)."""
+     agent._handoff_boundary = False
++    agent._handoff_boundary_top_only = False
+ 
+ 
+ def mark_withdrawn(agent: Any) -> None:
+@@ -63,10 +68,13 @@ def withdraw(agent: Any) -> None:
+         interrupt(tool_reason=WITHDRAW_TOOL_REASON)
+ 
+ 
+-def stop_here(agent: Any) -> bool:
+-    """At a step boundary: True when the turn must end here for the handoff (and marks it handed off)."""
++def stop_here(agent: Any, *, tool_round: bool = False) -> bool:
++    """At a step boundary: True when the turn must end here for the handoff (and marks it handed off).
++    ``tool_round``: the boundary before a tool round, which a top-only request (``request``) passes."""
+     if not (requested(agent) or withdrawn(agent)):
+         return False
++    if tool_round and not withdrawn(agent) and getattr(agent, "_handoff_boundary_top_only", False) is True:
++        return False
+     agent._handed_off_at_boundary = True
+     return True
+ 
+@@ -95,7 +103,7 @@ def finish(agent: Any, s: Any) -> dict[str, Any]:
+             logger.warning("Flush of a handed-off turn failed (session=%s)", getattr(agent, "session_id", None),
+                            exc_info=True)
+     agent._session_messages = s.messages
+-    for name in ("_handoff_boundary", "_handoff_withdrawn", "_handed_off_at_boundary"):
++    for name in ("_handoff_boundary", "_handoff_withdrawn", "_handed_off_at_boundary", "_handoff_boundary_top_only"):
+         if hasattr(agent, name):
+             setattr(agent, name, False)
+     clear = getattr(agent, "clear_interrupt", None)
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index beadf8c2..b83b49a2 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -13,7 +13,7 @@ import sys
+ import threading
+ import time
+ import uuid
+-from contextlib import suppress
++from contextlib import contextmanager, suppress
+ from dataclasses import dataclass
+ from typing import Any, Dict, List, Mapping, Optional, Tuple
+ 
+@@ -1018,6 +1018,25 @@ def _bind_interrupt_scope(agent: Any, ra) -> None:
+     agent._interrupt_thread_signal_pending = False
+ 
+ 
++@contextmanager
++def interrupt_scope_of_turn(agent: Any):
++    """Unbind the execution thread when the outermost ``run_conversation`` of *agent* returns. Thread
++    idents are reused at once (a new thread gets the ident of the last one that ended) and gateway turn
++    threads are pooled, so an agent that kept the ident of a turn it already finished aimed a later
++    ``interrupt()`` (a subagent stopped for a restart handoff while it waited) at whatever that thread
++    ran next: another chat's foreground command ended with ``[Command interrupted]``. A stop between
++    turns still reaches the next one through ``_interrupt_requested`` (``_bind_interrupt_scope``)."""
++    depth = getattr(agent, "_execution_scope_depth", 0)
++    depth = depth if isinstance(depth, int) else 0
++    agent._execution_scope_depth = depth + 1
++    try:
++        yield
++    finally:
++        agent._execution_scope_depth = depth
++        if depth == 0 and getattr(agent, "_execution_thread_id", None) == threading.current_thread().ident:
++            agent._execution_thread_id = None
++
++
+ def _memory_query_text(original_user_message: Any) -> str:
+     """Semantic text of the turn for memory queries: a multimodal (list) turn carries its text
+     in parts, so keying off ``isinstance(str)`` collapsed it to ``""`` and ``is_trivial_prompt``
+diff --git a/agent/turn_tool_round.py b/agent/turn_tool_round.py
+index e82e3603..dc683f3a 100644
+--- a/agent/turn_tool_round.py
++++ b/agent/turn_tool_round.py
+@@ -171,7 +171,7 @@ def run_tool_round(
+     # gateway.restart_turn_handoff_boundary: the tool-call row is durable and no tool has started; the next
+     # gateway runs them (agent.turn_boundary_handoff.play_resume).
+     from agent.turn_boundary_handoff import stop_here, withdrawn
+-    if stop_here(agent):
++    if stop_here(agent, tool_round=True):
+         _turn_exit_reason = "handed_off"
+         return _verdict("break")
+ 
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index 4125cef7..fb455b3b 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -47,6 +47,7 @@ import contextlib
+ import json
+ import logging
+ import os
++import threading
+ import time
+ from pathlib import Path
+ 
+@@ -207,6 +208,8 @@ class _Carry:
+         self.relayed: set[str] = set()
+         self.relay_announced = False
+         self.relay_checked = 0.0
++        # The background subagents carried to their own step boundaries (``_carry_subagents``), while they run.
++        self.subagents = None
+ 
+ 
+ def _platform(turn) -> str:
+@@ -333,11 +336,18 @@ def _in_tool_round(carry) -> bool:
+     """Whether a carried turn still runs a tool call here, or a cron run runs here: its tool calls are not visible
+     and it never stops at a boundary, so it holds the device connections (and the process handoff that closes them)
+     until it ends. The device plugin serves the next gateway over them meanwhile."""
+-    if _cron_runs(carry.runner):
++    if _cron_runs(carry.runner) or subagents_carried(carry):
+         return True
+     return any(aid not in carry.done and getattr(t.agent, "_executing_tools", False) for aid, t in carry.turns.items())
+ 
+ 
++def subagents_carried(carry) -> bool:
++    """Whether background subagents still run here on to their step boundaries (``_carry_subagents``). Until they
++    stopped, nothing tells the next gateway to adopt them (``PROCESSES_HANDED``): it would run them a second time."""
++    task = getattr(carry, "subagents", None)
++    return task is not None and not task.done()
++
++
+ # How often a busy carrier looks for background processes to relay (new ones, or one a tool call stopped waiting on).
+ RELAY_CHECK_S = 0.5
+ 
+@@ -368,6 +378,8 @@ async def _relay_processes(carry) -> None:
+ 
+ 
+ def _announce_relay(carry) -> None:
++    if subagents_carried(carry):
++        return  # the frame also has the next gateway adopt the subagents; announced once they stopped here
+     if carry.relayed and not carry.relay_announced and carry.events is not None:
+         carry.relay_announced = True
+         # The next gateway reattaches them (the relay kind) and adopts the subagents that wait on them.
+@@ -414,7 +426,62 @@ async def _disconnect_messaging(runner) -> None:
+         runner.adapters.pop(platform, None)
+ 
+ 
++# How long, at most, the carried subagents leave of the carry ceiling for the stop that follows a child that never
++# reached its boundary: the yield and its settle (``delegate_tool_handoff.YIELD_SETTLE_SECONDS``) and the record.
++SUBAGENT_STOP_RESERVE_S = 60.0
++
++
++async def _carry_subagents(carry) -> bool:
++    """Carry the background subagents like the turns (``delegation.restart_handoff``): each runs on to its next step
++    boundary here, its model call and tool round included, then stops and goes to the next gateway, which resumes it
++    from its stored transcript. Stopping them at the release cut their model calls, so the next gateway made those
++    calls again. Runs alongside the carry; returns once every unit is recorded as handed off. False when there is
++    nothing to carry this way."""
++    from tools.delegate_tool_config import _get_restart_handoff
++    if not getattr(carry.runner, "_restart_requested", False) or not _get_restart_handoff():
++        return False
++    from tools.async_delegation import hand_off_for_restart
++    from tools.delegate_tool_handoff import YIELD_SETTLE_SECONDS
++    from gateway.run_shutdown import GatewayShutdownMixin
++    boundary_s = max(0.0, ceiling_seconds(carry.runner) - SUBAGENT_STOP_RESERVE_S)
++    settle = YIELD_SETTLE_SECONDS + GatewayShutdownMixin._DELEGATION_HANDOFF_SETTLE_S
++    marked = threading.Event()
++
++    def run() -> int:
++        try:
++            return hand_off_for_restart(0.0, settle, boundary_seconds=boundary_s, marked=marked)
++        finally:
++            marked.set()
++
++    carry.subagents = asyncio.ensure_future(asyncio.to_thread(run))
++    # The units are handed off in the ledger before the profile is released, as at a stop.
++    await asyncio.to_thread(marked.wait, 30.0)
++    return True
++
++
++async def _end_subagent_carry(carry) -> None:
++    task = getattr(carry, "subagents", None)
++    if task is None:
++        return
++    try:
++        handed = await task
++    except Exception:
++        logger.warning("Carrying the background subagents failed; the next gateway resumes them from their "
++                       "stored transcripts", exc_info=True)
++        return
++    if handed:
++        logger.info("Restart: %d background delegation(s) carried to their step boundaries and handed to the next "
++                    "gateway after %.1fs", handed, time.monotonic() - carry.started)
++
++
+ async def _hand_off_background(runner) -> None:
++    carry = getattr(runner, "_turn_carry", None)
++    if carry is not None:
++        try:
++            if await _carry_subagents(carry):
++                return
++        except Exception:
++            logger.warning("Carrying the background subagents failed; stopping them now", exc_info=True)
+     from gateway.run_shutdown import GatewayShutdownMixin
+     ctx = GatewayShutdownMixin._StopContext(deferred_count=lambda: 0)
+     ctx.started_at = time.monotonic()
+@@ -801,8 +868,9 @@ async def _carry_turns(carry) -> None:
+         left = set(carry.turns) - carry.done
+         api = _api_live(runner)
+         cron = _cron_runs(runner)
++        subagents = subagents_carried(carry)
+         now = time.monotonic()
+-        if not left and not api and not cron:
++        if not left and not api and not cron and not subagents:
+             break
+         if now >= deadline:
+             # A cron run still running goes to the stop's cron drain, which interrupts it as before the carry.
+@@ -818,6 +886,8 @@ async def _carry_turns(carry) -> None:
+             last_log = now
+         await asyncio.sleep(POLL_S)
+     carry.done.update(carry.turns)
++    if not subagents_carried(carry):
++        await _end_subagent_carry(carry)
+     await _hand_off_processes_when_idle(carry)
+     _end_kept_sockets(runner, now=True)
+     # The listeners relay to the next gateway for their window (gateway.restart_listener_relay_seconds), so a
+diff --git a/tests/gateway/test_restart_carry_subagent_boundary.py b/tests/gateway/test_restart_carry_subagent_boundary.py
+new file mode 100644
+index 00000000..0f970de3
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_subagent_boundary.py
+@@ -0,0 +1,111 @@
++"""gateway.restart_turn_handoff_per_turn with delegation.restart_handoff: the background subagents are carried like
++the turns. The release does not wait for them; the carrier runs them on to their step boundaries, and the next
++gateway is told to adopt them (``PROCESSES_HANDED``) and gets the background processes only once they stopped."""
++import asyncio
++import json
++import os
++import threading
++import time
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++
++from tests.gateway.test_restart_turn_carry import _claimed_turn, _old_runner, _reserve_profile, _until
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++
++
++@pytest.fixture
++def subagents(monkeypatch):
++    """A background subagent in a model call: the handoff returns once it reached its boundary (``reach``)."""
++    import tools.async_delegation as ad
++    import tools.delegate_tool_config as config
++    monkeypatch.setattr(config, "_get_restart_handoff", lambda: True)
++    reach, calls = threading.Event(), []
++
++    def hand_off_for_restart(grace, timeout, *, boundary_seconds=None, marked=None):
++        calls.append({"grace": grace, "boundary_seconds": boundary_seconds})
++        if marked is not None:
++            marked.set()
++        reach.wait(10)
++        return 1
++    monkeypatch.setattr(ad, "hand_off_for_restart", hand_off_for_restart)
++    return reach, calls
++
++
++def _frames(tmp_path, epoch):
++    path = turn_carry.events_path(tmp_path, epoch)
++    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
++
++
++@pytest.mark.asyncio
++async def test_subagents_run_on_to_their_boundaries_after_the_release(owner, tmp_path, monkeypatch, subagents):
++    reach, calls = subagents
++    _reserve_profile(tmp_path)
++    row, _live, agent = _claimed_turn(owner, "chat")
++    agent._executing_tools = False
++    from gateway.run_shutdown import GatewayShutdownMixin
++    handed = []
++
++    async def hand_off(_runner):
++        handed.append(time.monotonic())
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(hand_off))
++    runner = _old_runner(owner, restart_turn_carry_ceiling_seconds=1080.0)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)  # the subagent's model call does not hold the release
++    assert len(calls) == 1 and calls[0]["boundary_seconds"] == pytest.approx(1080.0 - turn_carry.SUBAGENT_STOP_RESERVE_S)
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.sleep(0.4)
++    # The turn ended, but the subagent still runs here: the carrier stays, keeps its processes and does not tell
++    # the next gateway to adopt the subagent yet.
++    assert not carry.done() and handed == []
++    assert all(f["type"] != turn_carry.PROCESSES_HANDED for f in _frames(tmp_path, owner.epoch))
++    reach.set()
++    await asyncio.wait_for(carry, 5.0)
++    assert len(handed) == 1
++    assert [f["type"] for f in _frames(tmp_path, owner.epoch)].count(turn_carry.PROCESSES_HANDED) == 1
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_without_subagent_handoff_the_carry_stops_them_as_before(owner, tmp_path, monkeypatch):
++    import tools.delegate_tool_config as config
++    monkeypatch.setattr(config, "_get_restart_handoff", lambda: False)
++    from gateway.run_shutdown import GatewayShutdownMixin
++    stopped = []
++
++    async def stop(_runner, _ctx):
++        stopped.append(True)
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_delegations", stop)
++
++    async def hand_off(_runner):
++        return None
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(hand_off))
++    _reserve_profile(tmp_path)
++    row, _live, _agent = _claimed_turn(owner, "chat")
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    assert stopped == [True] and runner._turn_carry.subagents is None
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 5.0)
++    os.close(runner._turn_carry.lock_fd)
+diff --git a/tests/tools/test_restart_carry_subagent_boundary.py b/tests/tools/test_restart_carry_subagent_boundary.py
+new file mode 100644
+index 00000000..29f158ca
+--- /dev/null
++++ b/tests/tools/test_restart_carry_subagent_boundary.py
+@@ -0,0 +1,238 @@
++"""The per-turn carry (gateway.restart_turn_handoff_per_turn) and the background subagents it hands over.
++
++- An agent whose turn ended no longer names the thread that ran it: thread idents are reused at once, so a subagent
++  stopped for the restart while it waited aimed its interrupt at whatever ran on that ident next (another chat's
++  foreground device command ended with ``[Command interrupted]``, exit 130).
++- A subagent in a turn is carried to its next step boundary like a chat turn: its model call and its tool round
++  finish on the old gateway and it stops at the top of its next iteration, so the next gateway repeats no call.
++- A unit whose children all finished during the carry is still handed over: the next gateway owns the chats.
++"""
++
++import threading
++import time
++
++import pytest
++
++import run_agent
++from agent import conversation_loop, turn_boundary_handoff as boundary
++from agent.turn_context import _bind_interrupt_scope
++from tests.waiting import wait_until
++from tools import async_delegation as ad
++from tools import delegate_tool_handoff as handoff
++from tools.interrupt import is_interrupted, is_thread_interrupted, set_interrupt
++
++
++def _bare_agent():
++    from run_agent import AIAgent
++    agent = AIAgent.__new__(AIAgent)
++    agent._interrupt_requested = False
++    agent._interrupt_message = None
++    agent._hard_interrupt_requested = threading.Event()
++    agent._execution_thread_id = None
++    agent._interrupt_thread_signal_pending = False
++    agent._active_children = []
++    agent._active_children_lock = threading.Lock()
++    agent.quiet_mode = True
++    agent.provider, agent.model, agent._base_url = "openrouter", "test/model", "http://localhost:1234"
++    agent.session_id = "child-0"
++    return agent
++
++
++@pytest.fixture
++def one_turn(monkeypatch):
++    """``run_conversation`` around a turn body that only binds its thread, as the real one does first."""
++    import agent.turn_context as turn_context
++    import agent.turn_finalizer as turn_finalizer
++    import agent.voice_turn_route as voice_turn_route
++
++    def turn(agent, *_a, **_k):
++        _bind_interrupt_scope(agent, lambda: run_agent)
++        return {"final_response": "", "messages": [], "completed": True}
++    monkeypatch.setattr(conversation_loop, "_run_conversation_turn", turn)
++    monkeypatch.setattr(turn_context, "export_current_turn_boundary", lambda _a, result, _m: result)
++    monkeypatch.setattr(turn_finalizer, "settle_held_final", lambda *_a: None)
++    monkeypatch.setattr(voice_turn_route, "end_voice_turn_route", lambda *_a: None)
++    monkeypatch.setattr(conversation_loop, "_close_durable_failed_turn", lambda *_a: None)
++    monkeypatch.setattr(conversation_loop, "_hand_back_leftover_steer", lambda *_a: None)
++
++    def run(agent):
++        seen = {}
++
++        def body():
++            seen["tid"] = threading.get_ident()
++            conversation_loop.run_conversation(agent, "go")
++        worker = threading.Thread(target=body)
++        worker.start()
++        worker.join(5)
++        return seen["tid"]
++    return run
++
++
++def test_a_finished_turn_releases_its_thread(one_turn):
++    agent = _bare_agent()
++    tid = one_turn(agent)
++    assert agent._execution_thread_id is None
++    agent.hard_interrupt(tool_reason="gateway restart")
++    assert agent._interrupt_requested is True  # the next turn still sees the stop
++    assert not is_thread_interrupted(tid)
++
++
++def test_a_waiting_subagent_stopped_by_the_restart_leaves_another_chats_command_running(one_turn, monkeypatch):
++    """The j3 case: the subagent's turn ended (it waits on its processes); a chat's foreground command then runs on a
++    thread with the same ident. The restart handoff stops the subagent at once and the command runs on."""
++    monkeypatch.setattr(handoff, "_child_state", lambda child: {"session_id": child.session_id})
++    import tools.delegate_tool_subunits as subunits
++    monkeypatch.setattr(subunits, "hand_off", lambda _agent: [])
++    child = _bare_agent()
++    old = one_turn(child)
++    ready, done, seen = threading.Event(), threading.Event(), {}
++
++    def command():
++        set_interrupt(False)
++        seen["tid"] = threading.get_ident()
++        ready.set()
++        done.wait(5)
++        seen["interrupted"] = is_interrupted()
++        set_interrupt(False)
++    worker = threading.Thread(target=command)
++    worker.start()
++    assert ready.wait(5)
++    state = {}
++    handoff._handoff_fn({0: child})(time.monotonic() + 5, state)
++    done.set()
++    worker.join(5)
++    assert child._interrupt_requested is True and child._delegate_restart_handoff is True and set(state) == {"0"}
++    assert not is_thread_interrupted(old)
++    assert seen["interrupted"] is False  # whichever ident it got (Linux hands it the ended thread's)
++
++
++class _TurnChild:
++    """A subagent inside a turn (a model call), with the cleanup hook its run calls once it returns."""
++
++    def __init__(self, index):
++        self._execution_thread_id = 1000 + index
++        self._tool_worker_threads, self._tool_worker_threads_lock = set(), threading.Lock()
++        self.session_id, self.stops, self.tool = f"child-{index}", [], None
++
++    def get_activity_summary(self):
++        return {"current_tool": self.tool}
++
++    def hard_interrupt(self, message=None, *, tool_reason=None):
++        self.stops.append(tool_reason)
++
++    def reach_boundary(self):
++        """What the child's own thread does: stop at the top of its next iteration, then its cleanup."""
++        assert boundary.stop_here(self)
++        self._execution_thread_id = None
++        self._handoff_capture()
++
++
++@pytest.fixture
++def quiet_state(monkeypatch):
++    monkeypatch.setattr(handoff, "_child_state", lambda child: {"session_id": child.session_id})
++    import tools.delegate_tool_subunits as subunits
++    monkeypatch.setattr(subunits, "hand_off", lambda _agent: [])
++
++
++def test_a_subagent_in_a_model_call_finishes_it_and_stops_at_its_next_boundary(quiet_state, monkeypatch):
++    yields = []
++    monkeypatch.setattr(handoff, "_request_tool_yield", lambda child: yields.append(child.session_id))
++    busy = _TurnChild(0)
++    state = {}
++    started = time.monotonic()
++    worker = threading.Thread(target=handoff._handoff_fn({0: busy}),
++                              args=(started, state), kwargs={"boundary_until": started + 10})
++    worker.start()
++    wait_until(lambda: boundary.requested(busy), what="the boundary was requested")
++    time.sleep(0.3)
++    assert busy.stops == [] and state == {}  # its model call is not cut
++    assert boundary.stop_here(busy, tool_round=True) is False  # its tool round runs (no cut tool call to resume)
++    busy.reach_boundary()
++    worker.join(5)
++    assert not worker.is_alive() and time.monotonic() - started < 5
++    assert busy.stops == [handoff.RESTART_TOOL_REASON] and busy._delegate_restart_handoff is True
++    assert state == {"0": {"session_id": "child-0"}} and yields == []
++
++
++def test_a_subagent_that_never_reaches_its_boundary_is_stopped_as_before(quiet_state, monkeypatch):
++    monkeypatch.setattr(handoff, "YIELD_SETTLE_SECONDS", 0.3)
++    yields = []
++    monkeypatch.setattr(handoff, "_request_tool_yield", lambda child: yields.append(child.session_id))
++    stuck = _TurnChild(1)
++    stuck.tool = "terminal"
++    state = {}
++    started = time.monotonic()
++    handoff._handoff_fn({1: stuck})(started, state, boundary_until=started + 0.3)
++    assert yields == ["child-1"] and stuck.stops == [handoff.RESTART_TOOL_REASON] and set(state) == {"1"}
++    assert time.monotonic() - started >= 0.6
++    stuck._handoff_capture()  # its run ends later: recorded once
++    assert stuck.stops == [handoff.RESTART_TOOL_REASON]
++
++
++def test_a_child_handed_off_at_its_boundary_reads_as_unfinished():
++    from tools.delegate_tool_child_run import _build_result_entry, _SchemaOutcome
++    child = _bare_agent()
++    child._delegate_restart_handoff = True
++    result = {"final_response": "", "messages": [], "completed": False, "interrupted": False, "handed_off": True,
++              "api_calls": 2}
++    entry = _build_result_entry(child, result, 0, 1.0, _SchemaOutcome(None, None, [], 0))
++    assert entry["status"] == "interrupted" and entry["exit_reason"] == "handed_off"
++
++
++# ── the ledger ─────────────────────────────────────────────────────────────────────────────────────────────────
++
++
++@pytest.fixture
++def ledger():
++    ad._reset_for_tests()
++    yield
++    ad._reset_for_tests()
++
++
++def _unit(finish):
++    """A one-child unit whose child runs until its handoff function is called, then ends with ``finish``."""
++    started, release, calls = threading.Event(), threading.Event(), []
++
++    def runner():
++        started.set()
++        release.wait(10)
++        return {"results": [{"task_index": 0, "status": finish, "summary": "done" if finish == "completed" else None,
++                             "api_calls": 1, "duration_seconds": 1}]}
++
++    def handoff_fn(deadline, state, boundary_until=None):
++        calls.append(boundary_until)
++        state["0"] = {"session_id": "child-0b"}
++        release.set()
++    spec = {"version": 1, "parent": {"session_id": "parent-sid"}, "task_count": 1, "live_deleg_id": "deleg_call",
++            "children": {"0": {"goal": "task 0", "subagent_id": "sa-0-0000", "session_id": "child-0",
++                               "route": {"backend": "default", "route": {}}}}}
++    handle = ad.dispatch_async_delegation_batch(
++        goals=["task 0"], context=None, toolsets=None, role="leaf", model="m", session_key="agent:main:local:x",
++        parent_session_id="parent-sid", runner=runner, delegation_id="deleg_call", handoff=spec,
++        handoff_fn=handoff_fn)
++    assert handle["status"] == "dispatched" and started.wait(5)
++    return handle["delegation_id"], calls
++
++
++def test_a_unit_whose_child_finished_during_the_carry_goes_to_the_next_gateway(ledger):
++    delegation_id, calls = _unit("completed")
++    marked = threading.Event()
++    assert ad.hand_off_for_restart(0.0, 5.0, boundary_seconds=3.0, marked=marked) == 1
++    assert marked.is_set() and len(calls) == 1 and calls[0] is not None
++    seen = {}
++
++    def make_runner(unit):
++        seen.update(unit)
++        return (lambda: {"results": [unit["kept"][0]]}), None, None, None
++    ad._reset_for_tests()
++    assert ad.adopt_handed_off_delegations(make_runner) == 1
++    assert seen["kept"][0]["status"] == "completed" and seen["handoff"]["resume"] == []
++
++
++def test_a_unit_already_handed_off_by_the_carry_is_not_stopped_again(ledger):
++    _delegation_id, calls = _unit("interrupted")
++    threading.Thread(target=ad.hand_off_for_restart, args=(0.0, 5.0), kwargs={"boundary_seconds": 3.0},
++                     daemon=True).start()
++    wait_until(lambda: calls, what="the carry's handoff")
++    assert ad.hand_off_for_restart(0.0, 0.5) == 0  # the stop after the carry
++    assert len(calls) == 1
+diff --git a/tools/async_delegation.py b/tools/async_delegation.py
+index e99f12a0..2e021f0e 100644
+--- a/tools/async_delegation.py
++++ b/tools/async_delegation.py
+@@ -1379,18 +1379,27 @@ def push_task_failure_notice(delegation_id: str, entry: dict[str, Any], *, n_tas
+ _RESUMABLE_STATUSES = frozenset({"interrupted", "stalled"})
+ 
+ 
+-def hand_off_for_restart(grace_seconds: float, timeout_seconds: float) -> int:
++def hand_off_for_restart(grace_seconds: float, timeout_seconds: float, *, boundary_seconds: Optional[float] = None,
++                         marked: Optional[threading.Event] = None) -> int:
+     """Restart only: hand every running unit dispatched with a ``handoff`` to the next gateway; returns how many.
+ 
+     Each unit's row turns ``handed_off`` first, so a process killed from here on is still resumed. Its
+     ``handoff_fn(deadline, state)`` then stops each child at a clean point: out of its tool call, or at
+     ``grace_seconds`` at the latest. When the unit finalizes, children that finished keep their entries and the
+-    others are left for the next gateway (``adopt_handed_off_delegations``). Waits up to ``timeout_seconds``."""
++    others are left for the next gateway (``adopt_handed_off_delegations``). Waits up to ``timeout_seconds``.
++
++    ``boundary_seconds`` (the per-turn carry): each child in a turn first runs on to its next step boundary, for up
++    to that long (``delegate_tool_handoff._handoff_fn``), and the unit is handed off even when every child finished
++    meanwhile, so the next gateway, which owns the chats by then, delivers it. ``marked`` is set once every unit is
++    recorded as handed off, before any child stops."""
+     require_ledger_owner()
++    boundary = boundary_seconds is not None
+     with _records_lock:
+-        targets = [r for r in _records.values() if r.get("status") in _ACTIVE_STATES and callable(r.get("handoff_fn"))]
++        # A unit already being handed off (the per-turn carry's, at the stop that follows it) is not stopped twice.
++        targets = [r for r in _records.values() if r.get("status") in _ACTIVE_STATES and callable(r.get("handoff_fn"))
++                   and not r.get("_handoff")]
+         for record in targets:
+-            record.update(_handoff=True, _handoff_state={},
++            record.update(_handoff=True, _handoff_state={}, _handoff_boundary=boundary,
+                           _handoff_finished=frozenset(record.get("_finished_children") or ()))
+         # Queued units never started: handed off whole, and the next gateway queues them again.
+         queued = [r for r in _records.values() if r.get("status") == "queued" and callable(r.get("handoff_fn"))
+@@ -1399,20 +1408,25 @@ def hand_off_for_restart(grace_seconds: float, timeout_seconds: float) -> int:
+             record["status"] = "handed_off"
+             record.pop("_queued_run", None)
+             record.pop("_launcher", None)
+-    queued_handed = _hand_off_queued(queued)
+-    if not targets:
+-        return queued_handed
+-    ids = [r["delegation_id"] for r in targets]
+-    now = time.time()
+-    with _DB_LOCK, _transaction() as conn:
+-        for delegation_id in ids:
+-            conn.execute("UPDATE async_delegations SET state='handed_off', updated_at=? "
+-                         "WHERE delegation_id=? AND state='running'", (now, delegation_id))
++    try:
++        queued_handed = _hand_off_queued(queued)
++        if not targets:
++            return queued_handed
++        ids = [r["delegation_id"] for r in targets]
++        now = time.time()
++        with _DB_LOCK, _transaction() as conn:
++            for delegation_id in ids:
++                conn.execute("UPDATE async_delegations SET state='handed_off', updated_at=? "
++                             "WHERE delegation_id=? AND state='running'", (now, delegation_id))
++    finally:
++        if marked is not None:
++            marked.set()
+     deadline = time.monotonic() + max(0.0, grace_seconds)
++    boundary_until = time.monotonic() + max(0.0, boundary_seconds) if boundary else None
+     for record in targets:
+-        threading.Thread(target=_call_handoff, args=(record, deadline), daemon=True,
++        threading.Thread(target=_call_handoff, args=(record, deadline, boundary_until), daemon=True,
+                          name=f"async-delegate-handoff-{record['delegation_id']}").start()
+-    end = time.monotonic() + max(grace_seconds, timeout_seconds)
++    end = time.monotonic() + max(grace_seconds, timeout_seconds) + max(0.0, boundary_seconds or 0.0)
+     while time.monotonic() < end:
+         with _records_lock:
+             if not any((_records.get(i) or {}).get("status") in _LIVE_STATES for i in ids):
+@@ -1454,12 +1468,15 @@ def _hand_off_queued(records: list[dict[str, Any]]) -> int:
+     return handed
+ 
+ 
+-def _call_handoff(record: dict[str, Any], deadline: float) -> None:
++def _call_handoff(record: dict[str, Any], deadline: float, boundary_until: Optional[float] = None) -> None:
+     fn, state = record.get("handoff_fn"), record.get("_handoff_state")
+     if not callable(fn):
+         return
+     try:
+-        fn(deadline, state)
++        if boundary_until is None:
++            fn(deadline, state)
++        else:
++            fn(deadline, state, boundary_until=boundary_until)
+     except Exception:
+         logger.warning("Async delegation %s: restart handoff failed to stop its children", record.get("delegation_id"),
+                        exc_info=True)
+@@ -1474,7 +1491,7 @@ def _hand_off_unit(record: dict[str, Any], result: dict[str, Any]) -> bool:
+     finished = record.get("_handoff_finished") or frozenset()
+     resume = [i for i in indexes
+               if i not in finished and (entries.get(i) or {}).get("status", "interrupted") in _RESUMABLE_STATUSES]
+-    if not resume:
++    if not resume and not record.get("_handoff_boundary"):
+         return False
+     kept = [redact_child_result(entries[i]) for i in indexes if i in entries and i not in resume]
+     try:
+diff --git a/tools/delegate_tool_child_run.py b/tools/delegate_tool_child_run.py
+index d5d88c47..001a229a 100644
+--- a/tools/delegate_tool_child_run.py
++++ b/tools/delegate_tool_child_run.py
+@@ -704,7 +704,11 @@ def _build_result_entry(
+     # responses (usually a transport bug) — a failure, not a success.
+     usable_summary = bool(summary) and summary.strip() != "(empty)"
+     interrupt_note = ""
+-    if result.get("interrupted", False):
++    if result.get("handed_off") is True and getattr(child, "_delegate_restart_handoff", False) is True:
++        # Stopped at a step boundary for a restart (``delegate_tool_handoff``): unfinished, the next gateway resumes
++        # it from its stored transcript.
++        status, exit_reason = "interrupted", "handed_off"
++    elif result.get("interrupted", False):
+         status, exit_reason = "interrupted", "interrupted"
+         # The loop's final_response is a placeholder here ("Operation interrupted…", also appended as the closing
+         # assistant row); the completion must carry what the child actually had so far — its last real assistant
+@@ -1332,6 +1336,10 @@ class _ChildRun:
+         if not close_deferred and getattr(child, "_delegate_restart_handoff", False) is not True:
+             from tools.delegate_tool_handoff import record_resume_state
+             record_resume_state(child)  # before its registry row and tools go: start, tool count, directory
++        capture = getattr(child, "_handoff_capture", None)
++        if callable(capture):  # carried to its step boundary by a restart: its state, before its registry row goes
++            with _quiet("Failed to record a handed-off subagent's state: %s"):
++                capture()
+ 
+         # Safe even if the child was never registered (ID missing on test doubles).
+         if self.subagent_id:
+diff --git a/tools/delegate_tool_handoff.py b/tools/delegate_tool_handoff.py
+index 29abdc5c..38343a1f 100644
+--- a/tools/delegate_tool_handoff.py
++++ b/tools/delegate_tool_handoff.py
+@@ -292,14 +292,65 @@ def _request_tool_yield(child: Any) -> None:
+         request_yield(tid)
+ 
+ 
+-def _handoff_fn(children: dict[int, Any]) -> Callable[[float, dict], None]:
++def _in_turn(child: Any) -> bool:
++    """Whether the child is inside a turn now (a model call or a tool round): ``run_conversation`` binds its execution
++    thread while it runs (``agent.turn_context.interrupt_scope_of_turn``). A child waiting on its processes or its own
++    subagents, or one not started yet, is not."""
++    return getattr(child, "_execution_thread_id", None) is not None
++
++
++def _handoff_fn(children: dict[int, Any]) -> Callable[..., None]:
+     """Stop each child as soon as it is not inside a tool call. At ``deadline`` a child still in one is asked to
+     yield it, so a running terminal command keeps running as a background process the next gateway reattaches;
+     ``YIELD_SETTLE_SECONDS`` later every child is stopped, and a call cut then is cancelled with the reason
+     ``gateway restart``, which the child's transcript shows. A stopped child keeps its tool state
+-    (``_release_handed_off_child``)."""
+-    def hand_off(deadline: float, state: dict) -> None:
++    (``_release_handed_off_child``).
++
++    ``boundary_until`` (the per-turn carry, ``gateway.restart_turn_handoff_per_turn``): first carry each child in a
++    turn to its next step boundary, as the carry does for chat turns: its model call and its tool round finish here
++    and it stops at the top of its next iteration (``agent.turn_boundary_handoff.request(tool_round=False)``), so
++    the next gateway repeats no model call and finds no cut tool call. A child not in a turn is stopped at once, as
++    before. Children that have not reached a boundary by then go on to the steps above."""
++    def hand_off(deadline: float, state: dict, boundary_until: Optional[float] = None) -> None:
+         pending = dict(children)
++        captured: set = set()
++        lock = threading.Lock()
++
++        def stop(index: int, child: Any) -> None:
++            with lock:
++                if index in captured:
++                    return
++                captured.add(index)
++            state[str(index)] = _child_state(child)
++            from tools.delegate_tool_subunits import hand_off as _hand_off_children, is_waiting
++            if units := _hand_off_children(child):  # its own children go to the next gateway with it
++                state[str(index)].update(units=units, waiting=is_waiting(child))
++            child._delegate_restart_handoff = True
++            _signal_child_stop(child, tool_reason=RESTART_TOOL_REASON)
++
++        if boundary_until is not None:
++            from agent import turn_boundary_handoff as boundary
++            reached: dict[int, threading.Event] = {}
++            for index, child in list(pending.items()):
++                if not _in_turn(child):
++                    continue
++                event = threading.Event()
++                child._delegate_restart_handoff = True  # a wait it starts now ends at once; its helpers are kept
++
++                def at_boundary(i=index, c=child, e=event) -> None:
++                    stop(i, c)
++                    e.set()
++                child._handoff_capture = at_boundary  # its cleanup calls it once its run ended
++                boundary.request(child, tool_round=False)
++                reached[index] = event
++            for index, child in list(pending.items()):
++                if index not in reached:
++                    stop(index, child)
++                    del pending[index]
++            for index, event in reached.items():
++                if event.wait(max(0.0, boundary_until - time.monotonic())):
++                    del pending[index]
++            deadline = max(deadline, boundary_until)
+         yielded = False
+         while pending:
+             now = time.monotonic()
+@@ -310,12 +361,7 @@ def _handoff_fn(children: dict[int, Any]) -> Callable[[float, dict], None]:
+             last = now >= deadline + YIELD_SETTLE_SECONDS
+             for index, child in list(pending.items()):
+                 if last or not _in_tool(child):
+-                    state[str(index)] = _child_state(child)
+-                    from tools.delegate_tool_subunits import hand_off as _hand_off_children, is_waiting
+-                    if units := _hand_off_children(child):  # its own children go to the next gateway with it
+-                        state[str(index)].update(units=units, waiting=is_waiting(child))
+-                    child._delegate_restart_handoff = True
+-                    _signal_child_stop(child, tool_reason=RESTART_TOOL_REASON)
++                    stop(index, child)
+                     del pending[index]
+             if pending:
+                 time.sleep(0.25)
+@@ -411,9 +457,9 @@ class _ResumedUnit:
+         from tools.delegate_tool_dispatch import _batch_progress_token
+         return _batch_progress_token(list(self.children.values()))
+ 
+-    def hand_off(self, deadline: float, state: dict) -> None:
++    def hand_off(self, deadline: float, state: dict, boundary_until: Optional[float] = None) -> None:
+         self._stopped = self._handing_off = True  # a child not built yet stays unfinished for the next gateway
+-        _handoff_fn(dict(self.children))(deadline, state)
++        _handoff_fn(dict(self.children))(deadline, state, boundary_until=boundary_until)
+ 
+     def run(self) -> dict[str, Any]:
+         from hermes_state_registry import acquire, release_or_close
+-- 
+2.56.0
+
