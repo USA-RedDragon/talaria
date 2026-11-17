@@ -130,6 +130,7 @@ Under a chat's title, a chat on the pooled Claude provider shows "Claude" and th
 | A chat shows a note naming an account, with **Sign in** | A turn failed with a logged-out error and the plugin confirmed the account is signed out | A Claude admin signs it in. The hub handles one failure per chat and account a minute, and notifies admins at most once per account in 30 minutes |
 | "No Claude account can run this chat now." | The plugin has no account to give the chat | Sign accounts in, wait for "Next room back", or pick another model |
 | "Ask a Claude admin of this server to sign it in." | You are not in `claude.admins` for this backend | Ask someone on the list, or add the pair and restart the hub |
+| "Only a Claude admin of this server can sign it in." on a **Not signed in** account, in place of the agent's usage note | You are not in `claude.admins` for this backend, and the hub can sign the account in | Ask someone on the list, or add the pair and restart the hub |
 | 403 on a sign-in route | Same | Same |
 | "that code was not accepted; copy the whole code from the Claude page" | The code was cut short, had a space in it, or was too long | Copy the whole code again |
 | "that sign-in is no longer the current one; start it again" | Another admin, or the Telegram bot, started a newer sign-in for the slot | Start again. Run one sign-in per slot at a time |

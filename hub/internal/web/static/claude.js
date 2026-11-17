@@ -370,7 +370,10 @@ window.HubClaude = (ctx) => {
       if (who.length) box.append(el("p", "claude-meta", who.join(", ")));
       if (a.status_error) box.append(el("p", "err", a.status_error));
       const u = a.usage;
-      if (u && u.unavailable) box.append(el("p", "hint", "Usage not available: " + u.unavailable));
+      // A person who cannot sign the account in is told why there is no
+      // button, in place of the agent's advice to run claude and log in.
+      if (!data.admin && !a.no_signin && !a.signed_in) box.append(el("p", "hint", "Only a Claude admin of this server can sign it in."));
+      else if (u && u.unavailable) box.append(el("p", "hint", "Usage not available: " + u.unavailable));
       const rows = reported(u).map((w) => [w.label || w.kind, pct(w) + " used", resetOf(w) ? "resets " + resetOf(w) : ""]);
       if (rows.length) {
         const list = el("ul", "claude-windows");
