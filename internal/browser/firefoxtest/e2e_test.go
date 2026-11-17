@@ -206,7 +206,7 @@ func startFirefoxGrants(ctx context.Context, t *testing.T) (*broker.Broker, *bid
 
 	sock := filepath.Join(root, "state", broker.SocketName)
 	b, err := broker.Listen(broker.Options{Path: sock, ExtensionID: host.ExtensionID,
-		AllowHosts:   []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost, grantHost},
+		AllowHosts:   []string{loopback, crossHost, confirmHost, loginHost, otherLoginHost, twoLoginHost, grantHost, postHost},
 		ConfirmHosts: []string{confirmHost}, DaemonVersion: e2eDaemonVersion,
 		AutologinHosts: []string{loginHost, twoLoginHost}, AutologinMethods: map[string]string{loginHost: pickerMethod}, HubURL: e2eHubURL})
 	if err != nil {

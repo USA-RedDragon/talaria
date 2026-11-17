@@ -45,6 +45,9 @@ const (
 	// the user allows it with a sign-in grant. Grants take host names, not
 	// addresses.
 	grantHost = "grant.localhost"
+	// postHost is the sign-in API of grantHost on its own host name: the
+	// login form on grantHost posts the login there.
+	postHost = "api." + grantHost
 	// pickerMethod is the label configured for loginHost in browser.autologin-methods.
 	pickerMethod = "Password"
 	keyLogins    = "login_hosts"
@@ -65,6 +68,9 @@ type loginResult struct {
 	Method     string `json:"method"`
 	// MethodsSeen holds the labels of a sign-in method picker.
 	MethodsSeen []string `json:"methods_seen"`
+	// NeedsPostHost is the host a login form sent the login to that the
+	// user has not allowed.
+	NeedsPostHost string `json:"needs_post_host"`
 }
 
 // loginServer records the posts it gets.
@@ -72,6 +78,14 @@ type loginServer struct {
 	mu     sync.Mutex
 	posts  []string
 	clicks []string
+	// apiPosts are the posts that came in on the api. host name.
+	apiPosts []string
+}
+
+func (l *loginServer) gotAPI() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.apiPosts...)
 }
 
 func (l *loginServer) clicked() []string {
@@ -140,10 +154,27 @@ func (l *loginServer) handler(other string) http.HandlerFunc {
 				`const body = new URLSearchParams({user: f.user.value, pass: f.pass.value});`+
 				`await fetch("/login-api", {method: "POST", body});`+
 				`location.href = "/home"; });</script>`)
+		case "/xorigin-form":
+			// A single-page app whose script posts the login to its API on
+			// another host name (api.<host>), as portal.salad.com does.
+			_, _ = io.WriteString(w, `<!doctype html><title>Sign in</title><h1>Sign in</h1><div id="root"><form id="f">`+
+				`<label>Email <input name="user" autocomplete="username"></label>`+
+				`<label>Password <input type="password" name="pass" autocomplete="current-password"></label>`+
+				`<button type="submit">Sign in</button></form></div>`+
+				`<script>document.getElementById("f").addEventListener("submit", async (e) => {`+
+				`e.preventDefault(); const f = e.target;`+
+				`const body = new URLSearchParams({user: f.user.value, pass: f.pass.value});`+
+				`await fetch("https://api." + location.host + "/login-api", {method: "POST", body});`+
+				`location.href = "/home"; });</script>`)
 		case "/login-api":
 			body, _ := io.ReadAll(r.Body)
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 			l.mu.Lock()
-			l.posts = append(l.posts, r.Method+" "+string(body))
+			if strings.HasPrefix(r.Host, "api.") {
+				l.apiPosts = append(l.apiPosts, r.Method+" "+string(body))
+			} else {
+				l.posts = append(l.posts, r.Method+" "+string(body))
+			}
 			l.mu.Unlock()
 		case "/picker":
 			_, _ = io.WriteString(w, pickerPage("Passkey", "Password", "Approve on phone"))
@@ -347,7 +378,7 @@ func (r *recorded) refused(ctx context.Context, t *testing.T, what, want, op str
 func loginFlow(ctx context.Context, t *testing.T, b *broker.Broker, gr *grantRig, bc *bidi.Client, firstTab int) {
 	t.Helper()
 	password := "pw-" + rand.Text()
-	caDER, cert := testCA(t, loginHost, otherLoginHost, twoLoginHost, grantHost)
+	caDER, cert := testCA(t, loginHost, otherLoginHost, twoLoginHost, grantHost, postHost)
 	other := &loginServer{}
 	otherSrv := serveTLSOn(ctx, t, otherLoginHost, cert, other.handler(""))
 	main := &loginServer{}
@@ -439,6 +470,7 @@ func loginFlow(ctx context.Context, t *testing.T, b *broker.Broker, gr *grantRig
 
 	loginEdges(ctx, t, rig, tab.TabID)
 	grantFlow(ctx, t, rig, b, gr, grantLoginSrv, grantURL, tab.TabID, password)
+	postHostFlow(ctx, t, rig, gr, grantLoginSrv, grantURL, tab.TabID)
 
 	for _, out := range r.out {
 		if strings.Contains(out, password) {
@@ -581,7 +613,8 @@ func loginEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	t.Logf("navigated to %s", nav.URL)
 	res = rig.login(ctx, t, map[string]any{keyTab: tabID, keyGuard: approve(loginHost)})
 	t.Logf("login through a 307 to another host: %+v", res)
-	if !res.Filled || !res.Submitted || res.Reason != "" {
+	// The target is an address, which no sign-in card can allow.
+	if !res.Filled || res.Submitted || res.NeedsPostHost != "" || !strings.Contains(res.Reason, otherLoginHost) {
 		t.Errorf("login through a 307 = %+v", res)
 	}
 	if got := rig.other.got(); len(got) != 0 {
@@ -638,6 +671,10 @@ type grantRig struct {
 
 const (
 	grantAction = "action"
+	grantAdd    = "add"
+	grantRevoke = "revoke"
+	grantToken  = "token"
+	grantHostK  = "host"
 	grantUser   = "e2e-user"
 	grantDevice = "d_e2e"
 )
@@ -664,11 +701,11 @@ func newGrantRig(t *testing.T, b *broker.Broker, path string) *grantRig {
 	return &grantRig{gate: gate, key: priv}
 }
 
-func (g *grantRig) token(t *testing.T, host, scope string) string {
+func (g *grantRig) token(t *testing.T, host, scope string, postHosts ...string) string {
 	t.Helper()
 	now := time.Now()
 	tok, err := logingrant.Sign(g.key, logingrant.Claims{Sub: grantUser, DeviceID: grantDevice, Host: host, Scope: scope,
-		SessionID: "s_e2e", ChatTitle: "e2e", Via: "web", IssuedAt: now.Unix(), Expires: now.Add(time.Minute).Unix()})
+		PostHosts: postHosts, SessionID: "s_e2e", ChatTitle: "e2e", Via: "web", IssuedAt: now.Unix(), Expires: now.Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +747,7 @@ func grantFlow(ctx context.Context, t *testing.T, rig *loginRig, b *broker.Broke
 	}
 	grant := func(scope string) {
 		t.Helper()
-		if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: "add", "token": gr.token(t, grantHost, scope)}); err != nil {
+		if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: grantAdd, grantToken: gr.token(t, grantHost, scope)}); err != nil {
 			t.Fatalf("add %s grant: %v", scope, err)
 		}
 	}
@@ -733,7 +770,7 @@ func grantFlow(ctx context.Context, t *testing.T, rig *loginRig, b *broker.Broke
 	grant(logingrant.ScopeDevice)
 	signedIn(1)
 	signedIn(2) // a device grant stays until revoked
-	out, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: "revoke", "host": grantHost})
+	out, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: grantRevoke, grantHostK: grantHost})
 	if err != nil || !strings.Contains(string(out), `"revoked":true`) {
 		t.Fatalf("revoke = %s, %v", out, err)
 	}
@@ -749,8 +786,78 @@ func grantFlow(ctx context.Context, t *testing.T, rig *loginRig, b *broker.Broke
 	_, forged, _ := ed25519.GenerateKey(rand.Reader)
 	bad, _ := logingrant.Sign(forged, logingrant.Claims{Sub: grantUser, DeviceID: grantDevice, Host: grantHost, Scope: "device",
 		IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
-	if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: "add", "token": bad}); err == nil {
+	if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: grantAdd, grantToken: bad}); err == nil {
 		t.Error("a grant with a wrong signature was accepted")
 	}
 	refusedBoth("after a forged grant")
+}
+
+// postHostFlow checks a login form whose script posts the login to another
+// host name (postHost), against the real extension: the post is cancelled
+// and the answer names the host; after a grant with that post host, a
+// second try on the reloaded page signs in; a once post host holds for one
+// sign-in, and a revoked one is cancelled again.
+func postHostFlow(ctx context.Context, t *testing.T, rig *loginRig, gr *grantRig, srv *loginServer, u string, tabID int) {
+	t.Helper()
+	r := rig.r
+	page := u + "/xorigin-form"
+	add := func(scope string, post ...string) {
+		t.Helper()
+		if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: grantAdd, grantToken: gr.token(t, grantHost, scope, post...)}); err != nil {
+			t.Fatalf("add %s grant %v: %v", scope, post, err)
+		}
+	}
+	login := func(reload bool) loginResult {
+		t.Helper()
+		if !reload {
+			r.must(ctx, t, "navigate", map[string]any{keyTab: tabID, keyURL: page, keyGuard: map[string]any{keyVisit: []string{grantHost}}}, nil)
+		}
+		args := map[string]any{keyTab: tabID, keyGuard: approve(grantHost), keyTimeout: 5000}
+		if reload {
+			args["reload"] = true
+		}
+		return rig.login(ctx, t, args)
+	}
+	blocked := func(what string, posts int) {
+		t.Helper()
+		res := login(false)
+		t.Logf("%s: %+v", what, res)
+		if !res.Filled || res.Submitted || res.NeedsPostHost != postHost || !strings.Contains(res.Reason, postHost) {
+			t.Errorf("%s: login = %+v, want not submitted with needs_post_host %s", what, res, postHost)
+		}
+		if got := srv.gotAPI(); len(got) != posts {
+			t.Errorf("%s: the api host got %d posts, want %d", what, len(got), posts)
+		}
+	}
+	signedIn := func(what string, reload bool, posts int) {
+		t.Helper()
+		res := login(reload)
+		t.Logf("%s: %+v", what, res)
+		if !res.Filled || !res.Submitted || res.NeedsPostHost != "" || res.Reason != "" {
+			t.Errorf("%s: login = %+v", what, res)
+		}
+		got := srv.gotAPI()
+		if len(got) != posts || !strings.HasPrefix(got[len(got)-1], "POST user=alice&pass=") {
+			t.Errorf("%s: the api host got %q, want %d posts", what, got, posts)
+		}
+	}
+
+	add(logingrant.ScopeDevice)
+	blocked("no post host", 0)
+	// Allow once: the second try reloads the page and signs in.
+	add(logingrant.ScopeOnce, postHost)
+	signedIn("after allow once", true, 1)
+	blocked("once post host used", 1)
+	// Allow on this computer: it stays.
+	add(logingrant.ScopeDevice, postHost)
+	signedIn("after allow on this computer", false, 2)
+	signedIn("device post host stays", false, 3)
+	out, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: grantRevoke, grantHostK: grantHost, "post_host": postHost})
+	if err != nil || !strings.Contains(string(out), `"revoked":true`) {
+		t.Fatalf("revoke post host = %s, %v", out, err)
+	}
+	blocked("after the post host was revoked", 3)
+	if _, err := gr.gate.Call(ctx, grants.OpName, map[string]any{grantAction: grantRevoke, grantHostK: grantHost}); err != nil {
+		t.Fatal(err)
+	}
 }
