@@ -102,15 +102,17 @@ The value is at most <!-- docgen:const pkg=assertion name=MaxEncodedLen code=fal
 |---|---|---|
 | `typ` | string | Always `hermes-device-assertion` |
 | `aud` | string | The backend id. Each pod is configured with its own id (plugin setting `backend_id`, acp-host `acp-host.backend-id`) and refuses any other |
-| `leg` | string | `exec` (plugin) or `acp` (acp-host) |
-| `htm` | string | HTTP method of the upgrade: `GET` |
-| `htp` | string | Exact request path of the upgrade, without query: `/api/plugins/device/ws` or `/acp` |
+| `leg` | string | `exec` (plugin) or `acp` (acp-host); `move` for a move the user made in the hub (section 9, move rules) |
+| `htm` | string | HTTP method of the upgrade: `GET`; `PUT` on the move leg |
+| `htp` | string | Exact request path of the upgrade, without query: `/api/plugins/device/ws` or `/acp`; on the move leg `/api/plugins/device/sessions/<session id>/binding`, with the session id not escaped |
 | `sub` | string | The hub's user id, 1 to 256 characters |
 | `device_id` | string | The hub's device id, `[A-Za-z0-9_-]{1,64}`. This is the device's identity everywhere on the backend |
 | `device_name` | string | The name the user gave the device at pairing, 1 to 64 characters, for display |
 | `iat` | integer | Issue time, Unix seconds |
 | `exp` | integer | Expiry, Unix seconds |
 | `nonce` | string | At least 16 random bytes, base64url without padding (`[A-Za-z0-9_-]{22,128}`) |
+| `session_id` | string | Move leg only: the session the user moves. Absent on the other legs |
+| `dir` | string | Move leg only: the folder the user picked, exactly as the bind body's `dir`. Absent on the other legs |
 
 The hub signs a new assertion for every upgrade, with `iat` = now and `exp` = now + 30s or less.
 
@@ -998,6 +1000,14 @@ PUT rules:
 - The plugin checks these rules before it asks the device to resolve `dir`, and again under its lock before it writes, so a bind that lands meanwhile is seen.
 - Binding a session to the directory it is already bound to returns the existing binding with its generation unchanged. A different directory on the same device replaces the binding with a new generation.
 - `404` `unknown_device` when `device_id` is not connected and was never seen; `400` `bad_request` for a malformed body.
+
+Move rules (a move the user made in the hub):
+
+- When the user moves a chat in the hub (the "Move to computer..." dialog, its banner and chat menu entries, and Telegram's `/move`), the hub adds `"assertion": <move assertion>` to the PUT body. It is a hub assertion (section 3) with `leg` `move`, `htm` `PUT`, `htp` the PUT path of this session (session id not escaped), `sub` the user, `device_id` and `device_name` the target computer, `session_id` and `dir` exactly as in the request, signed for this one bind with a fresh nonce and a lifetime of 30 seconds or less. The hub signs one only for a move its signed-in user asked for, to one of that user's own paired computers that is connected; it never forwards a device's bind (section 7.4) with one, so no device, splice, ACP bridge or agent can send one.
+- A body that has an `assertion` member is a move. The plugin verifies it as in section 3.3 against its hub public keys, with `aud` its `backend_id`, `leg` `move`, `htm` `PUT` and `htp` the path of this session, and checks that `session_id`, `device_id` and `dir` equal the request's, and that the connected device belongs to `sub`. Any failure (missing, empty, forged, expired, replayed, another session, device, folder, backend or leg, another user's device) answers `403` `move_refused`; the bind does not happen and the device rules are not tried instead.
+- A verified move binds with the authority of `/device` in the session (8.8) and more: none of the lineage rules above refuse it. It binds a session bound to another device (a move), a session that resolves fail-closed (bound before, no lineage row yet, unreadable lineage, orphaned side agent), and a session that follows another device through an ancestor: that session alone gets a binding of its own, and the ancestor keeps its binding, as `/device off` then `/device` in a child would not (that removes the ancestor's binding).
+- What still refuses a move: the device is not connected (`409` `device_offline`, `404` `unknown_device`), the folder is not absolute or the device refuses it (`400` `bad_dir`, `422` `dir_refused`), the session cannot run on a device (`409` `not_device_session`), and the bindings file cannot be read or written (`503` `state_unavailable`, `500` `state_write_failed`).
+- A plugin older than this rule ignores `assertion` and applies the device rules. The hub then falls back to unbind and bind for a session bound to another of the user's computers, and tells the user to update talaria on the agent server or use `/device` for the other cases.
 - `409` `not_device_session` for a session whose live frozen policy is a bypass (safe mode, ignore-user-config) policy or names a terminal backend other than `device`. The plugin can check this only for sessions loaded in the gateway; others are allowed.
 - `503` `state_unavailable` when `bindings.json` cannot be read (every unbound session then fails closed), and `500` `state_write_failed` when it cannot be written.
 
@@ -1090,6 +1100,7 @@ Routes. The session resolves as above; errors are `{"error", "message"}`.
 - Only the hub reaches the plugin's HTTP routes (they are behind dashboard sign-in), so a device token cannot use the upload or read routes (section 9). The route writes only into `.hermes/attachments` of the directory that serves the session, refuses symbolic links on the way there, never overwrites a file, and applies the write rules of file tools.
 - The read route reads only from the device that serves the session, inside its roots, and refuses credential paths, symbolic links as the last part, other hard links and files over 32 MiB. These rules are by path: the agent can still copy a credential file into a root under another name with a command, as it can with any command. The hub shows such a file only when the chat named it. With the sandbox, all sessions of one person share `/work`, so one chat can name and show a file of another chat's directory.
 - The memory routes (9.1) are behind the same sign-in, so a device token cannot read or change memory either. Memory text enters every new chat's system prompt, so the routes keep Hermes's threat scan on every text they write, and the hub shows a backend's memory only to the users who may use that backend.
+- A move the user makes in the hub binds any session with the authority of `/device` (section 9, move rules). It needs a move assertion, which only the hub's private key can sign and which the hub signs only for its signed-in user's own move to that user's own connected computer, for one session, computer and folder, once, within 30 seconds. A device token, the splice, the ACP bridge, a compromised pod or an agent cannot make one, so they keep the device rules below.
 - A device token can bind only sessions that resolve to its device or were never bound in their lineage (7.4, and the plugin's own rules in section 9). It cannot take a session of another device's lineage (`409` `bound_to_other_device`), or one whose binding was removed (`409` `was_bound`). It can still claim any never-bound session of the user, such as a web chat, and then run commands in it on itself. When a create's bind fails, the hub deletes the new session only when it is never bound, so a create cannot delete a session that is or was bound.
 - A compromised Hermes pod can do anything the user's Hermes can, including running commands on connected devices in their roots. It cannot mint hub assertions, because it holds only public keys.
 - A compromised Hermes pod can use the browser of a connected device that has browser control on, as the agent can (docs/browser.md section 8), as it can run commands there.
@@ -1116,6 +1127,8 @@ Moving a device command to the background (8.4) needs a device and a plugin that
 Browser control needs a device and a plugin that both know the `browser` capability. With an older peer on either side the capability is not negotiated: the leg works as before, and the plugin's browser tools report that the device does not offer browser control.
 
 talaria-hub v0.5.0 refuses a `session.resume` by title or `latest` or with an empty `session_id` (5.4). The Ink TUI never sends those: it resumes by `session_id`, which may hold a title (5.3). With a device client of release 0.4.1 or older, `talaria chat -- -c` and `--resume <title>` fail with any hub, because the local Hermes launcher resolves them in its own session store (5.2), and a title sent as `session_id` fails the splice's bind. Later releases look the session up on the server and resume it by id (5.2, 5.3). The acp-host of those releases applies the hub v0.5.0 slash rules to prompts (6.2).
+
+The move assertion (section 9, move rules) needs plugin 0.30.0 or later and a hub that sends it. An older plugin ignores the body's `assertion` member, so a move through it gets the device rules (the hub then unbinds and binds a session of another of the user's computers, as before); an older hub sends no assertion, and the plugin applies the device rules. Devices need no change.
 
 Plugin 0.4.1 and the acp-host of the same release add refusals and change no wire format. The plugin refuses a device bind of a session of another device's lineage or of a fail-closed lineage (section 9), and `/device` can move a session between devices (8.8). acp-host pins ACP params, removes `_meta`, refuses sessions that are not bound to the device itself, and applies the slash-command allowlist to prompts (6.1, 6.2). Editors and the bridge need no change: the bridge binds every session before it uses it.
 

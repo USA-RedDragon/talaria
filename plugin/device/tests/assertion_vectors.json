@@ -454,5 +454,23 @@
    "now_ns": 1794300010000000000,
    "result": "claims"
   }
- ]
+ ],
+ "move": {
+  "name": "move leg with session_id and dir",
+  "encoded": "v1.eyJ0eXAiOiJoZXJtZXMtZGV2aWNlLWFzc2VydGlvbiIsImF1ZCI6ImFsaWNlIiwibGVnIjoibW92ZSIsImh0bSI6IlBVVCIsImh0cCI6Ii9hcGkvcGx1Z2lucy9kZXZpY2Uvc2Vzc2lvbnMvMjAyNjExMDdfMDIxOTIzX2JlNTk4ZC9iaW5kaW5nIiwic3ViIjoidXNlci0xIiwiZGV2aWNlX2lkIjoiZF84ZjJjIiwiZGV2aWNlX25hbWUiOiJ1cHN0YWlycy1wYyIsImlhdCI6MTc5NDMwMDAwMCwiZXhwIjoxNzk0MzAwMDMwLCJub25jZSI6ImJXOTJaUzEyWldOMGIzSXRibTl1WTJVdE1ERSIsInNlc3Npb25faWQiOiIyMDI2MTEwN18wMjE5MjNfYmU1OThkIiwiZGlyIjoiL2hvbWUvcmVkZHJhZ29uL1Byb2plY3RzL2RvY2dlbiJ9.GLE_MUzsSsuaI7IHR3MM-NKXNMQQKGNJMm37DJnYLLv7qBrQgCEw8dMkAFqBmhdT3kIoP0uUY1UEe0nBhC2XAQ",
+  "now_ns": 1794300010000000000,
+  "expect": {
+   "audience": "alice",
+   "leg": "move",
+   "method": "PUT",
+   "path": "/api/plugins/device/sessions/20261107_021923_be598d/binding"
+  },
+  "claims": {
+   "sub": "user-1",
+   "device_id": "d_8f2c",
+   "device_name": "upstairs-pc",
+   "session_id": "20261107_021923_be598d",
+   "dir": "/home/reddragon/Projects/docgen"
+  }
+ }
 }

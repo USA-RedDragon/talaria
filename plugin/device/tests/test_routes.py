@@ -339,6 +339,92 @@ class RouteTests(unittest.TestCase):
             self.assertEqual((r.status_code, r.json()["error"]), (409, "bound_to_other_device"))
         self.assertIsNone(self.hub.binding("c1"))
 
+    # moves the user made in the hub (protocol.md section 9, move rules)
+    def move_token(self, sid, device_id="d_lap", directory=None, **overrides):
+        claims = {"leg": "move", "htm": "PUT", "htp": f"/api/plugins/device/sessions/{sid}/binding",
+                  "device_id": device_id, "device_name": "laptop", "session_id": sid,
+                  "dir": str(self.root) if directory is None else directory}
+        claims.update(overrides)
+        return self.signer.sign(**claims)
+
+    def put_move(self, sid, token, device_id="d_lap", directory=None, **extra):
+        body = {"device_id": device_id, "dir": str(self.root) if directory is None else directory, **extra}
+        if token is not None:
+            body["assertion"] = token
+        return self.client.put(f"/api/plugins/device/sessions/{sid}/binding", json=body)
+
+    def two_devices(self):
+        self.online()
+        ws = self.connect(header=self.signer.sign(device_id="d_lap", device_name="laptop"))
+        ws.receive_json()
+        Device(ws, str(self.root)).start()
+
+    def refusals(self, sid):
+        """Every way a bind without a good move assertion is still refused, as (name, response)."""
+        now = int(time.time())
+        token = self.move_token(sid)
+        forged = token[:-4] + ("AAAA" if not token.endswith("AAAA") else "BBBB")
+        out = [("none", self.put_move(sid, None)),
+               ("empty", self.put_move(sid, "")),
+               ("forged", self.put_move(sid, forged)),
+               ("expired", self.put_move(sid, self.move_token(sid, iat=now - 60, exp=now - 40))),
+               ("wrong session", self.put_move(sid, self.move_token("other", session_id=sid))),
+               ("wrong session claim", self.put_move(sid, self.move_token(sid, session_id="other"))),
+               ("wrong device", self.put_move(sid, self.move_token(sid, device_id="d_8f2c"))),
+               ("wrong dir", self.put_move(sid, self.move_token(sid, directory=str(self.root / "sub")))),
+               ("wrong backend", self.put_move(sid, self.move_token(sid, aud="bob"))),
+               ("exec leg", self.put_move(sid, self.move_token(sid, leg="exec"))),
+               ("other user", self.put_move(sid, self.move_token(sid, sub="user-2")))]
+        return out
+
+    def assert_moves(self, sid, before):
+        """sid is refused every way but with a good move assertion, then moves to d_lap."""
+        for name, r in self.refusals(sid):
+            with self.subTest(case=name, session=sid):
+                self.assertIn(r.status_code, (403, 409), r.json())
+                if name != "none":
+                    self.assertEqual(r.json()["error"], "move_refused")
+        self.assertEqual(before(), self.hub.resolve(sid).state)
+        token = self.move_token(sid)
+        r = self.put_move(sid, token)
+        self.assertEqual(r.status_code, 200, r.json())
+        self.assertEqual((r.json()["device_id"], r.json()["session_id"]), ("d_lap", sid))
+        res = self.hub.resolve(sid)
+        self.assertEqual((res.state, res.via, res.binding.device_id), (core.STATE_BOUND, sid, "d_lap"))
+        r = self.put_move(sid, token)
+        self.assertEqual((r.status_code, r.json()["error"]), (403, "move_refused"), "a replayed move assertion")
+
+    def test_move_of_a_session_bound_elsewhere(self):
+        self.two_devices()
+        self.hub.bind("s1", "d_8f2c", str(self.root))
+        self.assertEqual(self.put_move("s1", None).json()["error"], "bound_to_other_device")
+        self.assert_moves("s1", lambda: core.STATE_BOUND)
+        self.assertEqual(self.hub.resolve("c1").binding.device_id, "d_lap")
+
+    def test_move_of_a_fail_closed_session(self):
+        self.two_devices()
+        self.hub.bind("s1", "d_8f2c", str(self.root))
+        self.hub.unbind("s1")
+        self.assertEqual(self.put_move("s1", None).json()["error"], "not_bindable")
+        self.assert_moves("s1", lambda: core.STATE_FAIL_CLOSED)
+        # A session with no row in the session store yet fails closed too; a move binds it.
+        r = self.put_move("ghost", self.move_token("ghost"))
+        self.assertEqual(r.status_code, 200, r.json())
+
+    def test_move_carves_a_session_out_of_its_lineage(self):
+        self.two_devices()
+        self.hub.bind("s1", "d_8f2c", str(self.root))
+        self.assertEqual(self.put_move("c1", None).json()["error"], "bound_to_other_device")
+        self.assert_moves("c1", lambda: core.STATE_BOUND)
+        # Only c1 moved: its parent keeps its binding.
+        self.assertEqual((self.hub.binding("s1").device_id, self.hub.resolve("s1").via), ("d_8f2c", "s1"))
+
+    def test_move_to_an_offline_device(self):
+        self.online()
+        self.hub._seen.add("d_lap")
+        r = self.put_move("s1", self.move_token("s1"))
+        self.assertEqual((r.status_code, r.json()["error"]), (409, "device_offline"))
+
     def test_dirs_route(self):
         r = self.client.get("/api/plugins/device/devices/d_8f2c/dirs")
         self.assertEqual((r.status_code, r.json()["error"]), (409, "device_offline"))

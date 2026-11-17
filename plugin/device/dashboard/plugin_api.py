@@ -150,8 +150,14 @@ async def put_binding(session_id: str, request: Request):
     if not isinstance(body, dict) or not isinstance(body.get("device_id"), str) or not body.get("device_id") \
             or not isinstance(body.get("dir"), str):
         return _error(400, "bad_request", 'the body must be {"device_id": <string>, "dir": <string>}')
+    # A move the user made in the hub carries the hub's move assertion and binds with the
+    # authority of /device in the session (section 9, move rules). Without one, the device rules.
+    move = "assertion" in body
     try:
-        binding = await asyncio.to_thread(core.hub().bind, session_id, body["device_id"], body["dir"])
+        if move:
+            core.verify_move(session_id, body["device_id"], body["dir"], body.get("assertion"))
+        binding = await asyncio.to_thread(core.hub().bind, session_id, body["device_id"], body["dir"],
+                                          operator=move, move=move)
     except core.BindError as exc:
         return _error(exc.status, exc.code, exc.message)
     return binding.to_json()

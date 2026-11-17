@@ -24,6 +24,7 @@ MAX_ENCODED_LEN = 4096
 LEG_EXEC = "exec"
 LEG_ACP = "acp"
 LEG_USAGE = "usage"
+LEG_MOVE = "move"
 SIGNATURE_SIZE = 64
 PUBLIC_KEY_SIZE = 32
 
@@ -58,6 +59,9 @@ class Claims:
     iat: int = 0
     exp: int = 0
     nonce: str = ""
+    # Set only on the move leg (docs/protocol.md section 9, move rules).
+    session_id: str = ""
+    dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,7 +115,7 @@ def _go_fold(name: str) -> str:
     return "".join(out)
 
 
-_STRING_FIELDS = ("typ", "aud", "leg", "htm", "htp", "sub", "device_id", "device_name", "nonce")
+_STRING_FIELDS = ("typ", "aud", "leg", "htm", "htp", "sub", "device_id", "device_name", "nonce", "session_id", "dir")
 _INT_FIELDS = ("iat", "exp")
 _FIELDS = _STRING_FIELDS + _INT_FIELDS
 _FOLDED = {_go_fold(f): f for f in _FIELDS}

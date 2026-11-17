@@ -141,6 +141,8 @@ RECONNECT_RECENT_S = 600
 # The assertion ``sub`` of a hub service device, such as the sandbox (protocol.md section 7.3).
 SERVICE_USER = "service"
 
+# Where the dashboard mounts the plugin's HTTP routes (section 9).
+PLUGIN_BASE = "/api/plugins/device"
 PLUGIN_EXEC_PATH = "/api/plugins/device/ws"
 ACP_HOST_PATH = "/acp"
 ACP_HOST_USAGE_PATH = "/usage"
@@ -435,6 +437,39 @@ def verifier() -> Any:
             _KEY_CACHE.update(text=text, keys=keys)
         _VERIFIER.keys = list(_KEY_CACHE["keys"])
     return _VERIFIER
+
+
+def move_path(session_id: str) -> str:
+    """The ``htp`` of a move assertion: the PUT binding route of the session, with the session
+    id as it is, not escaped (section 9, move rules)."""
+    return f"{PLUGIN_BASE}/sessions/{session_id}/binding"
+
+
+def verify_move(session_id: str, device_id: str, directory: str, token: Any) -> Any:
+    """Check the hub's move assertion of a PUT binding (section 9, move rules) and return its
+    claims. Raises :class:`BindError` 403 ``move_refused`` unless the hub signed it for this
+    backend, this session, this device and this folder in the last 30 seconds, it was not used
+    before, and the device, when connected, belongs to the assertion's user."""
+    if not isinstance(token, str) or not token:
+        raise BindError(403, "move_refused", "the move assertion is missing")
+    want = assertion.Expect(audience=backend_id(), leg=assertion.LEG_MOVE, method="PUT",
+                            path=move_path(session_id))
+    try:
+        claims = verifier().verify(token, want)
+    except assertion.Refused as exc:
+        logger.warning("device: move assertion refused for session %s: %s", session_id, exc)
+        raise BindError(403, "move_refused", f"the move assertion was refused ({exc.kind})") from None
+    for name, got, expected in (("session_id", claims.session_id, session_id),
+                                ("device_id", claims.device_id, device_id), ("dir", claims.dir, directory)):
+        if got != expected:
+            logger.warning("device: move assertion for session %s names another %s", session_id, name)
+            raise BindError(403, "move_refused", f"the move assertion names another {name}")
+    conn = hub().device(device_id)
+    if conn is not None and conn.user != claims.sub:
+        logger.warning("device: move assertion for session %s: device %s belongs to another user",
+                       session_id, device_id)
+        raise BindError(403, "move_refused", "the device belongs to another hub user")
+    return claims
 
 
 # --- process handle ---------------------------------------------------------------------------
@@ -1353,14 +1388,19 @@ class Hub:
         with self._lock:
             return session_id in self._ever_bound
 
-    def _check_claim(self, session_id: str, device_id: str, operator: bool) -> None:
+    def _check_claim(self, session_id: str, device_id: str, operator: bool, move: bool = False) -> None:
         """Refuse a bind that would take a session from another device (section 9 PUT rules).
 
-        A device (``operator`` false: the PUT route, so the splice, the ACP bridge and the hub)
-        may bind a session whose lineage resolves to that device, or one that is unbound and was
-        never bound anywhere in its lineage. The operator's ``/device`` may move a session whose
-        own binding names another device, and may bind any session that is not bound now; it may
-        not carve a session out of a lineage bound to another device through an ancestor."""
+        A device (``operator`` false: the PUT route, so the splice, the ACP bridge and the hub
+        for a device) may bind a session whose lineage resolves to that device, or one that is
+        unbound and was never bound anywhere in its lineage. The operator's ``/device`` may move a
+        session whose own binding names another device, and may bind any session that is not
+        bound now; it may not carve a session out of a lineage bound to another device through an
+        ancestor. A move the user made in the hub (``move``: the PUT route with a verified move
+        assertion, section 9 move rules) may do all of that and carve too: it gives only this
+        session a binding of its own, and the ancestor keeps its binding."""
+        if move:
+            return
         res = self.resolve(session_id)
         if res.state == STATE_BOUND and res.binding.device_id != device_id:
             if res.via == session_id:
@@ -1376,10 +1416,12 @@ class Hub:
             raise BindError(409, "not_bindable",
                             f"session {session_id} {res.reason}, so only /device in the session can bind it")
 
-    def bind(self, session_id: str, device_id: str, directory: str, *, operator: bool = False) -> Binding:
+    def bind(self, session_id: str, device_id: str, directory: str, *, operator: bool = False,
+             move: bool = False) -> Binding:
         """Bind ``session_id`` to ``directory`` on a connected device (section 9 PUT rules).
-        ``operator`` is true for the ``/device`` command. Raises :class:`BindError` with the HTTP
-        status and error code."""
+        ``operator`` is true for the ``/device`` command, ``move`` for a move the user made in the
+        hub (its assertion already verified). Raises :class:`BindError` with the HTTP status and
+        error code."""
         if not session_id:
             raise BindError(400, "bad_request", "no session id")
         if self._state_error:
@@ -1395,11 +1437,11 @@ class Hub:
         why = self._session_check(session_id) if self._session_check else None
         if why:
             raise BindError(409, "not_device_session", why)
-        self._check_claim(session_id, device_id, operator)
+        self._check_claim(session_id, device_id, operator, move)
         real = device_pwd(self, device_id, directory)
         with self._lock:
             # Again under the lock: a bind of this session or an ancestor may have landed meanwhile.
-            self._check_claim(session_id, device_id, operator)
+            self._check_claim(session_id, device_id, operator, move)
             existing = self._bindings.get(session_id)
             if existing is not None and existing.device_id == device_id and existing.dir == real:
                 return existing

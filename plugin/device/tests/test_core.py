@@ -470,6 +470,32 @@ class BindingTests(Base):
         self.hub.unbind("gone")
         self.assertEqual(self.hub.bind("gone", "d_lap", str(self.root), operator=True).device_id, "d_lap")
 
+    def test_hub_move_passes_every_lineage_rule(self):
+        """A move the user made in the hub (move=True) binds what a device and /device may not."""
+        other = FakeDevice(self.hub, str(self.root), str(self.devtmp), str(self.home), device_id="d_lap", name="lap")
+        self.addCleanup(other.close)
+        self.store.rows.update({"comp": self.session, "branch": "comp", "gone": None})
+        self.bind()
+        self.hub.bind("gone", "d_pc", str(self.root))
+        self.hub.unbind("gone")
+        cases = (("branch", "bound_to_other_device", True), (self.session, "bound_to_other_device", False),
+                 ("gone", "not_bindable", False), ("ghost", "not_bindable", False))
+        for sid, code, operator_refused in cases:
+            with self.subTest(session=sid):
+                self.assert_refused(sid, "d_lap", code)
+                if operator_refused:
+                    self.assert_refused(sid, "d_lap", code, operator=True)
+                b = self.hub.bind(sid, "d_lap", str(self.root), operator=True, move=True)
+                res = self.hub.resolve(sid)
+                self.assertEqual((b.device_id, res.via, res.binding.device_id), ("d_lap", sid, "d_lap"))
+        # The carve gave only the branch a binding: its ancestor still has its own.
+        self.assertEqual(self.hub.binding(self.session).device_id, "d_lap")
+        self.assertEqual(self.hub.resolve("comp").via, self.session)
+        self.hub.detach(other.conn)
+        with self.assertRaises(core.BindError) as ctx:
+            self.hub.bind("comp", "d_lap", str(self.root), operator=True, move=True)
+        self.assertEqual((ctx.exception.status, ctx.exception.code), (409, "device_offline"))
+
     def test_bind_resolves_symlinks(self):
         link = self.root / "link"
         link.symlink_to(self.root / "sub")

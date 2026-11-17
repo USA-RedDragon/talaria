@@ -102,6 +102,7 @@ func assertionConstants() []shared {
 		{"MaxEncodedLen", assertion.MaxEncodedLen, []string{"MAX_ENCODED_LEN"}},
 		{"LegExec", assertion.LegExec, []string{"LEG_EXEC"}},
 		{"LegACP", assertion.LegACP, []string{"LEG_ACP"}},
+		{"LegMove", assertion.LegMove, []string{"LEG_MOVE"}},
 	}
 }
 

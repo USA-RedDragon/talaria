@@ -48,6 +48,10 @@ const (
 	LegExec  = "exec"
 	LegACP   = "acp"
 	LegUsage = "usage"
+	// LegMove is a move of a session that the user made in the hub: a
+	// bind on the plugin's PUT binding route with the authority of /device
+	// in the session (docs/protocol.md section 9, move rules).
+	LegMove = "move"
 )
 
 // Errors returned by Verify and ParsePublicKeys.
@@ -78,6 +82,10 @@ type Claims struct {
 	IssuedAt   int64  `json:"iat"`
 	Expires    int64  `json:"exp"`
 	Nonce      string `json:"nonce"`
+	// SessionID and Dir are set only on the move leg: the session the
+	// user moves and the folder they picked.
+	SessionID string `json:"session_id,omitempty"`
+	Dir       string `json:"dir,omitempty"`
 }
 
 // Expect is what a verifier requires of the claims.

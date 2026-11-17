@@ -69,6 +69,16 @@ class GoVectorTests(unittest.TestCase):
                     got = exc.kind
                 self.assertEqual(got, v["result"])
 
+    def test_move_vector_matches_go(self):
+        """A move assertion the Go hub signed carries session_id and dir (protocol.md section 9)."""
+        m = VECTORS["move"]
+        e = m["expect"]
+        verifier = assertion.Verifier(assertion.parse_public_keys(VECTORS["public_key"]), now_ns=lambda: m["now_ns"])
+        claims = verifier.verify(m["encoded"], assertion.Expect(audience=e["audience"], leg=e["leg"],
+                                                                method=e["method"], path=e["path"]))
+        self.assertEqual({k: getattr(claims, k) for k in m["claims"]}, m["claims"])
+        self.assertEqual(assertion.LEG_MOVE, e["leg"])
+
     def test_key_vectors_match_go(self):
         for v in VECTORS["keys"]:
             with self.subTest(v["name"]):
