@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 04:44:46 +0000
+Subject: [PATCH] fix(gateway): a per-turn restart keeps a subagent waiting on
+ its process instead of settling it as owner exited
+
+---
+ gateway/run_notifications.py                  |   5 +
+ gateway/turn_carry.py                         |  23 ++++
+ .../tools/test_restart_carry_subagent_wait.py | 119 ++++++++++++++++++
+ tools/async_delegation.py                     |  13 +-
+ 4 files changed, 159 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tools/test_restart_carry_subagent_wait.py
+
+diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
+index 4cbd2602..bca2e083 100644
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -1631,6 +1631,11 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
+         """Offer completions whose owner process died while this gateway runs (#97202): the launch
+         ledger in the launch scope, each served secondary under its own. Startup replay only covers
+         owners that were already gone when the gateway started."""
++        from gateway import turn_carry
++        if turn_carry.released():
++            # gateway.restart_turn_handoff_per_turn: the ledger is the next gateway's. From here (perhaps another
++            # pod) its pid reads as dead, so a sweep would settle the subagents it adopted as "owner exited".
++            return
+         from tools.async_delegation import sweep_orphaned_completions
+         from tools.process_registry import process_registry as _pr
+         sweep = lambda: sweep_orphaned_completions(_pr.completion_queue)
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index bc715bca..d06e1a3b 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -129,6 +129,29 @@ def carrier_alive(home) -> bool:
+         os.close(fd)
+ 
+ 
++def live_carrier_pid(home) -> int | None:
++    """The pid a live carrier recorded in *home*'s state.db, or None (no carrier, or it exited). The pid is the one
++    its own process sees, as on the rows it owns, even when it runs in another pod."""
++    if not carrier_alive(home):
++        return None
++    import sqlite3
++    path = Path(home) / "state.db"
++    if not path.exists():
++        return None
++    from hermes_state_runtime import CARRY_KEY
++    try:
++        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
++        try:
++            row = conn.execute("SELECT value FROM state_meta WHERE key=?", (CARRY_KEY,)).fetchone()
++        finally:
++            conn.close()
++        record = json.loads(row[0]) if row is not None else None
++    except (sqlite3.Error, TypeError, ValueError):
++        return None
++    pid = record.get("pid") if isinstance(record, dict) else None
++    return pid if type(pid) is int else None
++
++
+ def defers_delegations(runner, home) -> bool:
+     """At startup: whether the handed-off background subagents wait for the carrier's process handoff instead of
+     being adopted now. The carrier hands its subagents over at the restart but its background processes only once
+diff --git a/tests/tools/test_restart_carry_subagent_wait.py b/tests/tools/test_restart_carry_subagent_wait.py
+new file mode 100644
+index 00000000..b8646a21
+--- /dev/null
++++ b/tests/tools/test_restart_carry_subagent_wait.py
+@@ -0,0 +1,119 @@
++"""gateway.restart_turn_handoff_per_turn and a background subagent waiting on its process (resume_on_exit).
++
++The carrier (the old gateway) goes on running while the next gateway has adopted the subagent it handed off. In the
++live rollout the two ran in different pods, so neither could see the other's pid: the carrier's orphan sweep read
++the next gateway's adopted unit as abandoned and delivered "owner exited" to the parent while the subagent still
++waited on its process. These tests make the other pod's pids invisible the same way (the liveness probe says dead):
++
++- the carrier no longer sweeps the ledger once it released the profile, so the adopted subagent goes on waiting
++  and its process's exit wakes it and it reports its real result;
++- the next gateway does not settle a unit the live carrier still owns, and does once the carrier exited.
++"""
++
++import fcntl
++import json
++import os
++import sqlite3
++import threading
++from types import SimpleNamespace
++
++from tests.tools.test_delegate_child_wait import _waiting_child
++from tests.tools.test_delegate_resume_action import (  # fixtures too
++    _Parent, _call, _clean_state, _completions, _db, _fake_child, _finished_child, seams,
++)
++from tests.waiting import wait_until
++from tools import async_delegation as ad
++from tools import delegate_tool_handoff as handoff
++from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
++
++from gateway import turn_carry
++from gateway.run_notifications import GatewayNotificationsMixin
++from hermes_constants import get_hermes_home
++
++
++def _state(delegation_id: str) -> str:
++    conn = sqlite3.connect(get_hermes_home() / "state.db")
++    try:
++        return conn.execute("SELECT state FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone()[0]
++    finally:
++        conn.close()
++
++
++def _carrier_sweep() -> None:
++    """The carrier's watcher tick (``_async_delegation_watcher``): its orphan sweep."""
++    runner = SimpleNamespace(_served_profile_homes=None, _each_secondary_ledger=lambda *a, **k: None)
++    GatewayNotificationsMixin._sweep_orphaned_completion_ledgers(runner)
++
++
++def test_the_carrier_leaves_the_subagent_the_next_gateway_adopted_waiting_on_its_process(seams, monkeypatch):
++    db = _db()
++    _finished_child(db)
++    child = _waiting_child("sleep 6; echo zd-sub-done")
++    seams(child)
++    run_id = _call(_Parent(db), subagent_id="sa-0-abcd", message="run it and wait")["run_id"]
++    wait_until(lambda: any(r.get("status") == "waiting" for r in _active_subagents.values()), what="waiting")
++
++    # The restart hands the waiting subagent over; its process keeps running (0012 hands it to the next gateway).
++    assert ad.hand_off_for_restart(2.0, 8.0) == 1
++    assert not child.seen["session"].exited
++
++    # The next gateway adopts it after the carrier's process handoff (0138); it waits on the process again.
++    ad._reset_for_tests()
++    with _active_subagents_lock:
++        _active_subagents.clear()
++    second = _fake_child()
++    seams(second)
++    assert ad.adopt_handed_off_delegations(handoff._resume_unit) == 1
++    assert _state(run_id) == "running"
++
++    # The carrier released the profile and carries its turns on; from its pod the next gateway's pid reads as dead.
++    monkeypatch.setattr(turn_carry, "_released", True)
++    monkeypatch.setattr(ad, "_owner_liveness", lambda: (lambda pid, started: False))
++    _carrier_sweep()
++    assert _state(run_id) == "running"
++    assert _completions(run_id) == []  # no "owner exited" result for the parent
++
++    event = wait_until(lambda: _completions(run_id), timeout=30, what="the woken subagent's result")[0]
++    assert event["status"] == "completed" and not event.get("last_known_status")
++    assert len(second.conversations) == 1 and "zd-sub-done" in second.conversations[0]["user_message"]
++    assert "exited with code 0" in second.conversations[0]["user_message"]
++
++
++def _carrier_record(pid: int) -> int:
++    """A live carrier in another pod: its record in state.db and its held ``.turn-carry.lock``. Returns the lock fd."""
++    from hermes_state_runtime import CARRY_KEY
++    home = get_hermes_home()
++    conn = sqlite3.connect(home / "state.db")
++    try:
++        conn.execute("CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT)")
++        conn.execute("INSERT OR REPLACE INTO state_meta(key, value) VALUES(?, ?)",
++                     (CARRY_KEY, json.dumps({"pid": pid, "epoch": 7, "turns": {}})))
++        conn.commit()
++    finally:
++        conn.close()
++    fd = os.open(turn_carry.lock_path(home), os.O_RDWR | os.O_CREAT, 0o600)
++    fcntl.flock(fd, fcntl.LOCK_EX)
++    return fd
++
++
++def test_the_next_gateway_leaves_a_unit_the_live_carrier_owns_until_the_carrier_exits(monkeypatch):
++    release = threading.Event()
++    handle = ad.dispatch_async_delegation(
++        goal="carried work", context=None, toolsets=None, role="leaf", model="m", session_key="chat",
++        parent_session_id="parent", runner=lambda: (release.wait(30), {"status": "completed", "summary": "x"})[1])
++    delegation_id = handle["delegation_id"]
++    carrier_pid = 4_000_000  # the carrier's pid in its own pod; no such process here
++    conn = sqlite3.connect(get_hermes_home() / "state.db")
++    conn.execute("UPDATE async_delegations SET owner_pid=?, owner_started_at=NULL WHERE delegation_id=?",
++                 (carrier_pid, delegation_id))
++    conn.commit()
++    conn.close()
++    fd = _carrier_record(carrier_pid)
++    try:
++        assert ad.recover_abandoned_delegations() == 0
++        assert _state(delegation_id) == "running"
++    finally:
++        os.close(fd)  # the carrier exits
++    assert ad.recover_abandoned_delegations() == 1
++    assert _state(delegation_id) == "unknown"
++    release.set()
+diff --git a/tools/async_delegation.py b/tools/async_delegation.py
+index 6f144360..e99f12a0 100644
+--- a/tools/async_delegation.py
++++ b/tools/async_delegation.py
+@@ -324,6 +324,16 @@ def _owner_liveness() -> Optional[Callable[[Any, Any], bool]]:
+     return alive
+ 
+ 
++def _live_carrier_pid() -> Optional[int]:
++    """``gateway.restart_turn_handoff_per_turn``: the pid of the previous gateway while it still carries its turns.
++    It may run in another pod whose pids this process cannot see, so its units are not read as abandoned."""
++    try:
++        from gateway.turn_carry import live_carrier_pid
++        return live_carrier_pid(get_hermes_home())
++    except Exception:
++        return None
++
++
+ def recover_abandoned_delegations() -> int:
+     """Classify records whose owning process disappeared as outcome unknown; children a multi-child unit had already
+     recorded (``record_unit_child``) are replayed with their real results."""
+@@ -332,6 +342,7 @@ def recover_abandoned_delegations() -> int:
+     if alive is None:
+         return 0
+     now, recovered = time.time(), 0
++    carrier = _live_carrier_pid()
+     with _DB_LOCK, _transaction() as conn:
+         rows = conn.execute("""SELECT delegation_id, origin_session, origin_ui_session_id,
+                       parent_session_id, dispatched_at, owner_pid,
+@@ -339,7 +350,7 @@ def recover_abandoned_delegations() -> int:
+                FROM async_delegations WHERE state IN ('running','finalizing')""").fetchall()
+         for row in rows:
+             delegation_id, session_key, origin_ui, parent_id, dispatched_at, pid, started, task_json, origin_sid, result_json, last_state = row
+-            if alive(pid, started):
++            if alive(pid, started) or (carrier is not None and pid == carrier):
+                 continue
+             task = json.loads(task_json or "{}")
+             error = "Delegation owner exited before recording a terminal result; outcome unknown."
+-- 
+2.56.0
+
