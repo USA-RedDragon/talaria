@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 03:52:18 -0600
+Subject: [PATCH] fix(gateway): a per-turn restart carries a cron run of the
+ old gateway to its end instead of falling back to the single handover
+
+---
+ cron/executions.py                           |  13 ++
+ gateway/turn_carry.py                        |  36 ++++--
+ tests/gateway/test_restart_carry_cron_run.py | 129 +++++++++++++++++++
+ 3 files changed, 166 insertions(+), 12 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_cron_run.py
+
+diff --git a/cron/executions.py b/cron/executions.py
+index 26f89649..182ab45d 100644
+--- a/cron/executions.py
++++ b/cron/executions.py
+@@ -166,7 +166,20 @@ def _process_start_time(pid: int) -> Optional[int]:
+         return None
+ 
+ 
++def _carrier_owns(pid: int) -> bool:
++    """Whether *pid* is the process a live per-turn restart carrier recorded (gateway.turn_carry): the old gateway
++    runs its cron runs to their ends after the next gateway took over, maybe in another pod whose pids this process
++    cannot see, so the pid proves nothing here while that carrier holds its lock."""
++    try:
++        from gateway.turn_carry import live_carrier_pid
++        return pid != os.getpid() and live_carrier_pid(get_hermes_home()) == pid
++    except Exception:
++        return False
++
++
+ def _owner_is_live(pid: int, started_at: Optional[int]) -> bool:
++    if _carrier_owns(pid):
++        return True
+     try:
+         from gateway.status import _pid_exists
+         if not _pid_exists(pid):
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index dcd36d8e..4125cef7 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -254,12 +254,9 @@ def _ineligible(runner, turns) -> str | None:
+         return "a turn runs in a managed worker"
+     if starting:
+         return STARTING
+-    try:
+-        cron = int(runner._active_cron_job_count()) - int(runner._restart_safe_cron_count())
+-    except Exception:
+-        cron = 0
+-    if cron > 0:
+-        return "a cron job runs in this process"
++    # A cron run in this process is carried too (``_cron_runs``): it runs to its end here, as before the release,
++    # while the next gateway serves everything else. Falling back to the single handover for it held every new turn
++    # of the profile until the stop's cron drain had waited for the run and then interrupted it.
+     for turn in turns:
+         if _platform(turn) not in _CARRIED_PLATFORMS:
+             return f"a turn runs on {_platform(turn) or 'an unknown platform'}"
+@@ -324,8 +321,20 @@ async def carry_restart(runner) -> bool:
+     return True
+ 
+ 
++def _cron_runs(runner) -> int:
++    """The cron runs in this process (a restart-safe external worker outlives it and is not counted)."""
++    try:
++        return max(0, int(runner._active_cron_job_count()) - int(runner._restart_safe_cron_count()))
++    except Exception:
++        return 0
++
++
+ def _in_tool_round(carry) -> bool:
+-    """Whether a carried turn still runs a tool call here."""
++    """Whether a carried turn still runs a tool call here, or a cron run runs here: its tool calls are not visible
++    and it never stops at a boundary, so it holds the device connections (and the process handoff that closes them)
++    until it ends. The device plugin serves the next gateway over them meanwhile."""
++    if _cron_runs(carry.runner):
++        return True
+     return any(aid not in carry.done and getattr(t.agent, "_executing_tools", False) for aid, t in carry.turns.items())
+ 
+ 
+@@ -791,18 +800,21 @@ async def _carry_turns(carry) -> None:
+                     _end_kept_sockets(runner)  # its viewers get the resumed turn's frames from the next gateway
+         left = set(carry.turns) - carry.done
+         api = _api_live(runner)
++        cron = _cron_runs(runner)
+         now = time.monotonic()
+-        if not left and not api:
++        if not left and not api and not cron:
+             break
+         if now >= deadline:
+-            logger.warning("Restart: %d carried turn(s) and %d API run(s) still running at the ceiling of %.0fs; "
+-                           "stopping them (gateway.restart_turn_carry_ceiling_seconds)", len(left), api,
+-                           ceiling_seconds(runner))
++            # A cron run still running goes to the stop's cron drain, which interrupts it as before the carry.
++            logger.warning("Restart: %d carried turn(s), %d API run(s) and %d cron run(s) still running at the ceiling "
++                           "of %.0fs; stopping them (gateway.restart_turn_carry_ceiling_seconds)", len(left), api,
++                           cron, ceiling_seconds(runner))
+             for aid in left:
+                 boundary.cancel(carry.turns[aid].agent)
+             break
+         if now - last_log >= 30.0:
+-            logger.info("Restart: carrying %d turn(s) and %d API run(s) to their ends", len(left), api)
++            logger.info("Restart: carrying %d turn(s), %d API run(s) and %d cron run(s) to their ends", len(left),
++                        api, cron)
+             last_log = now
+         await asyncio.sleep(POLL_S)
+     carry.done.update(carry.turns)
+diff --git a/tests/gateway/test_restart_carry_cron_run.py b/tests/gateway/test_restart_carry_cron_run.py
+new file mode 100644
+index 00000000..4b4ea9a8
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_cron_run.py
+@@ -0,0 +1,129 @@
++"""gateway.restart_turn_handoff_per_turn with a cron run in the old gateway at the restart: the run is carried like a
++turn. It goes on to its end on the carrier, which keeps the device connections (and the background processes'
++handoff that closes them) until it ended, while the next gateway takes the profile at once. Before, the restart fell
++back to the single handover (0131): every new turn of the profile waited until the stop's cron drain had waited for
++the run and then interrupted it.
++
++The next gateway also leaves the carrier's cron execution alone: the carrier may run in another pod, whose pids the
++next gateway cannot see, so its dead-owner sweep marked the execution of the still running run ``unknown``.
++"""
++
++import asyncio
++import os
++import time
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++from tests.gateway.test_restart_turn_carry import _claimed_turn, _old_runner, _reserve_profile, _until
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_hand_off_background", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++
++
++def _cron_runner(owner, runs):
++    runner = _old_runner(owner)
++    runner._active_cron_job_count = lambda: runs[0]
++    runner._restart_safe_cron_count = lambda: 0
++    return runner
++
++
++def _handed(monkeypatch):
++    handed = []
++    from gateway.run_shutdown import GatewayShutdownMixin
++
++    async def hand_off(runner):
++        handed.append(time.monotonic())
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(hand_off))
++    return handed
++
++
++@pytest.mark.asyncio
++async def test_a_cron_run_is_carried_to_its_end_and_holds_the_device_connections(owner, tmp_path, monkeypatch):
++    _reserve_profile(tmp_path)
++    row, _live, agent = _claimed_turn(owner, "chat")
++    agent._executing_tools = False  # in a model call
++    handed = _handed(monkeypatch)
++    runs = [1]  # a cron job runs in this process
++    runner = _cron_runner(owner, runs)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    # The next gateway takes the profile at once instead of the 0131 fallback (carry_restart returned False).
++    await asyncio.wait_for(_until(lambda: turn_carry.released() or carry.done()), 5.0)
++    assert not carry.done(), "the restart fell back to the single handover for the cron run"
++    assert turn_carry.released()
++    # The chat turn ends; the cron run still runs here: the device connections (the process handoff) stay.
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.sleep(0.5)
++    assert handed == []
++    assert not carry.done()
++    # The cron run ends: the processes go over and the carry ends.
++    ended = time.monotonic()
++    runs[0] = 0
++    await asyncio.wait_for(carry, 5.0)
++    assert len(handed) == 1 and handed[0] - ended < 1.0
++    assert carry.result() is True
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_a_cron_run_alone_is_carried(owner, tmp_path, monkeypatch):
++    _reserve_profile(tmp_path)
++    handed = _handed(monkeypatch)
++    runs = [1]
++    runner = _cron_runner(owner, runs)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await asyncio.wait_for(_until(lambda: turn_carry.released() or carry.done()), 5.0)
++    assert not carry.done()
++    await asyncio.sleep(0.3)
++    assert handed == []
++    runs[0] = 0
++    assert await asyncio.wait_for(carry, 5.0) is True
++    assert len(handed) == 1
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_a_cron_run_past_the_ceiling_goes_to_the_stop(owner, tmp_path, monkeypatch):
++    _reserve_profile(tmp_path)
++    handed = _handed(monkeypatch)
++    runner = _cron_runner(owner, [1])
++    runner.config.restart_turn_carry_ceiling_seconds = 1.0
++    started = time.monotonic()
++    assert await asyncio.wait_for(turn_carry.carry_restart(runner), 10.0) is True
++    assert time.monotonic() - started < 5.0
++    assert len(handed) == 1  # at the ceiling the processes go over; the stop's cron drain interrupts the run
++    os.close(runner._turn_carry.lock_fd)
++
++
++def test_the_next_gateway_leaves_the_carriers_cron_execution_alone(tmp_path, monkeypatch):
++    from cron import executions
++    monkeypatch.setattr(executions, "EXECUTIONS_FILE", None, raising=False)
++    execution = executions.create_execution("job1", source="scheduler")
++    executions.mark_execution_running(execution["id"])
++    # The carrier wrote the row: its pid, as its own pod sees it, is no live process here.
++    carrier_pid = 2 ** 22 + 17
++    with executions._transaction() as conn:
++        conn.execute("UPDATE executions SET process_id=?, pid=?, process_started_at=? WHERE id=?",
++                     ("carrier-process", carrier_pid, 12345, execution["id"]))
++    monkeypatch.setattr(turn_carry, "live_carrier_pid", lambda home: carrier_pid)
++    assert executions.recover_interrupted_executions() == 0
++    assert executions.get_execution(execution["id"])["status"] == "running"
++    # Once the carrier exited, a row it left is recovered as before.
++    monkeypatch.setattr(turn_carry, "live_carrier_pid", lambda home: None)
++    assert executions.recover_interrupted_executions() == 1
++    assert executions.get_execution(execution["id"])["status"] != "running"

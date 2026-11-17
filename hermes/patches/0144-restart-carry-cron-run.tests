@@ -1,0 +1,13 @@
+# A cron run of the old gateway carried to its end (this patch)
+tests/gateway/test_restart_carry_cron_run.py
+# The carry (0136 to 0142) it extends
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_carry_no_pause.py
+tests/gateway/test_restart_carry_background_work.py
+tests/gateway/test_restart_carry_process_relay.py
+tests/gateway/test_restart_carry_device_link.py
+tests/tools/test_restart_carry_subagent_wait.py
+# The cron execution ledger's dead-owner recovery
+tests/cron/test_execution_ledger.py
+tests/cron/test_stale_running_recovery.py
+tests/cron/test_cron_recovery.py
