@@ -1,0 +1,328 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 12:57:55 -0600
+Subject: [PATCH] feat(delegation): a Claude route runs on its parent chat's
+ API-key provider
+
+A delegation.backends.<backend>.options entry marked family: claude is a Claude route. When the parent chat runs on an Anthropic API-key provider (api_mode anthropic_messages on api.anthropic.com, not claude-pool), the route keeps its model and runs on that provider instead of its own, so the account the user picked pays for the chat's subagents. Any other chat, and every route not marked claude, resolves as before. A subagent carries its chat's choice to its own subagents and a restart handoff records it. A route that fails never falls back to the other side.
+---
+ tests/tools/test_delegation_claude_family.py | 174 +++++++++++++++++++
+ tools/delegate_tool.py                       |   2 +
+ tools/delegate_tool_claude.py                |  67 +++++++
+ tools/delegate_tool_handoff.py               |   3 +
+ tools/delegate_tool_routes.py                |   3 +
+ 5 files changed, 249 insertions(+)
+ create mode 100644 tests/tools/test_delegation_claude_family.py
+ create mode 100644 tools/delegate_tool_claude.py
+
+diff --git a/tests/tools/test_delegation_claude_family.py b/tests/tools/test_delegation_claude_family.py
+new file mode 100644
+index 0000000000..cc6495d80c
+--- /dev/null
++++ b/tests/tools/test_delegation_claude_family.py
+@@ -0,0 +1,174 @@
++"""A route marked ``family: claude`` runs on its parent chat's Anthropic API-key provider when the chat is on one,
++and on its own provider (the account pool) otherwise. Real ``delegate_task`` and route resolution; the child's
++construction is stubbed, and the runtime provider answers for the providers named here."""
++
++import json
++import threading
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from agent.delegation_provider import DelegationProvider
++
++API = "https://api.anthropic.com"
++POOL_URL = "process://claude-pool"
++OPTIONS = [
++    {"name": "local", "provider": "custom", "base_url": "http://ollama:11434/v1", "model": "qwen3:27b"},
++    {"name": "sonnet", "provider": "claude-pool", "model": "claude-sonnet-5-5", "family": "claude"},
++    {"name": "opus", "provider": "claude-pool", "model": "claude-opus-5-5", "family": "claude"},
++    {"name": "plain", "provider": "claude-pool", "model": "claude-haiku-5-5"},
++    {"name": "kimi", "provider": "deepinfra", "model": "moonshotai/Kimi-K3"},
++]
++CFG = {"backends": {"route-family": {"options": OPTIONS}}}
++
++
++class _Backend(DelegationProvider):
++    @property
++    def name(self):
++        return "route-family"
++
++    def task_parameters(self, config):
++        return {"option": {"type": "string", "enum": [o["name"] for o in OPTIONS] + ["opus (help)"]}}
++
++    def route_task(self, task, config):
++        entry = next(o for o in OPTIONS if o["name"] == task["option"].split(" ")[0])
++        route = {k: v for k, v in entry.items() if k in ("provider", "model", "base_url")}
++        return {**route, "label": task["option"]}
++
++
++def _runtime(requested=None, target_model=None, **_):
++    urls = {"claude-pool": POOL_URL, "claude-api-caam": API, "claude-api-jaam": API,
++            "deepinfra": "https://api.deepinfra.com/v1/openai"}
++    return {"provider": requested, "base_url": urls[requested], "api_key": f"key-{requested}",
++            "api_mode": "anthropic_messages" if requested.startswith("claude") else "chat_completions"}
++
++
++def _parent(provider, api_mode="anthropic_messages", base_url=API, account=None):
++    parent = MagicMock()
++    parent.provider, parent.requested_provider, parent.api_mode, parent.base_url = provider, provider, api_mode, base_url
++    parent.api_key, parent.model, parent.platform = "parent-key", "claude-sonnet-5-5", "cli"
++    parent.request_overrides = {}
++    parent.reasoning_config = {"enabled": True, "effort": "medium"}
++    parent.providers_allowed = parent.providers_ignored = parent.providers_order = parent.provider_sort = None
++    parent._session_db, parent._delegate_depth, parent._active_children = None, 0, []
++    parent._active_children_lock = threading.Lock()
++    parent._print_fn = parent.tool_progress_callback = parent.thinking_callback = None
++    if account is not None:
++        parent._delegate_claude_account = account
++    return parent
++
++
++def _construct(**kwargs):
++    child = MagicMock()
++    child.request_overrides = dict(kwargs.get("request_overrides") or {})
++    child.provider, child.model = kwargs.get("provider"), kwargs.get("model")
++    child.reasoning_config, child.service_tier = kwargs.get("reasoning_config"), kwargs.get("service_tier")
++    return child
++
++
++def _spawn(parent, options):
++    batches = []
++    with (
++        patch("tools.delegate_tool._load_config", return_value=CFG),
++        patch("tools.delegate_tool_routes._active_provider", return_value=_Backend()),
++        patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=_runtime),
++        patch("run_agent.AIAgent", side_effect=_construct) as agent,
++        patch("tools.delegate_tool._run_batch",
++              side_effect=lambda batch, background: batches.append(batch) or json.dumps({"status": "built"})),
++    ):
++        from tools.delegate_tool import delegate_task
++        result = json.loads(delegate_task(tasks=[{"goal": f"investigate failing build number {i} in the repo", "option": o} for i, o in enumerate(options)],
++                                          parent_agent=parent))
++    assert result == {"status": "built"}
++    return [(c.kwargs["provider"], c.kwargs["model"]) for c in agent.call_args_list], [c for _, _, c in batches[0].children]
++
++
++def test_a_chat_on_an_api_key_provider_runs_its_claude_routes_on_that_provider_with_the_routes_model():
++    built, _ = _spawn(_parent("claude-api-caam"), ["sonnet", "opus"])
++    assert built == [("claude-api-caam", "claude-sonnet-5-5"), ("claude-api-caam", "claude-opus-5-5")]
++
++
++def test_a_chat_on_the_pool_keeps_the_routes_own_provider():
++    built, _ = _spawn(_parent("claude-pool", base_url=POOL_URL), ["sonnet"])
++    assert built == [("claude-pool", "claude-sonnet-5-5")]
++
++
++def test_routes_not_marked_claude_keep_their_provider_for_an_api_parent():
++    built, _ = _spawn(_parent("claude-api-caam"), ["local", "plain", "kimi", "sonnet"])
++    assert built == [("custom", "qwen3:27b"), ("claude-pool", "claude-haiku-5-5"),
++                     ("deepinfra", "moonshotai/Kimi-K3"), ("claude-api-caam", "claude-sonnet-5-5")]
++
++
++@pytest.mark.parametrize("parent", [
++    _parent("openrouter", "chat_completions", "https://openrouter.ai/api/v1"),
++    _parent("minimax", "anthropic_messages", "https://api.minimax.io/anthropic"),
++])
++def test_only_an_anthropic_api_key_chat_is_followed(parent):
++    built, _ = _spawn(parent, ["sonnet"])
++    assert built == [("claude-pool", "claude-sonnet-5-5")]
++
++
++def test_a_help_label_follows_its_routes_family():
++    built, _ = _spawn(_parent("claude-api-jaam"), ["opus (help)"])
++    assert built == [("claude-api-jaam", "claude-opus-5-5")]
++
++
++def test_the_route_line_names_the_account_that_ran():
++    from tools.delegate_tool_child_run import route_text
++
++    _, (child,) = _spawn(_parent("claude-api-caam"), ["sonnet"])
++    child._delegate_route = {"backend": "route-family", "label": "sonnet"}
++    assert route_text(child) == "route sonnet: claude-sonnet-5-5 via claude-api-caam"
++
++
++def test_a_nested_child_keeps_the_chats_choice_even_under_a_helper_on_another_route():
++    _, (kimi,) = _spawn(_parent("claude-api-caam"), ["kimi"])
++    assert kimi._delegate_claude_account == "claude-api-caam"
++    under_kimi = _parent("deepinfra", "chat_completions", "https://api.deepinfra.com/v1/openai",
++                         account=kimi._delegate_claude_account)
++    built, (grandchild,) = _spawn(under_kimi, ["opus"])
++    assert built == [("claude-api-caam", "claude-opus-5-5")] and grandchild._delegate_claude_account == "claude-api-caam"
++    _, (pool_child,) = _spawn(_parent("claude-pool", base_url=POOL_URL), ["kimi"])
++    assert pool_child._delegate_claude_account == ""
++    built, _ = _spawn(_parent("deepinfra", "chat_completions", "x", account=pool_child._delegate_claude_account), ["opus"])
++    assert built == [("claude-pool", "claude-opus-5-5")]
++
++
++def test_a_nested_child_of_an_api_child_follows_it_directly():
++    built, _ = _spawn(_parent("claude-api-caam"), ["sonnet"])
++    nested, _ = _spawn(_parent(built[0][0]), ["opus"])
++    assert nested == [("claude-api-caam", "claude-opus-5-5")]
++
++
++def test_a_resumed_subagent_keeps_the_provider_it_ran_on_even_when_the_chat_moved_to_the_pool():
++    from tools.delegate_tool_handoff import _ResumedUnit, _ResumeParent, _parent_snapshot, _route_spec
++    from tools.delegate_tool_routes import resolve_task_routes
++
++    with (patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=_runtime),
++          patch("tools.delegate_tool_routes._active_provider", return_value=_Backend())):
++        (route,), _ = resolve_task_routes([{"goal": "g", "option": "sonnet"}], CFG, _parent("claude-api-caam"))
++        saved = _route_spec(route)
++        assert saved["route"]["provider"] == "claude-api-caam" and "reask" not in saved
++        snap = _parent_snapshot(_parent("claude-pool", base_url=POOL_URL))
++        parent = _ResumeParent(snap, None)
++        resumed = _ResumedUnit._route(SimpleNamespace(), 0, {"route": saved}, parent, CFG)
++    assert resumed.creds["provider"] == "claude-api-caam" and resumed.creds["model"] == "claude-sonnet-5-5"
++    assert resumed.creds["api_key"] == "key-claude-api-caam"
++
++
++def test_a_resumed_parent_keeps_the_chats_choice():
++    from tools.delegate_tool_handoff import _ResumeParent, _parent_snapshot
++    from tools.delegate_tool_claude import parent_claude_account
++
++    under_kimi = _parent("deepinfra", "chat_completions", "https://api.deepinfra.com/v1/openai", account="claude-api-jaam")
++    snap = json.loads(json.dumps(_parent_snapshot(under_kimi), default=str))
++    assert parent_claude_account(_ResumeParent(snap, None)) == "claude-api-jaam"
++
++
++def test_a_stored_subagent_resumed_by_id_keeps_the_provider_it_ran_on():
++    from tools.delegate_tool_resume import _stored_route
++
++    row = {"model": "claude-sonnet-5-5", "billing_provider": "claude-api-caam", "billing_base_url": API}
++    route = _stored_route(row, _parent("claude-pool", base_url=POOL_URL))["route"]
++    assert route == {"model": "claude-sonnet-5-5", "provider": "claude-api-caam", "base_url": API}
+diff --git a/tools/delegate_tool.py b/tools/delegate_tool.py
+index 488ed3ca75..1048fa08a6 100644
+--- a/tools/delegate_tool.py
++++ b/tools/delegate_tool.py
+@@ -401,6 +401,8 @@ def _build_child_agent(
+     child_session_ref["session_id"] = getattr(child, "session_id", "") or ""
+     child._progress_identity_ref = child_session_ref
+     child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
++    from tools.delegate_tool_claude import parent_claude_account
++    child._delegate_claude_account = parent_claude_account(parent_agent) or ""
+     # The brief as it was given, for the roster row and, once the live record is gone, the stored session.
+     child._delegate_goal, child._delegate_context = goal, context
+     _bind_approval_review_root(child, parent_agent, goal)
+diff --git a/tools/delegate_tool_claude.py b/tools/delegate_tool_claude.py
+new file mode 100644
+index 0000000000..1501913776
+--- /dev/null
++++ b/tools/delegate_tool_claude.py
+@@ -0,0 +1,67 @@
++"""A Claude route runs on the same Claude provider as its parent chat when that chat is on an Anthropic API key.
++
++A ``delegation.backends.<backend>.options`` entry marked ``family: claude`` is a Claude route: it names the account
++pool (or any one provider) for the chats that run there, and keeps its model. A chat on an Anthropic API-key
++provider (``api_mode: anthropic_messages`` on api.anthropic.com, not the pool) pays for its own subagents: the route
++takes that provider instead, so the account the user picked is the one billed. Nothing else changes, and nothing
++falls back from one side to the other: a route that fails keeps its error.
++"""
++
++from __future__ import annotations
++
++from typing import Any, Mapping, Optional
++
++from utils import base_url_hostname
++
++FAMILY_KEY = "family"
++CLAUDE_FAMILY = "claude"
++CLAUDE_POOL = "claude-pool"
++ANTHROPIC_API_HOST = "api.anthropic.com"
++_POOL_ROUTE_KEYS = ("base_url", "api_key", "api_mode")
++
++
++def _name(value: Any) -> str:
++    return value.strip() if isinstance(value, str) else ""
++
++
++def parent_claude_account(parent_agent: Any) -> Optional[str]:
++    """The Anthropic API-key provider a chat's Claude subagents run on, or None for any other chat. A subagent
++    carries its parent's answer (``_delegate_claude_account``, ``""`` for none), so a helper on another route still
++    hands its own helpers the chat's choice."""
++    inherited = getattr(parent_agent, "_delegate_claude_account", None)
++    if isinstance(inherited, str):
++        return inherited or None
++    provider = _name(getattr(parent_agent, "requested_provider", None)) or _name(getattr(parent_agent, "provider", None))
++    if not provider or CLAUDE_POOL in (provider.lower(), _name(getattr(parent_agent, "provider", None)).lower()):
++        return None
++    if _name(getattr(parent_agent, "api_mode", None)).lower() != "anthropic_messages":
++        return None
++    if base_url_hostname(_name(getattr(parent_agent, "base_url", None))) != ANTHROPIC_API_HOST:
++        return None
++    return provider
++
++
++def _claude_option(label: Any, settings: Any) -> bool:
++    """Whether ``label`` (an option's name, or ``<name> (help)``) is an option marked ``family: claude``."""
++    options = settings.get("options") if isinstance(settings, Mapping) else None
++    if not isinstance(label, str) or not isinstance(options, list):
++        return False
++    best: Optional[Mapping[str, Any]] = None
++    for entry in options:
++        name = _name(entry.get("name")) if isinstance(entry, Mapping) else ""
++        if name and (label == name or label.startswith(name + " ")) and (best is None or len(name) > len(best["name"])):
++            best = entry
++    return best is not None and _name(best.get(FAMILY_KEY)).lower() == CLAUDE_FAMILY
++
++
++def follow_parent_claude(route: dict[str, Any], backend: str, config: Mapping[str, Any], parent_agent: Any,
++                         ) -> dict[str, Any]:
++    """``route`` on the parent's API-key provider when it is a Claude route and the parent runs on one; else as is."""
++    backends = config.get("backends") if isinstance(config, Mapping) else None
++    settings = backends.get(backend) if isinstance(backends, Mapping) else None
++    if route.get("profile") or not _claude_option(route.get("label"), settings):
++        return route
++    account = parent_claude_account(parent_agent)
++    if not account:
++        return route
++    return {**{k: v for k, v in route.items() if k not in _POOL_ROUTE_KEYS}, "provider": account}
+diff --git a/tools/delegate_tool_handoff.py b/tools/delegate_tool_handoff.py
+index 9ce4aeb72e..29abdc5cc4 100644
+--- a/tools/delegate_tool_handoff.py
++++ b/tools/delegate_tool_handoff.py
+@@ -199,6 +199,8 @@ def _parent_snapshot(parent: Any) -> dict[str, Any]:
+         snap["base_url"] = live_url  # the endpoint the parent's client calls, as an inheriting child takes it
+     chain, dropped = _strip_secrets(_jsonable(getattr(parent, "_fallback_chain", None)))
+     snap["fallback_chain"] = None if dropped else chain
++    from tools.delegate_tool_claude import parent_claude_account
++    snap["claude_account"] = parent_claude_account(parent) or ""
+     if snap["enabled_toolsets"] is None and getattr(parent, "valid_tool_names", None):
+         snap["valid_tool_names"] = sorted(parent.valid_tool_names)
+     try:
+@@ -359,6 +361,7 @@ class _ResumeParent:
+         self.terminal_cwd, self.cwd = snap.get("workspace"), None
+         self.request_overrides = dict(snap.get("request_overrides") or {})
+         self._fallback_chain = snap.get("fallback_chain")
++        self._delegate_claude_account = snap.get("claude_account") if isinstance(snap.get("claude_account"), str) else None
+         self.api_key, self._client_kwargs, self.client, self._credential_pool = None, {}, None, None
+         self.prefill_messages, self._print_fn, self.tool_progress_callback = None, None, None
+         self._session_db, self._memory_manager = session_db, None
+diff --git a/tools/delegate_tool_routes.py b/tools/delegate_tool_routes.py
+index a2dfcf3a52..1f4dfd1318 100644
+--- a/tools/delegate_tool_routes.py
++++ b/tools/delegate_tool_routes.py
+@@ -21,6 +21,8 @@ from agent.delegation_provider import (
+     RESERVED_TASK_PARAMETERS, ROUTE_KEYS, DelegationProvider, DelegationRouteError,
+ )
+ 
++from tools.delegate_tool_claude import follow_parent_claude
++
+ logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
+ 
+ _PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+@@ -325,6 +327,7 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
+     for i, task in enumerate(task_list):
+         try:
+             route = _route_one(provider, declared, i, task, config)
++            route = follow_parent_claude(route, provider.name, config, parent_agent)
+             _check_backend_effort(i, route, config)
+             routes.append(_route_to_task_route(route, parent_agent, cache, config, provider.name))
+         except ValueError as exc:  # DelegationRouteError, the credential resolver's and the tier check's refusals
+-- 
+2.56.0
+
