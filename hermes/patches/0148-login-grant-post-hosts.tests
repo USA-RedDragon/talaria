@@ -1,0 +1,4 @@
+# The sign-in grant, its card and prompt, which post_hosts extends
+tests/tools/test_plugin_login_grant_approval.py
+tests/tools/test_approval.py
+tests/gateway/test_exec_approval_source_choice.py

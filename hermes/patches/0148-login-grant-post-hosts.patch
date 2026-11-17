@@ -1,0 +1,260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 04:30:00 -0600
+Subject: [PATCH] feat(approval): a sign-in grant card keeps the extra hosts a
+ sign-in posts to
+
+sanitize_login_grant also keeps post_hosts: a list of at most 4 strings of at most 253 characters (other items dropped), so a device plugin can name the hosts a sign-in posts credentials to and the card and PendingControls prompt carry them. A grant without post_hosts is unchanged. Tests also cover that a plugin tool handler (sync, async, or on a thread carrying the context) can call request_tool_approval(..., login_grant=...) mid-call: the card is raised and the call blocks until answered, once and device approve, deny refuses, and with no human it is blocked.
+---
+ tests/tools/test_login_grant_post_hosts.py | 205 +++++++++++++++++++++
+ tools/approval.py                          |   9 +-
+ 2 files changed, 213 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tools/test_login_grant_post_hosts.py
+
+diff --git a/tests/tools/test_login_grant_post_hosts.py b/tests/tools/test_login_grant_post_hosts.py
+new file mode 100644
+index 00000000..de5b5709
+--- /dev/null
++++ b/tests/tools/test_login_grant_post_hosts.py
+@@ -0,0 +1,205 @@
++"""A sign-in grant request keeps ``post_hosts``, and a plugin tool handler can raise the card mid-call.
++
++  1. ``sanitize_login_grant`` keeps ``post_hosts`` (at most 4 strings of at most 253 characters).
++  2. The gateway card and the PendingControls prompt carry it; a grant without it is unchanged.
++  3. A tool handler run by the registry (sync, async, or on a thread that carries the context) calls
++     ``request_tool_approval(..., login_grant=...)`` itself: in a gateway session the card is raised and the call
++     blocks until answered (once/device approve, deny refuses); with no human it is blocked.
++"""
++import json
++import threading
++import time
++
++import pytest
++
++import tools.approval as approval_mod
++from tools import approval_context
++from tools.registry import ToolRegistry
++from tools.thread_context import propagate_context_to_thread
++
++KEY = "login-grant-post-hosts-session"
++GRANT = {"device_id": "d_abc", "device_name": "upstairs-pc", "host": "portal.example.com", "saved_logins": 1,
++         "methods": ["Password"], "post_hosts": ["login.example.net", "sso.example.org"]}
++
++
++@pytest.fixture()
++def gateway(monkeypatch):
++    """A real gateway context: session key bound as a contextvar, HERMES_GATEWAY_SESSION set, cards recorded."""
++    cards = []
++    for name in ("HERMES_INTERACTIVE", "HERMES_EXEC_ASK", "HERMES_CRON_SESSION", "HERMES_SESSION_PLATFORM"):
++        monkeypatch.delenv(name, raising=False)
++    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
++    monkeypatch.setattr(approval_mod, "_yolo_active", lambda: False)
++    approval_mod.register_gateway_notify(KEY, cards.append)
++    token = approval_context.set_current_session_key(KEY)
++    yield cards
++    approval_context.reset_current_session_key(token)
++    approval_mod.unregister_gateway_notify(KEY)
++
++
++def _wait_card(cards, limit=10.0):
++    end = time.monotonic() + limit
++    while not cards and time.monotonic() < end:
++        time.sleep(0.02)
++    assert cards, "no approval card was raised"
++    return cards[0]
++
++
++def _controls():
++    from gateway.session_pending_controls import PendingControls
++
++    class _Events:
++        lock = threading.RLock()
++
++        def publish(self, *a, **k):
++            pass
++
++    return PendingControls(_Events())
++
++
++# --- 1. sanitizing --------------------------------------------------------------------------------------
++
++def test_sanitize_keeps_post_hosts_bounded():
++    raw = {**GRANT, "post_hosts": ["a" * 400, 7, None, "b.example", "c.example", "d.example", "e.example", "f.example"]}
++    out = approval_mod.sanitize_login_grant(raw)
++    assert out["post_hosts"] == ["a" * 253, "b.example", "c.example", "d.example"]
++
++
++def test_sanitize_post_hosts_plain_and_odd_values():
++    assert approval_mod.sanitize_login_grant(GRANT)["post_hosts"] == ["login.example.net", "sso.example.org"]
++    assert approval_mod.sanitize_login_grant({"post_hosts": ("x.example",)})["post_hosts"] == ["x.example"]
++    assert approval_mod.sanitize_login_grant({"post_hosts": [1, 2]})["post_hosts"] == []
++    assert "post_hosts" not in approval_mod.sanitize_login_grant({"post_hosts": "x.example"})
++    assert "post_hosts" not in approval_mod.sanitize_login_grant({"post_hosts": {"a": "b"}})
++
++
++def test_sanitize_without_post_hosts_is_unchanged():
++    raw = {k: v for k, v in GRANT.items() if k != "post_hosts"}
++    assert approval_mod.sanitize_login_grant(raw) == raw
++
++
++# --- 2. the card and the prompt -------------------------------------------------------------------------
++
++def _ask_in_thread(grant):
++    result = {}
++
++    def run():
++        result["value"] = approval_mod.request_tool_approval("browser_login", "r", login_grant=dict(grant))
++
++    worker = threading.Thread(target=propagate_context_to_thread(run))
++    worker.start()
++    return worker, result
++
++
++def test_card_and_prompt_carry_post_hosts(gateway):
++    worker, result = _ask_in_thread({**GRANT, "evil": 1})
++    card = _wait_card(gateway)
++    assert card["login_grant"]["post_hosts"] == ["login.example.net", "sso.example.org"]
++    assert "evil" not in card["login_grant"]
++    controls = _controls()
++    controls.register("s", object(), 1, {**card, "login_grant": {**card["login_grant"], "post_hosts": ["p.example", 5]}})
++    prompt = controls.pending[card["request_id"]][1]
++    assert prompt["login_grant"]["post_hosts"] == ["p.example"]
++    assert prompt["choices"] == ["once", "device", "deny"]
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++    assert result["value"]["approved"] is False
++
++
++def test_card_without_post_hosts_is_unchanged(gateway):
++    grant = {k: v for k, v in GRANT.items() if k != "post_hosts"}
++    worker, result = _ask_in_thread(grant)
++    card = _wait_card(gateway)
++    assert card["login_grant"] == grant
++    controls = _controls()
++    controls.register("s", object(), 1, card)
++    prompt = controls.pending[card["request_id"]][1]
++    assert prompt["login_grant"] == grant and "post_hosts" not in prompt["login_grant"]
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++
++
++# --- 3. a tool handler raises the card mid-call ----------------------------------------------------------
++
++def _registry(is_async):
++    """A registry with one plugin tool that signs in, is refused, asks for an extra host and retries."""
++    reg = ToolRegistry()
++    calls = []
++
++    def attempt(args):
++        calls.append(args.get("extra"))
++        return {"ok": bool(args.get("extra")), "attempt": len(calls)}
++
++    def handle(args, **kwargs):
++        first = attempt(args)
++        if first["ok"]:
++            return json.dumps(first)
++        verdict = approval_mod.request_tool_approval("browser_login", "Sign in needs another host",
++                                                    login_grant=dict(GRANT))
++        if not verdict.get("approved"):
++            return json.dumps({"ok": False, "denied": True, "message": verdict.get("message", "")})
++        return json.dumps(attempt({**args, "extra": GRANT["post_hosts"]}))
++
++    async def ahandle(args, **kwargs):
++        return handle(args, **kwargs)
++
++    reg.register(name="device_login", toolset="device", handler=ahandle if is_async else handle, is_async=is_async,
++                 schema={"name": "device_login", "description": "d", "parameters": {"type": "object", "properties": {}}})
++    return reg, calls
++
++
++def _dispatch_in_thread(reg):
++    result = {}
++
++    def run():
++        result["value"] = reg.dispatch("device_login", {})
++
++    worker = threading.Thread(target=propagate_context_to_thread(run))
++    worker.start()
++    return worker, result
++
++
++@pytest.mark.parametrize("is_async", [False, True])
++@pytest.mark.parametrize("choice", ["once", "device"])
++def test_handler_raises_card_and_blocks_until_answered(gateway, is_async, choice):
++    reg, calls = _registry(is_async)
++    worker, result = _dispatch_in_thread(reg)
++    card = _wait_card(gateway)
++    assert card["login_grant"]["post_hosts"] == GRANT["post_hosts"]
++    assert card["login_grant"]["host"] == "portal.example.com"
++    time.sleep(0.2)
++    assert worker.is_alive() and calls == [None], "the call must block while the card is open"
++    assert approval_mod.resolve_gateway_approval(KEY, choice, request_id=card["request_id"]) == 1
++    worker.join(30)
++    out = json.loads(result["value"])
++    assert out["ok"] is True and calls == [None, GRANT["post_hosts"]]
++
++
++@pytest.mark.parametrize("is_async", [False, True])
++def test_handler_deny_refuses(gateway, is_async):
++    reg, calls = _registry(is_async)
++    worker, result = _dispatch_in_thread(reg)
++    card = _wait_card(gateway)
++    approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
++    worker.join(30)
++    out = json.loads(result["value"])
++    assert out["ok"] is False and out["denied"] is True and calls == [None]
++
++
++
++
++@pytest.mark.parametrize("is_async", [False, True])
++def test_handler_without_a_human_is_blocked(monkeypatch, is_async):
++    for name in ("HERMES_GATEWAY_SESSION", "HERMES_INTERACTIVE", "HERMES_EXEC_ASK", "HERMES_SESSION_PLATFORM"):
++        monkeypatch.delenv(name, raising=False)
++    monkeypatch.setattr(approval_mod, "_yolo_active", lambda: True)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
++    token = approval_context.set_current_session_key(KEY)
++    try:
++        reg, calls = _registry(is_async)
++        out = json.loads(reg.dispatch("device_login", {}))
++    finally:
++        approval_context.reset_current_session_key(token)
++    assert out["ok"] is False and out["denied"] is True and "BLOCKED" in out["message"]
++    assert calls == [None]
+diff --git a/tools/approval.py b/tools/approval.py
+index bb9ffb12..658b63c9 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -1475,13 +1475,16 @@ _LOGIN_GRANT_STR_KEYS = ("device_id", "device_name", "host", "method", "existing
+ _LOGIN_GRANT_STR_MAX = 256
+ _LOGIN_GRANT_METHODS_MAX = 12
+ _LOGIN_GRANT_METHOD_MAX = 80
++_LOGIN_GRANT_POST_HOSTS_MAX = 4
++_LOGIN_GRANT_POST_HOST_MAX = 253
+ 
+ 
+ def sanitize_login_grant(raw) -> dict:
+     """The sign-in grant request of a plugin approval, cut down to what a card may show: only the keys
+     ``device_id``, ``device_name``, ``host``, ``method``, ``existing``, ``job_id`` (strings, at most 256
+     characters), ``saved_logins`` (an int, -1 when unknown) and ``methods`` (at most 12 strings of at most
+-    80 characters). Anything else, or a value of another type, is dropped. Always a dict."""
++    80 characters) and ``post_hosts`` (at most 4 strings of at most 253 characters: the extra hosts a sign-in
++    posts credentials to). Anything else, or a value of another type, is dropped. Always a dict."""
+     raw = raw if isinstance(raw, dict) else {}
+     out: dict = {}
+     for key in _LOGIN_GRANT_STR_KEYS:
+@@ -1495,6 +1498,10 @@ def sanitize_login_grant(raw) -> dict:
+     if isinstance(methods, (list, tuple)):
+         out["methods"] = [m[:_LOGIN_GRANT_METHOD_MAX] for m in methods
+                           if isinstance(m, str)][:_LOGIN_GRANT_METHODS_MAX]
++    post_hosts = raw.get("post_hosts")
++    if isinstance(post_hosts, (list, tuple)):
++        out["post_hosts"] = [h[:_LOGIN_GRANT_POST_HOST_MAX] for h in post_hosts
++                             if isinstance(h, str)][:_LOGIN_GRANT_POST_HOSTS_MAX]
+     return out
+ 
+ 
+-- 
+2.56.0
+
