@@ -654,6 +654,55 @@ class ToolTests(BrowserBase):
         self.assertNotIn("error", out)
         self.assertTrue(self.last("click")["args"]["guard"]["confirmed"])
 
+    def hook_misses_inspect(self, **args):
+        """pre_tool_call with an inspect that fails (a page busy reloading), then the handler with a
+        page that answers."""
+        self.fake.fail["inspect"] = (core.BROWSER_FAILED, "timed out")
+        self.assertIsNone(browser.pre_tool_call(tool_name="browser_click", args=args, task_id="t",
+                                                session_id=self.session))
+        del self.fake.fail["inspect"]
+        out = self.registry.dispatch("browser_click", args, task_id="t", session_id=self.session)
+        return out if isinstance(out, dict) else json.loads(out)
+
+    def test_salesforce_click_without_hook_inspect_uses_the_always_grant(self):
+        self.salesforce(label="Refresh")
+        rule = "browser:click:acme.lightning.force.com"
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: k == rule):
+            out = self.hook_misses_inspect(tab_id=7, ref="e9")
+        self.assertNotIn("error", out)
+        self.assertTrue(self.last("click")["args"]["guard"]["confirmed"])
+
+    def test_salesforce_click_without_hook_inspect_still_needs_approval(self):
+        self.salesforce(label="Refresh")
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: False):
+            out = self.hook_misses_inspect(tab_id=7, ref="e9")
+        self.assertIn("browser:click:acme.lightning.force.com", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "click"])
+
+    def test_salesforce_secret_page_without_hook_inspect_still_confirms(self):
+        self.salesforce(label="Save")
+        self.fake.inspect["sensitive"] = ["password"]
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+            out = self.hook_misses_inspect(tab_id=7, ref="e9")
+        self.assertIn("asks the user every time", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "click"])
+
+    def test_salesforce_frame_host_uses_the_page_rule(self):
+        self.salesforce(label="Refresh")
+        self.fake.inspect.update(host="acme--c.vf.force.com", url="https://acme--c.vf.force.com/apex/r")
+        rule = "browser:click:acme.lightning.force.com"
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: k == rule):
+            out = self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.assertEqual(self.decision["rule_key"], rule)
+        self.assertNotIn("error", out)
+        self.assertTrue(self.last("click")["args"]["guard"]["confirmed"])
+
+    def test_foreign_frame_in_salesforce_keeps_its_own_rule(self):
+        self.salesforce(label="Pay")
+        self.fake.inspect.update(host="pay.example.com", url="https://pay.example.com/x")
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.assertEqual(self.decision["rule_key"].rsplit(":", 1)[-1], "pay.example.com")
+
     def login_page(self, listed: bool = True):
         self.fake.inspect = {"url": "https://login.example.com/authsvc", "host": "login.example.com",
                              "top_host": "login.example.com", "sensitive": ["password"], "autologin": listed,

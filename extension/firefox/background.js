@@ -789,8 +789,13 @@ async function prepare(tabId, ref, kind, guard) {
   const frameHost = String(await inFrame(tabId, frameId, () => location.hostname) || "").toLowerCase();
   if ((kind === "click" || kind === "submit" || kind === "activate") &&
     (protectedHost(hostOf(tab.url)) || protectedHost(frameHost)) && !g.confirmed) {
+    const topHost = hostOf(tab.url);
+    const site = (h) => (h.startsWith("www.") ? h.slice(4) : h);
+    const ruleHost = frameHost && frameHost !== topHost && protectedHost(topHost) && protectedHost(frameHost) ? topHost :
+      (frameHost || topHost);
     throw new Refused("on Salesforce (and the sites in browser.confirm-hosts) every click and every Enter or Space key " +
-      "press needs the user's approval");
+      "press needs the user's approval, and the plugin passed none for this " + kind + " (page host " + topHost +
+      ", frame host " + (frameHost || "none") + "; it needs the approval rule browser:click:" + site(ruleHost) + ")");
   }
   const sensitive = await tabSensitive(tabId);
   if (sensitive.includes("password") && (autologinHost(hostOf(tab.url)) || autologinHost(frameHost))) {

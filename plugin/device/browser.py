@@ -1146,6 +1146,11 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
         grant["protected_ok"] = True
         salesforce = protected(str(info.get("host") or "")) or protected(str(info.get("top_host") or ""))
         if salesforce and not sensitive:
+            # A Salesforce frame inside a Salesforce page (a report or Visualforce iframe on another
+            # Salesforce host) is covered by the rule of the page the user approved.
+            top = site_of(str(info.get("top_host") or ""))
+            if top and top != page and protected(top) and protected(str(info.get("host") or "")):
+                page = top
             return grant, {"action": "approve", "rule_key": _rule("click", page),
                            "message": f"Allow {how} the element{what_el} on {page} (Salesforce) in "
                                       f"{where}. Approving for this chat (or always) lets the agent click, submit and "
@@ -2300,6 +2305,38 @@ def _batch_tool(args: dict, conn: Any, sid: str) -> str:
     return _batch().run(sys.modules[__name__], args, conn, sid)
 
 
+def _decide_late(tool: str, args: dict, req: dict, conn: Any) -> tuple[dict, Optional[str]]:
+    """``(grant, refusal)`` for an action the hook could not inspect. The page is inspected with
+    the normal timeout; a page that still cannot be inspected gets no grant, as before. Anything
+    that needs the user's approval must already be approved (this runs after the approval gate,
+    which never saw the page), and a page with secret fields keeps asking."""
+    ask = {"tab_id": req["tab_id"]}
+    if req.get("ref"):
+        ask["ref"] = req["ref"]
+    else:
+        ask["focus"] = True
+    try:
+        info = call(conn, "inspect", ask, _core().BROWSER_DEFAULT_TIMEOUT_S)
+        if not isinstance(info, dict) or info.get("error"):
+            return {}, None
+        grant, approval = decide(tool, args, conn, inspected=info)
+    except _core().BrowserError as exc:
+        _core().logger.info("device-browser: late inspect before %s failed: %s", tool, exc)
+        return {}, None
+    if approval and approval.get("action") == "block":
+        return {}, _err(str(approval.get("message") or "blocked"), "refused")
+    key = str((approval or {}).get("rule_key") or "")
+    if key and not approved(key):
+        return {}, _err(f"{tool} was not run: it needs the user's approval (rule {key}), and the check before it "
+                        f"could not read the page, so nobody was asked. Try again; approving once with \"always\" "
+                        f"in a chat, or adding plugin_rule:{key} to command_allowlist, lets it run unattended.",
+                        "approval")
+    if grant.get("confirm") and no_user():
+        return {}, _err(f"{tool} was not run: {grant.get('confirm_text') or 'it needs the user'} This asks the user "
+                        f"every time, and no user is present in this run.", "approval")
+    return grant, None
+
+
 def _act(op: str) -> Callable[[dict, Any, str], str]:
     tool = "browser_" + op
 
@@ -2316,6 +2353,14 @@ def _act(op: str) -> Callable[[dict, Any, str], str]:
         else:
             req["ref"] = _need_ref(args)
         grant = _take_grant(_grant_key(_session(sid), tool, args))
+        if not grant:
+            # pre_tool_call left no grant: its short inspect failed or timed out (a page busy
+            # reloading), so nothing decided what this action needs. Decide here, with the
+            # normal timeout, instead of sending the extension an empty guard that makes it
+            # refuse every click on Salesforce.
+            grant, refusal = _decide_late(tool, args, req, conn)
+            if refusal:
+                return refusal
         if grant.get("confirm") and not _confirm(grant.get("confirm_text") or "Allow this browser action?"):
             return _err("the user did not allow this action", "declined")
         req["guard"] = {"submit_hosts": grant.get("submit_hosts") or [], "visit_hosts": grant.get("visit_hosts") or [],

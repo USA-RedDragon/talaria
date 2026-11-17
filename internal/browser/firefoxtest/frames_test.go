@@ -330,6 +330,8 @@ func confirmFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int,
 	call(ctx, t, b, "snapshot", map[string]any{keyTab: tabID}, &snap)
 	button := refByName(snap.Snapshot, `"hover me"`)
 	mustFail(ctx, t, b, "click on a protected site", "needs the user's approval", "click", map[string]any{keyTab: tabID, keyRef: button})
+	mustFail(ctx, t, b, "refusal names the frame host and the rule", "frame host "+confirmHost+"; it needs the approval rule browser:click:"+confirmHost,
+		"click", map[string]any{keyTab: tabID, keyRef: button})
 	mustFail(ctx, t, b, "Enter on a protected site", "needs the user's approval", "press", map[string]any{keyTab: tabID, keyRef: button, keyKey: "Enter"})
 	call(ctx, t, b, "press", map[string]any{keyTab: tabID, keyRef: button, keyKey: "Tab"}, nil)
 	call(ctx, t, b, "click", map[string]any{keyTab: tabID, keyRef: button, keyGuard: map[string]any{"confirmed": true}}, nil)
