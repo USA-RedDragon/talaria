@@ -43,6 +43,11 @@ class PluginEndToEnd(unittest.TestCase):
         self.sock = socket.socket(socket.AF_UNIX)
         self.sock.connect(SOCK)
         self.addCleanup(self.sock.close)
+        # makefile() below holds the descriptor open after sock.close(), and the read thread
+        # blocks on it, so close() alone never ends the connection. Without a shutdown the Go
+        # relay never saw this test end, the device kept its exec leg, and the next test's
+        # connection waited forever for a hello on a leg that never came back.
+        self.addCleanup(self.shutdown_socket)
         self.reader = self.sock.makefile("rb")
         hello = json.loads(self.reader.readline())
         self.loop = asyncio.new_event_loop()
@@ -60,6 +65,12 @@ class PluginEndToEnd(unittest.TestCase):
         self.hub.attach(self.conn)
         threading.Thread(target=self.read, daemon=True).start()
         self.registry = self.register()
+
+    def shutdown_socket(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def read(self):
         for line in self.reader:
@@ -137,7 +148,9 @@ class PluginEndToEnd(unittest.TestCase):
         button = self.ref(snap["snapshot"], "button")
         unapproved = json.loads(self.registry.dispatch("browser_click", {"tab_id": tab, "ref": button},
                                                        task_id="t", session_id="e2e"))
-        self.assertEqual(unapproved["code"], "refused", "the extension must refuse a submit the user did not approve")
+        # The plugin's own gate now stops a submit nobody approved before it reaches the extension
+        # (code approval); the extension's refusal of the same call is checked by the Go leg.
+        self.assertIn(unapproved["code"], ("approval", "refused"), "a submit the user did not approve must be refused")
         self.tool("browser_click", "browser:submit:127.0.0.1", tab_id=tab, ref=button)
         self.assertIn("got: from the plugin", self.tool("browser_snapshot", tab_id=tab, full_text=True)["text"])
 
@@ -264,7 +277,7 @@ class PluginEndToEnd(unittest.TestCase):
         write = 'const r = await fetch("/api/data", {method: "PUT", body: JSON.stringify({from: "plugin"})}); return r.status;'
         unapproved = json.loads(self.registry.dispatch("browser_eval", {"tab_id": tab, "script": write, "allow_writes": True},
                                                        task_id="t", session_id="e2e"))
-        self.assertEqual(unapproved["code"], "refused", "the extension refuses a write the user did not approve")
+        self.assertIn(unapproved["code"], ("approval", "refused"), "a write the user did not approve must be refused")
         out = self.tool("browser_eval", "browser:script-write:127.0.0.1", tab_id=tab, script=write, allow_writes=True)
         self.assertEqual(out["result"], 200)
         refused = self.tool("browser_click", None, tab_id=tab, ref=inner[0])

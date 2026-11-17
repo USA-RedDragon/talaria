@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,10 +63,22 @@ func pluginLayer(ctx context.Context, t *testing.T, b *broker.Broker, formURL, p
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	// Every Python test opens its own connection and the device dials a fresh exec leg for
+	// each, so accept for as long as the layer runs. Accepting once left the second test's
+	// connection unserved, its setUp blocked reading the hello forever, and this test with it.
 	accepted := make(chan net.Conn, 1)
 	go func() {
-		if c, err := ln.Accept(); err == nil {
-			accepted <- c
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case accepted <- c:
+			case <-ctx.Done():
+				_ = c.Close()
+				return
+			}
 		}
 	}()
 
@@ -107,6 +120,12 @@ func pluginLayer(ctx context.Context, t *testing.T, b *broker.Broker, formURL, p
 	}
 	py := exec.CommandContext(ctx, "sh", args...)
 	py.Dir = repo
+	// CombinedOutput waits for every holder of the output pipe, not just sh. Kill the whole
+	// process group on cancel and bound the wait, so a wedged interpreter fails the test
+	// instead of outliving its context.
+	py.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	py.Cancel = func() error { return syscall.Kill(-py.Process.Pid, syscall.SIGKILL) }
+	py.WaitDelay = 10 * time.Second
 	py.Env = append(os.Environ(), "HERMES_BROWSER_E2E_SOCKET="+sock, "HERMES_BROWSER_E2E_FORM_URL="+formURL,
 		"HERMES_BROWSER_E2E_PAGES_URL="+pagesURL,
 		"HERMES_BROWSER_E2E_ROOT="+root)
