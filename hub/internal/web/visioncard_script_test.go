@@ -84,6 +84,10 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 		return map[string]any{kRole: stepTool, kCallID: id, fieldName: "vision_analyze", kText: "Image loaded into your context \u2014 you can see it natively now. Use your built-in vision to answer the user.\n\nQuestion: q",
 			kTimestamp: 1763000000.0, keyDisplayMeta: map[string]any{keyToolOutcome: map[string]any{keyDurationMS: 309}}}
 	}
+	withThinking := func(m map[string]any, think string) map[string]any {
+		m[ilThink] = think
+		return m
+	}
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Vision", Live: true, StartedAt: 900, Messages: []map[string]any{
 		{kRole: roleUser, kText: "what is on screen?"},
 		call("c1", `{"image_url":"`+seen+`","question":"What is on screen? Describe the window title, any error text and which button looks focused."}`), result("c1"),
@@ -91,7 +95,8 @@ func TestVisionCardShowsTheImage(t *testing.T) {
 		{kRole: roleAssistant, kText: visionAnswer},
 		call("c2", `{"image_url":"`+gone+`","question":"What is on screen?"}`), result("c2"),
 		call("c3", `{"image_url":"https://example.com/charts/q3.png","question":"Which chart is this?"}`), result("c3"),
-		call("c4", `{"image_url":"`+other+`","question":"Is this device-only image shown?"}`), result("c4"),
+		// Thinking, then straight to the next call: the thinking answers c3.
+		withThinking(call("c4", `{"image_url":"`+other+`","question":"Is this device-only image shown?"}`), "The chart is a bar chart of quarterly sales.\nQ4 is the tallest bar."), result("c4"),
 		page("c5", kept)[0], page("c5", kept)[1], page("c6", removed)[0], page("c6", removed)[1],
 		{kRole: roleAssistant, kText: "done"},
 	}})

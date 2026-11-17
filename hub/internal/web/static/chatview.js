@@ -232,6 +232,8 @@ window.HubChatView = (() => {
     ensureTurn() {
       if (this.turn) return this.turn;
       this.turn = { reasoning: null, text: null, raw: "" };
+      // A new turn: an image looked at in the last one gets no later answer.
+      if (this.answers) this.answers.end();
       return this.turn;
     }
 
@@ -559,6 +561,7 @@ window.HubChatView = (() => {
         return;
       }
       if (m.role === "assistant") {
+        if (this.answers) this.answers.step();
         const sum = m.archived ? window.HubNotice.parse(text) : null;
         if (sum && sum.kind === "compaction") {
           this.add(window.HubNotice.card(sum, text, { el, toast, at: this.at }));
@@ -629,7 +632,7 @@ window.HubChatView = (() => {
           else if (p.kind === "compacting") this.setStatus("Summarizing older messages to make room...");
           else if (p.text) this.setStatus(p.text);
           return true;
-        case "tool.generating": this.setStatus("Preparing " + (p.name || "a tool") + "..."); return true;
+        case "tool.generating": if (this.answers) this.answers.step(); this.setStatus("Preparing " + (p.name || "a tool") + "..."); return true;
         case "tool.start": this.setStatus(""); this.toolCards(p.tool_id, p.name, p.args); return true;
         case "tool.progress": {
           const card = this.toolCards(p.tool_id, p.name)[0];

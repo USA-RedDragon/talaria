@@ -89,11 +89,15 @@ async function run(c, w, h, touch, dark) {
   // Not available here, and a web link: no image, nothing broken.
   assert.ok(await ev(`!${card(1)}.querySelector("img")`), tag + ": no <img> for a missing file");
   assert.ok(/Image not available here/.test(await ev(`${card(1)}.querySelector(".vis").textContent`)), tag + ": says it is not available");
-  assert.ok((await ev(`${card(1)}.querySelector(".vis-path").textContent`)).endsWith("/gone.png"), tag + ": the path is shown small");
+  assert.ok(await ev(`!${card(1)}.querySelector(".vis-path")`), tag + ": the file name is in the chip, the path is not repeated");
   assert.ok(await ev(`getComputedStyle(${card(1)}.querySelector(".vis-gone")).borderTopStyle === "dashed"`), tag + ": dashed placeholder");
   assert.ok(await ev(`!${card(2)}.querySelector("img")`), tag + ": no <img> for a web link");
   assert.strictEqual(await ev(`${card(2)}.querySelector("a.vis-link").href`), "https://example.com/charts/q3.png", tag + ": the link");
   assert.ok(await ev(`!${card(3)}.querySelector("img")`), tag + ": no <img> for an image the hub does not serve");
+  // Thinking before the next call is the answer; with none, the question is the subtitle and no Question block waits.
+  assert.strictEqual(await ev(`${card(2)}.querySelector(".vis-q .qt").textContent`), "The chart is a bar chart of quarterly sales.", tag + ": the thinking before the next call answers the link card");
+  assert.strictEqual(await ev(`${card(1)}.querySelector(".tool-lines").textContent.trim()`), "What is on screen?", tag + ": no answer: the question is the subtitle");
+  assert.ok(await ev(`!${card(1)}.querySelector(".vis-q .qt")`), tag + ": nothing pretends an answer is coming");
   await ev(`${card(1)}.scrollIntoView()`);
   await shot(c, tag + "-unavailable");
 
@@ -103,7 +107,8 @@ async function run(c, w, h, touch, dark) {
   assert.ok(await ev(`${card(0)}.querySelector(".vis").hidden`), tag + ": the thumbnail row folds away when open");
   const big = await ev(`(() => { const i = ${card(0)}.querySelector(".vis-big img"); const f = parseFloat(getComputedStyle(document.documentElement).fontSize); return { h: i.getBoundingClientRect().height / f, w: i.getBoundingClientRect().width, ok: i.complete && i.naturalWidth === 640 }; })()`);
   assert.ok(big.ok && big.h <= 14.05, tag + ": the open image is at most 14rem tall " + JSON.stringify(big));
-  assert.strictEqual(await ev(`${card(0)}.querySelector(".vis-path").textContent`), seen, tag + ": the path");
+  assert.ok(await ev(`!${card(0)}.querySelector(".vis-path")`), tag + ": no repeated path");
+  assert.ok(await ev(`![...${card(0)}.querySelectorAll(".tool-lines")].some((n) => n.textContent.includes("/"))`), tag + ": no folder line");
   const labels = await ev(`[...${card(0)}.querySelectorAll(".notice-body-wrap .vis-sec > b")].map((b) => b.textContent).join(",")`);
   assert.strictEqual(labels, "Question,Answer", tag + ": blocks " + labels);
   assert.strictEqual(await ev(`${card(0)}.querySelector(".vis-answer").textContent`), answer, tag + ": the whole answer");

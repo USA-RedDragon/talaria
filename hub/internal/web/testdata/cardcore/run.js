@@ -251,12 +251,120 @@ function shape(n) {
   assert.strictEqual(text(node.querySelector(".vis-q .vis-ask")), "Which quarter peaks?");
   node.view.toggle();
   assert.ok(text(node.querySelector(".vis-sec .vis-answer")).includes("Next I will reply."));
-  // A new call before any text: no answer.
-  const n2 = H.mount(ctxV, { key: "v2", name: "browser_vision", args: { question: "q" }, mem: H.memory() });
-  H.finish(ctxV, n2, { result: "{}" });
-  ans.tool(n2);
-  ans.start();
-  ans.text("say", "unrelated", false);
-  assert.strictEqual(n2.call.answer, undefined);
+}
+
+// Shaped like stored rows: a vision call and its result, then what the model
+// does next. look(n, key) mounts and finishes a vision card.
+{
+  const ctxV = Object.assign({}, ctx, { zoom() {}, image: () => "" });
+  const look = (ans, key, path, q) => {
+    ans.start();
+    const n = H.mount(ctxV, { key, name: "vision_analyze", args: { image_url: path, question: q }, mem: H.memory() });
+    H.finish(ctxV, n, { result: "{\"success\":true,\"analysis\":\"Image loaded into your context\"}" });
+    ans.tool(n);
+    return n;
+  };
+  const other = (ans, key) => {
+    ans.start();
+    return H.mount(ctxV, { key, name: "terminal", args: { command: "ls" }, mem: H.memory() });
+  };
+  const sub = (n) => text(n.querySelector(".tool-lines"));
+
+  // Thinking, then a tool call: the thinking is the answer.
+  {
+    const ans = H.answers();
+    const n = look(ans, "a1", "/home/alice/a.png", "What is the job name?");
+    ans.step();
+    ans.text("think", "The job is nightly-backup and it failed.", true);
+    other(ans, "t1");
+    ans.text("think", "Second step thinking must not land on the card.", true);
+    assert.strictEqual(n.call.answer, "The job is nightly-backup and it failed.");
+    assert.strictEqual(text(n.querySelector(".vis-q .qt")), "The job is nightly-backup and it failed.");
+    assert.strictEqual(text(n.querySelector(".vis-q .vis-ask")), "What is the job name?");
+  }
+  // A tool call straight after the result, then thinking: still its answer.
+  {
+    const ans = H.answers();
+    const n = look(ans, "a2", "/home/alice/b.png", "q");
+    ans.step();
+    other(ans, "t2");
+    ans.text("think", "It is a bar chart.", true);
+    assert.strictEqual(n.call.answer, "It is a bar chart.");
+  }
+  // Reply text, then a tool call.
+  {
+    const ans = H.answers();
+    const n = look(ans, "a3", "/home/alice/c.png", "q");
+    ans.step();
+    ans.text("say", "Looks like a login page.", false);
+    other(ans, "t3");
+    assert.strictEqual(n.call.answer, "Looks like a login page.");
+  }
+  // Nothing at all: no answer, and the question is the subtitle, not a block
+  // that waits.
+  {
+    const ans = H.answers();
+    const n = look(ans, "a4", "/home/alice/d.png", "Quote all visible text");
+    ans.step();
+    other(ans, "t4");
+    ans.step();
+    ans.text("think", "Thinking of a later step is not its answer.", true);
+    assert.strictEqual(n.call.answer, undefined);
+    assert.strictEqual(sub(n), "Quote all visible text");
+    assert.strictEqual(n.querySelector(".vis-q .qt"), null);
+    assert.strictEqual(n.querySelector(".vis-path"), null);
+    n.view.toggle();
+    const labels = [...n.querySelectorAll(".vis-sec b")].map((b) => text(b));
+    assert.deepStrictEqual(labels, []);
+    assert.ok(!text(n).includes("/home/alice"), "no folder or path under the chip");
+  }
+  // The step after the call brings nothing and the next brings thinking: that
+  // thinking belongs to the later call only.
+  {
+    const ans = H.answers();
+    const a = look(ans, "d1", "/home/alice/k.png", "first?");
+    ans.step();
+    const b = look(ans, "d2", "/home/alice/l.png", "second?");
+    ans.step();
+    ans.text("think", "Only the second matters.", true);
+    assert.strictEqual(a.call.answer, undefined);
+    assert.strictEqual(b.call.answer, "Only the second matters.");
+  }
+  // A new turn ends the wait.
+  {
+    const ans = H.answers();
+    const n = look(ans, "a5", "/home/alice/e.png", "q");
+    ans.end();
+    ans.text("say", "unrelated", false);
+    assert.strictEqual(n.call.answer, undefined);
+  }
+  // Two images in one step share the block that follows; one looked at in the
+  // next step gets that step's own thinking.
+  {
+    const ans = H.answers();
+    const a = look(ans, "b1", "/home/alice/f.png", "left?");
+    const b = look(ans, "b2", "/home/alice/g.png", "right?");
+    ans.step();
+    ans.text("think", "Both show the same chart.", true);
+    other(ans, "t5");
+    const c = look(ans, "b3", "/home/alice/h.png", "third?");
+    ans.step();
+    ans.text("think", "The third is a table.", true);
+    assert.strictEqual(a.call.answer, "Both show the same chart.");
+    assert.strictEqual(b.call.answer, "Both show the same chart.");
+    assert.strictEqual(c.call.answer, "The third is a table.");
+  }
+  // Sequential: each image gets the thinking right after its own call.
+  {
+    const ans = H.answers();
+    const a = look(ans, "c1", "/home/alice/i.png", "q1");
+    ans.step();
+    ans.text("think", "First is red.", true);
+    const b = look(ans, "c2", "/home/alice/j.png", "q2");
+    ans.step();
+    ans.text("think", "Second is blue.", true);
+    assert.strictEqual(a.call.answer, "First is red.");
+    assert.strictEqual(b.call.answer, "Second is blue.");
+  }
 }
 console.log("ok");

@@ -95,8 +95,6 @@
     return /^Image loaded into your context/.test(x);
   }
 
-  const keptShot = /\/cache\/screenshots\//;
-
   function vision(c) {
     const a = isObj(c.args) ? c.args : {};
     const res = isObj(c.res) ? c.res : {};
@@ -116,8 +114,13 @@
     }
     // The answer is what the model said about the image right after the
     // call (toolcard.js answers()); the question and image show with it.
-    out.vision = Object.assign(src, { question: q, answer: str(c.answer).trim() });
-    if (src.kind === "file" && keptShot.test(src.path)) out.vision.hidePath = true;
+    // The chip names a file, so its path is not shown again. With no answer
+    // (the model went on without saying anything about it) the question is
+    // the card's subtitle, not a block that waits for an answer.
+    const answer = str(c.answer).trim();
+    out.vision = Object.assign(src, { question: answer ? q : "", answer });
+    if (src.kind === "file") out.vision.hidePath = true;
+    if (!answer && q) out.lines.push({ parts: q, dim: true });
     // The page's own screenshot comes with the result: until then, or when
     // it did not, only the question shows.
     if (page && src.kind === "none") out.vision.kind = "nothing";
@@ -145,9 +148,6 @@
         rows.push({ k: "Page", v: short(info.title) });
       }
       if (str(info.url)) rows.push({ k: "Address", v: [{ code: str(info.url) }] });
-    } else if (src.kind === "file") {
-      const folder = src.path.replace(/\/[^/]*$/, "");
-      if (folder) out.lines.push({ parts: folder, dim: true });
     }
     if (rows.length) out.blocks.push({ kind: "kv", rows });
     const text = modelLine(c.out || "") ? "" : c.out || "";

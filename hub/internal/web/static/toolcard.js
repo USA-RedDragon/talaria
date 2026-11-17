@@ -812,6 +812,10 @@ window.HubToolCard = (() => {
       }
       visBig.hidden = true;
       vis.hidden = false;
+      if (v.kind === "nothing" && !answer && !v.question) {
+        vis.hidden = true;
+        return;
+      }
       const q = el("div", "vis-q");
       if (answer) q.append(el("span", "qt", first(answer)));
       if (v.question) q.append(el(answer ? "small" : "span", answer ? "vis-ask" : "qt", v.question));
@@ -1061,30 +1065,60 @@ window.HubToolCard = (() => {
 
   // answers ties the model's words about an image to the card of the call
   // that looked at it: after a vision call ends, the first block of thinking
-  // or reply that follows is its answer. A new tool call, or a second block,
-  // ends the wait. tool(node) is called as a card finishes, start() as a
-  // call starts, text(kind, chunk, more) as thinking ("think") or reply
-  // ("say") text arrives (more: chunk adds to the block, else it is all).
+  // or reply that follows is its answer, even when more tool calls come
+  // first in that step (the model often goes straight on with them). Calls
+  // that looked at images in one step share the block that follows them. A
+  // card waits through the step after its own: when that step also brings
+  // nothing, there is no answer. A block ends when a call starts or another
+  // kind of text begins. tool(node) is called as a card finishes, start() as
+  // a call starts, step() as the model begins a new step (a stored assistant
+  // row, or a call being prepared), text(kind, chunk, more) as thinking
+  // ("think") or reply ("say") text arrives (more: chunk adds to the block,
+  // else it is all), end() when the turn is over.
   const visionTools = new Set(["vision_analyze", "browser_vision"]);
   function answers() {
-    let wait = null;
+    let waiting = [];
+    let cur = null;
+    let moved = false;
     return {
       tool(node) {
-        wait = node && node.view && visionTools.has(node.toolName) && !node.failed ? { node, kind: "", text: "" } : null;
+        cur = null;
+        if (node && node.view && visionTools.has(node.toolName) && !node.failed && !waiting.some((w) => w.node === node)) waiting.push({ node, age: 0 });
       },
       start() {
-        wait = null;
+        cur = null;
+        moved = true;
+      },
+      step() {
+        cur = null;
+        if (!moved) return;
+        moved = false;
+        for (const w of waiting) w.age++;
+        waiting = waiting.filter((w) => w.age <= 1);
+      },
+      end() {
+        waiting = [];
+        cur = null;
+        moved = false;
       },
       text(kind, chunk, more) {
-        if (!wait) return;
-        if (wait.kind && wait.kind !== kind) {
-          wait = null;
-          return;
+        if (cur && cur.kind !== kind) {
+          const done = cur.nodes.length > 0;
+          cur = null;
+          if (done) return;
         }
-        wait.kind = kind;
-        wait.text = more ? wait.text + str(chunk) : str(chunk);
-        const t = wait.text.trim();
-        if (t) wait.node.view.answer(t);
+        if (!cur) {
+          if (!waiting.length) return;
+          cur = { kind, text: "", nodes: [] };
+        }
+        cur.text = more ? cur.text + str(chunk) : str(chunk);
+        const t = cur.text.trim();
+        if (!t) return;
+        if (!cur.nodes.length) {
+          cur.nodes = waiting.map((w) => w.node);
+          waiting = [];
+        }
+        for (const n of cur.nodes) n.view.answer(t);
       },
     };
   }
