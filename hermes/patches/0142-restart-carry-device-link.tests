@@ -1,0 +1,10 @@
+# The carrier tells the device plugin where the next gateway listens at the release (this patch)
+tests/gateway/test_restart_carry_device_link.py
+# The carry (0136 to 0141) and the process handoff (0012) it relies on
+tests/gateway/test_restart_carry_process_relay.py
+tests/gateway/test_restart_carry_background_work.py
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_carry_no_pause.py
+tests/tools/test_restart_carry_subagent_relay.py
+tests/tools/test_restart_carry_subagent_wait.py
+tests/tools/test_process_handoff.py

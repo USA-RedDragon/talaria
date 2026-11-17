@@ -1,0 +1,206 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 06:38:14 +0000
+Subject: [PATCH] fix(gateway): a per-turn restart tells the device plugin
+ where the next gateway listens, so it serves the next gateway's device calls
+ over the connections the carrier keeps
+
+---
+ gateway/turn_carry.py                         |  46 +++++++
+ .../gateway/test_restart_carry_device_link.py | 113 ++++++++++++++++++
+ 2 files changed, 159 insertions(+)
+ create mode 100644 tests/gateway/test_restart_carry_device_link.py
+
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index 21226d13..dcd36d8e 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -472,6 +472,7 @@ async def _release(carry) -> None:
+     from gateway.run_bootstrap import _export_tickets_for_successor, _listener_relay_target
+     from gateway.status import remove_pid_file
+     relay_to = _listener_relay_target_for(runner, _listener_relay_target)
++    successor = _successor_listener(runner)
+     _export_tickets_for_successor(runner)
+     await _stop_api_listening(runner, carry)
+     remove_pid_file()
+@@ -486,6 +487,7 @@ async def _release(carry) -> None:
+         logger.debug("Host gateway role release failed", exc_info=True)
+     logger.info("Restart: profile released to the next gateway; carrying %d running turn(s) to their step "
+                 "boundaries (gateway.restart_turn_handoff_per_turn)", len(carry.turns))
++    _announce_successor(successor)
+     from gateway.run_shutdown import GatewayShutdownMixin
+     GatewayShutdownMixin._begin_listener_handover(runner)
+     if getattr(runner, "_listener_handover", None):
+@@ -497,6 +499,50 @@ async def _release(carry) -> None:
+         runner._carry_listener_task = asyncio.ensure_future(runner.stop_handover_listener(relay_to))
+ 
+ 
++def _successor_listener(runner) -> tuple[str, int] | None:
++    """Where the next gateway's listener accepts: the waiting standby's address when it runs in another network
++    namespace (the new pod of a rolling update), else this listener's own address, which the next gateway binds once
++    this one stops accepting. Read before the release: the standby removes its marker once it took over."""
++    try:
++        from gateway.listener_relay import successor_target
++        from gateway.run import get_hermes_home
++        from gateway.run_bootstrap import STANDBY_MARKER, standby_marker_is_fresh
++        marker = get_hermes_home() / STANDBY_MARKER
++        if standby_marker_is_fresh(marker):
++            target = successor_target(marker)
++            if target is not None:
++                return target
++    except Exception:
++        logger.debug("No standby listener address", exc_info=True)
++    try:
++        from gateway.webapp_listener import dial_host
++        host, port = runner.session_api.socket.getsockname()[:2]
++        return dial_host(host), int(port)
++    except Exception:
++        return None
++
++
++def _announce_successor(target) -> None:
++    """Tell each reattach provider (the device plugin) where the next gateway listens, so that it can serve the next
++    gateway's calls over the connections this carrier keeps (``keeps_socket``) until the processes are handed over:
++    a device has one connection, and a turn on the next gateway must not wait for the carried turns to end."""
++    if target is None:
++        return
++    try:
++        from tools.process_registry import process_registry
++        providers = dict(getattr(process_registry, "_reattach_providers", None) or {})
++    except Exception:
++        return
++    for name, provider in providers.items():
++        hook = getattr(provider, "carry_released", None)
++        if not callable(hook):
++            continue
++        try:
++            hook(target)
++        except Exception:
++            logger.warning("Reattach provider %s could not reach the next gateway", name, exc_info=True)
++
++
+ def carrying(runner) -> bool:
+     """This gateway carries its turns for the next gateway (from the restart until it exits)."""
+     return getattr(runner, "_turn_carry", None) is not None
+diff --git a/tests/gateway/test_restart_carry_device_link.py b/tests/gateway/test_restart_carry_device_link.py
+new file mode 100644
+index 00000000..f746e81d
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_device_link.py
+@@ -0,0 +1,113 @@
++"""gateway.restart_turn_handoff_per_turn: at the release the carrier tells each reattach provider (the device plugin)
++where the next gateway's listener accepts, so that the plugin serves the next gateway's device calls over the device
++connections the carrier keeps until its processes are handed over. Without it a device command of a turn on the next
++gateway waited for a device that stayed connected to the carrier and failed (``pre_tool_call plugin callback timed
++out``).
++"""
++
++import asyncio
++import json
++import os
++import socket
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++from tests.gateway.test_restart_turn_carry import _claimed_turn, _old_runner, _reserve_profile, _until
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_hand_off_background", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++    from gateway.run_shutdown import GatewayShutdownMixin
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(noop))
++
++
++class _Provider:
++    def __init__(self, released=None):
++        self.targets = []
++        self.released = released
++
++    def carry_released(self, target):
++        self.targets.append((target, turn_carry.released()))
++        if self.released:
++            self.released()
++
++
++def _providers(monkeypatch, **providers):
++    from tools.process_registry import process_registry
++    monkeypatch.setattr(process_registry, "_reattach_providers", dict(providers), raising=False)
++
++
++async def _carry_one(owner, tmp_path, runner):
++    row, _live, agent = _claimed_turn(owner, "cmd")
++    agent._executing_tools = True  # a carried foreground device command runs: the carrier keeps the device legs
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    return row, agent, carry
++
++
++async def _end(owner, row, carry, runner):
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 5.0)
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_the_device_plugin_learns_the_standby_listener_at_the_release(owner, tmp_path, monkeypatch):
++    import gateway.listener_relay as relay
++    from gateway import run_bootstrap
++    monkeypatch.setattr(relay, "standby_listener_record",
++                        lambda home: {"host": "10.1.2.3", "port": 9120, "netns": "net:[2]"})
++    run_bootstrap._write_standby_marker(tmp_path / run_bootstrap.STANDBY_MARKER)
++    monkeypatch.setattr(relay, "net_namespace_id", lambda: "net:[1]")
++    device, other = _Provider(), object()  # a provider without the hook is left alone
++    _providers(monkeypatch, device=device, other=other)
++    _reserve_profile(tmp_path)
++    runner = _old_runner(owner)
++    row, agent, carry = await _carry_one(owner, tmp_path, runner)
++    await _until(lambda: device.targets)
++    # Once released (the next gateway owns the profile), while the carried turn is still in its tool round.
++    assert device.targets == [(("10.1.2.3", 9120), True)]
++    assert not runner._turn_carry.processes_handed.is_set()
++    agent._executing_tools = False
++    await _end(owner, row, carry, runner)
++    assert len(device.targets) == 1
++
++
++@pytest.mark.asyncio
++async def test_on_the_same_host_it_is_this_listener_and_a_failing_provider_does_not_stop_the_carry(
++        owner, tmp_path, monkeypatch):
++    listening = socket.socket()
++    listening.bind(("0.0.0.0", 0))
++    listening.listen()
++    try:
++        def boom():
++            raise RuntimeError("no route")
++        device = _Provider(released=boom)
++        _providers(monkeypatch, device=device)
++        _reserve_profile(tmp_path)
++        runner = _old_runner(owner)
++        runner.session_api = SimpleNamespace(socket=listening, api=None, task=SimpleNamespace(done=lambda: True))
++        row, agent, carry = await _carry_one(owner, tmp_path, runner)
++        await _until(lambda: device.targets)
++        from gateway.webapp_listener import dial_host
++        assert device.targets == [((dial_host("0.0.0.0"), listening.getsockname()[1]), True)]
++        agent._executing_tools = False
++        await _end(owner, row, carry, runner)
++    finally:
++        listening.close()
+-- 
+2.56.0
+
