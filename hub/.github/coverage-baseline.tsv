@@ -32,12 +32,12 @@ internal/device/binding.go	102	76
 internal/device/chatfiles.go	97	81
 internal/device/computers.go	390	332
 internal/device/device.go	203	164
-internal/device/devicetest/devicetest.go	524	469
+internal/device/devicetest/devicetest.go	524	468
 internal/device/devicetest/files.go	142	127
 internal/device/devicetest/logingrants.go	65	61
 internal/device/files.go	180	140
 internal/device/gateway.go	419	331
-internal/device/legs.go	179	162
+internal/device/legs.go	179	163
 internal/device/logingrants.go	63	59
 internal/device/pair.go	52	29
 internal/device/plugin.go	112	96
@@ -45,7 +45,7 @@ internal/device/rpc.go	229	210
 internal/device/sessioncheck.go	23	22
 internal/device/usage.go	50	40
 internal/device/views.go	17	17
-internal/gateway/client.go	248	212
+internal/gateway/client.go	248	211
 internal/gateway/gatewaytest/activity.go	109	91
 internal/gateway/gatewaytest/compose.go	209	184
 internal/gateway/gatewaytest/fake.go	836	766
@@ -101,7 +101,7 @@ internal/scheduled/scheduledtest/scheduledtest.go	183	171
 internal/scheduled/service.go	480	418
 internal/secretbox/secretbox.go	37	31
 internal/server/server.go	40	0
-internal/service/activity.go	176	150
+internal/service/activity.go	176	151
 internal/service/agents.go	31	26
 internal/service/attach.go	100	85
 internal/service/claude.go	41	34
@@ -117,9 +117,9 @@ internal/service/outcome.go	95	90
 internal/service/page.go	63	57
 internal/service/pdf.go	74	56
 internal/service/rows.go	22	21
-internal/service/service.go	986	909
+internal/service/service.go	986	911
 internal/service/stopsend.go	93	77
-internal/service/subagentlog.go	186	156
+internal/service/subagentlog.go	186	157
 internal/service/toolout.go	39	32
 internal/service/turn.go	79	72
 internal/service/views.go	145	127
@@ -150,7 +150,7 @@ internal/telegram/claude.go	107	89
 internal/telegram/commands.go	245	203
 internal/telegram/computers.go	186	146
 internal/telegram/config.go	18	18
-internal/telegram/dmtopics.go	105	88
+internal/telegram/dmtopics.go	105	86
 internal/telegram/draft.go	78	63
 internal/telegram/echo.go	133	112
 internal/telegram/format.go	126	123
