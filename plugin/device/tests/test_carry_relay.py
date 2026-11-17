@@ -303,7 +303,11 @@ class CarryRelayBrowserTests(_TwoGateways):
         for p in (mock.patch.object(browser, "_core_ref", core), mock.patch.object(browser, "choices", lambda: jobs),
                   mock.patch.object(browser, "backend_user", lambda: ""),
                   mock.patch.object(browser, "_session_choice", lambda sid: None),
-                  mock.patch.object(browser, "cron_job_id", lambda sid: self.JOB if sid == "cron_run" else "")):
+                  mock.patch.object(browser, "cron_job_id", lambda sid: self.JOB if sid == "cron_run" else ""),
+                  # Patched once here: on_next runs calls in parallel threads, and a patch per thread
+                  # restored in the wrong order left one thread's stand-in in place for every later test.
+                  mock.patch.object(browser, "resolve",
+                                    lambda session_id="": (session_id, self.resolution(session_id)))):
             p.start()
             self.addCleanup(p.stop)
 
@@ -318,8 +322,7 @@ class CarryRelayBrowserTests(_TwoGateways):
         browser.target, then the operation. Returns a thread whose ``out`` is the result or the error."""
         def run():
             try:
-                with mock.patch.object(browser, "resolve", lambda session_id="": (sid, self.resolution(sid))):
-                    _res, conn = browser.target(sid, start=False)
+                _res, conn = browser.target(sid, start=False)
                 th.out = browser.call(conn, op, args or {}, 30)
             except Exception as exc:  # noqa: BLE001
                 th.out = exc
