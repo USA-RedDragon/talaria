@@ -30,7 +30,7 @@ internal/acphost/acphost.go	291	232
 internal/acphost/proc_unix.go	3	1
 internal/acphost/rewrite.go	260	237
 internal/acphost/sweep.go	30	28
-internal/acphost/sweep_linux.go	49	35
+internal/acphost/sweep_linux.go	49	36
 internal/allowlist/allowlist.go	27	26
 internal/attest/attest.go	141	123
 internal/attest/bundle.go	248	212
@@ -66,7 +66,7 @@ internal/claudeusage/timeline.go	96	86
 internal/config/config.go	107	97
 internal/config/load.go	18	17
 internal/daemonstate/daemonstate.go	17	13
-internal/device/device.go	802	712
+internal/device/device.go	802	711
 internal/device/files.go	156	118
 internal/device/files_unix.go	5	4
 internal/device/mcp.go	69	60
