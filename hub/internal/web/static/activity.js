@@ -438,6 +438,7 @@ window.HubActivity = (ctx) => {
         const st = await api("GET", chat.base + "/activity");
         if (chat !== S.chat) return;
         S.error = "";
+        S.netErr = false;
         S.failingSince = 0;
         S.loaded = true;
         merge(st);
@@ -445,6 +446,9 @@ window.HubActivity = (ctx) => {
         if (chat !== S.chat) return;
         // A backend that restarts answers again within seconds: keep showing the last good list
         // through a short gap, and say it failed only when it lasts.
+        // A drop on this side is no error of the hub: the last good rows stay,
+        // and the quiet note comes after the net grace (netgate.js).
+        if (e.network) { S.netErr = true; S.polled = Date.now(); schedule(); draw(); return; }
         S.failingSince = S.failingSince || Date.now();
         if (!S.loaded || Date.now() - S.failingSince >= ACTIVITY_GAP_MS) S.error = e.message;
       }
@@ -463,6 +467,11 @@ window.HubActivity = (ctx) => {
   const pollBackoff = window.HubBackoff({ base: 3000, max: 30000 });
   // How long a failing poll keeps the last good activity on screen before it shows the error.
   const ACTIVITY_GAP_MS = 60000;
+  // The quiet note shows when the drop outlasts the net grace, and goes when it ends.
+  if (window.HubNet) window.HubNet.on((what) => {
+    if (what !== "quiet") S.netErr = false;
+    if (S.chat) { draw(); if (what !== "quiet") soon(); }
+  });
 
   function schedule() {
     if (!S.chat) return;
@@ -473,6 +482,7 @@ window.HubActivity = (ctx) => {
     // spoken lately and no background command runs (a command's output
     // comes only from the list), the list is read less often.
     if (ms === 3000 && S.fed && Date.now() - S.fed < 15000 && ![...S.bgs.values()].some((r) => r.kind === "command" && live.has(r.state))) ms = 10000;
+    if (window.HubNet && window.HubNet.down()) ms = Math.max(ms, window.HubNet.retryIn());
     if (S.error) ms = Math.max(ms, pollBackoff.next());
     else pollBackoff.reset();
     S.timer = setTimeout(poll, ms);
@@ -1130,7 +1140,7 @@ window.HubActivity = (ctx) => {
     if (!isOpen()) return;
     const rows = [...subs, ...bgs];
     const sum = $("actsum");
-    const sumKey = JSON.stringify([rows.length - liveSub - liveBg, liveSub + liveBg, S.paused, S.error, totals(rows)]);
+    const sumKey = JSON.stringify([rows.length - liveSub - liveBg, liveSub + liveBg, S.paused, S.error, S.netErr && window.HubNet.quiet(), totals(rows)]);
     if (sumKey !== S.sumKey) {
       S.sumKey = sumKey;
       sum.replaceChildren();
@@ -1139,6 +1149,7 @@ window.HubActivity = (ctx) => {
       if (rows.some((r) => r.kind !== "command")) sum.append(...tokenText(totals(rows), liveSub + liveBg, rows.length - liveSub - liveBg));
       if (S.paused) sum.append(el("div", "warn", "New subagents are paused on this backend."));
       if (S.error) sum.append(el("div", "bad", "Could not load activity: " + S.error));
+      else if (S.netErr && window.HubNet.quiet()) sum.append(el("div", "quiet", "Reconnecting\u2026"));
     }
     const body = $("actbody");
     const top = body.scrollTop;

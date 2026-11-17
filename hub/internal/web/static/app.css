@@ -915,6 +915,7 @@ a.mem-button { border: 1px solid var(--line); background: var(--card); color: va
 .act-sum b { color: var(--fg); }
 .act-sum .warn { color: var(--warn); }
 .act-sum .bad { color: var(--bad); }
+.act-sum .quiet { color: var(--muted); }
 .act-body { flex: 1; min-height: 0; overflow-y: auto; padding: .5rem; padding-bottom: max(.5rem, env(safe-area-inset-bottom));
   display: flex; flex-direction: column; gap: .4rem; }
 .act .sec { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; padding: .4rem .35rem .1rem; }

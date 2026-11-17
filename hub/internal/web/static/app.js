@@ -34,7 +34,19 @@
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
     }
-    const r = await fetch(path, opts);
+    const net = window.HubNet;
+    // A drop on the user's side is not the hub's error: a read waits for the
+    // shared probe (netgate.js), and no failure here is worded as one.
+    const cut = () => Object.assign(new Error("Cannot reach Talaria. Check the connection."), { network: true });
+    if (method === "GET" && !net.allow()) throw cut();
+    let r;
+    try {
+      r = await fetch(path, opts);
+    } catch (_) {
+      net.failed();
+      throw cut();
+    }
+    net.answered();
     if (meta) meta.headers = r.headers;
     if (r.status === 401) {
       if (pageMode) page.signIn();
@@ -200,7 +212,11 @@
       if (me.computers) loadPlaces(sessions);
       if (me.partners && !worksLoaded) { worksLoaded = true; worksWith.load(); }
     } catch (e) {
-      if (e.message !== "login required") {
+      if (e.network) {
+        // A drop on this side: the chats shown stay, no red banner. The
+        // quiet note comes from the net listener below after the grace.
+        listRetry = setTimeout(refreshList, Math.max(listBackoff.next(), window.HubNet.retryIn()));
+      } else if (e.message !== "login required") {
         banner("Could not load chats: " + e.message, true, "list");
         listRetry = setTimeout(refreshList, listBackoff.next());
         // The chats shown stay as they were; with none yet, say why.
@@ -210,6 +226,21 @@
       listing = false;
     }
   }
+
+  // One quiet note for a drop that outlasts the grace, and one refresh of
+  // everything when the network is back (any answer, or the online event).
+  window.HubNet.on((what) => {
+    if (what === "quiet") {
+      if (!bannerKey || bannerKey === "list") banner("Reconnecting. You can keep reading and typing.", false, "net", true);
+    } else {
+      clearBanner("net");
+      listBackoff.reset();
+      clearTimeout(listRetry);
+      listRetry = 0;
+      refreshList();
+    }
+  });
+  window.addEventListener("online", () => setTimeout(refreshList, 0));
 
   // Where chats run. places holds the place of each chat by backend and
   // session; computers are the user's paired computers.
@@ -2026,6 +2057,8 @@
       const probe = (tries) => api("GET", base + "/page-info?path=" + encodeURIComponent(page.path)).then((r) => {
         if (r && r.title) { name.textContent = r.title; pageInfo.get(page.path).title = r.title; }
       }, (e) => {
+        // No answer is not a gone file: ask again when the network is back.
+        if (e && e.network) { window.HubNet.whenBack(() => probe(0)); return; }
         if (tries < 4 && e && (e.status === 429 || e.status === 503)) {
           setTimeout(() => probe(tries + 1), 1000 * (tries + 1));
           return;
@@ -3291,14 +3324,15 @@
           requestAnimationFrame(() => setTimeout(() => mark("painted"), 0));
         }
       },
-      lost: () => banner("Connection lost. Reconnecting.", false, "stream"),
+      lost: () => banner("Connection lost. Reconnecting.", false, "stream", true),
       back: () => clearBanner("stream"),
       healthy: () => { vreport.reconnected(); updates.check(); },
       failed: async () => {
         try { await api("GET", "/api/me"); } catch (_) { return; }
         banner("Could not open this chat. Reconnecting.", true, "stream");
       },
-    }, { query: () => (fp && !chat.pending.length ? "fp=" + encodeURIComponent(fp) : "") });
+    // The quiet note waits 10 s, the grace of netgate.js, so a short drop shows nothing.
+    }, { showAfter: 10000, query: () => (fp && !chat.pending.length ? "fp=" + encodeURIComponent(fp) : "") });
     stream = follow;
     // A chat kept from before shows at once, as the reader left it.
     if (kept) {
