@@ -1,0 +1,550 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 04:12:47 +0000
+Subject: [PATCH] fix(gateway): a per-turn restart hands subagents over after
+ their processes and never stalls on the backend probe
+
+With gateway.restart_turn_handoff_per_turn the next gateway adopted the handed-off background subagents at its
+startup, while the old gateway still held their background processes (it hands them over only once no carried
+turn is in a tool round): a subagent waiting on a process found no record of it. The next gateway now adopts them
+right after it reattached the processes the carrier handed over (or once the carrier exited).
+
+A new session's prompt build no longer waits on the terminal backend's environment probe for more than 5 s: a
+device backend's probe waits up to a minute for its device, which stays on the old gateway during the carry, so
+every new API run on the next gateway stalled for a minute and filled the concurrent-run cap. The last good probe
+is kept in <home>/cache/backend_probe.json and a new process uses it at once while it refreshes it.
+
+A restart waits up to 5 s for a turn claimed a moment before it to get its agent and carries it, instead of
+reading it as a managed worker's turn and falling back to the single handover.
+---
+ agent/prompt_builder.py                       | 122 ++++++++++-
+ gateway/run_startup.py                        |  17 +-
+ gateway/turn_carry.py                         |  72 +++++-
+ .../test_restart_carry_background_work.py     | 205 ++++++++++++++++++
+ 4 files changed, 396 insertions(+), 20 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_background_work.py
+
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index 0955a50f..52bcc620 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -11,6 +11,7 @@ import os
+ import queue
+ import sys
+ import threading
++import time
+ from collections import OrderedDict
+ from pathlib import Path
+ from typing import Any, Dict, Optional
+@@ -885,28 +886,127 @@ def _format_backend_probe(output: str) -> str:
+ 
+ 
+ def _probe_remote_backend(env_type: str) -> str | None:
+-    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included)."""
++    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included).
++
++    A prompt build never waits on the backend longer than ``_BACKEND_PROBE_WAIT_S``: a device backend's probe waits
++    for its device to (re)connect (the device plugin's reconnect_wait_seconds, 60 s), and while a restarting gateway
++    still carries its turns (gateway.restart_turn_handoff_per_turn) the device stays connected to that gateway, so
++    every new session on the next gateway (an API request included) stalled for a minute. The last good probe is
++    kept in ``<home>/cache/backend_probe.json``: a new process uses it at once (the same backend of the same home)
++    and refreshes it in the background."""
+     from hermes_constants import hermes_home_key
+-    cache_key = (hermes_home_key(), env_type, _tenv_read("TERMINAL_CWD", ""))
++    cwd = _tenv_read("TERMINAL_CWD", "")
++    cache_key = (hermes_home_key(), env_type, cwd)
+     formatted = _BACKEND_PROBE_CACHE.get(cache_key)
+     if formatted is None:
++        path = _backend_probe_store_path()
++        stored = _stored_backend_probe(path, env_type, cwd)
++        if stored:
++            _BACKEND_PROBE_CACHE[cache_key] = stored
++            _start_backend_probe(cache_key, env_type, cwd, path)  # refreshes it for the sessions after this one
++            return stored
++        done, started = _start_backend_probe(cache_key, env_type, cwd, path)
++        done.wait(max(0.0, started + _BACKEND_PROBE_WAIT_S - time.monotonic()))
++        formatted = _BACKEND_PROBE_CACHE.get(cache_key)
++        if formatted is None:
++            logger.info("Backend probe of %s did not answer within %.0fs; this prompt goes without it",
++                        env_type, _BACKEND_PROBE_WAIT_S)
++            return None
++    return formatted or None
++
++
++# The longest a prompt build waits for the backend probe; callers share one probe and one window.
++_BACKEND_PROBE_WAIT_S = 5.0
++_BACKEND_PROBE_RUNNING: dict[tuple[str, str, str], tuple[threading.Event, float]] = {}
++_BACKEND_PROBE_LOCK = threading.Lock()
++_BACKEND_PROBE_STORE = "backend_probe.json"
++
++
++def _backend_probe_store_path() -> Path | None:
++    try:
++        return get_hermes_home() / "cache" / _BACKEND_PROBE_STORE
++    except Exception:
++        return None
++
++
++def _stored_backend_probe(path: Path | None, env_type: str, cwd: str) -> str:
++    if path is None:
++        return ""
++    try:
++        value = json.loads(path.read_text(encoding="utf-8")).get(f"{env_type}\n{cwd}")
++    except (OSError, ValueError, AttributeError):
++        return ""
++    return value if isinstance(value, str) else ""
++
++
++def _store_backend_probe(path: Path | None, env_type: str, cwd: str, formatted: str) -> None:
++    if path is None or not formatted:
++        return
++    try:
++        try:
++            data = json.loads(path.read_text(encoding="utf-8"))
++        except (OSError, ValueError):
++            data = {}
++        if not isinstance(data, dict):
++            data = {}
++        if data.get(f"{env_type}\n{cwd}") == formatted:
++            return
++        data[f"{env_type}\n{cwd}"] = formatted
++        path.parent.mkdir(parents=True, exist_ok=True)
++        atomic_json_write(path, data)
++    except Exception:
++        logger.debug("Could not keep the backend probe", exc_info=True)
++
++
++def _start_backend_probe(cache_key, env_type: str, cwd: str, path: Path | None) -> tuple[threading.Event, float]:
++    """One probe per key at a time, in its own thread (with the caller's context: the session's backend binding);
++    returns its done event and start time."""
++    with _BACKEND_PROBE_LOCK:
++        running = _BACKEND_PROBE_RUNNING.get(cache_key)
++        if running is not None:
++            return running
++        running = (threading.Event(), time.monotonic())
++        _BACKEND_PROBE_RUNNING[cache_key] = running
++    context = contextvars.copy_context()
++
++    def probe() -> None:
+         formatted = ""
+         try:
+-            from tools import terminal_tool  # heavy; only needed for non-local backends
+-        except Exception as e:
+-            logger.debug("Backend probe unavailable (import failed): %s", e)
+-        else:
+             try:
+-                formatted = _format_backend_probe(_run_backend_probe(env_type, terminal_tool))
++                from tools import terminal_tool  # heavy; only needed for non-local backends
+             except Exception as e:
+-                logger.debug("Backend probe failed: %s", e)
+-        _BACKEND_PROBE_CACHE[cache_key] = formatted
+-    return formatted or None
++                logger.debug("Backend probe unavailable (import failed): %s", e)
++            else:
++                try:
++                    formatted = _format_backend_probe(_run_backend_probe(env_type, terminal_tool))
++                except Exception as e:
++                    logger.debug("Backend probe failed: %s", e)
++            if formatted or not _BACKEND_PROBE_CACHE.get(cache_key):
++                _BACKEND_PROBE_CACHE[cache_key] = formatted  # a failed refresh keeps the stored line
++            _store_backend_probe(path, env_type, cwd, formatted)
++        finally:
++            with _BACKEND_PROBE_LOCK:
++                _BACKEND_PROBE_RUNNING.pop(cache_key, None)
++            running[0].set()
++
++    try:
++        threading.Thread(target=context.run, args=(probe,), daemon=True, name="backend-probe").start()
++    except RuntimeError:  # interpreter shutting down
++        with _BACKEND_PROBE_LOCK:
++            _BACKEND_PROBE_RUNNING.pop(cache_key, None)
++        running[0].set()
++    return running
+ 
+ 
+ def _clear_backend_probe_cache() -> None:
+-    """Test helper — drop the backend probe cache so monkeypatched backends take effect."""
++    """Test helper — drop the backend probe cache (and the kept probe) so monkeypatched backends take effect."""
+     _BACKEND_PROBE_CACHE.clear()
++    path = _backend_probe_store_path()
++    if path is not None:
++        try:
++            path.unlink()
++        except OSError:
++            pass
+ 
+ 
+ def _local_host_hints() -> list[str]:
+diff --git a/gateway/run_startup.py b/gateway/run_startup.py
+index b23919a2..39fcc66d 100644
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -1250,11 +1250,18 @@ class GatewayStartupMixin:
+             if recovered:
+                 logger.info("Recovered %s background process(es) from previous run", recovered)
+         # Background subagents the previous gateway handed off on a graceful restart resume here, after
+-        # their background processes were reattached above (delegation.restart_handoff).
+-        with _log_suppressed(logging.WARNING, "Could not resume handed-off background delegations: %s"):
+-            from tools.delegate_tool_handoff import resume_handed_off_delegations
+-            if resumed := resume_handed_off_delegations():
+-                logger.info("Resumed %d background delegation(s) handed off by the previous gateway", resumed)
++        # their background processes were reattached above (delegation.restart_handoff). A carrier
++        # (gateway.restart_turn_handoff_per_turn) may hand its processes over later: they wait for those.
++        from gateway import turn_carry
++        if turn_carry.defers_delegations(self, _hermes_home):
++            self._deferred_delegations = True  # turn_carry.start_watch adopts them if it finds no carrier
++            logger.info("Handed-off background delegations resume once the carrying gateway handed over its "
++                        "processes (gateway.restart_turn_handoff_per_turn)")
++        else:
++            with _log_suppressed(logging.WARNING, "Could not resume handed-off background delegations: %s"):
++                from tools.delegate_tool_handoff import resume_handed_off_delegations
++                if resumed := resume_handed_off_delegations():
++                    logger.info("Resumed %d background delegation(s) handed off by the previous gateway", resumed)
+         # The gateway owns delegation state: replay durable completions the previous
+         # process never delivered. Explicit here, never at tools import (clients).
+         with _log_suppressed(logging.WARNING, "Could not restore async delegation completions: %s"):
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index 87b6966c..bc715bca 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -129,6 +129,26 @@ def carrier_alive(home) -> bool:
+         os.close(fd)
+ 
+ 
++def defers_delegations(runner, home) -> bool:
++    """At startup: whether the handed-off background subagents wait for the carrier's process handoff instead of
++    being adopted now. The carrier hands its subagents over at the restart but its background processes only once
++    no carried turn is in a tool round (a carried foreground command keeps the device's connection); a subagent
++    adopted before that finds no record of the process it waits on and ends as if it were lost. The watch adopts
++    them right after it reattached the processes (``PROCESSES_HANDED``), or once the carrier exited."""
++    return configured(runner) and carrier_alive(home)
++
++
++def _adopt_delegations() -> None:
++    try:
++        from tools.delegate_tool_handoff import resume_handed_off_delegations
++        resumed = resume_handed_off_delegations()
++    except Exception:
++        logger.warning("Could not resume the background delegations the carrier handed off", exc_info=True)
++        return
++    if resumed:
++        logger.info("Resumed %d background delegation(s) handed off by the carrying gateway", resumed)
++
++
+ def live_carry_epoch(db) -> int | None:
+     """At startup: the runtime epoch of a carrier that still runs its claims, or None."""
+     from hermes_state_runtime import turn_carry_record
+@@ -164,14 +184,45 @@ def _platform(turn) -> str:
+     return str(getattr(platform, "value", platform) or "")
+ 
+ 
++# Why a restart waits before it decides whether it can carry its turns: a turn claimed a moment ago still builds its
++# agent (an API request, a message), so it is not among the turns yet. It is carried with them once it has its
++# agent; it used to read as a managed worker's turn, and the whole restart fell back to the single handover.
++STARTING = "a turn is still starting"
++# How long a restart waits for such turns.
++STARTING_TURN_WAIT_S = 5.0
++
++
++def _other_turns(runner, turns) -> tuple[list, list]:
++    """``(starting, workers)``: the claimed turns not among *turns*: those whose agent is still being built here,
++    and those a managed worker runs."""
++    from gateway import turn_handoff
++    from gateway.session_authorities import all_authorities
++    from gateway.turn_boundary import _in_process
++    carried = {t.admission_id for t in turns}
++    authorities = {getattr(a, "profile_id", None): a for a in all_authorities(runner)}
++    starting, workers = [], []
++    for item in turn_handoff.running_turns(runner):
++        if item["admission_id"] in carried:
++            continue
++        authority = authorities.get(item["profile_id"])
++        generation, agent = (getattr(authority, "adopted", None) or {}).get(item["session_id"], (None, None))
++        if generation == item["generation"] and agent is not None and not _in_process(agent):
++            workers.append(item)
++        else:
++            starting.append(item)
++    return starting, workers
++
++
+ def _ineligible(runner, turns) -> str | None:
+     """Why this restart cannot carry its turns (it then hands them over the 0131 way), or None."""
+-    from gateway import turn_handoff
+     from gateway.session_authorities import all_authorities
+     if len(all_authorities(runner)) != 1:
+         return "the gateway serves several profiles"
+-    if len(turn_handoff.running_turns(runner)) != len(turns):
++    starting, workers = _other_turns(runner, turns)
++    if workers:
+         return "a turn runs in a managed worker"
++    if starting:
++        return STARTING
+     try:
+         cron = int(runner._active_cron_job_count()) - int(runner._restart_safe_cron_count())
+     except Exception:
+@@ -196,8 +247,13 @@ async def carry_restart(runner) -> bool:
+     from gateway import turn_boundary
+     from gateway.session_authorities import all_authorities
+     from agent import turn_boundary_handoff as boundary
+-    turns = turn_boundary._turns(runner)
+-    reason = _ineligible(runner, turns)
++    deadline = time.monotonic() + STARTING_TURN_WAIT_S
++    while True:
++        turns = turn_boundary._turns(runner)
++        reason = _ineligible(runner, turns)
++        if reason != STARTING or time.monotonic() >= deadline:
++            break
++        await asyncio.sleep(POLL_S)  # it has its agent within moments; nothing else waits on this
+     if reason is not None:
+         logger.info("Restart: turns not carried (%s); handing them over at their boundaries first "
+                     "(gateway.restart_turn_handoff_per_turn)", reason)
+@@ -311,6 +367,10 @@ async def _record(carry) -> None:
+     for path in (events_path(carry.home, carry.epoch), control_path(carry.home, carry.epoch)):
+         os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+     carry.events = open(events_path(carry.home, carry.epoch), "a", encoding="utf-8")  # noqa: SIM115
++    if carry.processes_handed.is_set():
++        # Handed before the release: the next gateway adopts the handed-off subagents once it reads this frame
++        # (``defers_delegations``), after the processes they wait on were reattached.
++        _write_frame(carry, {"type": PROCESSES_HANDED, "session_id": ""})
+     record = {"pid": os.getpid(), "since": time.time(),
+               "turns": {aid: {"session_id": t.session_id, "generation": t.generation}
+                         for aid, t in carry.turns.items()}}
+@@ -768,6 +828,8 @@ def start_watch(runner) -> bool:
+         logger.info("Carrying gateway (epoch %d) still runs %d turn(s); relaying them here "
+                     "(gateway.restart_turn_handoff_per_turn)", remote.epoch, len(remote.open))
+         return True
++    if getattr(runner, "_deferred_delegations", False):
++        _adopt_delegations()  # the startup left them for a watch that has nothing to watch
+     return False
+ 
+ 
+@@ -780,6 +842,7 @@ async def _watch(remote: _Remote) -> None:
+             if remote.reattach:
+                 remote.reattach = False
+                 await _reattach_processes(runner_of(remote))
++                _adopt_delegations()  # the processes they wait on are here now
+             await _pick_up(remote)
+             if not await asyncio.to_thread(carrier_alive, remote.home):
+                 _relay_frames(remote)
+@@ -969,6 +1032,7 @@ async def _finish(remote: _Remote) -> None:
+         except Exception:
+             logger.debug("Schedule after the carrier left failed", exc_info=True)
+     await _reattach_processes(runner)
++    _adopt_delegations()
+     await asyncio.to_thread(end_turn_carry, authority.db, epoch=remote.epoch)
+     for path in (events_path(remote.home, remote.epoch), control_path(remote.home, remote.epoch)):
+         path.unlink(missing_ok=True)
+diff --git a/tests/gateway/test_restart_carry_background_work.py b/tests/gateway/test_restart_carry_background_work.py
+new file mode 100644
+index 00000000..c780fac2
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_background_work.py
+@@ -0,0 +1,205 @@
++"""gateway.restart_turn_handoff_per_turn and the work that is not a turn:
++
++- background subagents the carrier hands over at the restart are adopted by the next gateway only once the
++  carrier handed over the background processes they wait on (a carried foreground command defers that), so a
++  subagent waiting on a process finds it instead of "no record of it";
++- a new session on the next gateway does not wait for the device backend's probe while the device is still
++  connected to the carrier: the last probe is kept, and a probe that does not answer is waited for 5 s at most.
++"""
++import asyncio
++import json
++import threading
++import time
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++
++from tests.gateway.test_restart_turn_carry import (_NextAuthority, _claimed_turn, _old_runner, _reserve_profile,
++                                                   _until)
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_hand_off_background", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++
++
++def _next_gateway(monkeypatch, owner, tmp_path):
++    """The next gateway's watch of the carrier, with its process reattach and subagent adoption recorded."""
++    from hermes_state_runtime import turn_carry_record
++    log = []
++
++    async def reattach(_runner):
++        log.append("reattach")
++    monkeypatch.setattr(turn_carry, "_reattach_processes", reattach)
++    import tools.delegate_tool_handoff as handoff
++    monkeypatch.setattr(handoff, "resume_handed_off_delegations", lambda: log.append("adopt") or 1)
++    nxt = _NextAuthority(owner.db)
++    remote = turn_carry._Remote(owner.runner, nxt, turn_carry_record(owner.db), tmp_path)
++    nxt._turn_carrier = remote
++    return log, asyncio.ensure_future(turn_carry._watch(remote))
++
++
++@pytest.mark.asyncio
++async def test_handed_off_subagents_are_adopted_after_the_processes_a_carried_command_held_back(
++        owner, tmp_path, monkeypatch):
++    _reserve_profile(tmp_path)
++    row, _live, agent = _claimed_turn(owner, "cmd")
++    agent._executing_tools = True  # a carried turn's foreground command runs on the device
++    from gateway.run_shutdown import GatewayShutdownMixin
++    handed = []
++
++    async def hand_off(_runner):
++        handed.append(time.monotonic())
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(hand_off))
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    # The next gateway's startup leaves the handed-off subagents for its watch while the carrier lives.
++    assert turn_carry.defers_delegations(runner, tmp_path) is True
++    log, watch = _next_gateway(monkeypatch, owner, tmp_path)
++    await asyncio.sleep(0.4)
++    assert handed == [] and log == []  # their processes are still the carrier's: nothing adopted yet
++    agent._executing_tools = False  # the command ends; the processes go over
++    await _until(lambda: "adopt" in log)
++    assert log == ["reattach", "adopt"]  # adopted right after the processes it waits on were reattached
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 5.0)
++    import os
++    os.close(runner._turn_carry.lock_fd)  # the carrier exits
++    await asyncio.wait_for(watch, 5.0)
++    assert turn_carry.defers_delegations(runner, tmp_path) is False
++
++
++@pytest.mark.asyncio
++async def test_processes_handed_before_the_release_let_the_next_gateway_adopt_the_subagents_at_once(
++        owner, tmp_path, monkeypatch):
++    _reserve_profile(tmp_path)
++    row, _live, agent = _claimed_turn(owner, "model")
++    agent._executing_tools = False  # in a model call: the processes go over before the release
++    from gateway.run_shutdown import GatewayShutdownMixin
++
++    async def hand_off(_runner):
++        return None
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(hand_off))
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await _until(turn_carry.released)
++    frames = [json.loads(line) for line in turn_carry.events_path(tmp_path, owner.epoch).read_text().splitlines()]
++    assert frames[0]["type"] == turn_carry.PROCESSES_HANDED
++    log, watch = _next_gateway(monkeypatch, owner, tmp_path)
++    await _until(lambda: "adopt" in log, timeout=1.0)  # not only once the carrier exits
++    assert not carry.done()
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 5.0)
++    import os
++    os.close(runner._turn_carry.lock_fd)
++    await asyncio.wait_for(watch, 5.0)
++    assert log.count("adopt") >= 1
++
++
++@pytest.mark.asyncio
++async def test_a_turn_still_starting_at_the_restart_is_carried_with_the_rest(owner, tmp_path):
++    """An API request (or a message) claimed a moment before the SIGTERM still builds its agent: the restart waits
++    for it and carries it, instead of reading it as a managed worker's turn and falling back to the single
++    handover (new API requests then got 503 until the old gateway exited)."""
++    _reserve_profile(tmp_path)
++    row, _live, _agent = _claimed_turn(owner, "starting")
++    adopted = owner.adopted.pop("starting")  # claimed; its agent is being built
++    runner = _old_runner(owner)
++    carry = asyncio.ensure_future(turn_carry.carry_restart(runner))
++    await asyncio.sleep(0.3)
++    assert not carry.done() and not turn_carry.released()
++    owner.adopted["starting"] = adopted  # it has its agent
++    await _until(turn_carry.released)
++    assert row["admission_id"] in runner._turn_carry.turns
++    from hermes_state_runtime import settle_session_input
++    settle_session_input(owner.db, epoch=owner.epoch, admission_id=row["admission_id"],
++                         generation=row["generation"], outcome="completed")
++    await asyncio.wait_for(carry, 5.0)
++    assert carry.result() is True
++    import os
++    os.close(runner._turn_carry.lock_fd)
++
++
++def test_without_a_carrier_the_startup_adopts_them_as_before(tmp_path):
++    from types import SimpleNamespace
++    from tests.gateway.test_restart_turn_carry import _config
++    runner = SimpleNamespace(config=_config())
++    assert turn_carry.defers_delegations(runner, tmp_path) is False
++    runner.config.restart_turn_handoff_per_turn = False
++    assert turn_carry.defers_delegations(runner, tmp_path) is False
++
++
++# --- the device backend's probe on the next gateway ----------------------------------------------------------
++
++
++@pytest.fixture
++def _probe(monkeypatch):
++    """The prompt's backend probe against a device: answers at once while ``connected`` is set, else it waits for the
++    device like the plugin does (3 s here, 60 s live) and fails."""
++    import agent.prompt_builder as pb
++    monkeypatch.setenv("TERMINAL_ENV", "device")
++    connected = threading.Event()
++    runs = []
++
++    def run(env_type, _terminal_tool):
++        runs.append(env_type)
++        if connected.wait(3.0):
++            return "os=Linux\nkernel=7.2.9-arch1-1\n"
++        return ""
++    monkeypatch.setattr(pb, "_run_backend_probe", run)
++    pb._clear_backend_probe_cache()
++    yield pb, connected, runs
++    connected.set()
++    pb._clear_backend_probe_cache()
++
++
++def test_the_next_gateway_uses_the_kept_probe_while_the_device_is_still_on_the_carrier(_probe):
++    pb, connected, runs = _probe
++    connected.set()  # the old gateway probed its device once
++    assert pb._probe_remote_backend("device") == "  OS: Linux 7.2.9-arch1-1"
++    pb._BACKEND_PROBE_CACHE.clear()  # a new process: the next gateway
++    connected.clear()  # its device is still connected to the carrier
++    started = time.monotonic()
++    assert pb._probe_remote_backend("device") == "  OS: Linux 7.2.9-arch1-1"
++    assert time.monotonic() - started < 0.5
++
++
++def test_a_probe_that_does_not_answer_holds_the_prompts_no_longer_than_the_window(_probe, monkeypatch):
++    pb, connected, runs = _probe
++    monkeypatch.setattr(pb, "_BACKEND_PROBE_WAIT_S", 0.5, raising=False)
++    results, times = [], []
++
++    def build():
++        t = time.monotonic()
++        results.append(pb._probe_remote_backend("device"))
++        times.append(time.monotonic() - t)
++    threads = [threading.Thread(target=build) for _ in range(4)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join(10)
++    assert results == [None] * 4
++    assert max(times) < 1.0  # not the device's reconnect wait
++    assert runs == ["device"]  # the prompts share one probe
++    connected.set()  # the device came over: the probe answers and is kept for the next prompts
++    deadline = time.monotonic() + 3
++    while pb._probe_remote_backend("device") is None and time.monotonic() < deadline:
++        time.sleep(0.05)
++    assert pb._probe_remote_backend("device") == "  OS: Linux 7.2.9-arch1-1"
+-- 
+2.56.0
+

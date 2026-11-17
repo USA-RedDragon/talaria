@@ -1,0 +1,12 @@
+# The per-turn carry's subagents, processes and new sessions (this patch) and the carry it fixes (0136, 0137)
+tests/gateway/test_restart_carry_background_work.py
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_carry_no_pause.py
+tests/gateway/test_restart_turn_boundary.py
+# The prompt's backend probe
+tests/agent/test_prompt_builder.py
+tests/tools/test_env_probe.py
+# The subagent handoff (0016) and the process handoff (0012) it orders
+tests/tools/test_async_delegation.py
+tests/tools/test_process_handoff.py
+tests/gateway/test_gateway_shutdown.py
