@@ -643,7 +643,7 @@ index a5bc8126..caee0da2 100644
              await stop_gateway_api(handle)
          self._listener_handover = None
 diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
-index 6c4ae3f4..16d90a61 100644
+index 6c4ae3f4..9d8cf28b 100644
 --- a/gateway/session_pending_controls.py
 +++ b/gateway/session_pending_controls.py
 @@ -41,6 +41,10 @@ def _clarify_record(entry, prompt):
@@ -673,7 +673,7 @@ index 6c4ae3f4..16d90a61 100644
              if background:
                  self.background.add(prompt_id)
 -            self.events.publish(session_id, prompt, event_type='approval.request')
-+            self.announce(session_id, prompt, 'approval.request')
++            self.announce(session_id, prompt, event_type='approval.request')
  
      def register_clarify(self, session_id, generation, entry, *, timeout_s=None, background=False):
          from gateway.run import _redact_approval_command
@@ -682,7 +682,7 @@ index 6c4ae3f4..16d90a61 100644
              if background:
                  self.background.add(entry.clarify_id)
 -            self.events.publish(session_id, prompt, event_type="clarify.request")
-+            self.announce(session_id, prompt, "clarify.request")
++            self.announce(session_id, prompt, event_type="clarify.request")
 +
 +    def announce(self, session_id, prompt, event_type):
 +        """Publish *prompt* as *event_type*, unless the same prompt was announced under its id and has not settled
