@@ -136,6 +136,11 @@ type env struct {
 	jobs *fakeJobs
 }
 
+const (
+	hubURL  = "https://hub.example/"
+	chatURL = "https://hub.example/#/s/desk/s1"
+)
+
 func setup(t *testing.T, mutate func(*notify.Options)) *env {
 	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "hub.db"))
@@ -148,7 +153,7 @@ func setup(t *testing.T, mutate func(*notify.Options)) *env {
 	st.SetClock(func() time.Time { return e.now })
 	o := notify.Options{Store: st, Access: access{alice: backend, bob: "other"}, Prompts: e.pend, Users: []string{alice, bob},
 		Backends: map[string]string{backend: "Desk"}, Jobs: map[string]notify.Requester{backend: e.jobs},
-		PublicURL: "https://hub.example/", Push: e.push, PushSubject: "https://hub.example",
+		PublicURL: hubURL, Push: e.push, PushSubject: "https://hub.example",
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return e.now }}
 	if mutate != nil {
 		mutate(&o)
@@ -183,7 +188,7 @@ func TestApprovalReachesOnlyItsPersonOnce(t *testing.T) {
 		t.Fatalf("telegram %d, push %d", e.tg.count(), e.push.count())
 	}
 	got := e.tg.sent[0]
-	if got.chat != 11 || got.m.Record.User != alice || got.m.Title != title || got.m.URL != "https://hub.example/#/s/desk/s1" {
+	if got.chat != 11 || got.m.Record.User != alice || got.m.Title != title || got.m.URL != chatURL {
 		t.Fatalf("telegram = %+v", got)
 	}
 	p := e.push.sent[0]
@@ -516,7 +521,7 @@ func TestClaudeSignInGoesOnlyToItsUsers(t *testing.T) {
 	if e.tg.count() != 1 || e.push.count() != 1 {
 		t.Fatalf("telegram %d, push %d", e.tg.count(), e.push.count())
 	}
-	if got := e.tg.sent[0]; got.chat != 11 || got.m.Detail != detail || got.m.URL != "https://hub.example/#/s/desk/s1" {
+	if got := e.tg.sent[0]; got.chat != 11 || got.m.Detail != detail || got.m.URL != chatURL {
 		t.Fatalf("telegram = %+v", got)
 	}
 	p := e.push.sent[0].payload
@@ -554,5 +559,37 @@ func TestPrivateChatWithTopicsGetsNoticesInItsMainChat(t *testing.T) {
 		Detail: "needs a sign-in"})
 	if e.tg.count() != 2 || e.tg.sent[0].chat != 11 || e.tg.sent[1].chat != 12 {
 		t.Fatalf("sent = %+v, want the main chat with topics first, then the other private chat", e.tg.sent)
+	}
+}
+
+// bob has no access to the backend but is one of its Claude admins: he gets
+// the sign-in notice, without the chat's title or link, so it shows him
+// nothing of the chat.
+func TestClaudeSignInReachesAdminWithoutAccessWithoutTheChat(t *testing.T) {
+	t.Parallel()
+	e := setup(t, nil)
+	n := hub.Notice{Kind: hub.NoticeClaudeSignIn, BackendID: backend, SessionID: session, Key: "claude:desk:account1:1",
+		Title: title, Detail: "Claude (account1) needs a sign-in: this is its first sign-in. Open the hub to sign in.",
+		Users: []string{alice, bob}, Account: "account1"}
+	e.n.HandleNow(context.Background(), n)
+	if e.tg.count() != 2 || e.push.count() != 2 {
+		t.Fatalf("telegram %d, push %d", e.tg.count(), e.push.count())
+	}
+	if a := e.tg.sent[0]; a.chat != 11 || a.m.Title != title || a.m.URL != chatURL {
+		t.Fatalf("alice's notice = %+v", a)
+	}
+	got := e.tg.sent[1]
+	if got.chat != 22 || got.m.Record.User != bob || got.m.Record.Account != "account1" || got.m.Title != "" ||
+		got.m.Record.SessionID != "" || got.m.URL != hubURL || got.m.Backend != "Desk" {
+		t.Fatalf("telegram = %+v", got)
+	}
+	if p := e.push.sent[1]; p.sub.Endpoint != endpoint+bob || strings.Contains(p.raw, title) || strings.Contains(p.raw, session) {
+		t.Fatalf("push = %+v", p)
+	}
+	// Only the sign-in notice passes: an approval of that chat does not.
+	e.n.HandleNow(context.Background(), hub.Notice{Kind: hub.NoticeApproval, BackendID: backend, SessionID: session, Key: "p:1",
+		Title: title, Users: []string{bob}, Prompt: &hub.PromptInfo{ID: "p1", Kind: hub.PromptApproval, Command: command, Choices: []string{"once", "deny"}}})
+	if e.tg.count() != 2 {
+		t.Fatalf("an approval reached a user without access: %d", e.tg.count())
 	}
 }

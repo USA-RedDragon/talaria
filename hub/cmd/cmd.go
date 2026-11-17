@@ -415,7 +415,11 @@ func newClaude(cfg *config.Config, svc *service.Service, n *notify.Notifier, dia
 	if err != nil {
 		return nil
 	}
-	return claude.New(claude.Options{Access: svc, Admins: admins, Location: cfg.Claude.Location(), Requesters: rs,
+	names := make(map[string]string, len(cfg.Backends))
+	for _, b := range cfg.Backends {
+		names[b.ID] = b.Name
+	}
+	return claude.New(claude.Options{Access: svc, Admins: admins, Names: names, Location: cfg.Claude.Location(), Requesters: rs,
 		Notify: n.Notify, Announce: svc.Announce})
 }
 

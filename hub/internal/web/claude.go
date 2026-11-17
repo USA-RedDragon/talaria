@@ -25,6 +25,7 @@ func (s *Server) claudeRoutes(mux *http.ServeMux) {
 	mux.Handle("GET "+base+"/{account}/signin", s.api(s.handleClaudeSignIn))
 	mux.Handle("DELETE "+base+"/{account}/signin", s.api(s.handleClaudeSignIn))
 	mux.Handle("POST "+base+"/{account}/signin/code", s.api(s.handleClaudeCode))
+	mux.Handle("GET /api/claude/admin-backends", s.api(s.handleClaudeAdminBackends))
 	mux.Handle("GET /api/claude/{backend}/pool", s.api(s.lastAnswer(s.handleClaudePool)))
 	mux.Handle("GET /api/backends/{backend}/models", s.api(s.handleNewChatModels))
 }
@@ -184,6 +185,24 @@ func (s *Server) handleClaudePool(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.claudeFail(w, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// claudeAdminBackends is the optional part of a hub.Claude that lists the
+// backends a user is a Claude admin of without access to the backend.
+type claudeAdminBackends interface {
+	AdminBackends(ctx context.Context, user string) []hub.Backend
+}
+
+// handleClaudeAdminBackends lists the backends whose Claude accounts the
+// user manages without chat access, for the Usage page.
+func (s *Server) handleClaudeAdminBackends(w http.ResponseWriter, r *http.Request) {
+	out := []backendJSON{}
+	if a, ok := s.claude.(claudeAdminBackends); ok {
+		for _, b := range a.AdminBackends(r.Context(), userFrom(r)) {
+			out = append(out, backendJSON{ID: b.ID, Name: b.Name})
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -50,6 +50,9 @@ type Options struct {
 	Access Access
 	// Admins are the Claude admins of each backend.
 	Admins map[string][]string
+	// Names are the display names of the backends. A backend without one
+	// shows its ID.
+	Names map[string]string
 	// Location is the time zone of reset times. Default UTC.
 	Location *time.Location
 	// Requesters reach each backend's dashboard with the hub's session.
@@ -152,6 +155,11 @@ func (s *Service) Present(ctx context.Context, user string) bool {
 	found := make(chan struct{}, len(s.clients))
 	for id := range s.clients {
 		if s.o.Access.Allowed(ctx, user, id) != nil {
+			if s.IsAdmin(user, id) {
+				// An admin without chat access still has the accounts
+				// panel for this backend.
+				found <- struct{}{}
+			}
 			continue
 		}
 		key := id + "\n" + user
@@ -225,6 +233,42 @@ func (s *Service) Admin(user string) bool {
 	return false
 }
 
+// AdminBackends lists the backends whose Claude accounts user may manage
+// as a Claude admin although the user may not use the backend: they get
+// the accounts and the sign-in, and nothing else of it.
+func (s *Service) AdminBackends(ctx context.Context, user string) []hub.Backend {
+	out := []hub.Backend{}
+	for id := range s.clients {
+		if !s.IsAdmin(user, id) || s.o.Access.Allowed(ctx, user, id) == nil {
+			continue
+		}
+		name := s.o.Names[id]
+		if name == "" {
+			name = id
+		}
+		out = append(out, hub.Backend{ID: id, Name: name})
+	}
+	slices.SortFunc(out, func(a, b hub.Backend) int { return strings.Compare(a.ID, b.ID) })
+	return out
+}
+
+// accountsClient is client for the accounts, their usage and the sign-in:
+// a Claude admin of the backend gets it without access to the backend. The
+// bool says whether the user may use the backend.
+func (s *Service) accountsClient(ctx context.Context, user, backendID string) (*Client, bool, error) {
+	c, err := s.client(ctx, user, backendID)
+	if err == nil {
+		return c, true, nil
+	}
+	if !errors.Is(err, hub.ErrForbidden) || !s.IsAdmin(user, backendID) {
+		return nil, false, err
+	}
+	if c = s.clients[backendID]; c == nil {
+		return nil, false, hub.ErrNoClaude
+	}
+	return c, false, nil
+}
+
 func (s *Service) client(ctx context.Context, user, backendID string) (*Client, error) {
 	if err := s.o.Access.Allowed(ctx, user, backendID); err != nil {
 		return nil, err
@@ -237,7 +281,7 @@ func (s *Service) client(ctx context.Context, user, backendID string) (*Client, 
 }
 
 func (s *Service) adminClient(ctx context.Context, user, backendID string) (*Client, error) {
-	c, err := s.client(ctx, user, backendID)
+	c, _, err := s.accountsClient(ctx, user, backendID)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +360,7 @@ func (s *Service) forget(backendID, accountID string) {
 // ClaudeAccounts lists a backend's Claude accounts, and its ChatGPT plan
 // when Hermes is signed in to one. See hub.Claude.
 func (s *Service) ClaudeAccounts(ctx context.Context, user, backendID string, usage bool) (hub.ClaudeAccounts, error) {
-	c, err := s.client(ctx, user, backendID)
+	c, access, err := s.accountsClient(ctx, user, backendID)
 	if err != nil {
 		return hub.ClaudeAccounts{}, err
 	}
@@ -324,6 +368,10 @@ func (s *Service) ClaudeAccounts(ctx context.Context, user, backendID string, us
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		if !access {
+			// The ChatGPT plan is the backend's own, not a Claude account.
+			return
+		}
 		var cerr error
 		if cg, cerr = s.chatGPT(ctx, backendID, c, false); cerr != nil {
 			s.log.Info("ChatGPT usage: model options", "backend", backendID, "error", cerr.Error())
@@ -367,11 +415,14 @@ func (s *Service) ClaudeAccounts(ctx context.Context, user, backendID string, us
 
 // ClaudeUsage reads one account's usage. See hub.Claude.
 func (s *Service) ClaudeUsage(ctx context.Context, user, backendID, accountID string, fresh bool) (hub.ClaudeUsage, error) {
-	c, err := s.client(ctx, user, backendID)
+	c, access, err := s.accountsClient(ctx, user, backendID)
 	if err != nil {
 		return hub.ClaudeUsage{}, err
 	}
 	if accountID == ChatGPTAccount {
+		if !access {
+			return hub.ClaudeUsage{}, hub.ErrForbidden
+		}
 		e, err := s.chatGPT(ctx, backendID, c, fresh)
 		if err != nil && !e.present {
 			return hub.ClaudeUsage{}, err

@@ -248,6 +248,14 @@ func (n *Notifier) handle(ctx context.Context, nt hub.Notice) {
 	}
 	for _, user := range users {
 		if n.o.Access.Allowed(cctx, user, nt.BackendID) != nil {
+			// A Claude admin without access to the backend still gets the
+			// sign-in notice, but not the chat's title or link.
+			if nt.Kind != hub.NoticeClaudeSignIn || nt.Users == nil {
+				continue
+			}
+			bare := nt
+			bare.SessionID, bare.Title = "", ""
+			n.deliverNew(cctx, user, bare)
 			continue
 		}
 		n.deliverNew(cctx, user, nt)

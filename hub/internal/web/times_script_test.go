@@ -48,3 +48,17 @@ func TestResetTimesScript(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+// The Usage page shows a backend whose Claude accounts the user manages
+// without chat access, and picks its backend among both kinds.
+func TestUsagePickScript(t *testing.T) {
+	t.Parallel()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	out, err := exec.CommandContext(t.Context(), node, filepath.Join("testdata", "usagepick", "run.js"), filepath.Join("static", "insights.js")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}

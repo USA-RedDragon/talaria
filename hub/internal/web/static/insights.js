@@ -153,6 +153,15 @@ window.HubUsage = (ctx) => {
     if (location.hash !== h) history.replaceState(null, "", h);
   }
 
+  // pickBackend chooses the backend the page shows: the one asked for, the
+  // one shown before, the user's default, then the first, among the
+  // backends the user may use and the ones they only manage the Claude
+  // accounts of (those carry claudeOnly).
+  function pickBackend(own, adminOnly, want, current, def) {
+    const all = own.concat(adminOnly.filter((a) => !own.some((o) => o.id === a.id)).map((a) => ({ id: a.id, name: a.name, claudeOnly: true })));
+    return { all, pick: all.find((x) => x.id === want) || all.find((x) => x.id === current) || all.find((x) => x.id === def) || all[0] };
+  }
+
   async function show(rest) {
     shown = true;
     root.hidden = false;
@@ -162,12 +171,15 @@ window.HubUsage = (ctx) => {
     else if ([1, 7, 30, 90].includes(Number(d))) days = Number(d);
     let backends = [];
     try { backends = await api("GET", "/api/backends"); } catch (_) { /* drawn below */ }
+    let adminOnly = [];
+    if (ctx.hasClaude()) {
+      try { adminOnly = await api("GET", "/api/claude/admin-backends"); } catch (_) { /* none */ }
+    }
     if (!shown) return;
-    const pick = backends.find((x) => x.id === b) || backends.find((x) => x.id === backend) ||
-      backends.find((x) => x.id === ctx.defaultBackend()) || backends[0];
+    const { all, pick } = pickBackend(backends, adminOnly, b, backend, ctx.defaultBackend());
     backend = pick ? pick.id : "";
     if (backend) setHash();
-    load(backends);
+    load(all);
   }
 
   function hide() {
@@ -192,8 +204,19 @@ window.HubUsage = (ctx) => {
       }
       sel.onchange = () => { backend = sel.value; setHash(); load(backends); };
       bar.append(sel);
+    } else if (backends.length === 1 && backends[0].claudeOnly) {
+      bar.append(el("strong", "usage-backend", backends[0].name));
     }
     bar.append(el("span", "grow"));
+    // The range is for the chat usage, which a Claude-only backend has none of.
+    const only = (backends.find((x) => x.id === backend) || {}).claudeOnly;
+    if (only) {
+      const again = el("button", "", "Refresh");
+      again.type = "button";
+      again.onclick = () => load(backends);
+      bar.append(again);
+      return bar;
+    }
     const range = el("select");
     range.setAttribute("aria-label", "Time range");
     for (const [d, label] of ranges) {
@@ -217,11 +240,12 @@ window.HubUsage = (ctx) => {
     // The Claude Code panel is the user's, not the backend's: it stays
     // when the Hermes changes.
     if (ccPanel && ccDays !== days) ccPanel = null;
-    if (!ccPanel && ctx.claudeCodePanel) {
+    if (!ccPanel && ctx.claudeCodePanel && !(backends.find((x) => x.id === backend) || {}).claudeOnly) {
       ccPanel = ctx.claudeCodePanel(ccRange[days]);
       ccDays = days;
     }
-    const code = ccPanel ? [ccPanel] : [];
+    const only = (backends.find((x) => x.id === backend) || {}).claudeOnly;
+    const code = ccPanel && !only ? [ccPanel] : [];
     if (!backend) {
       body.append(...code, el("p", "none", "No assistant is set up for you yet."));
       return;
@@ -231,6 +255,12 @@ window.HubUsage = (ctx) => {
     (ctx.claudePanel ? ctx.claudePanel(backend) : Promise.resolve(null)).then((p) => {
       if (mine === gen && p) claude.replaceChildren(p);
     }, () => {});
+    if (only) {
+      // The user manages this backend's Claude accounts and nothing else
+      // of it: no chat usage, no Claude Code panel.
+      body.replaceChildren(claude);
+      return;
+    }
     let r;
     try {
       r = await api("GET", "/api/usage/" + encodeURIComponent(backend) + "?days=" + dayCount());
@@ -390,7 +420,7 @@ window.HubUsage = (ctx) => {
     return out;
   }
 
-  return { show, hide };
+  return { show, hide, pickBackend };
 };
 
 // HubFiles shows the folder of a chat that runs on one of the user's

@@ -52,6 +52,7 @@ claude:
 - Empty, the default, means nobody. Hub admins are not Claude admins unless listed.
 - The user and the backend must exist, or the hub refuses to start.
 - Other people who may use the backend see usage only. They never see a sign-in link, and the hub answers `403` when they try to start, read, answer or cancel a sign-in.
+- A Claude admin does not need access to the backend's chats. Someone listed in `claude.admins` for a backend they may not use (a family member's agent, say) sees that backend on **Usage** with only the **Subscription accounts** panel: its Claude accounts, their usage and the sign-in. The ChatGPT plan, the chat usage, the pool line of a chat and every chat stay closed to them, and the hub still answers `403` for them.
 - `claude.time_zone` sets the time zone of reset times. It defaults to `ui.time_zone`, then the server's zone.
 
 ## Sign an account in
@@ -73,7 +74,7 @@ Things to know:
 
 ### Sign in from Telegram
 
-When a chat's account loses its login, each Claude admin of that backend gets the notice "A Claude account needs a sign-in" (the **Claude sign-ins** kind in the notification settings, which only Claude admins see). On Telegram the bot starts the sign-in for that admin and sends the link, in their private chat or in the General topic of their linked group. Reply to that message with the code. Only that admin's reply counts. The bot deletes the message with the code when it may, and edits the sign-in message to show the result. Web Push notices never carry the link; they say to open the hub.
+When a chat's account loses its login, each Claude admin of that backend gets the notice "A Claude account needs a sign-in" (the **Claude sign-ins** kind in the notification settings, which only Claude admins see). On Telegram the bot starts the sign-in for that admin and sends the link, in their private chat or in the General topic of their linked group. Reply to that message with the code. Only that admin's reply counts. The bot deletes the message with the code when it may, and edits the sign-in message to show the result. An admin without access to the backend gets the notice and the Telegram sign-in too, with no chat title or link. Web Push notices never carry the link; they say to open the hub.
 
 ## How the pool picks an account
 

@@ -41,7 +41,7 @@ Errors are JSON, `{"error": "..."}`, with the usual status: `401` when the login
 | Search and usage | `GET /api/search`, `GET /api/usage/{backend}` |
 | Notifications | `/api/notify`, `/api/notify/settings`, `/api/notify/push` and `/api/notify/test` |
 | Computers | `GET /api/devices`, `POST /api/devices/{device}/rename` and `/revoke` |
-| Claude accounts | `GET /api/claude/{backend}/accounts` (add `?usage=1` for usage), `GET /api/claude/{backend}/accounts/{account}/usage`, `GET /api/claude/{backend}/pool?session=...&model=...`, and for Claude admins `POST`, `GET` and `DELETE` on `.../accounts/{account}/signin` and `POST .../signin/code`. See [Claude accounts](https://github.com/USA-RedDragon/talaria/blob/main/docs/guides/claude-accounts.md) |
+| Claude accounts | `GET /api/claude/{backend}/accounts` (add `?usage=1` for usage), `GET /api/claude/{backend}/accounts/{account}/usage`, `GET /api/claude/{backend}/pool?session=...&model=...` (backend users only), `GET /api/claude/admin-backends` (the backends the caller is a Claude admin of without access to it; the accounts, their usage and the sign-in work for those), and for Claude admins `POST`, `GET` and `DELETE` on `.../accounts/{account}/signin` and `POST .../signin/code`. See [Claude accounts](https://github.com/USA-RedDragon/talaria/blob/main/docs/guides/claude-accounts.md) |
 | Admin | Under `/api/admin/`, for admins only: `users` (list, add, change, `delete`, `password`), `backup` (start, then download with the token), `telegram` and `updates` |
 | Your account | `POST /api/account/password` |
 

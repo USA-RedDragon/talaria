@@ -192,3 +192,74 @@ func TestMeClaudeNeedsPlugin(t *testing.T) {
 		}
 	}
 }
+
+// bob is a Claude admin of pc without access to it: he sees its accounts
+// and signs them in, and the hub refuses him everything else of it.
+func TestClaudeAdminWithoutAccess(t *testing.T) {
+	t.Parallel()
+	var e *hubEnv
+	e = setupWith(t, func(cfg *config.Config, opts *web.Options, _ *store.Store) {
+		cfg.Backends[0].Users = []string{userAlice}
+		cfg.Users = append(cfg.Users, config.User{Sub: "sub-carol", Name: "carol"})
+		cfg.Claude.Admins = []string{"alice=pc", "bob=pc"}
+		admins, _ := cfg.Claude.AdminMap()
+		d := gateway.NewDialer(gateway.Credentials{BaseURL: cfg.Backends[0].URL, Provider: providerBasic, Username: clientID, Password: "pw"})
+		opts.Claude = claude.New(claude.Options{Access: lateAccess{&e}, Admins: admins, Requesters: map[string]device.Requester{"pc": d},
+			Names: map[string]string{"pc": "Home PC"}})
+	})
+	plugin := claudetest.New(e.gw)
+	base := e.url + "/api/claude/pc/accounts"
+	bob := client(t)
+	e.is.as("sub-bob", userBob, "family")
+	m := login(t, e, bob)
+	if _, body := get(t, bob, e.url+"/api/me"); !strings.Contains(body, `"claude":true`) || !strings.Contains(body, `"claude_admin":true`) {
+		t.Fatalf("me = %s", body)
+	}
+	if _, body := get(t, bob, e.url+"/api/backends"); strings.Contains(body, `"pc"`) {
+		t.Fatalf("backends list a backend bob cannot use: %s", body)
+	}
+	if resp, body := get(t, bob, e.url+"/api/claude/admin-backends"); resp.StatusCode != http.StatusOK ||
+		!strings.Contains(body, `"id":"pc"`) || !strings.Contains(body, `"name":"Home PC"`) {
+		t.Fatalf("admin backends = %d %s", resp.StatusCode, body)
+	}
+	if resp, body := get(t, bob, base+"?usage=1"); resp.StatusCode != http.StatusOK || !strings.Contains(body, `"admin":true`) ||
+		!strings.Contains(body, `"provider":"claude-account1"`) || strings.Contains(body, "openai-codex") {
+		t.Fatalf("accounts = %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := get(t, bob, base+"/account1/usage"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("usage = %d", resp.StatusCode)
+	}
+	if resp, _ := get(t, bob, base+"/"+claude.ChatGPTAccount+"/usage"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("ChatGPT usage = %d", resp.StatusCode)
+	}
+	resp, body := do(t, bob, http.MethodPost, base+"/account1/signin", m.CSRF, e.url)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"url":"https://claude.com/cai/oauth/authorize`) {
+		t.Fatalf("start = %d %s", resp.StatusCode, body)
+	}
+	resp, body = post(t, bob, base+"/account1/signin/code", m.CSRF, e.url, map[string]string{fieldSignIn: signIn1, fieldCode: claudetest.GoodCode})
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"state":"succeeded"`) {
+		t.Fatalf("code = %d %s", resp.StatusCode, body)
+	}
+	// Chat access stays closed.
+	if resp, _ := get(t, bob, e.url+"/api/claude/pc/pool?session=s1&model=m"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("pool = %d", resp.StatusCode)
+	}
+	if resp, _ := get(t, bob, e.url+"/api/usage/pc?days=30"); resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("chat usage = %d", resp.StatusCode)
+	}
+	_ = plugin
+
+	// carol is no admin: refused everything, and the list is empty.
+	carol := client(t)
+	e.is.as("sub-carol", "carol", "family")
+	mc := login(t, e, carol)
+	if resp, _ := get(t, carol, base); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("carol accounts = %d", resp.StatusCode)
+	}
+	if resp, _ := do(t, carol, http.MethodPost, base+"/account1/signin", mc.CSRF, e.url); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("carol start = %d", resp.StatusCode)
+	}
+	if _, body := get(t, carol, e.url+"/api/claude/admin-backends"); strings.TrimSpace(body) != "[]" {
+		t.Fatalf("carol's admin backends = %s", body)
+	}
+}

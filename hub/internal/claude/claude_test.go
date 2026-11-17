@@ -80,6 +80,11 @@ type env struct {
 // newEnv runs a fake plugin on backendMain; other has a Hermes without it.
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvAdmins(t, map[string][]string{backendMain: {alice}})
+}
+
+func newEnvAdmins(t *testing.T, admins map[string][]string) *env {
+	t.Helper()
 	gw := gatewaytest.New("hub", "pw")
 	t.Cleanup(gw.Close)
 	bare := gatewaytest.New("hub", "pw")
@@ -95,7 +100,7 @@ func newEnv(t *testing.T) *env {
 	creds := func(u string) device.Requester {
 		return gateway.NewDialer(gateway.Credentials{BaseURL: u, Provider: "basic", Username: "hub", Password: "pw"})
 	}
-	e.svc = claude.New(claude.Options{Access: access{}, Admins: map[string][]string{backendMain: {alice}}, Location: loc,
+	e.svc = claude.New(claude.Options{Access: access{}, Admins: admins, Names: map[string]string{backendMain: "Main PC"}, Location: loc,
 		Requesters: map[string]device.Requester{backendMain: creds(gw.URL()), other: creds(bare.URL()), solo: creds(sgw.URL())},
 		UsageRetry: 10 * time.Millisecond,
 		Notify:     e.rec.notify, Announce: e.rec.announce, Now: func() time.Time { return e.now },
@@ -593,5 +598,70 @@ func TestUsageJSONHasISOTimes(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"resets_at":"2026-11-16T14:00:00Z"`) {
 		t.Errorf("resets_at is not an ISO time: %s", raw)
+	}
+}
+
+// carol is a Claude admin of backendMain without access to it: she gets its
+// Claude accounts, their usage and the sign-in, and nothing else of it.
+func TestAdminWithoutAccess(t *testing.T) {
+	t.Parallel()
+	const carol = "carol"
+	e := newEnvAdmins(t, map[string][]string{backendMain: {alice, carol}, other: {carol}})
+	ctx := context.Background()
+	e.plugin.SetLoggedIn(account, true, aliceEmail)
+	e.chatgpt.Lock()
+	e.chatgpt.Row, e.chatgpt.Cold = codexRow(12, 2), 1
+	e.chatgpt.Unlock()
+
+	got, err := e.svc.ClaudeAccounts(ctx, carol, backendMain, true)
+	if err != nil || !got.Admin || len(got.Accounts) != 2 {
+		t.Fatalf("accounts = %+v %v, want the two Claude accounts and no ChatGPT", got, err)
+	}
+	for _, a := range got.Accounts {
+		if a.ID == claude.ChatGPTAccount {
+			t.Fatalf("ChatGPT plan shown to an admin without access: %+v", a)
+		}
+	}
+	if _, err := e.svc.ClaudeUsage(ctx, carol, backendMain, account, true); err != nil {
+		t.Errorf("usage: %v", err)
+	}
+	if _, err := e.svc.ClaudeUsage(ctx, carol, backendMain, claude.ChatGPTAccount, true); !errors.Is(err, hub.ErrForbidden) {
+		t.Errorf("ChatGPT usage: %v", err)
+	}
+	if _, err := e.svc.StartSignIn(ctx, carol, backendMain, account); err != nil {
+		t.Errorf("start: %v", err)
+	}
+	if _, err := e.svc.SignInState(ctx, carol, backendMain, account); err != nil {
+		t.Errorf("state: %v", err)
+	}
+	if _, err := e.svc.CancelSignIn(ctx, carol, backendMain, account); err != nil {
+		t.Errorf("cancel: %v", err)
+	}
+	// What is not the accounts stays closed.
+	if _, err := e.svc.ClaudePool(ctx, carol, backendMain, "s1", "m"); !errors.Is(err, hub.ErrForbidden) {
+		t.Errorf("pool: %v", err)
+	}
+	// Not an admin of solo: refused as before. Admin of other, which has
+	// no plugin: no Claude.
+	if _, err := e.svc.ClaudeAccounts(ctx, carol, solo, false); !errors.Is(err, hub.ErrForbidden) {
+		t.Errorf("solo: %v", err)
+	}
+	if _, err := e.svc.StartSignIn(ctx, "mallory", backendMain, account); !errors.Is(err, hub.ErrForbidden) {
+		t.Errorf("mallory: %v", err)
+	}
+	if _, err := e.svc.ClaudeAccounts(ctx, "mallory", backendMain, false); !errors.Is(err, hub.ErrForbidden) {
+		t.Errorf("mallory accounts: %v", err)
+	}
+	if bs := e.svc.AdminBackends(ctx, carol); len(bs) != 2 || bs[0] != (hub.Backend{ID: backendMain, Name: "Main PC"}) || bs[1].ID != other || bs[1].Name != other {
+		t.Errorf("carol's admin backends = %+v", bs)
+	}
+	if bs := e.svc.AdminBackends(ctx, alice); len(bs) != 0 {
+		t.Errorf("alice uses the backend, admin backends = %+v", bs)
+	}
+	if bs := e.svc.AdminBackends(ctx, "mallory"); len(bs) != 0 {
+		t.Errorf("mallory's admin backends = %+v", bs)
+	}
+	if !e.svc.Present(ctx, carol) {
+		t.Error("an admin without access does not see the Claude pages")
 	}
 }
