@@ -90,7 +90,7 @@ async function ledger(c, tag) {
   assert.strictEqual(shown, 1, tag + ": only the failed ledger call is shown");
   const text = await ev(`[...document.querySelectorAll("#msgs details.toolgroup > summary, .toolgroup > summary")].map((x) => x.textContent).join(" | ")`);
   assert.ok(!/used ledger/i.test(text.replace(/Used ledger[^|]*step failed/i, "")), tag + ": the fold lines do not count the ledger: " + text);
-  assert.ok(/clarify/i.test(text), tag + ": the fold line still counts the others: " + text);
+  assert.ok(/clarify|asked a question/i.test(text), tag + ": the fold line still counts the others: " + text);
 }
 
 async function run(c, w, h, touch, dark) {
