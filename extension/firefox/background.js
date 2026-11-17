@@ -646,8 +646,7 @@ browser.webRequest.onBeforeRequest.addListener(
         { cancel: true } : {};
     }
     const lg = loginGuards.get(details.tabId);
-    if (lg && lg.submitting && details.method !== "GET" && details.method !== "HEAD" &&
-      (!/^https:/.test(details.url) || !lg.hosts.has(hostOf(details.url)))) {
+    if (loginRequestCancels(lg, details.method, details.url)) {
       return { cancel: true };
     }
     if (lg && lg.secrets.length && carriesSecret(details.url, lg.secrets)) {
@@ -703,7 +702,7 @@ browser.webRequest.onBeforeRequest.addListener(
 );
 
 // While browser_login waits for its submit, a POST that a 307 or 308
-// redirect would send again to a host outside browser.autologin-hosts is
+// redirect would send again to a host outside the login guard's hosts is
 // cancelled, so the login form's body never goes to another host. The
 // first other answer from an autologin host ends the submitting phase, so
 // later posts (a SAML response to the application) go through.
@@ -715,17 +714,7 @@ browser.webRequest.onHeadersReceived.addListener(
     }
     if (details.statusCode === 307 || details.statusCode === 308) {
       const loc = (details.responseHeaders || []).find((h) => h.name.toLowerCase() === "location");
-      let to = "";
-      try {
-        const u = new URL(loc ? loc.value : "", details.url);
-        to = u.protocol === "https:" ? u.hostname.toLowerCase() : "";
-      } catch (e) {
-        to = "";
-      }
-      if (!lg.hosts.has(to)) {
-        return { cancel: true };
-      }
-      return {};
+      return loginRedirectCancels(lg, loc ? loc.value : "", details.url) ? { cancel: true } : {};
     }
     if (details.type === "main_frame" && lg.hosts.has(hostOf(details.url))) {
       lg.submitting = false;
@@ -2317,8 +2306,11 @@ const OPS = {
     }
     return out;
   },
-  async login({ tab_id, url, guard, timeout_ms }) {
+  async login({ tab_id, url, guard, timeout_ms, reload }) {
     const approved = new Set(((guard && guard.login_hosts) || []).map((h) => String(h).toLowerCase()));
+    // The daemon sets post_hosts from the user's sign-in grants: per login
+    // host, the other hosts its form may send the login to.
+    const postHosts = (guard && guard.post_hosts) || {};
     if (loginBusy) {
       throw new Refused("another browser_login is running");
     }
@@ -2335,6 +2327,14 @@ const OPS = {
         tabId = (await OPS.tab_open({ url: target.href, guard: { visit_hosts: [target.hostname] } })).tab_id;
       }
       let tab = await agentTab(tabId);
+      if (reload && !url && /^https:/.test(tab.url || "") && approved.has(hostOf(tab.url))) {
+        // A second try after the user allowed another host: a fresh page,
+        // which Firefox fills again.
+        const loaded = waitComplete(tabId, true).catch(() => null);
+        await browser.tabs.reload(tabId);
+        await Promise.race([loaded, new Promise((r) => setTimeout(r, LOAD_TIMEOUT_MS))]);
+        tab = await browser.tabs.get(tabId);
+      }
       if (tab.status === "loading") {
         tab = await waitComplete(tabId);
       }
@@ -2415,7 +2415,8 @@ const OPS = {
       if (!secrets.length) {
         return noted({ tab_id: tabId, filled: true, submitted: false, landed_host: host, reason: read.error || "the login form is no longer filled" });
       }
-      const guard = { hosts: new Set(hosts), submitting: true, secrets, leaked: false };
+      const guard = { hosts: new Set([...hosts, ...loginPostHosts(postHosts, host)]), submitting: true, secrets, leaked: false,
+        blocked: null };
       loginGuards.set(tabId, guard);
       const loaded = waitComplete(tabId, true).catch(() => null);
       const sent = await inPage(tabId, pageLogin, [hosts, host, true]);
@@ -2429,6 +2430,9 @@ const OPS = {
       if (guard.leaked) {
         return noted({ tab_id: tabId, filled: true, submitted: false, landed_host: hostOf(after.url),
           reason: "the site tried to send the password in the address; stopped" });
+      }
+      if (guard.blocked) {
+        return noted(loginBlockedResult(guard, { tab_id: tabId, filled: true, landed_host: hostOf(after.url), login_host: host }));
       }
       return noted({ tab_id: tabId, filled: true, submitted: true, landed_host: hostOf(after.url) });
     } finally {

@@ -12,7 +12,7 @@
     }
   },
   "permissions": ["nativeMessaging", "tabs", "tabGroups", "scripting", "webRequest", "webRequestBlocking", "dns", "<all_urls>"],
-  "background": {"scripts": ["update.js", "background.js"], "persistent": true},
+  "background": {"scripts": ["update.js", "loginguard.js", "background.js"], "persistent": true},
   "icons": {"16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "96": "icons/icon-96.png"},
   "browser_action": {
     "default_title": "Talaria: not connected",
