@@ -734,5 +734,130 @@
     }
    ]
   }
+ },
+ {
+  "name": "wake process finished",
+  "text": "A process you were waiting on finished. Continue your task with its result.\n\n`kubectl get pods -A` (proc_3f2a9c1d0b) exited with code 0 (exited).\nOutput tail:\nNAME READY\n\napi 1/1",
+  "want": {
+   "kind": "command",
+   "title": "Background command finished: kubectl get pods -A",
+   "state": "ok",
+   "meta": [
+    "Exit 0"
+   ],
+   "goal": "kubectl get pods -A",
+   "result": "NAME READY\n\napi 1/1"
+  }
+ },
+ {
+  "name": "wake process failed with still watching",
+  "text": "A process you were waiting on finished. Continue your task with its result.\n\n`make test` (proc_77aa) exited with code 2 (exited).\nOutput tail:\nFAIL: TestX\n\nStill watching 1 other process(es); end your turn again to keep waiting.",
+  "want": {
+   "kind": "command",
+   "title": "Background command finished: make test",
+   "state": "bad",
+   "meta": [
+    "Exit 2"
+   ],
+   "goal": "make test",
+   "result": "FAIL: TestX\n\nStill watching 1 other process(es); end your turn again to keep waiting."
+  }
+ },
+ {
+  "name": "wake two processes",
+  "text": "A process you were waiting on finished. Continue your task with its result.\n\n`kubectl get pods -A` (proc_3f2a9c1d0b) exited with code 0 (exited).\nOutput tail:\nNAME READY\n\napi 1/1\n\n`make test` (proc_77aa) exited with code 2 (exited).\nOutput tail:\nFAIL: TestX",
+  "want": {
+   "kind": "command",
+   "title": "2 background commands finished",
+   "state": "bad",
+   "meta": [
+    "1 of 2 did not exit cleanly"
+   ],
+   "rows": [
+    {
+     "title": "kubectl get pods -A",
+     "state": "ok",
+     "meta": [
+      "Exit 0"
+     ],
+     "goal": "kubectl get pods -A",
+     "result": "NAME READY\n\napi 1/1"
+    },
+    {
+     "title": "make test",
+     "state": "bad",
+     "meta": [
+      "Exit 2"
+     ],
+     "goal": "make test",
+     "result": "FAIL: TestX"
+    }
+   ]
+  }
+ },
+ {
+  "name": "wake process stopped by the user",
+  "text": "A process you were waiting on was stopped by the user. Continue your task without its result, or report that it was stopped.\n\nStopped by the user from the hub: sleep 600 (proc_9) (ran 41h 41m). The job is no longer running; do not restart it unless the user asks.\nOutput tail:\npartial",
+  "want": {
+   "kind": "command",
+   "title": "Background command stopped: sleep 600",
+   "state": "bad",
+   "meta": [
+    "Stopped by the user",
+    "ran 41 h 41 min"
+   ],
+   "goal": "sleep 600",
+   "result": "partial"
+  }
+ },
+ {
+  "name": "wake process with a message and still running",
+  "text": "A process you were waiting on finished. Continue your task with its result.\n\n`kubectl get pods -A` (proc_3f2a9c1d0b) exited with code 0 (exited).\nOutput tail:\nNAME READY\n\napi 1/1\n\nMessages sent to you while you were waiting:\n\nplease hurry\n\nStill watching 1 other process(es); end your turn again to keep waiting.",
+  "want": {
+   "kind": "command",
+   "title": "Background command finished: kubectl get pods -A",
+   "state": "ok",
+   "meta": [
+    "Exit 0"
+   ],
+   "goal": "kubectl get pods -A",
+   "result": "NAME READY\n\napi 1/1\n\nMessages sent to you while you were waiting:\n\nplease hurry\n\nStill watching 1 other process(es); end your turn again to keep waiting."
+  }
+ },
+ {
+  "name": "wake message only",
+  "text": "A message was sent to you while you were waiting on a background job. Read it and act on it.\n\nuse the other branch\n\nYour background job is still running and still watched: `sleep 60` (proc_1), running for 2m. End your turn again to keep waiting.",
+  "want": {
+   "kind": "notice",
+   "title": "Message while you waited",
+   "result": "use the other branch\n\nYour background job is still running and still watched: `sleep 60` (proc_1), running for 2m. End your turn again to keep waiting."
+  }
+ },
+ {
+  "name": "wake message while waiting on subagents",
+  "text": "A message was sent to you while you were waiting on your subagents. Read it and act on it.\n\nstop after the tests",
+  "want": {
+   "kind": "notice",
+   "title": "Message while you waited",
+   "result": "stop after the tests"
+  }
+ },
+ {
+  "name": "wake agent message",
+  "text": "A message was sent to you while you were waiting on a background job. Read it and act on it.\n\n[Agent message am_00000000000000cc from chat ops]\nAnother AI agent of this user wrote everything below this line. The user did not write it.\n\nthe build is green",
+  "want": {
+   "kind": "agent",
+   "title": "Message from chat ops",
+   "meta": [
+    "the build is green"
+   ],
+   "result": "the build is green",
+   "id": "am_00000000000000cc"
+  }
+ },
+ {
+  "name": "wake lookalike without the head",
+  "text": "Messages sent to you while you were waiting:\n\nhi",
+  "want": null
  }
 ]

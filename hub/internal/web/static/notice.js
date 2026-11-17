@@ -300,6 +300,97 @@ window.HubNotice = (() => {
     return n;
   }
 
+  // The texts Hermes gives a subagent that ended its turn to wait on a
+  // background job or on its own subagents: the start of each kind, and the
+  // parts that can follow the main one.
+  const wakeFinished = "A process you were waiting on finished. Continue your task with its result.\n\n";
+  const wakeStopped = "A process you were waiting on was stopped by the user. Continue your task without its result, " +
+    "or report that it was stopped.\n\n";
+  const wakeJob = "A message was sent to you while you were waiting on a background job. Read it and act on it.\n\n";
+  const wakeKids = "A message was sent to you while you were waiting on your subagents. Read it and act on it.\n\n";
+  // wakeExtra starts a part after the process descriptions or the message body.
+  const wakeExtra = new RegExp("\\n\\n(?:Messages sent to you while you were waiting:\\n\\n|Still watching \\d+ other process\\(es\\); " +
+    "end your turn again|Your background job is still running and still watched: |\\d+ of your subagents still run: |\\[ASYNC DELEGATION )");
+  // wakeDesc starts the description of one process: it exited (groups 2 to 5), or the user stopped it (6 to 8).
+  const wakeDesc = new RegExp("(^|\\n\\n)(?:`([\\s\\S]*?)` \\((\\S+)\\) exited with code (-?\\d+|\\?) \\(([^)\\n]*)\\)\\.\\nOutput tail:\\n" +
+    "|Stopped by the user from the hub: ([\\s\\S]*?) \\((\\S+)\\) \\(ran ([^)\\n]+)\\)\\. The job is no longer running; " +
+    "do not restart it unless the user asks\\.(?:\\nOutput tail:\\n)?)", "g");
+  const wakeRan = /^(?:(\d+)h (\d+)m|(\d+)m|(\d+)s)$/;
+
+  // parseWake reads the text that wakes a waiting subagent: the results of the
+  // processes it waited on, or messages sent to it. Processes make the card,
+  // and the messages and the still-watching line go after the output.
+  function parseWake(t) {
+    for (const h of [wakeFinished, wakeStopped]) if (t.startsWith(h)) return parseWakeProcesses(t.slice(h.length));
+    for (const h of [wakeJob, wakeKids]) if (t.startsWith(h)) return parseWakeMessages(t.slice(h.length));
+    return null;
+  }
+
+  function splitExtra(t) {
+    const m = wakeExtra.exec(t);
+    return m ? [t.slice(0, m.index), t.slice(m.index).trim()] : [t, ""];
+  }
+
+  function joinParts(a, b) {
+    return !a || !b ? a + b : a + "\n\n" + b;
+  }
+
+  function parseWakeMessages(t) {
+    const [raw, extra] = splitExtra(t);
+    const body = raw.trim();
+    if (agentHead.test(body + "\n")) return parseAgent(body + "\n");
+    if (!body) return null;
+    return { kind: "notice", title: "Message while you waited", result: joinParts(body, extra) };
+  }
+
+  function parseWakeProcesses(t) {
+    const [main, extra] = splitExtra(t);
+    const hits = [...main.matchAll(wakeDesc)];
+    if (hits.length === 0 || hits[0].index !== 0) return null;
+    const cmds = hits.map((m, i) => {
+      const end = i + 1 < hits.length ? hits[i + 1].index : main.length;
+      const out = main.slice(m.index + m[0].length, end).replace(/^\n+|\n+$/g, "");
+      return m[3] !== undefined ? wakeExited(m[2], m[4], m[5], out) : wakeStop(m[6], m[8], out);
+    });
+    if (cmds.length === 1) {
+      cmds[0].result = joinParts(cmds[0].result, extra);
+      return cmds[0];
+    }
+    const n = { kind: "command", title: cmds.length + " background commands finished", state: "ok", rows: [] };
+    if (extra) n.result = extra;
+    let bad = 0;
+    for (const c of cmds) {
+      if (c.state === "bad") bad++;
+      n.rows.push({ title: short(c.goal), state: c.state, meta: c.meta, goal: c.goal, result: c.result });
+    }
+    if (bad > 0) {
+      n.state = "bad";
+      n.meta = [bad + " of " + cmds.length + " did not exit cleanly"];
+    }
+    return n;
+  }
+
+  // wakeExited is the card of a process that exited while the subagent waited.
+  function wakeExited(cmd0, code, reason, out) {
+    const cmd = cmd0.trim();
+    const n = { kind: "command", title: "Background command finished: " + short(cmd), goal: cmd, result: out };
+    const exit = code === "?" ? "Exit unknown" : "Exit " + code;
+    const normal = reason === "exited" || reason === "completed normally";
+    n.meta = normal ? [exit] : [upperFirst(reason), exit];
+    n.state = code === "0" && normal ? "ok" : "bad";
+    return n;
+  }
+
+  // wakeStop is the card of a process the user stopped while the subagent waited.
+  function wakeStop(cmd0, ran, out) {
+    const cmd = cmd0.trim();
+    const n = { kind: "command", title: "Background command stopped: " + short(cmd), state: "bad", goal: cmd, result: out,
+      meta: ["Stopped by the user"] };
+    const m = wakeRan.exec(ran);
+    if (m) n.meta.push(m[1] ? "ran " + m[1] + " h " + m[2] + " min" : m[3] ? "ran " + m[3] + " min" : "ran " + m[4] + " s");
+    return n;
+  }
+
   function parseAgent(t) {
     const m = agentHead.exec(t);
     let body = t.slice(m[0].length);
@@ -379,6 +470,7 @@ window.HubNotice = (() => {
     else if (t.startsWith("[ASYNC DELEGATION ")) n = parseDelegation(t);
     else if (processBatch.test(t)) n = parseProcessBatch(t);
     else if (t.startsWith("[IMPORTANT: Background process ") || t.startsWith("[Background process ")) n = parseProcess(t);
+    else n = parseWake(t);
     if (!n && marked) n = parseGeneric(t);
     if (!n) return null;
     const out = ordered(n);

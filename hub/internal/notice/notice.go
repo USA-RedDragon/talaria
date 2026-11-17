@@ -110,6 +110,8 @@ func Parse(text string) *Notice {
 		n = parseProcessBatch(t)
 	case strings.HasPrefix(t, "[IMPORTANT: Background process "), strings.HasPrefix(t, "[Background process "):
 		n = parseProcess(t)
+	default:
+		n = parseWake(t)
 	}
 	if n == nil && marked {
 		n = parseGeneric(t)
@@ -331,7 +333,10 @@ func rowNotice(r Row) *Notice {
 	return n
 }
 
-const labelFailed = "Failed"
+const (
+	labelFailed  = "Failed"
+	reasonNormal = "completed normally"
+)
 
 func statusLabel(status string) string {
 	switch status {
@@ -437,7 +442,7 @@ func parseProcess(t string) *Notice {
 	if m[3] == "?" {
 		exit = "Exit unknown"
 	}
-	if m[2] == "completed normally" || m[2] == "exited" {
+	if m[2] == reasonNormal || m[2] == "exited" {
 		n.Meta = []string{exit}
 	} else {
 		n.Meta = []string{upperFirst(m[2]), exit}
@@ -446,7 +451,7 @@ func parseProcess(t string) *Notice {
 		n.Meta = append(n.Meta, ran)
 	}
 	n.State = StateBad
-	if m[3] == "0" && m[2] == "completed normally" {
+	if m[3] == "0" && m[2] == reasonNormal {
 		n.State = StateOK
 	}
 	return n
@@ -505,6 +510,154 @@ func parseProcessBatch(t string) *Notice {
 	if bad > 0 {
 		n.State = StateBad
 		n.Meta = []string{fmt.Sprintf("%d of %d did not exit cleanly", bad, len(parts))}
+	}
+	return n
+}
+
+// The texts Hermes gives a subagent that ended its turn to wait on a
+// background job or on its own subagents: the start of each kind, and the
+// parts that can follow the main one.
+const (
+	wakeFinished = "A process you were waiting on finished. Continue your task with its result.\n\n"
+	wakeStopped  = "A process you were waiting on was stopped by the user. Continue your task without its result, " +
+		"or report that it was stopped.\n\n"
+	wakeJob  = "A message was sent to you while you were waiting on a background job. Read it and act on it.\n\n"
+	wakeKids = "A message was sent to you while you were waiting on your subagents. Read it and act on it.\n\n"
+)
+
+var (
+	// wakeExtra starts a part after the process descriptions or the message body.
+	wakeExtra = regexp.MustCompile(`\n\n(?:Messages sent to you while you were waiting:\n\n|Still watching \d+ other process\(es\); ` +
+		`end your turn again|Your background job is still running and still watched: |\d+ of your subagents still run: |\[ASYNC DELEGATION )`)
+	// wakeDesc starts the description of one process: it exited (groups 2 to 5), or the user stopped it (6 to 8).
+	wakeDesc = regexp.MustCompile("(?s)(^|\n\n)(?:`(.*?)` \\((\\S+)\\) exited with code (-?\\d+|\\?) \\(([^)\\n]*)\\)\\.\\nOutput tail:\\n" +
+		"|Stopped by the user from the hub: (.*?) \\((\\S+)\\) \\(ran ([^)\\n]+)\\)\\. The job is no longer running; " +
+		"do not restart it unless the user asks\\.(?:\\nOutput tail:\\n)?)")
+	wakeRan = regexp.MustCompile(`^(?:(\d+)h (\d+)m|(\d+)m|(\d+)s)$`)
+)
+
+// parseWake reads the text that wakes a waiting subagent: the results of the
+// processes it waited on, or messages sent to it. Processes make the card,
+// and the messages and the still-watching line go after the output.
+func parseWake(t string) *Notice {
+	for _, h := range []string{wakeFinished, wakeStopped} {
+		if strings.HasPrefix(t, h) {
+			return parseWakeProcesses(t[len(h):])
+		}
+	}
+	for _, h := range []string{wakeJob, wakeKids} {
+		if strings.HasPrefix(t, h) {
+			return parseWakeMessages(t[len(h):])
+		}
+	}
+	return nil
+}
+
+func parseWakeMessages(t string) *Notice {
+	body, extra := t, ""
+	if loc := wakeExtra.FindStringIndex(t); loc != nil {
+		body, extra = t[:loc[0]], strings.TrimSpace(t[loc[0]:])
+	}
+	body = strings.TrimSpace(body)
+	if hub.AgentHeaderRE.MatchString(body + "\n") {
+		return parseAgent(body + "\n")
+	}
+	if body == "" {
+		return nil
+	}
+	return &Notice{Kind: KindNotice, Title: "Message while you waited", Result: joinParts(body, extra)}
+}
+
+func joinParts(a, b string) string {
+	if a == "" || b == "" {
+		return a + b
+	}
+	return a + "\n\n" + b
+}
+
+func parseWakeProcesses(t string) *Notice {
+	main, extra := t, ""
+	if loc := wakeExtra.FindStringIndex(t); loc != nil {
+		main, extra = t[:loc[0]], strings.TrimSpace(t[loc[0]:])
+	}
+	idx := wakeDesc.FindAllStringSubmatchIndex(main, -1)
+	if len(idx) == 0 || idx[0][0] != 0 {
+		return nil
+	}
+	var cmds []*Notice
+	for i, m := range idx {
+		end := len(main)
+		if i+1 < len(idx) {
+			end = idx[i+1][0]
+		}
+		g := func(k int) string {
+			if m[2*k] < 0 {
+				return ""
+			}
+			return main[m[2*k]:m[2*k+1]]
+		}
+		out := strings.Trim(main[m[1]:end], "\n")
+		if g(2) != "" || g(3) != "" {
+			cmds = append(cmds, wakeExited(g(2), g(4), g(5), out))
+		} else {
+			cmds = append(cmds, wakeStop(g(6), g(8), out))
+		}
+	}
+	if len(cmds) == 1 {
+		c := cmds[0]
+		c.Result = joinParts(c.Result, extra)
+		return c
+	}
+	n := &Notice{Kind: KindCommand, Title: fmt.Sprintf("%d background commands finished", len(cmds)), State: StateOK, Result: extra}
+	bad := 0
+	for _, c := range cmds {
+		if c.State == StateBad {
+			bad++
+		}
+		n.Rows = append(n.Rows, Row{Title: short(c.Goal), State: c.State, Meta: c.Meta, Goal: c.Goal, Result: c.Result})
+	}
+	if bad > 0 {
+		n.State = StateBad
+		n.Meta = []string{fmt.Sprintf("%d of %d did not exit cleanly", bad, len(cmds))}
+	}
+	return n
+}
+
+// wakeExited is the card of a process that exited while the subagent waited.
+func wakeExited(cmd, code, reason, out string) *Notice {
+	cmd = strings.TrimSpace(cmd)
+	n := &Notice{Kind: KindCommand, Title: "Background command finished: " + short(cmd), Goal: cmd, Result: out}
+	exit := "Exit " + code
+	if code == "?" {
+		exit = "Exit unknown"
+	}
+	normal := reason == "exited" || reason == reasonNormal
+	if normal {
+		n.Meta = []string{exit}
+	} else {
+		n.Meta = []string{upperFirst(reason), exit}
+	}
+	n.State = StateBad
+	if code == "0" && normal {
+		n.State = StateOK
+	}
+	return n
+}
+
+// wakeStop is the card of a process the user stopped while the subagent waited.
+func wakeStop(cmd, ran, out string) *Notice {
+	cmd = strings.TrimSpace(cmd)
+	n := &Notice{Kind: KindCommand, Title: "Background command stopped: " + short(cmd), State: StateBad,
+		Goal: cmd, Result: out, Meta: []string{"Stopped by the user"}}
+	if m := wakeRan.FindStringSubmatch(ran); m != nil {
+		switch {
+		case m[1] != "":
+			n.Meta = append(n.Meta, "ran "+m[1]+" h "+m[2]+" min")
+		case m[3] != "":
+			n.Meta = append(n.Meta, "ran "+m[3]+" min")
+		default:
+			n.Meta = append(n.Meta, "ran "+m[4]+" s")
+		}
 	}
 	return n
 }
