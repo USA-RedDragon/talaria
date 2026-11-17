@@ -50,6 +50,8 @@ class FakeBrowser:
         self.saved_logins = 1
         self.methods_seen: list[str] = []
         self.login_result = {"filled": True, "submitted": True, "landed_host": "app.example.com", "password": "hunter2"}
+        # Answers of the next login calls, in order; then login_result.
+        self.login_results: list[dict] = []
 
     def login_grants(self, args: dict) -> dict:
         """The daemon's login_grants operation. A token is added as a grant for the host after ``host=`` in it
@@ -118,7 +120,8 @@ class FakeBrowser:
             return {"ok": True, "result": {"tab_id": args["tab_id"], "url": "https://example.com/", "title": "Example Domain",
                                            "read_only": not args.get("allow_writes"), "result": {"n": 2}, "secret": "x"}}
         if op == "login":
-            return {"ok": True, "result": dict(self.login_result, tab_id=args.get("tab_id", 8))}
+            result = self.login_results.pop(0) if self.login_results else self.login_result
+            return {"ok": True, "result": dict(result, tab_id=args.get("tab_id", 8))}
         if op == "login_grants":
             return self.login_grants(args)
         if op == "check":
@@ -938,6 +941,104 @@ class ToolTests(BrowserBase):
         self.assertEqual(self.run_tool("browser_check")["login_grants"]["grants"][0]["host"], "a.example.com")
         self.fake.grants_unsupported = True
         self.assertIn("does not report", self.run_tool("browser_check")["login_grants"]["note"])
+
+    # --- a login form that posts to another host -------------------------------------------------
+
+    BLOCKED = {"filled": True, "submitted": False, "landed_host": "login.example.com", "login_host": "login.example.com",
+               "needs_post_host": "login-api.example.com",
+               "reason": "the login form sends to login-api.example.com, which is not approved for this saved login"}
+
+    def post_host_card(self, answer: bool):
+        """Run browser_login on a granted host whose form posts to another host; the card the handler raises
+        is answered with ``answer``. Returns (tool result, the cards asked)."""
+        self.login_page()
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "Password", "scope": "device"}
+        self.fake.login_results = [dict(self.BLOCKED)]
+        asked = []
+
+        def ask(tool_name, reason, rule_key="", approval_callback=None, login_grant=None):
+            asked.append({"tool": tool_name, "message": reason, "rule_key": rule_key, "login_grant": login_grant})
+            return {"approved": answer, "message": "" if answer else "BLOCKED: denied"}
+        with mock.patch("tools.approval.request_tool_approval", ask):
+            out = self.run_tool("browser_login", tab_id=7)
+        return out, asked
+
+    def test_login_post_host_raises_the_card_and_retries_once(self):
+        out, asked = self.post_host_card(True)
+        self.assertEqual(len(asked), 1)
+        card = asked[0]
+        cid = self.device.conn.device_id
+        self.assertEqual(card["rule_key"], f"browser:login-grant:{cid}:login.example.com")
+        self.assertIn("also sends the login to login-api.example.com", card["message"])
+        self.assertEqual(card["login_grant"]["post_hosts"], ["login-api.example.com"])
+        self.assertEqual(card["login_grant"]["host"], "login.example.com")
+        self.assertEqual(card["login_grant"]["method"], "Password", "the grant keeps its method")
+        logins = [r["args"] for r in self.fake.requests if r["op"] == "login"]
+        self.assertEqual(len(logins), 2)
+        self.assertNotIn("reload", logins[0])
+        self.assertEqual(logins[1]["reload"], True)
+        self.assertEqual(logins[1]["tab_id"], 7)
+        self.assertEqual(logins[1]["guard"], {"login_hosts": ["login.example.com"]})
+        self.assertTrue(out["submitted"])
+        self.assertEqual(out["post_host_allowed"], "login-api.example.com")
+        self.assertNotIn("password", out)
+
+    def test_login_post_host_denied_does_not_retry(self):
+        out, asked = self.post_host_card(False)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "login"]), 1)
+        self.assertFalse(out["submitted"])
+        self.assertEqual(out["needs_post_host"], "login-api.example.com")
+        self.assertIn("did not allow login-api.example.com", out["reason"])
+        self.assertIn("needs the user", out["note"])
+
+    def test_login_post_host_retry_that_is_blocked_again_asks_once(self):
+        self.login_page()
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "", "scope": "device"}
+        self.fake.login_results = [dict(self.BLOCKED), dict(self.BLOCKED)]
+        asked = []
+        with mock.patch("tools.approval.request_tool_approval", lambda *a, **k: asked.append(k) or {"approved": True}):
+            out = self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "login"]), 2)
+        self.assertFalse(out["submitted"])
+        self.assertNotIn("post_host_allowed", out)
+
+    def test_login_post_host_without_a_user_names_both_hosts(self):
+        self.login_page()
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "Password", "scope": "device"}
+        self.fake.login_results = [dict(self.BLOCKED)]
+        told = []
+        jobs = browser._jobs()
+        asked = []
+        with mock.patch.object(browser, "no_user", lambda: True), \
+                mock.patch("tools.approval.request_tool_approval", lambda *a, **k: asked.append(k)), \
+                mock.patch.object(jobs, "ask_chat", lambda sid, rule, tool: told.append((rule, tool)) or " The job's chat was told."):
+            out = self.run_tool("browser_login", tab_id=7)
+        self.assertEqual(asked, [])
+        self.assertFalse(out["submitted"])
+        self.assertIn("login.example.com", out["reason"])
+        self.assertIn("login-api.example.com", out["reason"])
+        self.assertIn("no user is present", out["reason"])
+        self.assertEqual(told, [("browser:login:login.example.com", "browser_login")])
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "login"]), 1)
+
+    def test_login_post_host_that_is_not_a_host_name_asks_nothing(self):
+        self.login_page()
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "", "scope": "device"}
+        asked = []
+        for bad in ("10.0.0.1", "Login-API.example.com", "localhost", "a.example.com:443", 5, "login.example.com"):
+            self.fake.login_results = [dict(self.BLOCKED, needs_post_host=bad)]
+            with mock.patch("tools.approval.request_tool_approval", lambda *a, **k: asked.append(k)):
+                out = self.run_tool("browser_login", tab_id=7)
+            self.assertFalse(out["submitted"], bad)
+        self.assertEqual(asked, [])
+
+    def test_check_lists_post_hosts(self):
+        self.fake.grants["a.example.com"] = {"host": "a.example.com", "method": "", "scope": "device", "post_hosts": ["api.example.com"],
+                                             "once_post_hosts": ["b.example.com"], "once_post_expires_at": 9}
+        g = self.run_tool("browser_check")["login_grants"]["grants"][0]
+        self.assertEqual((g["post_hosts"], g["once_post_hosts"], g["once_post_expires_at"]), (["api.example.com"], ["b.example.com"], 9))
 
     def test_refused_pattern_matches_the_device(self):
         src = Path(__file__).resolve().parents[3] / "logingrant" / "logingrant.go"

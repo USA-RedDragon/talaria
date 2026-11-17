@@ -116,8 +116,11 @@ async def login_grants_add(device_id: str, request: Request):
 
 
 @router.delete("/devices/{device_id}/login-grants/{host}")
-async def login_grants_revoke(device_id: str, host: str):
-    return await _grants_call(device_id, {"action": "revoke", "host": host.lower()}, "revoked")
+async def login_grants_revoke(device_id: str, host: str, post_host: str = ""):
+    req = {"action": "revoke", "host": host.lower()}
+    if post_host:
+        req["post_host"] = post_host.lower()  # only this extra host of the grant
+    return await _grants_call(device_id, req, "revoked")
 
 
 @router.get("/bindings")

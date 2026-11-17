@@ -2589,7 +2589,14 @@ def _login(args: dict, conn: Any, sid: str) -> str:
         req["url"] = url
     res = call(conn, "login", req, LOGIN_TIMEOUT_S)
     res = res if isinstance(res, dict) else {}
+    post = _post_host(res)
+    if post and not res.get("submitted"):
+        res = _login_post_host(conn, sid, req, res, post)
     out = {k: res[k] for k in ("tab_id", "filled", "submitted", "landed_host", "reason") if k in res}
+    if isinstance(res.get("needs_post_host"), str):
+        out["needs_post_host"] = res["needs_post_host"][:253]
+    if isinstance(res.get("post_host_allowed"), str):
+        out["post_host_allowed"] = res["post_host_allowed"]
     if isinstance(res.get("method"), str):
         out["method"] = res["method"][:80]  # the button the extension clicked, from the device config
     seen = res.get("methods_seen")
@@ -2598,6 +2605,62 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     if not out.get("submitted"):
         out["note"] = "The sign-in did not happen. Do not try to type the password; report that it needs the user."
     return _ok(out)
+
+
+_HOST_NAME = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _post_host(res: dict) -> str:
+    """The host a login form sent the login to that the user has not allowed, as the extension
+    reports it: a lower-case DNS name (logingrant.ValidHost), or ""."""
+    host = res.get("needs_post_host")
+    if not isinstance(host, str) or not _HOST_NAME.fullmatch(host) or host.rsplit(".", 1)[-1].isdigit():
+        return ""
+    return host
+
+
+def _login_post_host(conn: Any, sid: str, req: dict, res: dict, post: str) -> dict:
+    """The login form sent the login to another host (``post``), which the extension cancelled. Ask
+    the user on the sign-in card whether that host may get the login too; after Allow the hub gave the
+    device a grant with the post host, and the submit is tried once more on the reloaded page. With
+    no user present nothing is asked."""
+    host = str(res.get("login_host") or res.get("landed_host") or "").lower()
+    if not host or host == post:
+        return res
+    name = str(conn.name or conn.device_id)
+    if no_user():
+        try:
+            told = _jobs().ask_chat(_session(sid), _rule("login", host), "browser_login")
+        except Exception:
+            _core().logger.warning("device-browser: could not tell the job's chat", exc_info=True)
+            told = ""
+        return dict(res, reason=(
+            f"the login form on {host} sends the login to {post}, which the user has not allowed for the saved "
+            f"login on {name}, and no user is present in this run (a scheduled job or a one-shot query). Report "
+            f"that the user can allow {post} for {host} from a chat.{told}"))
+    status = _status(conn, host, in_hook=False) or {}
+    grant = status.get("grant") if isinstance(status.get("grant"), dict) else {}
+    card = login_grant_card(conn, host, status)
+    lg = dict(card["login_grant"], post_hosts=[post])
+    if grant.get("method"):
+        lg["method"] = str(grant["method"])
+    message = (f"Sign in with the saved login on {host}? Computer: {name}. The login form also sends the login to "
+               f"{post}. Firefox fills the form and the agent submits it; the password is never shown to the agent.")
+    try:
+        from tools.approval import request_tool_approval
+        answer = request_tool_approval("browser_login", message, rule_key=card["rule_key"], login_grant=lg)
+    except Exception:
+        _core().logger.warning("device-browser: could not ask for the post host", exc_info=True)
+        return res
+    if not (isinstance(answer, dict) and answer.get("approved")):
+        return dict(res, reason=f"the user did not allow {post} for the saved login on {host}")
+    retry = {k: v for k, v in req.items() if k != "url"}
+    retry.update(tab_id=res.get("tab_id"), reload=True)
+    again = call(conn, "login", retry, LOGIN_TIMEOUT_S)
+    again = again if isinstance(again, dict) else {}
+    if again.get("submitted"):
+        again["post_host_allowed"] = post
+    return again
 
 
 def _check(args: dict, conn: Any, _sid: str) -> str:
@@ -2621,7 +2684,8 @@ def _grants_view(listed: Any, conn: Any) -> dict:
             listed = grants_op(conn.device_id, {"action": "list"})
         except (GrantsUnsupported, _core().BrowserError):
             return {"grants": [], "config_hosts": [], "note": "this device does not report sign-in grants"}
-    keep = ("host", "method", "scope", "granted_at", "session_id", "chat_title", "via", "user", "last_used", "expires_at")
+    keep = ("host", "method", "scope", "granted_at", "session_id", "chat_title", "via", "user", "last_used", "expires_at",
+            "post_hosts", "once_post_hosts", "once_post_expires_at")
     grants = [{k: g[k] for k in keep if k in g} for g in (listed.get("grants") or []) if isinstance(g, dict)]
     hosts = [{"host": str(h.get("host") or ""), "method": str(h.get("method") or "")}
              for h in (listed.get("config_hosts") or []) if isinstance(h, dict)]
