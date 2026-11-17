@@ -156,7 +156,7 @@ func TestCutOutputsDoNotWidenTheFirstRows(t *testing.T) {
 	login(t, e, c)
 	r, stop := stream(t, c, e.url+toolOutBase+"wide/events", "")
 	defer stop()
-	evs := readEvents(t, r, "snapshot")
+	evs := readFreshSnapshot(t, r)
 	var snap struct {
 		Messages []json.RawMessage `json:"messages"`
 		Older    int               `json:"older"`
