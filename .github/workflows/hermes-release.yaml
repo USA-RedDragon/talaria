@@ -1,13 +1,17 @@
 name: Hermes release
 
 # Each change to hermes/Dockerfile, hermes/patches or hermes/scripts on main,
-# after the tests pass, is released from the tip of main as image tag v<upstream>-p<n> (v0.23.1-p31,
+# after the tests pass, is released from the last code commit of main (the
+# newest commit that is not the bot's coverage badge commit, which starts no CI
+# and is never released) as image tag v<upstream>-p<n> (v0.23.1-p31,
 # v0.23.1-p32, then v0.24.0-p1 after Renovate moves the base), with the git tag
 # and GitHub release hermes/v<upstream>-p<n> (never marked latest: the latest
 # release is the talaria daemon's, which auto-update reads).
 # Run it by hand with publish off (the default) for a dry run: it prints the
 # next tag and builds both platforms without pushing. With publish on it
-# releases HEAD again.
+# releases again. The optional ref input names the commit to release instead of
+# the last code commit; a coverage badge commit is refused. The tests run on the
+# same commit that is built and tagged.
 # The image is ghcr.io/usa-reddragon/talaria-hermes, also tagged latest-stable.
 
 on:
@@ -26,6 +30,10 @@ on:
         description: Push the images and make the release. Off is a dry run.
         type: boolean
         default: false
+      ref:
+        description: Commit to release (branch, tag or SHA). Empty is the last code commit of main.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -42,13 +50,47 @@ defaults:
     working-directory: hermes
 
 jobs:
+  # The one commit that is tested, built and tagged. Never the coverage badge
+  # commit: it starts no CI, and a tag there is not a tested release.
+  target:
+    name: Release commit
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve
+        id: commit
+        working-directory: .
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          git fetch --no-tags origin main
+          if [ -n "$INPUT_REF" ]; then
+            git fetch --no-tags origin "$INPUT_REF" || true
+            sha=$(scripts/release-commit.sh "$INPUT_REF")
+          else
+            sha=$(scripts/release-commit.sh)
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release commit $sha: $(git log -1 --format=%s "$sha")" >> "$GITHUB_STEP_SUMMARY"
+
   test:
     name: Test
+    needs: target
     uses: ./.github/workflows/hermes-test.yaml
+    with:
+      ref: ${{ needs.target.outputs.sha }}
 
   version:
     name: Version
-    needs: test
+    needs: [target, test]
     runs-on: ubuntu-24.04
     # contents: write is for the git tag, which is made here, before any image moves.
     permissions:
@@ -70,22 +112,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TARGET: ${{ needs.target.outputs.sha }}
           MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
           PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
         run: |
-          # Release the tip of main, not the commit that started this run. Runs queue
-          # behind each other and take a while, so by the time one gets here main has
-          # usually moved; skipping to "the newest run" never ends while main keeps
-          # moving, because that run is overtaken too. The tip carries every earlier
-          # change, and the run for a later commit that did not touch the image inputs
-          # then finds nothing changed since the new tag. GITHUB_TOKEN may only create
-          # a ref at a commit whose .github/workflows matches the tip of main (anywhere
-          # else it gets 403), which the tip does by definition.
-          target=$GITHUB_SHA
-          if [ "$PUBLISH" = true ]; then
-            git fetch --no-tags origin main
-            target=$(git rev-parse FETCH_HEAD)
-          fi
+          # Release the commit the target job picked and the tests ran on: the last
+          # code commit of main, or the ref given by hand, never the coverage badge
+          # commit that follows each code commit. Runs queue behind each other, so
+          # the pick is the newest code commit when the run gets to it; the run for
+          # a later commit that did not touch the image inputs then finds nothing
+          # changed since the new tag. GITHUB_TOKEN may only create a ref at a
+          # commit whose .github/workflows matches the tip of main (anywhere else
+          # it gets 403), which the last code commit does, as the badge commit
+          # changes no workflow.
+          target=$TARGET
+          git cat-file -e "$target^{commit}" 2>/dev/null || git fetch --no-tags origin "$target"
           plan=$(scripts/next-release.sh "$target" "$MANUAL")
           echo "$plan" >> "$GITHUB_OUTPUT"
           echo "push=$PUBLISH" >> "$GITHUB_OUTPUT"

@@ -10,6 +10,11 @@ on:
       - scripts/test-plugin.sh
       - .github/workflows/hermes-test.yaml
   workflow_call:
+    inputs:
+      ref:
+        description: Commit to test. Empty is the commit of the calling run.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -34,6 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       # The patches ship in a public image and their headers are public, so they
@@ -77,6 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Release planning
@@ -115,6 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
