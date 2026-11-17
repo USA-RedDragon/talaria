@@ -830,11 +830,13 @@ window.HubActivity = (ctx) => {
     meta.append(el("span", "", word));
     // No clock time: the length is at the right of the row, and the chat's
     // messages carry their times.
+    // A tool count only once there are tools; a command's monospace name
+    // already says what it is.
     if (r.kind === "sub") {
       if (r.model) meta.append(el("span", "", r.model));
-      meta.append(el("span", "", r.tools + (r.tools === 1 ? " tool" : " tools")));
-    } else {
-      meta.append(el("span", "", r.kind === "prompt" ? "Prompt" : "Command"));
+      if (r.tools > 0) meta.append(el("span", "", r.tools + (r.tools === 1 ? " tool" : " tools")));
+    } else if (r.kind === "prompt") {
+      meta.append(el("span", "", "Prompt"));
     }
     if (r.tin !== null || r.tout !== null) meta.append(el("span", "", k(r.tin) + " in · " + k(r.tout) + " out"));
     head.append(meta);
