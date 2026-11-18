@@ -29,6 +29,7 @@ const (
 	keyKey      = "key"
 	keyTimeout  = "timeout_ms"
 	keyScripts  = "script_hosts"
+	keyWriteH   = "write_hosts"
 )
 
 // recorder counts what the test servers got.
@@ -268,7 +269,7 @@ func scriptFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int, 
 	if puts, _ := rec.counts(); puts != 0 {
 		t.Fatalf("the server got %d PUTs before the write was approved", puts)
 	}
-	write := map[string]any{"write_hosts": []string{loopback}}
+	write := map[string]any{keyWriteH: []string{loopback}}
 	if out := evalIn(ctx, t, b, map[string]any{keyTab: tabID, keyScript: put, keyWrites: true, keyGuard: write}); string(out.Result) != "200" || out.ReadOnly {
 		t.Errorf("approved PUT = %+v", out)
 	}
@@ -427,7 +428,7 @@ func pageWritesFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID i
 
 	// The scroll position survives the reload; a script with allow_writes
 	// keeps its page (and its limits).
-	write := map[string]any{"write_hosts": []string{loopback}}
+	write := map[string]any{keyWriteH: []string{loopback}}
 	out.Reloaded = false
 	call(ctx, t, b, "eval", map[string]any{keyTab: tabID, keyScript: `window.scrollTo(0, 1200); window.__w = 1; return scrollY;`, keyWrites: true, keyGuard: write}, &out)
 	t.Logf("scrolled to %s", out.Result)
@@ -470,7 +471,7 @@ func confirmFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int,
 	call(ctx, t, b, "press", map[string]any{keyTab: tabID, keyRef: button, keyKey: "Tab"}, nil)
 	call(ctx, t, b, "click", map[string]any{keyTab: tabID, keyRef: button, keyGuard: map[string]any{"confirmed": true}}, nil)
 	mustFail(ctx, t, b, "write script on a protected site", "never allowed", "eval", map[string]any{keyTab: tabID,
-		keyScript: `return 1`, keyWrites: true, keyGuard: map[string]any{"write_hosts": []string{confirmHost}}})
+		keyScript: `return 1`, keyWrites: true, keyGuard: map[string]any{keyWriteH: []string{confirmHost}}})
 	out := evalIn(ctx, t, b, map[string]any{keyTab: tabID, keyScript: `return document.querySelectorAll("iframe").length;`,
 		keyGuard: map[string]any{keyScripts: []string{confirmHost}}})
 	if string(out.Result) != "2" {
