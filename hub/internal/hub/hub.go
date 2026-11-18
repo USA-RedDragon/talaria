@@ -325,6 +325,19 @@ type TelegramTopic struct {
 	Seen time.Time
 }
 
+// TelegramSentLog records the messages the Telegram bot sent for the events
+// of a chat, by a key the events give, so the replica that takes the bot
+// over during a turn finds what the last leader sent for the turn's events
+// it replays, and uses those messages instead of sending them again.
+type TelegramSentLog interface {
+	// TelegramSent is the message recorded under key, false when none is.
+	TelegramSent(ctx context.Context, botID, chatID, thread int64, key string) (int64, bool, error)
+	// SaveTelegramSent records the message sent under key.
+	SaveTelegramSent(ctx context.Context, botID, chatID, thread int64, key string, messageID int64) error
+	// PruneTelegramSent forgets the records from before before.
+	PruneTelegramSent(ctx context.Context, before time.Time) error
+}
+
 // TelegramState keeps the Telegram bot's chat attachments, linked groups,
 // topics and update offset, so the hub replica that takes the bot over
 // carries on where the last one stopped.

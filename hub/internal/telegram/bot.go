@@ -186,6 +186,9 @@ type Bot struct {
 	sent map[string]sentPrompt
 	// budget spaces the edits of each chat across its topics.
 	budget *budget
+	// sentLog records the messages sent for events, so a replica that
+	// takes the bot over does not send them again; nil without one.
+	sentLog *sentLog
 	// me is what getMe last said of the bot; meAt is when.
 	me   atomic.Pointer[Me]
 	meAt atomic.Int64
@@ -213,13 +216,20 @@ func (b *Bot) notePrompt(id string, msg int64) {
 	b.sent[id] = sentPrompt{msg: msg, at: now}
 }
 
-// sentMessage is the message of the prompt the bot sent under id.
-func (b *Bot) sentMessage(id string) (int64, bool) {
+// sentMessage is the message of the prompt the bot sent under id in to,
+// also when the last leader sent it.
+func (b *Bot) sentMessage(ctx context.Context, to dest, id string) (int64, bool) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	p, ok := b.sent[id]
-	return p.msg, ok
+	b.mu.Unlock()
+	if ok {
+		return p.msg, true
+	}
+	return b.sentLog.find(ctx, to, userKey(id))
 }
+
+// userKey is the sentLog key of the message of a prompt sent under id.
+func userKey(id string) string { return "u:" + id }
 
 type chatState struct {
 	user    string
@@ -328,6 +338,7 @@ func New(cfg Config, opts Options) (*Bot, error) {
 		sent:    make(map[string]sentPrompt),
 	}
 	b.budget = newBudget(func() time.Time { return b.now() })
+	b.sentLog = newSentLog(opts.State, b.botID, logger)
 	if opts.editGaps[0] > 0 {
 		b.budget.private, b.budget.group = opts.editGaps[0], opts.editGaps[1]
 	}
@@ -486,6 +497,7 @@ func (b *Bot) restore(ctx context.Context) int64 {
 		b.logger.Info("Restored Telegram chats", "chats", len(chats))
 	}
 	b.restoreForums(cctx)
+	b.sentLog.prune(cctx, b.now())
 	return offset
 }
 
@@ -1052,6 +1064,7 @@ func (b *Bot) prompt(ctx context.Context, to dest, user string, msg int64, text 
 	a = st.att
 	id := promptID(to, hub.SubmissionID(ctx))
 	b.notePrompt(id, msg)
+	b.sentLog.save(ctx, to, userKey(id), msg)
 	cctx, cancel := context.WithTimeout(hub.WithSubmissionID(ctx, id), callTimeout)
 	defer cancel()
 	res, err := b.svc.Prompt(cctx, user, a.backendID, a.sessionID, text, files...)
@@ -1101,7 +1114,8 @@ func (b *Bot) pump(ctx context.Context, a *attachment) {
 	r.statusTick = b.tick
 	r.budget = b.budget
 	r.drafts = b.cfg.Drafts && a.to.chat > 0
-	r.userMsg = b.sentMessage
+	r.session, r.sentLog = a.sessionID, b.sentLog
+	r.userMsg = func(id string) (int64, bool) { return b.sentMessage(ctx, a.to, id) }
 	if b.cfg.Steps != "" {
 		r.steps = b.cfg.Steps
 	}
@@ -1162,7 +1176,9 @@ func (b *Bot) pump(ctx context.Context, a *attachment) {
 				continue
 			}
 			a.status.track(ev)
+			r.cause, r.causeN = ev.Cursor, 0
 			r.handle(ctx, ev)
+			r.cause = hub.Cursor{}
 			if ev.Seq > a.lastSeq.Load() {
 				a.lastSeq.Store(ev.Seq)
 			}
@@ -1181,9 +1197,12 @@ func (b *Bot) pump(ctx context.Context, a *attachment) {
 func (b *Bot) addApproval(a *attachment, prompt hub.PromptInfo, body string) (string, func(int64)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	raw := make([]byte, 9)
-	_, _ = rand.Read(raw)
-	key := base64.RawURLEncoding.EncodeToString(raw)
+	key := approvalKey(b.cfg.Token, a.to, a.backendID, a.sessionID, prompt.ID)
+	if prompt.ID == "" {
+		raw := make([]byte, 9)
+		_, _ = rand.Read(raw)
+		key = base64.RawURLEncoding.EncodeToString(raw)
+	}
 	p := &pendingApproval{to: a.to, backendID: a.backendID, sessionID: a.sessionID, prompt: prompt, body: body,
 		bound: make(chan struct{})}
 	b.approvals[key] = p

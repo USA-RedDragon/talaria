@@ -684,11 +684,34 @@ type fakeState struct {
 	offset int64
 	groups map[int64]hub.TelegramGroup
 	topics map[string]hub.TelegramTopic
+	// sent is what hub.TelegramSentLog records, by bot, chat, topic and key.
+	sent map[string]int64
 }
 
 func newFakeState() *fakeState {
-	return &fakeState{chats: map[int64]hub.TelegramChat{}, groups: map[int64]hub.TelegramGroup{}, topics: map[string]hub.TelegramTopic{}}
+	return &fakeState{chats: map[int64]hub.TelegramChat{}, groups: map[int64]hub.TelegramGroup{}, topics: map[string]hub.TelegramTopic{},
+		sent: map[string]int64{}}
 }
+
+func sentKey(botID, chatID, thread int64, key string) string {
+	return fmt.Sprintf("%d/%d/%d/%s", botID, chatID, thread, key)
+}
+
+func (f *fakeState) TelegramSent(_ context.Context, botID, chatID, thread int64, key string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.sent[sentKey(botID, chatID, thread, key)]
+	return id, ok, nil
+}
+
+func (f *fakeState) SaveTelegramSent(_ context.Context, botID, chatID, thread int64, key string, messageID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent[sentKey(botID, chatID, thread, key)] = messageID
+	return nil
+}
+
+func (f *fakeState) PruneTelegramSent(context.Context, time.Time) error { return nil }
 
 func topicKey(chatID int64, backendID, sessionID string) string {
 	return fmt.Sprintf("%d/%s/%s", chatID, backendID, sessionID)

@@ -64,7 +64,11 @@ func draftUnsupported(e *APIError) bool {
 
 // newDraft starts the draft of a new turn.
 func (r *renderer) newDraft() {
-	r.draft = draftState{id: draftID(), dirty: true}
+	id := r.causeDraftID()
+	if id == 0 {
+		id = draftID()
+	}
+	r.draft = draftState{id: id, dirty: true}
 }
 
 // markDraft notes that the draft changed and sends it when its gap

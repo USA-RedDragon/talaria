@@ -10,7 +10,36 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/hub"
 )
 
-var _ hub.TelegramState = (*Store)(nil)
+var (
+	_ hub.TelegramState   = (*Store)(nil)
+	_ hub.TelegramSentLog = (*Store)(nil)
+)
+
+// TelegramSent returns the message the bot recorded under key in a chat.
+func (s *Store) TelegramSent(ctx context.Context, botID, chatID, thread int64, key string) (int64, bool, error) {
+	var id int64
+	err := s.row(ctx, `SELECT message_id FROM telegram_sent WHERE bot_id = ? AND chat_id = ? AND thread_id = ? AND key = ?`,
+		botID, chatID, thread, key).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
+}
+
+// SaveTelegramSent records the message the bot sent under key in a chat.
+func (s *Store) SaveTelegramSent(ctx context.Context, botID, chatID, thread int64, key string, messageID int64) error {
+	return s.exec(ctx, `INSERT INTO telegram_sent (bot_id, chat_id, thread_id, key, message_id, sent_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(bot_id, chat_id, thread_id, key) DO UPDATE SET message_id = excluded.message_id, sent_at = excluded.sent_at`,
+		botID, chatID, thread, key, messageID, s.now().Unix())
+}
+
+// PruneTelegramSent forgets the sent messages recorded before before.
+func (s *Store) PruneTelegramSent(ctx context.Context, before time.Time) error {
+	return s.exec(ctx, `DELETE FROM telegram_sent WHERE sent_at < ?`, before.Unix())
+}
 
 // SaveTelegramChat records the session a Telegram chat is attached to.
 func (s *Store) SaveTelegramChat(ctx context.Context, c hub.TelegramChat) error {

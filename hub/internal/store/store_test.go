@@ -119,6 +119,56 @@ func TestGroups(t *testing.T) {
 	})
 }
 
+// The bot's record of what it sent is shared by the replicas: one finds
+// what another recorded, per chat and topic, a record can be replaced, and
+// old records go.
+func TestTelegramSentLog(t *testing.T) {
+	t.Parallel()
+	const key, card = "e:s1:ep:3:0:1", "p:s1:ap1"
+	backends(t, func(t *testing.T, s *store.Store) {
+		ctx := context.Background()
+		now := time.Unix(1_000_000, 0)
+		s.SetClock(func() time.Time { return now })
+		if _, ok, err := s.TelegramSent(ctx, 123, 1, 0, key); ok || err != nil {
+			t.Fatalf("empty log found a message: %v %v", ok, err)
+		}
+		for _, r := range []struct {
+			chat, thread int64
+			key          string
+			id           int64
+		}{{1, 0, key, 7}, {1, 5, key, 8}, {1, 0, card, 9}, {1, 0, card, 10}} {
+			if err := s.SaveTelegramSent(ctx, 123, r.chat, r.thread, r.key, r.id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, w := range []struct {
+			chat, thread int64
+			key          string
+			id           int64
+		}{{1, 0, key, 7}, {1, 5, key, 8}, {1, 0, card, 10}} {
+			if id, ok, err := s.TelegramSent(ctx, 123, w.chat, w.thread, w.key); !ok || err != nil || id != w.id {
+				t.Fatalf("%+v: got %d %v %v", w, id, ok, err)
+			}
+		}
+		if _, ok, _ := s.TelegramSent(ctx, 124, 1, 0, card); ok {
+			t.Fatal("another bot found the record")
+		}
+		now = now.Add(time.Hour)
+		if err := s.SaveTelegramSent(ctx, 123, 2, 0, "u:x", 11); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.PruneTelegramSent(ctx, now.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, _ := s.TelegramSent(ctx, 123, 1, 0, card); ok {
+			t.Fatal("an old record survived the prune")
+		}
+		if id, ok, _ := s.TelegramSent(ctx, 123, 2, 0, "u:x"); !ok || id != 11 {
+			t.Fatal("a new record went with the prune")
+		}
+	})
+}
+
 func TestTelegramState(t *testing.T) {
 	t.Parallel()
 	backends(t, func(t *testing.T, s *store.Store) {

@@ -191,6 +191,16 @@ type renderer struct {
 	// noEmptyDraft is set once Telegram refused the empty "Thinking…"
 	// draft, which servers before Bot API 10.0 do.
 	noEmptyDraft bool
+	// session is the attached session, for the keys of sentLog.
+	session string
+	// sentLog finds and records the messages sent for events, so a
+	// replica that takes the bot over does not send them again; nil
+	// records none. cause is the place of the event being handled in the
+	// backend's stream, zero between events, and causeN counts the
+	// messages sent for it.
+	sentLog *sentLog
+	cause   hub.Cursor
+	causeN  int
 	// userMsg finds the Telegram message of a prompt the bot sent, by its
 	// submission ID; nil finds none.
 	userMsg func(id string) (int64, bool)
@@ -1025,14 +1035,18 @@ func (r *renderer) showPrompt(ctx context.Context, kind string, p approvalPayloa
 	key, bind := r.approve(info, body)
 	text := head + "\n" + body + promptFooter(info)
 	var id int64
-	if info.Kind == hub.PromptClarify && len(info.Choices) == 0 {
+	pkey := r.promptKey(info.ID)
+	if prev, ok := r.sentBefore(ctx, pkey); ok {
+		id = prev
+	} else if info.Kind == hub.PromptClarify && len(info.Choices) == 0 {
 		var err error
 		id, err = r.api.SendForceReply(ctx, r.to.chat, r.to.thread, text, "Your answer")
 		r.sendFailed(err)
 		r.spend()
 		r.draftLost()
+		r.sentLog.save(ctx, r.to, pkey, id)
 	} else {
-		id = r.send(ctx, text, promptKeyboard(cbApproval, key, info, nil))
+		id = r.sendAs(ctx, pkey, text, promptKeyboard(cbApproval, key, info, nil))
 	}
 	bind(id)
 	r.prompts[info.ID] = shownPrompt{key: key, msgID: id, at: r.now(), prompt: info}
@@ -1251,10 +1265,20 @@ func (r *renderer) agentMessage(ctx context.Context, n *notice.Notice) {
 // send sends html and returns the message ID, or 0 on failure. When Telegram
 // rejects the markup it resends the text without formatting.
 func (r *renderer) send(ctx context.Context, html string, kb *InlineKeyboard) int64 {
+	return r.sendAs(ctx, r.causeKey(), html, kb)
+}
+
+// sendAs is send for a message recorded under key: when the last leader
+// sent it already, it is that message.
+func (r *renderer) sendAs(ctx context.Context, key, html string, kb *InlineKeyboard) int64 {
+	if id, ok := r.sentBefore(ctx, key); ok {
+		return id
+	}
 	id, err := sendHTMLErr(ctx, r.api, r.logger, r.to, html, kb)
 	r.sendFailed(err)
 	r.spend()
 	r.draftLost()
+	r.sentLog.save(ctx, r.to, key, id)
 	return id
 }
 
