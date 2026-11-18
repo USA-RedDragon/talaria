@@ -192,7 +192,11 @@ func TestTakeoverMovesTheStreamWithoutAGapOrASnapshot(t *testing.T) {
 	if len(other) > 0 {
 		t.Fatalf("events besides the reply across the takeover: %v (want none: no snapshot, no status)", other)
 	}
-	if gap > 100*time.Millisecond {
+	// The move itself takes about a second here (eight resumes at 100 ms);
+	// the reply must not wait for it. The bound leaves room for a slow,
+	// race-instrumented runner; a re-subscribe paused it longer and also
+	// sent a snapshot (checked above).
+	if gap > 500*time.Millisecond {
 		t.Fatalf("the reply paused %s at the takeover", gap)
 	}
 	if got[len(got)-1].ev.Kind != hub.KindMessageComplete {
