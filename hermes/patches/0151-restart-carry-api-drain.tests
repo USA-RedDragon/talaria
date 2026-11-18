@@ -1,0 +1,23 @@
+# The per-turn carry and its API relay (0136 to 0150) and the listener relay it builds on (0035 to 0041)
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_carry_no_pause.py
+tests/gateway/test_restart_carry_background_work.py
+tests/gateway/test_restart_carry_process_relay.py
+tests/gateway/test_restart_carry_device_link.py
+tests/gateway/test_restart_carry_cron_run.py
+tests/gateway/test_restart_listener_relay.py
+tests/gateway/test_restart_listener_relay_close.py
+tests/gateway/test_restart_listener_hold.py
+tests/gateway/test_restart_listener_handover.py
+tests/gateway/test_listener_start_hold.py
+# The shutdown tail that now ends the relay, and the standby warm-up (0149)
+tests/gateway/test_startup_restart_race.py
+tests/gateway/test_bootstrap_early_exit_teardown.py
+tests/gateway/test_standby_warm.py
+# The status snapshot, the skill catalog cache and the log handler this patch changes
+tests/gateway/test_status.py
+tests/hermes_cli/test_shared_metrics_busy.py
+tests/tools/test_skills_tool.py
+tests/tools/test_skills_tool_discovery_cache.py
+tests/hermes_cli/test_skill_collision_visibility.py
+tests/test_hermes_logging.py

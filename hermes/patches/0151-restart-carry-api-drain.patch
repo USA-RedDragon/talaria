@@ -1,0 +1,944 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 23:43:34 +0000
+Subject: [PATCH] fix(gateway): a carrier's API port relays until it exits, and
+ a takeover does less per request
+
+Under gateway.restart_turn_handoff_per_turn the old gateway's API port relays new connections to the next gateway's API server (another network namespace: the new pod). That relay was cancelled as soon as the last carried turn ended, while the process went on through its stop for a while: a client still routed to the old pod (its own containers, or the Service in the seconds after the pod went unready) got "Connection refused", and a request in flight on the relay was cut ("Remote end closed connection without response"). The relay now runs up to the end of the process (turn_carry.finish_api_relay, the last step of the shutdown tail): the port closes no earlier than API_ENDPOINTS_MARGIN_S (10 s) after the listener stopped accepting (the end of its relay window, from when the pod's readiness probe fails and the Service drops it), then each relayed connection ends at its next point between two HTTP exchanges (at once when idle) and one still busy after API_DRAIN_S (30 s) is cut (listener_relay.relay_api_listener, which follows each connection's requests and responses: Content-Length, chunked, 1xx, 204/304, upgrades). A gateway that is the pod's sidecar is its last container, so no client in the pod outlives the port.
+
+The new gateway right after a takeover serves its own API clients, the old pod's relayed ones and the hub's reconnecting viewers at once, and some of that work was done more often than needed:
+- every tracked mutation's end re-published the in-flight count on the event loop (a deep copy of the status snapshot, a PID record and a queued file write) even when the count had not changed; it is published only when it changes (status.active_agents_published);
+- each CLI-surface session inventory (one per viewer that creates or resumes a session) scanned the skill trees again, because the scan bypassed the skill catalog cache to keep its Kanban view apart; the catalog now caches that view under its own key;
+- the first resume and create after the takeover built the session socket's contract validators (pydantic defer_build) on the event loop; the standby builds them before the lock (standby_warm._warm_contracts);
+- the log file handler formatted, and redacted, every record twice (once to decide on a rollover); it formats it once per emit;
+- resolve_runtime_mode deep-copied the config to read agent.coding_instructions.
+---
+ agent/coding_context.py                       |   2 +-
+ gateway/listener_relay.py                     | 195 +++++++++++++
+ gateway/run_agent_cache.py                    |   5 +-
+ gateway/run_bootstrap.py                      |  14 +
+ gateway/session_local_inventory.py            |  16 +-
+ gateway/standby_warm.py                       |  23 +-
+ gateway/status.py                             |  14 +
+ gateway/turn_carry.py                         |  61 +++-
+ hermes_logging.py                             |  16 +-
+ tests/gateway/test_restart_carry_api_drain.py | 272 ++++++++++++++++++
+ tests/gateway/test_restart_takeover_load.py   | 120 ++++++++
+ tools/skills_tool.py                          |   4 +-
+ 12 files changed, 720 insertions(+), 22 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_api_drain.py
+ create mode 100644 tests/gateway/test_restart_takeover_load.py
+
+diff --git a/agent/coding_context.py b/agent/coding_context.py
+index 84e382f0..3acf6532 100644
+--- a/agent/coding_context.py
++++ b/agent/coding_context.py
+@@ -381,7 +381,7 @@ def resolve_runtime_mode(
+     the trailing block so a user can pin workflow rules without editing the shipped brief."""
+     resolved_cwd = _resolve_cwd(cwd)
+     mode = _coding_mode(config)
+-    raw = _agent_config_value(config, "coding_instructions", "", readonly=False)
++    raw = _agent_config_value(config, "coding_instructions", "", readonly=True)  # read only: no deep copy
+     items = raw if isinstance(raw, (list, tuple)) else [raw or ""]
+     instructions = "\n".join(str(item).strip() for item in items if str(item).strip())
+     return RuntimeMode(
+diff --git a/gateway/listener_relay.py b/gateway/listener_relay.py
+index 2702ac73..a42a0c31 100644
+--- a/gateway/listener_relay.py
++++ b/gateway/listener_relay.py
+@@ -358,3 +358,198 @@ async def relay_listener(sock: socket.socket, target: tuple[str, int], seconds:
+             if pending:
+                 await asyncio.gather(*pending, return_exceptions=True)
+     return counts[0], counts[1]
++
++
++class _HttpExchanges:
++    """Follows both halves of a relayed HTTP/1.x connection far enough to tell whether it sits between two
++    exchanges: the client sent nothing since the last complete response, and no response is under way. A
++    response ends with its ``Content-Length``, its last chunk, or (no length, or an upgrade) the connection.
++    Pipelined requests are not told apart (HTTP clients do not pipeline)."""
++
++    def __init__(self):
++        self.awaiting = False  # the client sent bytes the successor has not answered completely yet
++        self.answered = 0  # complete responses
++        self._head = bytearray()
++        self._state = "head"  # head, length, chunk-size, chunk-data, chunk-crlf, trailer, stream
++        self._left = 0
++        self._line = bytearray()
++
++    @property
++    def idle(self) -> bool:
++        return not self.awaiting and self._state == "head" and not self._head
++
++    def from_client(self, data: bytes) -> None:
++        if data:
++            self.awaiting = True
++
++    def from_server(self, data: bytes) -> None:
++        data = memoryview(data)
++        while len(data):
++            if self._state == "stream":  # until the connection ends
++                return
++            if self._state == "head":
++                self._head += data
++                end = self._head.find(b"\r\n\r\n")
++                if end < 0:
++                    if len(self._head) > _HEAD_LIMIT:
++                        self._state = "stream"
++                    return
++                rest = memoryview(bytes(self._head[end + 4:]))
++                self._start_body(bytes(self._head[:end]))
++                self._head.clear()
++                data = rest
++                continue
++            if self._state == "length":
++                n = min(self._left, len(data))
++                self._left -= n
++                data = data[n:]
++                if not self._left:
++                    self._done()
++                continue
++            if self._state == "chunk-data":
++                n = min(self._left, len(data))
++                self._left -= n
++                data = data[n:]
++                if not self._left:
++                    self._state, self._left = "chunk-crlf", 2
++                continue
++            if self._state == "chunk-crlf":
++                n = min(self._left, len(data))
++                self._left -= n
++                data = data[n:]
++                if not self._left:
++                    self._state = "chunk-size"
++                continue
++            # chunk-size and trailer lines
++            nl = bytes(data).find(b"\n")
++            if nl < 0:
++                self._line += data
++                if len(self._line) > _HEAD_LIMIT:
++                    self._state = "stream"
++                return
++            self._line += data[:nl + 1]
++            data = data[nl + 1:]
++            line = bytes(self._line).strip()
++            self._line.clear()
++            if self._state == "trailer":
++                if not line:
++                    self._done()
++                continue
++            try:
++                size = int(line.split(b";", 1)[0], 16)
++            except ValueError:
++                self._state = "stream"
++                return
++            if size == 0:
++                self._state = "trailer"
++            else:
++                self._state, self._left = "chunk-data", size
++
++    def _start_body(self, head: bytes) -> None:
++        lines = head.split(b"\r\n")
++        status = lines[0].split()
++        code = int(status[1]) if len(status) > 1 and status[1].isdigit() else 0
++        headers = {}
++        for line in lines[1:]:
++            name, _, value = line.partition(b":")
++            headers[name.strip().lower()] = value.strip().lower()
++        chunked = b"chunked" in headers.get(b"transfer-encoding", b"")
++        if 100 <= code < 200 and code != 101:
++            self._state = "head"  # an interim response; the final one follows
++        elif code == 101:
++            self._state = "stream"  # upgraded: ends with the connection
++        elif code in (204, 304):
++            self._done()
++        elif chunked:
++            self._state = "chunk-size"
++        elif b"content-length" in headers:
++            try:
++                self._left = int(headers[b"content-length"])
++            except ValueError:
++                self._state = "stream"
++                return
++            self._state = "length"
++            if not self._left:
++                self._done()
++        else:
++            self._state = "stream"  # read until the successor closes
++
++    def _done(self) -> None:
++        self._state = "head"
++        self.awaiting = False
++        self.answered += 1
++
++
++async def _pipe_watched(reader, writer, feed) -> None:
++    try:
++        while data := await reader.read(65536):
++            feed(data)
++            writer.write(data)
++            await writer.drain()
++        if writer.can_write_eof():
++            writer.write_eof()
++    except (OSError, RuntimeError):
++        pass
++
++
++# A relayed API connection accepted shortly before the port closed may still have its first request on the way.
++FIRST_REQUEST_S = 1.0
++
++
++async def relay_api_listener(sock: socket.socket, target: tuple[str, int], stop: asyncio.Event, *,
++                             connect_timeout: float, drain_seconds: float) -> tuple[int, int]:
++    """``gateway.restart_turn_handoff_per_turn``: accept on the API port's listening *sock* until *stop* is set and
++    relay each connection to the next gateway's API server at *target*. Then the port closes and each open
++    connection ends at its next point between two exchanges (at once when it is idle), so a request in flight gets
++    its whole answer; one still open after *drain_seconds* is cut. Returns ``(relayed, unrelayed)``."""
++    loop = asyncio.get_running_loop()
++    conns: dict[asyncio.Task, tuple[_HttpExchanges, float]] = {}
++    counts = [0, 0]
++
++    async def handle(reader, writer):
++        task = asyncio.current_task()
++        exchanges = _HttpExchanges()
++        conns[task] = (exchanges, loop.time())
++        try:
++            deadline = loop.time() + connect_timeout
++            while True:
++                try:
++                    upstream_reader, upstream_writer = await asyncio.wait_for(
++                        asyncio.open_connection(*target), CONNECT_ATTEMPT_TIMEOUT_S)
++                    break
++                except (OSError, TimeoutError):
++                    if loop.time() + CONNECT_RETRY_S >= deadline:
++                        counts[1] += 1
++                        return
++                    await asyncio.sleep(CONNECT_RETRY_S)
++            counts[0] += 1
++            try:
++                await asyncio.gather(_pipe_watched(reader, upstream_writer, exchanges.from_client),
++                                     _pipe_watched(upstream_reader, writer, exchanges.from_server))
++            finally:
++                upstream_writer.close()
++        except Exception:
++            logger.debug("API relay connection failed", exc_info=True)
++        finally:
++            conns.pop(task, None)
++            writer.close()
++
++    server = await asyncio.start_server(handle, sock=sock)
++    try:
++        await stop.wait()
++    finally:
++        server.close()
++        deadline = loop.time() + drain_seconds
++        while conns and loop.time() < deadline:
++            for task, (exchanges, opened) in list(conns.items()):
++                # Between two exchanges its client opens the next connection elsewhere. A connection that has
++                # not sent its first request yet may have it on the way: it gets FIRST_REQUEST_S to show it.
++                if exchanges.idle and (exchanges.answered or loop.time() - opened >= FIRST_REQUEST_S):
++                    task.cancel()
++            await asyncio.sleep(0.02)
++        pending = list(conns)
++        for task in pending:
++            task.cancel()
++        if pending:
++            await asyncio.gather(*pending, return_exceptions=True)
++    return counts[0], counts[1]
+diff --git a/gateway/run_agent_cache.py b/gateway/run_agent_cache.py
+index 71e6eb0a..0e08918c 100644
+--- a/gateway/run_agent_cache.py
++++ b/gateway/run_agent_cache.py
+@@ -300,7 +300,10 @@ class GatewayAgentCacheMixin:
+         would clobber it). Best-effort: a failed write must never disrupt a turn. The running-turn
+         set also feeds the day's peak of chats running at once (in memory, see shared_metrics_busy)."""
+         from gateway.run import _write_runtime_status_quiet
+-        _write_runtime_status_quiet(active_agents=self._active_work_count())
++        from gateway.status import active_agents_published
++        count = self._active_work_count()
++        if not active_agents_published(count):  # most calls (each tracked mutation's end) change nothing
++            _write_runtime_status_quiet(active_agents=count)
+         observe_running_chats(key for key, _ in self._running_agent_items())
+ 
+     def _release_running_agent_state(
+diff --git a/gateway/run_bootstrap.py b/gateway/run_bootstrap.py
+index 51fad2f7..ae01a8e8 100644
+--- a/gateway/run_bootstrap.py
++++ b/gateway/run_bootstrap.py
+@@ -543,6 +543,15 @@ async def _start_gateway_shutdown_tail(
+     except Exception:
+         logger.warning("MCP shutdown failed; connections may be left open", exc_info=True)
+ 
++    # gateway.restart_turn_handoff_per_turn: a carrier's API port relays to the next gateway up to here, so that
++    # clients still routed to it are served and the requests on it finish before the process ends.
++    _mark("tail: API relay")
++    from gateway import turn_carry
++    try:
++        await turn_carry.finish_api_relay(runner)
++    except Exception:
++        logger.warning("The carrier's API relay did not end cleanly", exc_info=True)
++
+     # The failure verdict comes AFTER the cooperative teardown: returning early here leaked the
+     # cron ticker + housekeeping threads (and open MCP connections) for embedded callers (#12175).
+     return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
+@@ -1352,6 +1361,11 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
+                 if getattr(runner, "_stop_task", None) is None and not getattr(runner, "_running", False):
+                     runner._startup_cleanup_only = True
+                 await runner.stop()
++                from gateway import turn_carry
++                try:
++                    await turn_carry.finish_api_relay(runner)  # when the shutdown tail did not run (it raised)
++                except Exception:
++                    logger.debug("The carrier's API relay did not end cleanly", exc_info=True)
+         finally:
+             if _planned_stop_watcher_stop is not None:
+                 _planned_stop_watcher_stop.set()
+diff --git a/gateway/session_local_inventory.py b/gateway/session_local_inventory.py
+index b1e8f66e..a4f0ed95 100644
+--- a/gateway/session_local_inventory.py
++++ b/gateway/session_local_inventory.py
+@@ -106,19 +106,13 @@ def _unknown_toolsets(enabled, config):
+ def _cli_skills():
+     """``hermes_cli.banner.get_available_skills`` as main's classic CLI computed it: ``cmd_chat`` pins
+     ``HERMES_KANBAN_BOARD`` before HermesCLI starts, so ``environments: [kanban]`` skills are offered.
+-    The owner never sets that env; the kanban relevance is scoped to this scan (a ContextVar) and the
+-    catalog cache entry it would poison is restored, so other surfaces keep their own view."""
++    The owner never sets that env; the kanban relevance is scoped to this scan (a ContextVar), which the
++    skill catalog caches apart from the other surfaces' view, so each session's inventory (every hub viewer
++    reconnecting after a restart asks for one) does not scan the skill trees again."""
+     from tools import skills_tool
+     from tools.kanban_toolset_context import scoped_kanban_toolset_selection
+-    key = ("filtered", False)
+-    saved = skills_tool._SKILLS_CACHE.pop(key, None)
+-    try:
+-        with scoped_kanban_toolset_selection(["kanban"]):
+-            found = skills_tool.find_all_skills()
+-    finally:
+-        skills_tool._SKILLS_CACHE.pop(key, None)
+-        if saved is not None:
+-            skills_tool._SKILLS_CACHE[key] = saved
++    with scoped_kanban_toolset_selection(["kanban"]):
++        found = skills_tool.find_all_skills()
+     grouped: dict[str, list[str]] = {}
+     for skill in found:
+         grouped.setdefault(skill.get("category") or "general", []).append(skill["name"])
+diff --git a/gateway/standby_warm.py b/gateway/standby_warm.py
+index 301fb6e7..8ddda45c 100644
+--- a/gateway/standby_warm.py
++++ b/gateway/standby_warm.py
+@@ -129,6 +129,27 @@ def _warm_skill_index() -> None:
+     _cli_skills()
+ 
+ 
++def _warm_contracts() -> None:
++    """Build the validators of the session socket's contract models (``defer_build``): the first resume or
++    create after the takeover checks its params and result against them, and building one on first use runs
++    pydantic's schema generation on the event loop while the takeover's API requests wait for it."""
++    from pydantic import BaseModel
++    from tui_gateway.contracts.registry import CANONICAL_METHODS, EVENTS, METHODS
++    models = []
++    for contract in [*CANONICAL_METHODS.values(), *METHODS.values(), *EVENTS.values()]:
++        for field in ("params", "result", "payload"):
++            model = getattr(contract, field, None)
++            if isinstance(model, type) and issubclass(model, BaseModel) and model not in models:
++                models.append(model)
++    for model in models:
++        if not getattr(model, "__pydantic_complete__", False) or type(
++                getattr(model, "__pydantic_validator__", None)).__name__ == "MockValSer":
++            try:
++                model.model_rebuild()
++            except Exception:
++                logger.debug("Standby warm build of %s failed", model.__name__, exc_info=True)
++
++
+ def warm_standby(home, config=None) -> dict:
+     """Everything a standby warms beyond the boot imports. Never raises. Under multiplex the turn
+     machinery is left to the boot, which warms it in the launch profile's scope."""
+@@ -141,7 +162,7 @@ def warm_standby(home, config=None) -> dict:
+         result.update(imported=imported, failed=failed)
+     except Exception:
+         logger.debug("Standby warm imports failed", exc_info=True)
+-    steps = [_warm_config, _warm_openai_client, _warm_skill_index]
++    steps = [_warm_config, _warm_openai_client, _warm_skill_index, _warm_contracts]
+     if not getattr(config, "multiplex_profiles", False):
+         steps.append(_warm_turn_machinery)
+     for step in steps:
+diff --git a/gateway/status.py b/gateway/status.py
+index 9e179024..74916b36 100644
+--- a/gateway/status.py
++++ b/gateway/status.py
+@@ -1244,6 +1244,20 @@ def runtime_status_pid_is_live(record: Optional[dict[str, Any]]) -> bool:
+     return _live_pid_from_record(record) is not None
+ 
+ 
++def active_agents_published(raw: Any) -> bool:
++    """True when this process's status snapshot (for the current profile's file) already holds *raw* as its
++    ``active_agents``: a turn-boundary publish of the same count would only deep-copy the snapshot, rebuild its
++    PID record and queue an identical file write, on the event loop, once per tracked mutation."""
++    try:
++        path = _get_runtime_status_path()
++    except Exception:
++        return False
++    with _runtime_status_state_lock:
++        state = _runtime_status_state
++        return (state is not None and _runtime_status_state_path == path
++                and state.get("active_agents") == parse_active_agents(raw))
++
++
+ def parse_active_agents(raw: Any) -> int:
+     """Coerce ``active_agents`` to a non-negative int; shared by writer and both HTTP readers."""
+     try:
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index fb455b3b..4dc91d30 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -199,6 +199,8 @@ class _Carry:
+         self.control_offset = 0
+         self.lock_fd = None
+         self.api_relay = None
++        self.api_stop = asyncio.Event()  # set when the API port may close (finish_api_relay)
++        self.unready_at = None  # monotonic: the listener relay ended, so this pod's readiness fails from here
+         # Set once the background processes went to the next gateway; until then the device connections they and
+         # the carried turns' foreground commands use stay open here.
+         self.processes_handed = asyncio.Event()
+@@ -573,6 +575,11 @@ async def _release(carry) -> None:
+             _ready_probe(runner)
+         await GatewayShutdownMixin._stop_end_listener_reads(runner, ctx)
+         runner._carry_listener_task = asyncio.ensure_future(runner.stop_handover_listener(relay_to))
++        # The listener stops accepting (its health probe too) when its relay window ends, at once without one;
++        # the pod is unready from then, while the connections it kept may still run.
++        window = float(getattr(getattr(runner, "config", None), "restart_listener_relay_seconds", 0) or 0)
++        _mark_unready(carry, time.monotonic() + (window if relay_to is not None else 0.0))
++        runner._carry_listener_task.add_done_callback(lambda _t, _c=carry: _mark_unready(_c))
+ 
+ 
+ def _successor_listener(runner) -> tuple[str, int] | None:
+@@ -742,10 +749,10 @@ async def _stop_api_listening(runner, carry) -> None:
+     except Exception:
+         logger.warning("API server did not stop accepting before the carry", exc_info=True)
+     if sock is not None:
+-        from gateway.listener_relay import relay_listener
++        from gateway.listener_relay import relay_api_listener
+         sock.setblocking(False)
+-        carry.api_relay = asyncio.ensure_future(relay_listener(sock, _api_target, ceiling_seconds(runner),
+-                                                               connect_timeout=API_FORWARD_CONNECT_S))
++        carry.api_relay = asyncio.ensure_future(relay_api_listener(
++            sock, _api_target, carry.api_stop, connect_timeout=API_FORWARD_CONNECT_S, drain_seconds=API_DRAIN_S))
+         logger.info("API port relays new connections to the next gateway at %s:%d", *_api_target)
+ 
+ 
+@@ -756,6 +763,11 @@ _carrying = False
+ API_RELEASE_WAIT_S = 30.0
+ # How long a forwarded API request waits for the next gateway's API server to listen.
+ API_FORWARD_CONNECT_S = 30.0
++# The API port closes this long after the listener relay ended (the pod's readiness fails from there): two failed
++# probes a second apart and the endpoint update, with room to spare (finish_api_relay).
++API_ENDPOINTS_MARGIN_S = 10.0
++# Then each relayed request in flight gets up to this long to finish (the relay timeouts are 30 s).
++API_DRAIN_S = 30.0
+ _HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
+                           "transfer-encoding", "upgrade", "host", "content-length"})
+ 
+@@ -898,9 +910,46 @@ async def _carry_turns(carry) -> None:
+             await listener
+         except Exception:
+             logger.debug("Listener relay ended with an error", exc_info=True)
+-    if carry.api_relay is not None:
+-        carry.api_relay.cancel()
+-        await asyncio.gather(carry.api_relay, return_exceptions=True)
++    # The API port relays on through the stop, up to the end of the process (finish_api_relay).
++    _mark_unready(carry)
++
++
++def _mark_unready(carry, at: float | None = None) -> None:
++    """From *at* (monotonic, default now) on, this pod's readiness probe fails: the earliest time given wins."""
++    at = time.monotonic() if at is None else at
++    if carry.unready_at is None or at < carry.unready_at:
++        carry.unready_at = at
++
++
++async def finish_api_relay(runner) -> None:
++    """The last step of a carrier's process (``gateway.restart_turn_handoff_per_turn``): close the API port that
++    relays to the next gateway and let the requests in flight on it finish (``listener_relay.relay_api_listener``).
++
++    Not before :data:`API_ENDPOINTS_MARGIN_S` past the moment the listener stopped accepting (the end of its relay
++    window): the pod's readiness probe on the listener fails from then, and a load balancer (the Service) stops
++    sending it new connections only a probe period or two and an endpoint update later. Clients in this process's
++    container (a tool's ``curl``, a ``kubectl exec``) reach the port up to here and end with it; where the gateway
++    is the pod's sidecar, the other containers stopped before it exits, so no client in the pod outlives the port."""
++    carry = getattr(runner, "_turn_carry", None)
++    relay = getattr(carry, "api_relay", None)
++    if not isinstance(relay, asyncio.Future):
++        return
++    carry.api_relay = None
++    if not relay.done():
++        since = carry.unready_at if carry.unready_at is not None else time.monotonic()
++        wait = since + API_ENDPOINTS_MARGIN_S - time.monotonic()
++        if wait > 0:
++            logger.info("API port relays %.0fs more before it closes (the Service may still route here)", wait)
++            await asyncio.sleep(wait)
++        carry.api_stop.set()
++    try:
++        relayed, unrelayed = await asyncio.wait_for(asyncio.shield(relay), API_DRAIN_S + 5.0)
++        logger.info("API port closed: it relayed %d connection(s) to the next gateway (%d not reached)",
++                    relayed, unrelayed)
++    except Exception:
++        relay.cancel()
++        await asyncio.gather(relay, return_exceptions=True)
++        logger.debug("API relay ended with an error", exc_info=True)
+ 
+ 
+ def _end_kept_sockets(runner, now: bool = False) -> None:
+diff --git a/hermes_logging.py b/hermes_logging.py
+index 7a9c6970..bdeebe9d 100644
+--- a/hermes_logging.py
++++ b/hermes_logging.py
+@@ -537,6 +537,14 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
+         elif (st.st_dev, st.st_ino) != (self._stat_dev, self._stat_ino):
+             self._reopen_stream(st)
+ 
++    def format(self, record: logging.LogRecord) -> str:
++        emitting = getattr(self, "_emitting", None)
++        if emitting is None or emitting[0] is not record:
++            return super().format(record)
++        if emitting[1] is None:
++            self._emitting = (record, super().format(record))
++        return self._emitting[1]
++
+     def emit(self, record: logging.LogRecord) -> None:
+         self.skipped_missing_dir = False
+         # Under this handler's own lock (Handler.handle), which close() also takes: a record that
+@@ -556,7 +564,13 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
+                 and not os.path.isdir(os.path.dirname(self.baseFilename))):
+             self.skipped_missing_dir = True
+             return
+-        super().emit(record)
++        # BaseRotatingHandler.emit formats the record twice (shouldRollover measures it, then the write);
++        # with the redacting formatter that is twice the regex work per line. One emit formats it once.
++        self._emitting = (record, None)
++        try:
++            super().emit(record)
++        finally:
++            self._emitting = None
+         # A record actually reached the file: only now has the destination recovered. Resetting
+         # in _open() is wrong — open() succeeds on a device whose write/flush still raise EIO,
+         # which re-armed the report and printed the path once per record.
+diff --git a/tests/gateway/test_restart_carry_api_drain.py b/tests/gateway/test_restart_carry_api_drain.py
+new file mode 100644
+index 00000000..1cc49945
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_api_drain.py
+@@ -0,0 +1,272 @@
++"""gateway.restart_turn_handoff_per_turn: the old gateway's API port relays to the next gateway up to the end of its
++process, closes only a margin after its pod went unready, and lets the requests in flight on it finish.
++
++Before, the relay was cancelled as soon as the last carried turn ended: the process went on through its stop for
++seconds with the port closed (a client in the pod got ``Connection refused``), and a relayed request still in flight
++was cut (``RemoteDisconnected``)."""
++import asyncio
++import socket
++import time
++from types import SimpleNamespace
++
++import pytest
++from aiohttp import web
++
++from gateway import listener_relay, turn_boundary, turn_carry
++from gateway.config import Platform
++from gateway.listener_relay import _HttpExchanges, relay_api_listener
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++
++async def _next_api(delay=0.0):
++    """The next gateway's API server: POST /v1/chat/completions answers after *delay* seconds."""
++    async def completions(request):
++        await request.read()
++        await asyncio.sleep(delay)
++        return web.json_response({"answer": "from the next gateway", "pad": "x" * 2000})
++
++    app = web.Application()
++    app.router.add_post("/v1/chat/completions", completions)
++    runner = web.AppRunner(app)
++    await runner.setup()
++    site = web.TCPSite(runner, "127.0.0.1", 0)
++    await site.start()
++    return runner, ("127.0.0.1", site._server.sockets[0].getsockname()[1])
++
++
++async def _old_api():
++    """The old gateway's API server and an adapter that names it, as ``_stop_api_listening`` reads it."""
++    app = web.Application()
++    runner = web.AppRunner(app)
++    await runner.setup()
++    site = web.TCPSite(runner, "127.0.0.1", 0)
++    await site.start()
++    port = site._server.sockets[0].getsockname()[1]
++    adapter = SimpleNamespace(_site=site, _port=port, _host="127.0.0.1")
++    return runner, adapter, port
++
++
++def _request(body=b'{"messages": []}', keep_alive=False) -> bytes:
++    return (b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
++            + (b"" if keep_alive else b"Connection: close\r\n")
++            + b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
++
++
++async def _post(port, timeout=10.0):
++    """One request on a new connection, as urllib sends it: (status line, whole response) or the error."""
++    reader, writer = await asyncio.open_connection("127.0.0.1", port)
++    try:
++        writer.write(_request())
++        await writer.drain()
++        data = await asyncio.wait_for(reader.read(), timeout)
++        return data
++    finally:
++        writer.close()
++
++
++def _complete(response: bytes) -> bool:
++    head, _, body = response.partition(b"\r\n\r\n")
++    if not head.startswith(b"HTTP/1.1 200"):
++        return False
++    length = next(int(line.split(b":")[1]) for line in head.split(b"\r\n") if line.lower().startswith(b"content-length"))
++    return len(body) == length
++
++
++def _refused(port) -> bool:
++    try:
++        socket.create_connection(("127.0.0.1", port), timeout=1).close()
++    except ConnectionRefusedError:
++        return True
++    return False
++
++
++def _carrier(adapter):
++    runner = SimpleNamespace(adapters={Platform.API_SERVER: adapter}, _carry_listener_task=None)
++    carry = SimpleNamespace(runner=runner, api_relay=None, api_stop=asyncio.Event(), unready_at=None, turns={},
++                            done=set(), started=time.monotonic(), processes_handed=asyncio.Event())
++    runner._turn_carry = carry
++    return runner, carry
++
++
++async def _carry_turns_with_nothing_left(monkeypatch, carry):
++    async def noop(*_a, **_k):
++        return None
++    monkeypatch.setattr(turn_carry, "_apply_controls", noop)
++    monkeypatch.setattr(turn_carry, "_hand_off_processes_when_idle", noop)
++    monkeypatch.setattr(turn_carry, "_end_kept_sockets", lambda *_a, **_k: None)
++    monkeypatch.setattr(turn_carry, "_cron_runs", lambda runner: 0)
++    monkeypatch.setattr(turn_carry, "_api_live", lambda runner: 0)
++    monkeypatch.setattr(turn_boundary, "_turns", lambda runner: [])
++    await asyncio.wait_for(turn_carry._carry_turns(carry), 5)
++
++
++# --- the carrier's API port --------------------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_the_api_port_relays_past_the_end_of_the_carry_and_closes_after_the_margin(monkeypatch):
++    next_runner, target = await _next_api(delay=0.2)
++    old_runner, adapter, port = await _old_api()
++    monkeypatch.setattr(listener_relay, "successor_api_target", lambda marker: target)
++    monkeypatch.setattr(turn_carry, "API_ENDPOINTS_MARGIN_S", 0.6)
++    runner, carry = _carrier(adapter)
++    try:
++        await turn_carry._stop_api_listening(runner, carry)
++        assert _complete(await _post(port))
++        await _carry_turns_with_nothing_left(monkeypatch, carry)
++        # The last carried turn ended; the process goes on through its stop, and the port still relays.
++        assert _complete(await _post(port))
++        started = time.monotonic()
++        finish = asyncio.ensure_future(turn_carry.finish_api_relay(runner))
++        await asyncio.sleep(0.3)
++        assert not finish.done() and _complete(await _post(port))  # within the margin: the Service may route here
++        await asyncio.wait_for(finish, 10)
++        assert carry.unready_at is not None and carry.unready_at <= started
++        assert time.monotonic() - carry.unready_at >= 0.6  # the margin counts from the end of the listener relay
++        assert _refused(port)
++    finally:
++        await old_runner.cleanup()
++        await next_runner.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_a_request_in_flight_when_the_port_closes_gets_its_whole_answer(monkeypatch):
++    next_runner, target = await _next_api(delay=1.5)
++    old_runner, adapter, port = await _old_api()
++    monkeypatch.setattr(listener_relay, "successor_api_target", lambda marker: target)
++    monkeypatch.setattr(turn_carry, "API_ENDPOINTS_MARGIN_S", 0.0)
++    runner, carry = _carrier(adapter)
++    try:
++        await turn_carry._stop_api_listening(runner, carry)
++        in_flight = asyncio.ensure_future(_post(port))
++        await asyncio.sleep(0.3)
++        carry.unready_at = time.monotonic()
++        await asyncio.wait_for(turn_carry.finish_api_relay(runner), 10)
++        assert _complete(await asyncio.wait_for(in_flight, 5))
++        assert _refused(port)
++    finally:
++        await old_runner.cleanup()
++        await next_runner.cleanup()
++
++
++# --- the relay itself --------------------------------------------------------------------------------------------
++
++
++def _listening():
++    sock = socket.socket()
++    sock.bind(("127.0.0.1", 0))
++    sock.listen(16)
++    sock.setblocking(False)
++    return sock
++
++
++@pytest.mark.asyncio
++async def test_an_idle_kept_alive_connection_closes_at_once_and_a_busy_one_after_its_answer():
++    next_runner, target = await _next_api(delay=1.0)
++    sock = _listening()
++    port = sock.getsockname()[1]
++    stop = asyncio.Event()
++    loop = asyncio.get_running_loop()
++    relay = asyncio.ensure_future(relay_api_listener(sock, target, stop, connect_timeout=5, drain_seconds=10))
++    try:
++        idle_reader, idle_writer = await asyncio.open_connection("127.0.0.1", port)
++        idle_writer.write(_request(keep_alive=True))
++        head = await asyncio.wait_for(idle_reader.readuntil(b"\r\n\r\n"), 5)
++        length = next(int(l.split(b":")[1]) for l in head.split(b"\r\n") if l.lower().startswith(b"content-length"))
++        await idle_reader.readexactly(length)  # answered; the connection stays open between two requests
++        busy = asyncio.ensure_future(_post(port))
++        await asyncio.sleep(0.3)
++        stop.set()
++        closed_at = loop.time()
++        assert await asyncio.wait_for(idle_reader.read(), 2) == b""
++        assert loop.time() - closed_at < 0.5
++        assert _complete(await asyncio.wait_for(busy, 5))
++        assert await asyncio.wait_for(relay, 5) == (2, 0)
++        idle_writer.close()
++    finally:
++        relay.cancel()
++        await next_runner.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_a_connection_still_busy_after_the_drain_is_cut():
++    next_runner, target = await _next_api(delay=5.0)
++    sock = _listening()
++    port = sock.getsockname()[1]
++    stop = asyncio.Event()
++    relay = asyncio.ensure_future(relay_api_listener(sock, target, stop, connect_timeout=5, drain_seconds=0.3))
++    try:
++        slow = asyncio.ensure_future(_post(port))
++        await asyncio.sleep(0.2)
++        stop.set()
++        await asyncio.wait_for(relay, 3)
++        assert not _complete(await asyncio.wait_for(slow, 3))
++    finally:
++        await next_runner.cleanup()
++
++
++def test_exchanges_tell_when_a_connection_sits_between_two_answers():
++    ex = _HttpExchanges()
++    assert ex.idle
++    ex.from_client(b"POST /v1/chat/completions HTTP/1.1\r\n")
++    assert not ex.idle
++    ex.from_server(b"HTTP/1.1 100 Continue\r\n\r\n")
++    assert not ex.idle  # an interim answer
++    ex.from_server(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/event-stream\r\n\r\n5\r\nda")
++    ex.from_client(b"")
++    assert not ex.idle
++    ex.from_server(b"ta:\r\n")
++    ex.from_server(b"a;x=1\r\n0123456789\r\n0\r\n")
++    assert not ex.idle  # the last chunk's trailer is still open
++    ex.from_server(b"\r\n")
++    assert ex.idle and ex.answered == 1
++    ex.from_client(b"GET / HTTP/1.1\r\n\r\n")
++    ex.from_server(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nab")
++    assert not ex.idle
++    ex.from_server(b"c")
++    assert ex.idle and ex.answered == 2
++    ex.from_client(b"DELETE /x HTTP/1.1\r\n\r\n")
++    ex.from_server(b"HTTP/1.1 204 No Content\r\n\r\n")
++    assert ex.idle
++    ex.from_client(b"GET /x HTTP/1.1\r\n\r\n")
++    ex.from_server(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil the end")
++    assert not ex.idle  # no length: it ends with the connection
++    upgraded = _HttpExchanges()
++    upgraded.from_client(b"GET /ws HTTP/1.1\r\n\r\n")
++    upgraded.from_server(b"HTTP/1.1 101 Switching Protocols\r\nContent-Length: 0\r\n\r\n")
++    assert not upgraded.idle
++
++
++# --- the process tail --------------------------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_the_shutdown_tail_closes_the_api_relay_last(monkeypatch):
++    import threading
++    import gateway.run as gateway_run
++    from gateway import run_bootstrap
++    calls = []
++
++    async def finish(runner):
++        calls.append(("finish_api_relay", runner))
++
++    async def mcp(**_k):
++        calls.append(("mcp",))
++    monkeypatch.setattr(turn_carry, "finish_api_relay", finish)
++    monkeypatch.setattr(gateway_run, "_shutdown_mcp_servers_nonblocking", mcp)
++    monkeypatch.setattr(gateway_run, "_resolve_gateway_exit_verdict", lambda runner, sig: True)
++    monkeypatch.setattr(gateway_run, "_stop_cron_provider", lambda provider: None)
++    done = threading.Thread(target=lambda: None)
++    done.start()
++    done.join()
++    runner = SimpleNamespace(config=None)
++    assert await run_bootstrap._start_gateway_shutdown_tail(runner, None, threading.Event(), None, done, done,
++                                                            threading.Event(), done, [False]) is True
++    assert calls == [("mcp",), ("finish_api_relay", runner)]
+diff --git a/tests/gateway/test_restart_takeover_load.py b/tests/gateway/test_restart_takeover_load.py
+new file mode 100644
+index 00000000..b9d3ef7d
+--- /dev/null
++++ b/tests/gateway/test_restart_takeover_load.py
+@@ -0,0 +1,120 @@
++"""Per-request and per-reconnect work that made API answers slow on a gateway right after a takeover, when it
++serves its own API clients, the old pod's relayed ones and the hub's reconnecting viewers at once:
++
++- every tracked mutation's end re-published the in-flight count on the event loop (a deep copy of the status
++  snapshot, a PID record and a file write) even when the count had not changed;
++- each CLI session's inventory (one per viewer that reconnects) scanned the skill trees again: the scan bypassed
++  the skill catalog cache to keep its Kanban view apart;
++- the log file handler formatted (and redacted) every record twice."""
++import logging
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import status
++
++
++@pytest.fixture(autouse=True)
++def _home(tmp_path, monkeypatch):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(status, "_runtime_status_state", None)
++    monkeypatch.setattr(status, "_runtime_status_state_path", None)
++    return tmp_path
++
++
++def test_an_unchanged_in_flight_count_is_not_published_again(monkeypatch):
++    import gateway.run as gateway_run
++    from gateway.run_agent_cache import GatewayAgentCacheMixin
++    published = []
++    real = gateway_run._write_runtime_status_quiet
++
++    def write(**fields):
++        published.append(fields)
++        real(**fields)
++    monkeypatch.setattr(gateway_run, "_write_runtime_status_quiet", write)
++    running = []
++    runner = SimpleNamespace(_active_work_count=lambda: len(running),
++                             _running_agent_items=lambda: [(key, object()) for key in running])
++    persist = lambda: GatewayAgentCacheMixin._persist_active_agents(runner)  # noqa: E731
++    running.append("a")
++    persist()
++    for _ in range(20):  # each tracked mutation's end
++        persist()
++    running.append("b")
++    persist()
++    persist()
++    running.clear()
++    persist()
++    assert published == [{"active_agents": 1}, {"active_agents": 2}, {"active_agents": 0}]
++    assert status._runtime_status_state["active_agents"] == 0
++
++
++def test_another_writer_s_count_is_published_over(monkeypatch):
++    status.publish_runtime_status(active_agents=3)
++    assert status.active_agents_published(3) and not status.active_agents_published(2)
++    status.publish_runtime_status(gateway_state="running")
++    assert status.active_agents_published(3)
++
++
++def _skills(home):
++    for name, extra in (("arxiv", ""), ("sdlc-review", "environments:\n  - kanban\n")):
++        skill = home / "skills" / "devops" / name
++        skill.mkdir(parents=True)
++        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d.\n{extra}---\nBody.\n")
++
++
++def test_each_cli_inventory_reuses_the_skill_catalog_and_keeps_its_kanban_view(_home, monkeypatch):
++    import agent.skill_utils as skill_utils
++    from gateway.session_local_inventory import _cli_skills
++    from tools import skills_tool
++    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
++    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
++    monkeypatch.setattr(skills_tool, "_SKILLS_CACHE", {})
++    _skills(_home)
++    scans = []
++    real = skill_utils.resolve_skill_catalog
++
++    def resolve(scanned):
++        scans.append(len(scanned))
++        return real(scanned)
++    monkeypatch.setattr(skill_utils, "resolve_skill_catalog", resolve)
++    for _ in range(5):  # five viewers reconnect after a takeover
++        assert sorted(_cli_skills()["devops"]) == ["arxiv", "sdlc-review"]
++    assert len(scans) == 1
++    assert [s["name"] for s in skills_tool.find_all_skills()] == ["arxiv"]  # the other surfaces' own view
++    assert sorted(_cli_skills()["devops"]) == ["arxiv", "sdlc-review"]
++    assert [s["name"] for s in skills_tool.find_all_skills()] == ["arxiv"]
++    assert len(scans) == 2
++
++
++def test_the_log_file_handler_formats_each_record_once(tmp_path):
++    from hermes_logging import _ManagedRotatingFileHandler
++    calls = []
++
++    class Counting(logging.Formatter):
++        def format(self, record):
++            calls.append(record.getMessage())
++            return super().format(record)
++    handler = _ManagedRotatingFileHandler(str(tmp_path / "x.log"), maxBytes=1 << 20, backupCount=1)
++    handler.setFormatter(Counting("%(message)s"))
++    try:
++        for n in range(3):
++            handler.handle(logging.LogRecord("t", logging.INFO, __file__, 1, f"line {n}", None, None))
++    finally:
++        handler.close()
++    assert calls == ["line 0", "line 1", "line 2"]
++    assert (tmp_path / "x.log").read_text() == "line 0\nline 1\nline 2\n"
++
++
++def test_the_standby_builds_the_session_socket_contracts_before_the_lock(_home, monkeypatch):
++    """The first resume after a takeover validated its params and result against contract models whose validators
++    pydantic builds on first use (``defer_build``): schema generation on the event loop, while API requests wait."""
++    from gateway import standby_warm
++    from tui_gateway.contracts.registry import CANONICAL_METHODS
++    steps = []
++    for name in ("_warm_config", "_warm_openai_client", "_warm_skill_index", "_warm_turn_machinery"):
++        monkeypatch.setattr(standby_warm, name, lambda _n=name: steps.append(_n))
++    standby_warm.warm_standby(_home)
++    for method in ("session.resume", "session.create", "session.list"):
++        for model in (CANONICAL_METHODS[method].params, CANONICAL_METHODS[method].result):
++            assert model.__pydantic_complete__ and type(model.__pydantic_validator__).__name__ == "SchemaValidator"
+diff --git a/tools/skills_tool.py b/tools/skills_tool.py
+index 5188dcfe..27a319d7 100644
+--- a/tools/skills_tool.py
++++ b/tools/skills_tool.py
+@@ -235,7 +235,9 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
+     collecting candidates, so it asks for hidden rows too."""
+     from agent.skill_utils import (
+         TIER_PROJECT, is_disabled_entry, iter_project_skill_files, iter_skill_index_files, resolve_skill_catalog)
+-    cache_key = ("with_disabled" if skip_disabled else "filtered", include_hidden)
++    from tools.kanban_toolset_context import kanban_toolset_requested
++    # ``environments: [kanban]`` skills are visible only while a scan names Kanban (the CLI's view): its own entry.
++    cache_key = ("with_disabled" if skip_disabled else "filtered", include_hidden, kanban_toolset_requested())
+     disabled = set() if skip_disabled else _get_disabled_skill_names()
+     roots, _ = skill_search_dirs()
+     signature = _skills_scan_signature([d for _t, d in roots], disabled)
