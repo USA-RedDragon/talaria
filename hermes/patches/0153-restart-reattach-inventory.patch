@@ -1,0 +1,378 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 19:38:15 -0600
+Subject: [PATCH] fix(gateway): a takeover's re-attach burst builds each
+ session's banner inventory sections once per profile
+
+When the hub's socket moves to the gateway that took over (gateway.restart_turn_handoff_per_turn closes the kept socket with 1012 once the next gateway is ready), the hub re-attaches every chat it watches, one after the other: session.events.since, session.resume and config.set each. Every session.resume built the session's banner inventory again (snapshot_info: the git branch and project of its folder, the tool snapshot of its policy, the availability of its toolsets, the skills, the MCP servers, the CLI notices), though the chats of one profile share those sections. On a CPU-starved gateway (0.5 CPU) that was most of each resume (0.1 to 0.4 s): a streaming reply that the hub re-attached late paused for seconds (4.1 to 4.5 s with it last of eight chats), and the API turns running at that moment waited for the CPU (up to 2 s over their median).
+
+The profile-wide sections are now reused for INVENTORY_REUSE_S (10 s) once built, keyed by what each depends on (the folder, the frozen policy without the session's own secret reference, the toolset list) and per profile (session_local_inventory._section, under reused_session_inventory). The sections only a session's own agent knows (its tools, provider, system prompt, context length) are read each time. Callers of one key at once wait for the one build; each gets its own copy. session.info, which a client sends to see the inventory of now, builds every section anew.
+---
+ gateway/session_controls.py                  |   2 +-
+ gateway/session_local_inventory.py           | 128 ++++++++++++++--
+ tests/gateway/test_restart_reattach_burst.py | 149 +++++++++++++++++++
+ 3 files changed, 265 insertions(+), 14 deletions(-)
+ create mode 100644 tests/gateway/test_restart_reattach_burst.py
+
+diff --git a/gateway/session_controls.py b/gateway/session_controls.py
+index 8e9c9a51..b5123b4a 100644
+--- a/gateway/session_controls.py
++++ b/gateway/session_controls.py
+@@ -592,7 +592,7 @@ class AuthorityConnection:
+         if set(params) != {'session_id'}:
+             raise RuntimeStoreError('invalid_params')
+         await self.authority.resolve(self.actor, ref)
+-        return await snapshot_info(self.authority, ref)
++        return await snapshot_info(self.authority, ref, reuse=False)  # asked for: the inventory of now
+ 
+     async def list_sessions(self, ref, params):
+         if 'session:read' not in self.actor.capabilities:
+diff --git a/gateway/session_local_inventory.py b/gateway/session_local_inventory.py
+index a4f0ed95..2ad9fd4f 100644
+--- a/gateway/session_local_inventory.py
++++ b/gateway/session_local_inventory.py
+@@ -13,7 +13,14 @@ from __future__ import annotations
+ 
+ import asyncio
+ import contextlib
++import contextvars
++import copy
++import dataclasses
++import hashlib
++import json
+ import logging
++import threading
++import time
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -125,16 +132,92 @@ def _session_provider(view, config=None):
+                                      getattr(view, "base_url", None), getattr(view, "model", None), config=config)
+ 
+ 
++#: The banner sections every session of a profile shares (its git branch and project by folder, the tool
++#: snapshot of a policy, the availability of a toolset list, the skills, MCP servers and notices) are reused
++#: for this long once built. The hub re-attaches every chat it watches one after the other when its socket
++#: moves to the gateway that took over (a ``session.resume`` each), and each resume built them all again: on a
++#: busy node that was most of each resume, the chats behind it waited (a streaming reply among them paused for
++#: seconds) and the API turns of that moment waited for the CPU. ``session.info`` builds them anew.
++INVENTORY_REUSE_S = 10.0
++_REUSE_MAX = 512
++_reused: dict = {}
++_reuse_locks: dict = {}
++_reuse_guard = threading.Lock()
++_reuse_window = contextvars.ContextVar("inventory_reuse_s", default=0.0)
++
++
++def _policy_key(policy):
++    """The frozen policy as a key, without the session's own reference to its secrets (the inventory reads
++    ``policy.config(secrets=False)``), so sessions alike but for it share; None when it cannot be one."""
++    if policy is None:
++        return None
++    try:
++        if getattr(policy, "config_secret_ref", None) is not None:
++            policy = dataclasses.replace(policy, config_secret_ref=None)
++        hash(policy)
++    except (TypeError, ValueError):
++        return False
++    return policy
++
++
++def _config_key(config):
++    """What a section read of the session's resolved config: a config edit builds it anew."""
++    try:
++        return hashlib.sha1(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest()
++    except (TypeError, ValueError):
++        return False
++
++
++def _section(authority, name, key, build):
++    """``build()``, or a copy of what it returned for the same profile, *name* and *key* within the reuse
++    window of this call (none outside :func:`reused_session_inventory`). Callers of one key wait for one build."""
++    window = _reuse_window.get()
++    if window <= 0 or key is False or (isinstance(key, tuple) and any(part is False for part in key)):
++        return build()
++    full = (id(authority), getattr(authority, "profile_id", None), name, key)
++    try:
++        hash(full)
++    except TypeError:
++        return build()
++    with _reuse_guard:
++        lock = _reuse_locks.setdefault(full, threading.Lock())
++    with lock:
++        hit = _reused.get(full)
++        if hit is not None and time.monotonic() - hit[0] < window:
++            return copy.deepcopy(hit[1])
++        value = build()
++        with _reuse_guard:
++            if len(_reused) >= _REUSE_MAX:
++                now = time.monotonic()
++                stale = [k for k, (t, _) in _reused.items() if now - t >= window] or list(_reused)[: _REUSE_MAX // 2]
++                for k in stale:
++                    _reused.pop(k, None)
++                    if k != full:
++                        _reuse_locks.pop(k, None)
++            _reused[full] = (time.monotonic(), value)
++        return copy.deepcopy(value)
++
++
++def forget_reused_inventories() -> None:
++    """Drop every reused section (tests; a change the next resume must show at once)."""
++    with _reuse_guard:
++        _reused.clear()
++        _reuse_locks.clear()
++
++
+ def session_inventory(authority, policy, agent, cwd):
+     """Main's banner/status fields for one session. Each section degrades to main's empty value on
+     its own, so one failing builder never blanks the others (main wrapped each in ``suppress``)."""
+     from gateway.session_authorities import owner_scope
+     from tui_gateway import git_probe
++    pkey = _policy_key(policy)
+     info: dict = {"tools": {}, "skills": {}, "mcp_servers": [], "version": "", "release_date": "",
+                   "update_behind": None, "update_command": "",
+-                  "branch": git_probe.branch(cwd) if cwd else "", "project": _project(cwd)}
++                  "branch": _section(authority, "branch", cwd, lambda: git_probe.branch(cwd)) if cwd else "",
++                  "project": _section(authority, "project", cwd, lambda: _project(cwd))}
+     with owner_scope(authority):
+         config = policy.config(authority, secrets=False) if policy is not None else {}
++        ckey = _config_key(config) if _reuse_window.get() > 0 else None
+         if agent is not None:
+             from agent.voice_turn_route import session_runtime_view
+             info["provider"] = _session_provider(session_runtime_view(agent), config if policy is not None else None)
+@@ -149,26 +232,30 @@ def session_inventory(authority, policy, agent, cwd):
+             enabled = []
+             if policy is not None:
+                 try:
+-                    enabled, tools = _policy_tools(policy, config)
+-                    info["tools"] = _grouped(tools)
++                    enabled, grouped = _section(authority, "policy_tools", (pkey, ckey), lambda: (
++                        lambda pair: (pair[0], _grouped(pair[1])))(_policy_tools(policy, config)))
++                    info["tools"] = grouped
+                 except Exception:  # health: allow BLE001 -- main's suppress: the banner shows no tools, not an error
+                     logger.warning("session inventory: tool snapshot failed", exc_info=True)
+         info["enabled_toolsets"] = sorted(enabled)
++        toolsets = tuple(enabled)
+         with contextlib.suppress(Exception):
+             # The classic CLI banner colours lazy (yellow) / disabled (red) tools from this.
+             from hermes_cli.banner import compute_toolset_availability
+-            info["tool_availability"] = compute_toolset_availability(enabled)
++            info["tool_availability"] = _section(authority, "availability", (ckey, toolsets),
++                                                 lambda: compute_toolset_availability(enabled))
+         if policy is not None and policy.source == "cli":
+-            info.update(_cli_startup_notices(enabled), unknown_toolsets=_unknown_toolsets(enabled, config))
++            info.update(_section(authority, "cli_notices", (pkey, ckey, toolsets), lambda: {
++                **_cli_startup_notices(enabled), "unknown_toolsets": _unknown_toolsets(enabled, config)}))
+         with contextlib.suppress(Exception):
+             if policy is not None and policy.source == "cli":
+-                info["skills"] = _cli_skills()
++                info["skills"] = _section(authority, "cli_skills", ckey, _cli_skills)
+             else:
+                 from hermes_cli.banner import get_available_skills
+-                info["skills"] = get_available_skills()
++                info["skills"] = _section(authority, "skills", ckey, get_available_skills)
+         with contextlib.suppress(Exception):
+             from tools.mcp_tool_discovery import get_mcp_status
+-            info["mcp_servers"] = get_mcp_status()
++            info["mcp_servers"] = _section(authority, "mcp", ckey, get_mcp_status)
+     with contextlib.suppress(Exception):
+         from hermes_cli import __release_date__
+         from hermes_cli.version_info import get_version_info
+@@ -183,19 +270,34 @@ def session_inventory(authority, policy, agent, cwd):
+     return info
+ 
+ 
+-async def snapshot_info(authority, ref):
+-    """``local_session_info`` plus main's inventory, the builders run off the owner loop."""
++def reused_session_inventory(authority, policy, agent, cwd, *, reuse_s=None):
++    """:func:`session_inventory` whose profile-wide sections built within *reuse_s* seconds
++    (:data:`INVENTORY_REUSE_S`) stand; the agent's own sections are read each time."""
++    token = _reuse_window.set(INVENTORY_REUSE_S if reuse_s is None else reuse_s)
++    try:
++        return session_inventory(authority, policy, agent, cwd)
++    finally:
++        _reuse_window.reset(token)
++
++
++async def snapshot_info(authority, ref, *, reuse=True):
++    """``local_session_info`` plus main's inventory, the builders run off the owner loop. *reuse*: the profile-wide
++    sections built moments ago stand (``reused_session_inventory``); ``session.info`` builds them anew."""
+     from gateway.session_local import local_session_info
+     from gateway.session_policy import policy_for_source
+     info = local_session_info(authority, ref)
+     policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
+     agent = authority.agent(ref)
+-    inventory = await asyncio.to_thread(session_inventory, authority, policy, agent, info.get("cwd"))
++    from gateway.session_usage import snapshot_usage
++
++    def build():  # one trip off the loop: on a starved gateway each trip waits for the CPU
++        return (reused_session_inventory(authority, policy, agent, info.get("cwd"), reuse_s=None if reuse else 0.0),
++                snapshot_usage(authority, ref, agent))
++    inventory, usage = await asyncio.to_thread(build)
+     if info.get('tool_count') is None:
+         # A lazy session: the tools its first turn loads (the banner's own count).
+         info['tool_count'] = sum(len(names) for names in (inventory.get('tools') or {}).values())
+-    from gateway.session_usage import snapshot_usage
+-    if (usage := await asyncio.to_thread(snapshot_usage, authority, ref, agent)) is not None:
++    if usage is not None:
+         info['usage'] = usage
+     return {**inventory, **info}
+ 
+diff --git a/tests/gateway/test_restart_reattach_burst.py b/tests/gateway/test_restart_reattach_burst.py
+new file mode 100644
+index 00000000..55c33223
+--- /dev/null
++++ b/tests/gateway/test_restart_reattach_burst.py
+@@ -0,0 +1,149 @@
++"""The hub re-attaches every chat it watches, one after the other, when its socket moves to the gateway that took
++over (session.events.since, session.resume and config.set each). Each resume built the session's banner inventory
++(git branch, project, tool snapshot and availability, skills, MCP servers) again, though the chats of one profile
++share those sections: on a busy node that was most of each resume, the chats behind it waited (a streaming reply
++among them paused for seconds) and the API turns of that moment waited for the CPU. The profile-wide sections built
++moments ago now stand; what only a session's own agent knows is read each time."""
++import asyncio
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import session_local_inventory as inventory
++from gateway.session_policy import LocalSessionPolicy
++
++
++def _policy(**over):
++    fields = dict(source="gui", platform="local", cwd="/w", model=None, toolsets=("hermes-cli",),
++                  config_json="{}", request_json="{}", terminal_json="{}")
++    fields.update(over)
++    return LocalSessionPolicy(**fields)
++
++
++def _forget():
++    getattr(inventory, "forget_reused_inventories", lambda: None)()
++
++
++@pytest.fixture
++def builds(monkeypatch):
++    """Counts each profile-wide section build; the policy's config read is the stored one."""
++    import hermes_cli.banner as banner
++    import tools.mcp_tool_discovery as mcp
++    from tui_gateway import git_probe
++    _forget()
++    calls = []
++
++    def count(name, value):
++        def build(*a, **k):
++            calls.append(name)
++            return value() if callable(value) else value
++        return build
++    monkeypatch.setattr(git_probe, "branch", count("branch", "main"))
++    monkeypatch.setattr(inventory, "_project", count("project", None))
++    monkeypatch.setattr(inventory, "_policy_tools", count(
++        "policy_tools", lambda: (["terminal"], [{"function": {"name": "terminal"}}])))
++    monkeypatch.setattr(banner, "compute_toolset_availability", count("availability", lambda: {"terminal": "ok"}))
++    monkeypatch.setattr(banner, "get_available_skills", count("skills", lambda: {"devops": ["arxiv"]}))
++    monkeypatch.setattr(mcp, "get_mcp_status", count("mcp", lambda: []))
++    monkeypatch.setattr(LocalSessionPolicy, "config", lambda self, authority=None, secrets=True: {})
++    yield calls
++    _forget()
++
++
++@pytest.fixture
++def snapshot(monkeypatch):
++    import gateway.session_local as session_local
++    import gateway.session_policy as session_policy
++    import gateway.session_usage as session_usage
++    policies, agents = {}, {}
++    monkeypatch.setattr(session_local, "local_session_info",
++                        lambda authority, ref: {"session_id": ref.session_id, "cwd": policies[ref.session_id].cwd})
++    monkeypatch.setattr(session_policy, "policy_for_source", lambda runner, source: policies[source])
++    monkeypatch.setattr(session_usage, "snapshot_usage", lambda authority, ref, agent: None)
++    authority = SimpleNamespace(profile_id="/home", runner=SimpleNamespace(),
++                                sessions={}, agent=lambda ref: agents.get(ref.session_id))
++
++    def add(sid, policy, agent=None):
++        policies[sid] = policy
++        authority.sessions[sid] = SimpleNamespace(source=sid)
++        if agent is not None:
++            agents[sid] = agent
++    return authority, add
++
++
++def _resume_all(authority, ids, **kw):
++    async def run():
++        return [await inventory.snapshot_info(authority, SimpleNamespace(session_id=sid), **kw) for sid in ids]
++    return asyncio.run(run())
++
++
++def _agent(name):
++    return SimpleNamespace(session_id=name, tools=[{"function": {"name": f"tool_{name}"}}],
++                           enabled_toolsets=["hermes-cli"], _cached_system_prompt=f"prompt {name}",
++                           provider="custom", requested_provider="custom", base_url="http://m", model="m")
++
++
++def test_a_reattach_burst_builds_the_profile_sections_once(builds, snapshot):
++    authority, add = snapshot
++    for n in range(6):  # chats of one profile: alike but for their own frozen-secret reference
++        add(f"s{n}", _policy(config_secret_ref=f"secret-{n}"))
++    for n in range(3):  # chats that ran turns: each has its own agent
++        add(f"a{n}", _policy(config_secret_ref=f"secret-a{n}"), _agent(f"a{n}"))
++    ids = [*(f"s{n}" for n in range(6)), *(f"a{n}" for n in range(3))]
++    infos = _resume_all(authority, ids)
++    assert sorted(builds) == sorted(["branch", "project", "policy_tools", "availability", "skills", "mcp",
++                                     "availability"])  # one availability per toolset list: the agents' differs
++    assert [info["session_id"] for info in infos] == ids
++    assert all(info["skills"] == {"devops": ["arxiv"]} and info["branch"] == "main" for info in infos)
++    assert [info["tools"] for info in infos[6:]] == [{"other": [f"tool_a{n}"]} for n in range(3)]  # its own agent
++    assert [info["system_prompt"] for info in infos[6:]] == [f"prompt a{n}" for n in range(3)]
++    assert infos[0]["tool_count"] == 1
++    infos[0]["skills"]["devops"].append("mutated")  # each caller has its own copy
++    assert _resume_all(authority, ["s1"])[0]["skills"] == {"devops": ["arxiv"]}
++    assert len(builds) == 7
++
++
++def test_session_info_and_an_old_section_build_anew(builds, snapshot, monkeypatch):
++    authority, add = snapshot
++    add("a", _policy())
++    add("b", _policy(cwd="/elsewhere"))
++    _resume_all(authority, ["a", "a"])
++    assert len(builds) == 6
++    _resume_all(authority, ["b"])  # another folder (a policy of its own): only what depends on them
++    assert builds[6:] == ["branch", "project", "policy_tools"]
++    _resume_all(authority, ["a"], reuse=False)  # session.info asks for the inventory of now
++    assert len(builds) == 15
++    clock = [1000.0]
++    monkeypatch.setattr(inventory.time, "monotonic", lambda: clock[0])
++    _forget()
++    _resume_all(authority, ["a"])
++    clock[0] += inventory.INVENTORY_REUSE_S + 0.1
++    _resume_all(authority, ["a"])
++    assert len(builds) == 27
++
++
++def test_another_profile_never_shares_a_section(builds):
++    policy = _policy()
++    one, two = SimpleNamespace(profile_id="/p1"), SimpleNamespace(profile_id="/p2")
++    for authority in (one, two, one):
++        inventory.reused_session_inventory(authority, policy, None, "/w")
++    assert len(builds) == 12
++    inventory.session_inventory(one, policy, None, "/w")  # outside a reuse window: built
++    assert len(builds) == 18
++
++
++def test_the_session_info_call_asks_for_a_fresh_inventory(monkeypatch):
++    from gateway import session_controls
++    seen = []
++
++    async def snapshot_info(authority, ref, **kw):
++        seen.append(kw)
++        return {}
++    monkeypatch.setattr(inventory, "snapshot_info", snapshot_info)
++
++    async def resolve(actor, ref):
++        return None
++    connection = SimpleNamespace(authority=SimpleNamespace(resolve=resolve), actor=None)
++    asyncio.run(session_controls.AuthorityConnection.info(connection, SimpleNamespace(session_id="a"),
++                                                          {"session_id": "a"}))
++    assert seen == [{"reuse": False}]
+-- 
+2.56.0
+
