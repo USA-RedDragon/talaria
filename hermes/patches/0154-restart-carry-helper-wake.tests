@@ -1,0 +1,19 @@
+# A helper that finishes during the carry of its waiting subagent (this patch)
+tests/gateway/test_restart_carry_helper_wake.py
+# The per-turn carry of subagents and their helpers this patch fixes (0150, 0152) and the carry it joins (0136 to 0144)
+tests/gateway/test_restart_carry_subagent_command.py
+tests/gateway/test_restart_carry_subagents_alone.py
+tests/tools/test_restart_carry_subagent_helpers.py
+tests/tools/test_restart_carry_subagent_boundary.py
+tests/gateway/test_restart_carry_subagent_boundary.py
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_carry_background_work.py
+# The subagent handoff (0016), its waits (0092, 0105, 0139) and a subagent's own subagents (0128)
+tests/tools/test_delegation_restart_handoff.py
+tests/tools/test_async_delegation.py
+tests/tools/test_restart_carry_subagent_wait.py
+tests/tools/test_restart_carry_subagent_relay.py
+tests/tools/test_delegate_child_wait.py
+tests/tools/test_delegate_resume_action.py
+tests/tools/test_delegate_wait_wake.py
+tests/tools/test_delegate.py
