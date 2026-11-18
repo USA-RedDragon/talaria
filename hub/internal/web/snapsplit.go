@@ -34,6 +34,11 @@ type eventWriter struct {
 	fp string
 	// before, when set, runs once just before the first bytes are written.
 	before func()
+	// from is the cursor the stream resumed after (see sinceSeq): an event
+	// up to it reached the page already. cur is the cursor of the last
+	// event written, which an event that has none carries on, so the
+	// page's last id always says where it is.
+	from, cur hub.Cursor
 }
 
 // emit writes one event, after before.
@@ -67,7 +72,23 @@ func snapFP(data json.RawMessage) string {
 
 func (ew *eventWriter) write(w io.Writer, e hub.Event) bool {
 	if e.Kind != hub.KindSnapshot {
+		switch {
+		case e.Cursor.IsZero():
+			if e.Provisional || e.Seq == 0 {
+				break
+			}
+			e.Cursor = ew.cur
+		case !e.Cursor.After(ew.from) && e.Cursor.Epoch == ew.from.Epoch:
+			// The page has it: this replica follows the backend a little
+			// behind the one the page left.
+			return true
+		default:
+			ew.cur = e.Cursor
+		}
 		return ew.emit(w, e, "")
+	}
+	if !e.Provisional {
+		ew.cur, ew.from = e.Cursor, hub.Cursor{}
 	}
 	p := ew.s.snaps.prepared(e)
 	if !e.Provisional && ew.fp != "" && p.fp == ew.fp {

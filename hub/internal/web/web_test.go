@@ -474,9 +474,11 @@ func TestEventStreamAndResume(t *testing.T) {
 		t.Fatalf("resumed = %+v", again)
 	}
 	stop2()
-	// An id from another replica is no resume point: a fresh open, with a
-	// new snapshot of the chat as it is.
-	r3, stop3 := stream(t, c, e.url+"/api/sessions/pc/s1/events", "otherreplica."+strings.SplitN(evs[6].id, ".", 2)[1])
+	// An id from another replica without a cursor (a hub before cursors)
+	// is no resume point: a fresh open, with a new snapshot of the chat as
+	// it is.
+	seq, _, _ := strings.Cut(strings.SplitN(evs[6].id, ".", 2)[1], "~")
+	r3, stop3 := stream(t, c, e.url+"/api/sessions/pc/s1/events", "otherreplica."+seq)
 	if got := readEvents(t, r3, "snapshot"); len(got) != 1 {
 		t.Fatalf("id from another replica resumed: %+v", got)
 	}

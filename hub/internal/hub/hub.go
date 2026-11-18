@@ -66,6 +66,33 @@ type Event struct {
 	// way: something to show at once, which the fresh one replaces. It
 	// has no place in the stream (Seq 0).
 	Provisional bool
+	// Cursor places the event in the backend's own event stream for the
+	// session, which every hub replica follows: a stream that resumes on
+	// another replica, whose Seq means nothing there, goes on from it (see
+	// WithResume). Zero when the event has no place there.
+	Cursor Cursor
+}
+
+// Cursor is a place in a backend's event stream for one session: Epoch is
+// a short tag of the stream's replay epoch, Seq the last frame of it that
+// the event reflects.
+type Cursor struct {
+	Epoch string
+	Seq   int64
+	// Sub counts the events before this one that reflect the same frame.
+	Sub int
+}
+
+// IsZero reports whether c names no place.
+func (c Cursor) IsZero() bool { return c.Epoch == "" }
+
+// After reports whether c comes after d in the same stream; false for
+// cursors of different streams.
+func (c Cursor) After(d Cursor) bool {
+	if c.Epoch != d.Epoch || c.IsZero() {
+		return false
+	}
+	return c.Seq > d.Seq || (c.Seq == d.Seq && c.Sub > d.Sub)
 }
 
 // Service is the hub core. user is always the Authentik username; every

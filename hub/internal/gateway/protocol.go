@@ -17,6 +17,14 @@ const (
 	TicketPrefix   = "hermes-gateway-ticket."
 	ReadyEvent     = "gateway.ready"
 	ReplayGapEvent = "session.replay_gap"
+	// SuccessorReadyEvent is the event a Hermes gateway that hands its
+	// profile to the next one sends a socket whose dial asked for it
+	// (SuccessorHintQuery) once that gateway is ready (Talaria Hermes patch
+	// 0155). The socket stays open and goes on streaming the turns it
+	// carries; the client opens its next socket to the gateway named in the
+	// payload (SuccessorReady), moves its sessions there and then closes
+	// this one, so no event pauses.
+	SuccessorReadyEvent = "gateway.successor_ready"
 )
 
 // Methods of the canonical session contract
@@ -91,6 +99,26 @@ type Event struct {
 	Seq                 int64           `json:"seq"`
 	ExecutionGeneration *int64          `json:"execution_generation,omitempty"`
 	AdmissionID         string          `json:"admission_id,omitempty"`
+	// CarriedFrom names the frame of the gateway that carries a turn
+	// through a restart, when the gateway that took over relays that frame
+	// under its own epoch and sequence (Talaria Hermes patch 0155). A client
+	// that got the carrier's frame already drops it.
+	CarriedFrom *Cursor `json:"carried_from,omitempty"`
+}
+
+// Cursor is a place in a session's event stream: an epoch and a sequence
+// in it.
+type Cursor struct {
+	ReplayEpoch string `json:"replay_epoch"`
+	Seq         int64  `json:"seq"`
+}
+
+// SuccessorReady is the payload of SuccessorReadyEvent: the listener
+// address of the gateway that took over when it runs in another network
+// namespace (the next pod of a rollout), else empty.
+type SuccessorReady struct {
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
 }
 
 // Session sources (CanonicalCreateParams.source). A session.list row

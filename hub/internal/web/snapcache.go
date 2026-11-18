@@ -3,7 +3,6 @@ package web
 import (
 	"bytes"
 	"encoding/json"
-	"strconv"
 	"sync"
 
 	"github.com/USA-RedDragon/talaria/hub/internal/hub"
@@ -133,7 +132,7 @@ func (p *snapPrep) olderFrame(s *Server, e hub.Event) []byte {
 		if err != nil {
 			return nil
 		}
-		p.olderF = append(append([]byte("id: "+s.instance+"."+strconv.FormatInt(e.Seq, 10)+"\ndata: "), data...), '\n', '\n')
+		p.olderF = append(append([]byte("id: "+s.eventID(e)+"\ndata: "), data...), '\n', '\n')
 	}
 	return p.olderF
 }

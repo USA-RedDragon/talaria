@@ -556,8 +556,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if since == "" {
 		since = r.URL.Query().Get("since")
 	}
-	sinceSeq := s.sinceSeq(since)
-	ew := &eventWriter{s: s, split: since == "", fp: r.URL.Query().Get("fp")}
+	sinceSeq, from := s.sinceSeq(since)
+	ew := &eventWriter{s: s, split: since == "", fp: r.URL.Query().Get("fp"), from: from, cur: from}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -569,6 +569,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if since == "" {
 		ctx = hub.WithCached(ctx)
+	}
+	if sinceSeq == 0 && !from.IsZero() {
+		// An id of another replica, or of this one before a restart: go on
+		// from its place in the backend's stream.
+		ctx = hub.WithResume(ctx, from)
 	}
 	ch, stop, err := s.svc.Attach(ctx, userFrom(r), r.PathValue("backend"), r.PathValue("session"), sinceSeq)
 	if err != nil {
@@ -684,16 +689,43 @@ func (s *Server) flushEvents(w io.Writer, ch <-chan hub.Event) {
 	}
 }
 
-// sinceSeq reads a Last-Event-ID. An id is "<instance>.<seq>": sequences
-// count per hub process, so an id from another replica, or from before a
-// restart, reads as 0 and the stream starts with a fresh snapshot.
-func (s *Server) sinceSeq(id string) int64 {
+// sinceSeq reads a Last-Event-ID. An id is "<instance>.<seq>", then for an
+// event with a place in the backend's stream "~<epoch>-<seq>-<sub>" (see
+// hub.Cursor). Hub sequences count per hub process, so an id from another
+// replica, or from before a restart, reads as 0; its cursor, which every
+// replica understands, says where the stream goes on.
+func (s *Server) sinceSeq(id string) (int64, hub.Cursor) {
+	id, cur, _ := strings.Cut(id, "~")
+	from := parseCursor(cur)
 	inst, seq, ok := strings.Cut(id, ".")
 	if !ok || inst != s.instance {
-		return 0
+		return 0, from
 	}
 	n, _ := strconv.ParseInt(seq, 10, 64)
-	return n
+	return n, from
+}
+
+func parseCursor(s string) hub.Cursor {
+	parts := strings.Split(s, "-")
+	if len(parts) != 3 || parts[0] == "" {
+		return hub.Cursor{}
+	}
+	seq, err1 := strconv.ParseInt(parts[1], 10, 64)
+	sub, err2 := strconv.Atoi(parts[2])
+	if err1 != nil || err2 != nil || seq < 0 || sub < 0 {
+		return hub.Cursor{}
+	}
+	return hub.Cursor{Epoch: parts[0], Seq: seq, Sub: sub}
+}
+
+// eventID is e's id: "<instance>.<seq>", then "~" and the cursor when e
+// has one.
+func (s *Server) eventID(e hub.Event) string {
+	id := s.instance + "." + strconv.FormatInt(e.Seq, 10)
+	if c := e.Cursor; !c.IsZero() {
+		id += "~" + c.Epoch + "-" + strconv.FormatInt(c.Seq, 10) + "-" + strconv.Itoa(c.Sub)
+	}
+	return id
 }
 
 func (s *Server) writeEvent(w io.Writer, e hub.Event) bool { return s.writeEventFP(w, e, "") }
@@ -704,6 +736,6 @@ func (s *Server) writeEventFP(w io.Writer, e hub.Event, fp string) bool {
 	if err != nil {
 		return true
 	}
-	_, err = fmt.Fprintf(w, "id: %s.%d\ndata: %s\n\n", s.instance, e.Seq, data)
+	_, err = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", s.eventID(e), data)
 	return err == nil
 }

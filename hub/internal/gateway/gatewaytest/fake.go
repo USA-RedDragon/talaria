@@ -254,6 +254,10 @@ type Gateway struct {
 	// silent, while open, holds every call and every new connection
 	// (Silence).
 	silent chan struct{}
+	// handedOver says the gateway handed its sessions to the next one
+	// (HandOver); handedRequests counts the requests its sockets got since.
+	handedOver     bool
+	handedRequests int
 }
 
 type submission struct {
@@ -320,6 +324,9 @@ func (l *gatedListener) set(shut bool) {
 type conn struct {
 	ws      *websocket.Conn
 	writeMu sync.Mutex
+	// hint says the dial asked for gateway.successor_ready
+	// (gateway.SuccessorHintQuery).
+	hint bool
 }
 
 // send writes v, giving the write its own deadline within ctx.
@@ -766,6 +773,12 @@ func (g *Gateway) publishLocked(s *Session, typ string, payload any) {
 // publishAdmissionLocked publishes an event that names the admission it
 // belongs to on the frame, as Hermes does for turn events.
 func (g *Gateway) publishAdmissionLocked(s *Session, typ, admission string, payload any) {
+	g.publishFromLocked(s, typ, admission, payload, nil)
+}
+
+// publishFromLocked is publishAdmissionLocked for a frame that names the
+// frame of the gateway that carried it (from), nil for none.
+func (g *Gateway) publishFromLocked(s *Session, typ, admission string, payload any, from *gateway.Cursor) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		panic(err)
@@ -773,7 +786,7 @@ func (g *Gateway) publishAdmissionLocked(s *Session, typ, admission string, payl
 	s.seq++
 	gen := s.Generation
 	ev := gateway.Event{Type: typ, SessionID: s.ID, Payload: raw, ReplayEpoch: s.epoch, Seq: s.seq, ExecutionGeneration: &gen,
-		AdmissionID: admission}
+		AdmissionID: admission, CarriedFrom: from}
 	s.ring = append(s.ring, ev)
 	if s.turnEnded {
 		s.turnEvents, s.turnEnded = nil, false
@@ -894,7 +907,7 @@ func (g *Gateway) ws(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.SetReadLimit(64 << 20)
-	c := &conn{ws: ws}
+	c := &conn{ws: ws, hint: r.URL.Query().Get("successor_hint") == "1"}
 	g.mu.Lock()
 	g.conns[c] = true
 	g.mu.Unlock()
@@ -944,6 +957,14 @@ func (g *Gateway) ws(w http.ResponseWriter, r *http.Request) {
 		if g.notReady {
 			g.mu.Unlock()
 			_ = ws.Close(websocket.StatusCode(1013), "")
+			return
+		}
+		if g.handedOver {
+			// A request on the socket the old gateway keeps: it is answered
+			// on the next connection, at the gateway that took over.
+			g.handedRequests++
+			g.mu.Unlock()
+			_ = ws.Close(websocket.StatusServiceRestart, "")
 			return
 		}
 		g.calls = append(g.calls, Call{Method: req.Method, Params: req.Params, Raw: append(json.RawMessage(nil), data...)})

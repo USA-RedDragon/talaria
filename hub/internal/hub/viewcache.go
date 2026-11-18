@@ -23,6 +23,22 @@ func ViewSnapshotKey(sessionID string) string { return "s:" + sessionID }
 
 type cachedKey struct{}
 
+type resumeKey struct{}
+
+// WithResume asks Attach to go on after c, the cursor of the last event a
+// viewer got from another replica (or this one before a restart): the
+// events after it, without a snapshot, when this replica's buffer still
+// has them; else the snapshot as for a fresh open.
+func WithResume(ctx context.Context, c Cursor) context.Context {
+	return context.WithValue(ctx, resumeKey{}, c)
+}
+
+// ResumeFrom is the cursor WithResume set on ctx, zero when none.
+func ResumeFrom(ctx context.Context) Cursor {
+	c, _ := ctx.Value(resumeKey{}).(Cursor)
+	return c
+}
+
 // WithCached lets Sessions and Attach answer with the hub's last copy when
 // the backend is slow to answer, for a page that shows it until the fresh
 // one comes. Without it they wait for the backend as before.

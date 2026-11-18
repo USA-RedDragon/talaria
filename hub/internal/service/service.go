@@ -558,7 +558,15 @@ func (s *Service) Attach(ctx context.Context, user, backendID, sessionID string,
 	if err != nil {
 		return nil, nil, refusal(err)
 	}
-	ch, cancel := ls.attach(sinceSeq)
+	var ch <-chan hub.Event
+	var cancel func()
+	resumed := false
+	if from := hub.ResumeFrom(ctx); sinceSeq == 0 && !from.IsZero() && !offline {
+		ch, cancel, resumed = ls.attachAfter(from)
+	}
+	if !resumed {
+		ch, cancel = ls.attach(sinceSeq)
+	}
 	if offline {
 		// Tell the viewer only once the backend has been away a while; a
 		// restart that ends sooner goes unseen.
@@ -966,6 +974,9 @@ type backend struct {
 	mu      sync.Mutex
 	client  *gateway.Client
 	lastErr string
+	// handed are the connections whose gateway handed over to the next
+	// one (see handover): a session on one moves without a new snapshot.
+	handed map[*gateway.Client]bool
 	// listErr is why the last session list failed, "" when it worked.
 	listErr  string
 	sessions map[string]*live
@@ -1170,13 +1181,15 @@ func (b *backend) conn(ctx context.Context) (*gateway.Client, error) {
 	}
 	dctx, cancel := b.timeout(ctx)
 	defer cancel()
-	c, err := b.dialer.Dial(dctx, b.onEvent)
+	onEvent, set := b.events()
+	c, err := b.dialer.Dial(dctx, onEvent)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err != nil {
 		b.lastErr = err.Error()
 		return nil, err
 	}
+	set(c)
 	if b.closed {
 		c.Close()
 		return nil, errClosed
@@ -1203,9 +1216,16 @@ func (b *backend) watch(c *gateway.Client) {
 			sessions = append(sessions, ls)
 		}
 	}
-	closed := b.closed
+	closed, handed := b.closed, b.handed[c]
 	b.mu.Unlock()
 	if closed {
+		return
+	}
+	if handed {
+		// Its sessions moved to the gateway that took over; any that did
+		// not are subscribed again below.
+		b.log.Info("closed the connection to the gateway that handed over")
+		b.retry()
 		return
 	}
 	b.log.Warn("gateway connection lost", "error", fmt.Sprint(c.Err()))
@@ -1279,18 +1299,6 @@ func (b *backend) retry() {
 			delay = min(delay*2, 30*time.Second)
 		}
 	}()
-}
-
-func (b *backend) onEvent(ev gateway.Event) {
-	if ev.SessionID == "" {
-		return
-	}
-	b.mu.Lock()
-	ls := b.sessions[ev.SessionID]
-	b.mu.Unlock()
-	if ls != nil {
-		ls.handle(ev)
-	}
 }
 
 func (b *backend) list(ctx context.Context) ([]hub.Session, error) {
@@ -1551,6 +1559,16 @@ func (b *backend) ensure(ctx context.Context, ls *live) (*gateway.Client, error)
 		ls.mu.Unlock()
 		return c, nil
 	}
+	from := ls.client
+	ls.mu.Unlock()
+	if from != nil && from != c && !stale && b.isHanded(from) {
+		err := b.move(ctx, ls, from, c)
+		if err == nil {
+			return c, nil
+		}
+		b.log.Warn("move without a new snapshot failed, taking one", "session", ls.id, "error", err.Error())
+	}
+	ls.mu.Lock()
 	ls.pending, ls.early, ls.stale = true, nil, false
 	recovering := ls.client != nil && !stale
 	epoch, last, oldSub := ls.epoch, ls.gwSeq, ls.subID
@@ -1711,7 +1729,19 @@ func (b *backend) subscribed(ctx context.Context, c *gateway.Client, ls *live, s
 	ls.subscribedUsage(snap.Running, snap.Info.Usage, before)
 	ls.ring, ls.truncated = nil, false
 	ls.seq++
-	ls.snapshot = hub.Event{Seq: ls.seq, Kind: hub.KindSnapshot, Data: data}
+	// The snapshot's cursor is the frame before the running turn's first:
+	// the turn's events follow it, each with its own frame.
+	at := snap.LastSequence
+	if len(tail) > 0 {
+		at = min(at, tail[0].Seq-1)
+	}
+	ls.late = late && snap.InflightReply == nil
+	cur := hub.Cursor{}
+	if !ls.late && snap.ReplayEpoch != "" {
+		cur = hub.Cursor{Epoch: epochTag(snap.ReplayEpoch), Seq: at}
+	}
+	ls.lastCursor = cur
+	ls.snapshot = hub.Event{Seq: ls.seq, Kind: hub.KindSnapshot, Data: data, Cursor: cur}
 	ls.broadcast(ls.snapshot)
 	ls.replayTurn(tail, msgs)
 	ls.late, ls.lateHeld = false, false

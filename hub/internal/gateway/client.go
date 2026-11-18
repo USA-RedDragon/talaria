@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +93,50 @@ type Dialer struct {
 	// slow shares the cookies of http but has no time limit of its own:
 	// the caller's context bounds it.
 	slow *http.Client
+	// ws, when set, opens the socket (see At); nil uses the default client.
+	ws *http.Client
+}
+
+// SuccessorHintQuery is the query parameter a dial sets to ask a Hermes
+// gateway that hands over for SuccessorReadyEvent instead of a close
+// (Talaria Hermes patch 0155).
+const SuccessorHintQuery = "successor_hint=1"
+
+// At returns a Dialer for the same backend whose connections all go to
+// addr (host:port) instead of where the base URL's host resolves: the
+// gateway that took over in the next pod, while the Service in front of
+// both still routes to the old one. The URL, the Host header, the Origin
+// and the cookies stay those of the base URL, and the cookies are shared
+// with d.
+func (d *Dialer) At(addr string) *Dialer {
+	pin := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext(ctx, network, addr)
+	}
+	var rt http.RoundTripper = &http.Transport{DialContext: pin}
+	if tr, ok := d.http.Transport.(*http.Transport); ok {
+		tr = tr.Clone()
+		tr.DialContext = pin
+		rt = tr
+	}
+	// The socket's own transport speaks HTTP/1.1 only: an upgrade cannot
+	// go over HTTP/2.
+	ws := &http.Transport{DialContext: pin, TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}}
+	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+		ws = tr.Clone()
+		ws.DialContext, ws.ForceAttemptHTTP2 = pin, false
+		ws.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	}
+	return &Dialer{creds: d.creds, http: &http.Client{Jar: d.http.Jar, Timeout: d.http.Timeout, Transport: rt},
+		slow: &http.Client{Jar: d.http.Jar, Transport: rt}, ws: &http.Client{Transport: ws}}
+}
+
+// DialSuccessor dials the gateway that took over at host:port (see At), or
+// through the base URL when host is empty.
+func (d *Dialer) DialSuccessor(ctx context.Context, host string, port int, onEvent func(Event)) (*Client, error) {
+	if host == "" || port <= 0 {
+		return d.Dial(ctx, onEvent)
+	}
+	return d.At(net.JoinHostPort(host, strconv.Itoa(port))).Dial(ctx, onEvent)
 }
 
 // RestartBudget is the longest a Hermes restart keeps a call from being
@@ -138,7 +184,7 @@ const maxFrame = 64 << 20
 // sent them, on the connection's reader goroutine.
 func (d *Dialer) Dial(ctx context.Context, onEvent func(Event)) (*Client, error) {
 	for attempt := 1; ; attempt++ {
-		conn, err := d.DialRaw(ctx)
+		conn, err := d.dialRaw(ctx, "&"+SuccessorHintQuery)
 		if err != nil {
 			return nil, err
 		}
@@ -164,6 +210,11 @@ func ticketRefused(err error) bool {
 // anything is read from it, so the gateway.ready event is its first
 // message. The caller owns the connection.
 func (d *Dialer) DialRaw(ctx context.Context) (*websocket.Conn, error) {
+	return d.dialRaw(ctx, "")
+}
+
+// dialRaw is DialRaw with query added to the socket's URL.
+func (d *Dialer) dialRaw(ctx context.Context, query string) (*websocket.Conn, error) {
 	ticket, err := d.ticket(ctx)
 	if errors.Is(err, ErrUnauthorized) {
 		if err = d.login(ctx); err != nil {
@@ -179,9 +230,10 @@ func (d *Dialer) DialRaw(ctx context.Context) (*websocket.Conn, error) {
 		return nil, fmt.Errorf("gateway url: %w", err)
 	}
 	origin := base.Scheme + "://" + base.Host
-	conn, resp, err := websocket.Dial(ctx, WebSocketURL(d.creds.BaseURL)+"/api/ws?native_dial=browser", &websocket.DialOptions{
+	conn, resp, err := websocket.Dial(ctx, WebSocketURL(d.creds.BaseURL)+"/api/ws?native_dial=browser"+query, &websocket.DialOptions{
 		Subprotocols: []string{Subprotocol, TicketPrefix + ticket},
 		HTTPHeader:   http.Header{"Origin": []string{origin}},
+		HTTPClient:   d.ws,
 	})
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()

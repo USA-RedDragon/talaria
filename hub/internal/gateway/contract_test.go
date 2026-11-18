@@ -40,6 +40,9 @@ func contract() map[string][]string {
 			"    admission_id: str\n    execution_generation: int\n",
 		},
 		"gateway/run_api.py": {
+			"SUCCESSOR_READY_EVENT = '" + gateway.SuccessorReadyEvent + "'",
+			"if b'" + gateway.SuccessorHintQuery + "' in (scope.get('query_string') or b'').split(b'&'):",
+			"payload = {'host': str(host), 'port': int(port)}",
 			"native_peer = bool(ws.client) and ws.client.host in {'127.0.0.1', '::1'}",
 			"if reason == 'none' or ws.headers.get('origin') or (reason == 'ok' and not native_peer):",
 		},
@@ -72,7 +75,9 @@ func contract() map[string][]string {
 		"gateway/session_completion_notes.py": {"_ALWAYS_NOTED = frozenset({'cron'})"},
 		"gateway/session_events.py": {
 			"'type': event_type, 'session_id': self._key,", "'payload': deepcopy(payload), 'replay_epoch': self.epoch}}",
+			"frame['params']['carried_from'] = dict(self.origin)",
 		},
+		"gateway/turn_carry.py": {`origin = {"replay_epoch": params["replay_epoch"], "seq": params["seq"]}`},
 		"gateway/session_pending_controls.py": {
 			"choices = ['" + gateway.ChoiceOnce + "', '" + gateway.ChoiceDeny + "']",
 			"prompt = {'kind': 'approval', 'prompt_id': prompt_id,", "event_type='approval.request'",

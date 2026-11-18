@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"hash/fnv"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,14 +39,27 @@ type live struct {
 	retired         bool
 	// gone is closed when a retired session has left the map, after the
 	// gateway was told it is detached; nil when it was not retired by an idle detach.
-	gone       chan struct{}
-	pins       int
-	cur        *gateway.Client
-	pending    bool
-	early      []gateway.Event
-	subID      string
-	epoch      string
-	gwSeq      int64
+	gone    chan struct{}
+	pins    int
+	cur     *gateway.Client
+	pending bool
+	early   []gateway.Event
+	subID   string
+	epoch   string
+	gwSeq   int64
+	// moving is the connection a move subscribes the session on, whose
+	// frames wait in moveEarly for the cut; movedFrom is the connection
+	// the session moved off, whose frames are dropped; prevEpoch and
+	// prevSeq are where the session's stream was on it, so the frames the
+	// next gateway relays from there (carried_from) are not shown twice
+	// (see handover).
+	moving    *gateway.Client
+	moveEarly []gateway.Event
+	// lastCursor is the cursor of the last event emitted (nextCursor).
+	lastCursor hub.Cursor
+	movedFrom  *gateway.Client
+	prevEpoch  string
+	prevSeq    int64
 	generation int64
 	// revision is the session's runtime revision, which session.mutate
 	// is fenced on. Turns and settings changes move it.
@@ -182,16 +196,6 @@ func (ls *live) abort() {
 	ls.pending, ls.early = false, nil
 }
 
-func (ls *live) handle(ev gateway.Event) {
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
-	if ls.pending {
-		ls.early = append(ls.early, ev)
-		return
-	}
-	ls.apply(ev)
-}
-
 // flushEarly applies the frames that arrived while a request was in
 // flight. ls.mu is held.
 func (ls *live) flushEarly() {
@@ -301,7 +305,10 @@ func (ls *live) replayTurn(tail []gateway.Event, msgs []json.RawMessage) {
 			}
 		}
 	}
+	last := ls.gwSeq
+	defer func() { ls.gwSeq = last }()
 	for _, ev := range tail {
+		ls.gwSeq = min(ev.Seq, last) // each event's cursor is its own frame
 		payload := ev.Payload
 		if ev.Type == hub.KindMessageStart {
 			ev.Payload = ls.startPayload(ev, !shown)
@@ -504,11 +511,8 @@ func (ls *live) apply(ev gateway.Event) {
 		ls.b.log.Info("replay epoch changed", "session", ls.id)
 		ls.epoch, ls.gwSeq = ev.ReplayEpoch, 0
 	}
-	if ev.Seq != 0 {
-		if ev.Seq <= ls.gwSeq {
-			return
-		}
-		ls.gwSeq = ev.Seq
+	if ls.seen(ev) {
+		return
 	}
 	if ev.ExecutionGeneration != nil && *ev.ExecutionGeneration > ls.generation {
 		ls.generation = *ev.ExecutionGeneration
@@ -641,13 +645,73 @@ func (ls *live) emit(kind string, data json.RawMessage) {
 // at 0 when its time is not known. ls.mu is held.
 func (ls *live) emitAt(kind string, data json.RawMessage, at int64) {
 	ls.seq++
-	e := hub.Event{Seq: ls.seq, Kind: kind, Data: data, At: at}
+	e := hub.Event{Seq: ls.seq, Kind: kind, Data: data, At: at, Cursor: ls.nextCursor()}
 	ls.ring = append(ls.ring, e)
 	if n := ls.b.svc.opts.RingSize; len(ls.ring) > n {
 		ls.ring = append([]hub.Event(nil), ls.ring[len(ls.ring)-n/2:]...)
 		ls.truncated = true
 	}
 	ls.broadcast(e)
+}
+
+// epochTag is a short tag of a replay epoch for cursors.
+func epochTag(epoch string) string {
+	if epoch == "" {
+		return ""
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(epoch))
+	return strconv.FormatUint(uint64(h.Sum32()), 36)
+}
+
+// nextCursor is the cursor of the next event the session emits: the
+// gateway frame it reflects, and how many events before it reflect the
+// same one. ls.mu is held.
+func (ls *live) nextCursor() hub.Cursor {
+	if ls.late || ls.epoch == "" {
+		return hub.Cursor{}
+	}
+	c := hub.Cursor{Epoch: epochTag(ls.epoch), Seq: ls.gwSeq}
+	if last := ls.lastCursor; last.Epoch == c.Epoch && last.Seq == c.Seq {
+		c.Sub = last.Sub + 1
+	}
+	ls.lastCursor = c
+	return c
+}
+
+// attachAfter adds a viewer that goes on after c, the cursor of the last
+// event it got from another replica: the buffered events after c and the
+// live ones, with no snapshot. ok is false when the buffer does not reach
+// back to c; the caller attaches as for a fresh open then. Events up to c
+// that arrive later are the caller's to drop (this replica may follow the
+// stream a little behind the other).
+func (ls *live) attachAfter(c hub.Cursor) (ch <-chan hub.Event, stop func(), ok bool) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	snap := ls.snapshot.Cursor
+	if ls.snapshot.Kind != hub.KindSnapshot || snap.IsZero() || c.Epoch != snap.Epoch || snap.After(c) || ls.steeringLocked() {
+		return nil, nil, false
+	}
+	start := 0
+	reached := !ls.truncated
+	for i, e := range ls.ring {
+		if !e.Cursor.IsZero() && !e.Cursor.After(c) && e.Cursor.Epoch == c.Epoch {
+			start, reached = i+1, true
+		}
+	}
+	if !reached {
+		return nil, nil, false
+	}
+	v := &viewer{ch: make(chan hub.Event, ls.b.svc.opts.ViewerBuffer+len(ls.ring)+1)}
+	for _, e := range ls.ring[start:] {
+		v.ch <- e
+	}
+	ls.viewers[v] = struct{}{}
+	if ls.idleTimer != nil {
+		ls.idleTimer.Stop()
+		ls.idleTimer = nil
+	}
+	return v.ch, func() { ls.detach(v) }, true
 }
 
 // broadcast sends e to every viewer, dropping any that is full. ls.mu is held.
