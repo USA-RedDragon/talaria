@@ -1,0 +1,617 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 18:44:48 -0600
+Subject: [PATCH] fix(gateway): a restart with no turn running carries
+ background subagents and their helpers to their boundaries
+
+The per-turn carry (gateway.restart_turn_handoff_per_turn) ran the background subagents on to their step boundaries only when a chat turn was running. With none (a chat that started a background subagent and ended its turn), the restart wait returned at once, since the subagents are not work it waits for (gateway.restart_wait_delegations is off), so the carry never started. The stop then handed the subagents over the 0016 way with restart_handoff_grace_seconds: a running foreground terminal command was moved to the background (yielded_to_background), the subagent started its next model call, the stop cut it, and the next gateway's subagent ran the command again. The restart wait now starts the carry when background subagents run that delegation.restart_handoff hands over: the profile goes to the next gateway at once, and each subagent finishes its command and its tool round on the old gateway and stops before its next model call; the next gateway resumes it with the real tool result in its transcript.
+
+A carried subagent also stopped its own subagents (its helpers) with it, cutting a helper's model call. Each helper in a turn is now carried the same way: it runs on to its own next step boundary, the subagent's stop waits for it (up to the same limit), its unit goes to the next gateway as unfinished with the state it had there, and it does not wake the subagent here. A helper not in a turn, or with no resume record, stops with the subagent as before.
+---
+ gateway/run_shutdown.py                       |   6 +
+ gateway/turn_carry.py                         |  16 ++
+ .../test_restart_carry_subagent_command.py    | 183 ++++++++++++++++++
+ .../test_restart_carry_subagents_alone.py     | 103 ++++++++++
+ .../test_restart_carry_subagent_helpers.py    | 116 +++++++++++
+ tools/delegate_tool_handoff.py                |   9 +
+ tools/delegate_tool_subunits.py               |  51 ++++-
+ 7 files changed, 482 insertions(+), 2 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_subagent_command.py
+ create mode 100644 tests/gateway/test_restart_carry_subagents_alone.py
+ create mode 100644 tests/tools/test_restart_carry_subagent_helpers.py
+
+diff --git a/gateway/run_shutdown.py b/gateway/run_shutdown.py
+index caee0da2..4c854ad3 100644
+--- a/gateway/run_shutdown.py
++++ b/gateway/run_shutdown.py
+@@ -1638,6 +1638,12 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+         """
+         active = self._active_work_count() + GatewayShutdownMixin._restart_wait_delegation_count(self)
+         if active <= 0:
++            # gateway.restart_turn_handoff_per_turn: with no turn to carry, the background subagents are still carried
++            # to their step boundaries (``turn_carry.carries_subagents``). Returning here left them to the stop's
++            # handoff, which moved a running foreground command to the background and cut the next model call.
++            from gateway import turn_carry
++            if turn_carry.carries_subagents(self) and await turn_carry.carry_restart(self):
++                return False
+             return True
+         if self._awaitable_work_count() <= 0:
+             logger.warning(
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index 4dc91d30..5e47c2f8 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -433,6 +433,22 @@ async def _disconnect_messaging(runner) -> None:
+ SUBAGENT_STOP_RESERVE_S = 60.0
+ 
+ 
++def carries_subagents(runner) -> bool:
++    """Whether a restart with no turn running still carries (``carry_restart``): the key is on and background
++    subagents run that ``delegation.restart_handoff`` hands to the next gateway. A carry with no turn releases the
++    profile at once and only runs the subagents on to their step boundaries here (``_carry_subagents``)."""
++    if not enabled(runner):
++        return False
++    from tools.delegate_tool_config import _get_restart_handoff
++    if not _get_restart_handoff():
++        return False
++    try:
++        from tools.async_delegation import active_count
++        return active_count() > 0
++    except Exception:
++        return False
++
++
+ async def _carry_subagents(carry) -> bool:
+     """Carry the background subagents like the turns (``delegation.restart_handoff``): each runs on to its next step
+     boundary here, its model call and tool round included, then stops and goes to the next gateway, which resumes it
+diff --git a/tests/gateway/test_restart_carry_subagent_command.py b/tests/gateway/test_restart_carry_subagent_command.py
+new file mode 100644
+index 00000000..ba90b934
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_subagent_command.py
+@@ -0,0 +1,183 @@
++"""A background subagent's foreground command across a per-turn restart (gateway.restart_turn_handoff_per_turn with
++delegation.restart_handoff), with no chat turn running: the real child loop and the real terminal tool.
++
++The restart wait returned at once (no turn ran), so the carry never started; the stop then handed the subagent over
++with no grace: its running command was moved to the background (``yielded_to_background``), its next model call was
++started and cut, and the next gateway's subagent ran the command again. Now the carry runs the subagent on to its step
++boundary: the command ends and returns its real result, the subagent stops before its next model call, and the next
++gateway resumes it with that result in its transcript.
++"""
++import asyncio
++import json
++import os
++import threading
++import time
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++from gateway.run_shutdown import GatewayShutdownMixin
++from tests.agent.test_turn_boundary_handoff import _agent as _bare_agent
++from tests.agent.test_turn_boundary_handoff import _response
++from tests.gateway.test_restart_turn_carry import _old_runner, _reserve_profile, _until
++from tests.tools.test_delegate_resume_action import (  # the seams fixture
++    CHILD, PARENT, SID, _Parent, _call, _completions, _finished_child, _record, seams,
++)
++from tests.waiting import wait_until
++from tools import async_delegation as ad
++from tools import delegate_tool_handoff as handoff
++from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
++
++pytestmark = pytest.mark.platforms("linux")
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++    monkeypatch.setattr("agent.title_generator.maybe_auto_title", lambda *a, **k: None)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(noop))
++    import tools.delegate_tool_config as config
++    monkeypatch.setattr(config, "_get_restart_handoff", lambda: True)
++    ad._reset_for_tests()
++    yield
++    ad._reset_for_tests()
++    with _active_subagents_lock:
++        _active_subagents.clear()
++
++
++def _terminal_call(command, call_id="call_t1"):
++    from types import SimpleNamespace
++    return SimpleNamespace(id=call_id, type="function",
++                           function=SimpleNamespace(name="terminal", arguments=json.dumps({"command": command})))
++
++
++def _real_child(db, model_calls):
++    """A real agent as the rebuilt subagent: its own loop, its stored session, a scripted model."""
++    child = _bare_agent(db, CHILD)
++    for name, value in (("_delegate_restart_handoff", False), ("_delegate_live_writer", None),
++                        ("_live_transcript_path", None), ("_delegate_output_schema", None), ("_delegate_images", []),
++                        ("_subagent_id", SID), ("model", "qwen"), ("_delegate_depth", 1),
++                        ("_parent_session_id", PARENT)):
++        setattr(child, name, value)
++    script = list(model_calls)
++    child.client.chat.completions.create.side_effect = lambda **kwargs: script.pop(0)(**kwargs)
++    child.valid_tool_names = {"terminal"}
++    return child
++
++
++@pytest.fixture
++def real_terminal(monkeypatch, tmp_path):
++    """The terminal tool for real (local backend), counted; every other tool refuses."""
++    from tools.terminal_tool import terminal_tool
++    runs = []
++
++    def call(name, args, *a, **k):
++        assert name == "terminal", name
++        runs.append(args["command"])
++        return terminal_tool(args["command"], task_id=SID, timeout=60)
++    monkeypatch.setattr("model_tools.handle_function_call", call)
++    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
++    return runs
++
++
++def _idle(runner):
++    runner._active_work_count = lambda: 0
++    runner._awaitable_work_count = lambda: 0
++    runner._restart_safe_cron_count = lambda: 0
++    runner._wedged_agent_count = lambda: 0
++    runner._active_cron_job_count = lambda: 0
++    runner._running_agent_items = list
++    return runner
++
++
++async def _restart(runner):
++    """What a restart runs for the subagents: the restart wait (the per-turn carry), then the stop's handoff."""
++    await GatewayShutdownMixin._await_active_work_before_restart(runner)
++    ctx = GatewayShutdownMixin._StopContext(deferred_count=lambda: 0)
++    ctx.started_at = time.monotonic()
++    await GatewayShutdownMixin._stop_hand_off_delegations(runner, ctx)
++
++
++@pytest.mark.live_system_guard_bypass
++@pytest.mark.asyncio
++async def test_a_subagents_running_command_ends_here_and_is_not_run_again(owner, tmp_path, seams, real_terminal):
++    from hermes_state_registry import acquire
++    db = acquire()
++    record = _record()
++    record[handoff.RESUME_STATE_KEY]["cwd"] = str(tmp_path)
++    _finished_child(db, record=record)
++    marker = tmp_path / "runs.txt"
++    command = f"sleep 2; echo zd-s2-1 >> {marker}; echo zd-s2-1"
++    asked = threading.Event()
++
++    def first(**_kwargs):
++        asked.set()
++        return _response("", [_terminal_call(command)])
++
++    second_calls = []
++
++    def after_the_command(**kwargs):
++        second_calls.append(kwargs)
++        return _response("All four done.")
++
++    child = _real_child(db, [first, after_the_command])
++    seams(child)
++    handle = _call(_Parent(db), subagent_id=SID, message="run the commands")
++    run_id = handle["run_id"]
++    await asyncio.to_thread(wait_until, lambda: real_terminal, what="the command started")
++    await asyncio.sleep(0.3)  # the command is in flight when the restart begins
++
++    _reserve_profile(tmp_path)
++    runner = _idle(_old_runner(owner, restart_turn_carry_ceiling_seconds=1080.0))
++    await asyncio.wait_for(_restart(runner), 30.0)
++
++    # The command ran to its end on the old gateway and the subagent stopped before its next model call.
++    assert marker.read_text().splitlines() == ["zd-s2-1"]
++    rows = db.get_messages_as_conversation(CHILD)
++    tool_rows = [r for r in rows if r["role"] == "tool" and r.get("tool_call_id") == "call_t1"]
++    assert len(tool_rows) == 1
++    result = json.loads(tool_rows[0]["content"])
++    assert result.get("status") != "yielded_to_background" and result["exit_code"] == 0
++    assert "zd-s2-1" in result["output"]
++    assert asked.is_set() and second_calls == []
++    assert _completions(run_id) == []  # handed to the next gateway, not finished here
++    assert json.loads(_row(run_id))["handoff"]
++    if getattr(runner, "_turn_carry", None) is not None and runner._turn_carry.lock_fd is not None:
++        os.close(runner._turn_carry.lock_fd)
++
++    # The next gateway resumes it with the real result in its transcript: one model call, no command run again.
++    ad._reset_for_tests()
++    with _active_subagents_lock:
++        _active_subagents.clear()
++    resumed_calls = []
++
++    def resumed_model(**kwargs):
++        resumed_calls.append(kwargs)
++        return _response("All four done.")
++    resumed = _real_child(db, [resumed_model])
++    seams(resumed)
++    assert ad.adopt_handed_off_delegations(handoff._resume_unit) == 1
++    event = (await asyncio.to_thread(wait_until, lambda: _completions(run_id), timeout=30,
++                                     what="the resumed subagent's result"))[0]
++    assert event["results"][0]["status"] == "completed"
++    assert len(resumed_calls) == 1 and real_terminal == [command]
++    assert marker.read_text().splitlines() == ["zd-s2-1"]
++    sent = resumed_calls[0]["messages"]
++    assert any(m.get("role") == "tool" and m.get("tool_call_id") == "call_t1" and "zd-s2-1" in str(m.get("content"))
++               for m in sent)
++
++
++def _row(delegation_id):
++    from tests.tools.test_delegate_resume_action import _row_json
++    return _row_json(delegation_id)
+diff --git a/tests/gateway/test_restart_carry_subagents_alone.py b/tests/gateway/test_restart_carry_subagents_alone.py
+new file mode 100644
+index 00000000..3332535f
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_subagents_alone.py
+@@ -0,0 +1,103 @@
++"""gateway.restart_turn_handoff_per_turn with delegation.restart_handoff and no chat turn running: the background
++subagents are still carried to their step boundaries. The restart wait used to return at once when no turn ran (the
++subagents are not work it waits for), so the carry never started and the stop handed the subagents over the 0016 way
++with no grace: a running foreground command was moved to the background and the subagent's next model call was cut.
++"""
++import asyncio
++import os
++import threading
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++from gateway.run_shutdown import GatewayShutdownMixin
++
++from tests.gateway.test_restart_turn_carry import _old_runner, _reserve_profile, _until
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++    async def noop(*_a, **_k):
++        return None
++    for name in ("_stop_cron", "_disconnect_messaging"):
++        monkeypatch.setattr(turn_carry, name, noop)
++    monkeypatch.setattr(GatewayShutdownMixin, "_stop_hand_off_processes", staticmethod(noop))
++
++
++@pytest.fixture
++def subagent(monkeypatch):
++    """One live background delegation; the handoff returns once its subagent reached its boundary (``reach``)."""
++    import tools.async_delegation as ad
++    import tools.delegate_tool_config as config
++    monkeypatch.setattr(config, "_get_restart_handoff", lambda: True)
++    live = {"count": 1}
++    monkeypatch.setattr(ad, "active_count", lambda: live["count"])
++    reach, calls = threading.Event(), []
++
++    def hand_off_for_restart(grace, timeout, *, boundary_seconds=None, marked=None):
++        calls.append({"grace": grace, "boundary_seconds": boundary_seconds})
++        if marked is not None:
++            marked.set()
++        if boundary_seconds is not None:
++            reach.wait(10)
++        live["count"] = 0
++        return 1
++    monkeypatch.setattr(ad, "hand_off_for_restart", hand_off_for_restart)
++    return live, reach, calls
++
++
++def _idle(runner):
++    """No chat turn, cron run or API run: only the background subagent works."""
++    runner._active_work_count = lambda: 0
++    runner._awaitable_work_count = lambda: 0
++    runner._restart_safe_cron_count = lambda: 0
++    runner._wedged_agent_count = lambda: 0
++    runner._active_cron_job_count = lambda: 0
++    runner._running_agent_items = list
++    return runner
++
++
++@pytest.mark.asyncio
++async def test_a_subagent_with_no_turn_running_is_carried_to_its_boundary(owner, tmp_path, subagent):
++    _live, reach, calls = subagent
++    _reserve_profile(tmp_path)
++    runner = _idle(_old_runner(owner, restart_turn_carry_ceiling_seconds=1080.0))
++    wait = asyncio.ensure_future(GatewayShutdownMixin._await_active_work_before_restart(runner))
++    await _until(lambda: calls)
++    # Carried, not stopped at the release: its tool round and model call run on to their end here.
++    assert calls[0]["boundary_seconds"] == pytest.approx(1080.0 - turn_carry.SUBAGENT_STOP_RESERVE_S)
++    await _until(turn_carry.released)  # the next gateway serves the profile meanwhile
++    await asyncio.sleep(0.3)
++    assert not wait.done()
++    reach.set()
++    assert await asyncio.wait_for(wait, 5.0) is False
++    assert len(calls) == 1
++    os.close(runner._turn_carry.lock_fd)
++
++
++@pytest.mark.asyncio
++async def test_with_nothing_running_the_restart_does_not_carry(owner, tmp_path, subagent):
++    live, _reach, calls = subagent
++    live["count"] = 0
++    _reserve_profile(tmp_path)
++    runner = _idle(_old_runner(owner))
++    assert await GatewayShutdownMixin._await_active_work_before_restart(runner) is True
++    assert calls == [] and getattr(runner, "_turn_carry", None) is None and not turn_carry.released()
++
++
++@pytest.mark.asyncio
++async def test_without_subagent_handoff_a_subagent_does_not_start_a_carry(owner, tmp_path, subagent, monkeypatch):
++    import tools.delegate_tool_config as config
++    monkeypatch.setattr(config, "_get_restart_handoff", lambda: False)
++    _reserve_profile(tmp_path)
++    runner = _idle(_old_runner(owner))
++    assert await GatewayShutdownMixin._await_active_work_before_restart(runner) is True
++    assert subagent[2] == [] and getattr(runner, "_turn_carry", None) is None
+diff --git a/tests/tools/test_restart_carry_subagent_helpers.py b/tests/tools/test_restart_carry_subagent_helpers.py
+new file mode 100644
+index 00000000..b6903af5
+--- /dev/null
++++ b/tests/tools/test_restart_carry_subagent_helpers.py
+@@ -0,0 +1,116 @@
++"""The per-turn restart carry and a subagent's own subagents (its helpers, ``delegate_tool_subunits``).
++
++A subagent carried to its step boundary (0150) handed its helpers over by stopping them with it: a helper in a model
++call had that call cut and the next gateway made it again. Now each helper in a turn is carried the same way: it runs
++on to its own next step boundary, the subagent's stop waits for it, and its unit goes to the next gateway as
++unfinished (resumed there), not as a finished result, and does not wake the subagent here.
++"""
++
++import threading
++import time
++import weakref
++
++import pytest
++
++from agent import turn_boundary_handoff as boundary
++from tests.waiting import wait_until
++from tools import delegate_tool_handoff as handoff
++from tools import delegate_tool_subunits as subunits
++
++
++class _Agent:
++    """A subagent or helper inside a turn (a model call), with the cleanup hook its run calls once it returns."""
++
++    def __init__(self, name, in_turn=True):
++        self._execution_thread_id = 1000 if in_turn else None
++        self._tool_worker_threads, self._tool_worker_threads_lock = set(), threading.Lock()
++        self.session_id, self.stops, self._delegate_restart_handoff = name, [], False
++
++    def get_activity_summary(self):
++        return {"current_tool": None}
++
++    def hard_interrupt(self, message=None, *, tool_reason=None):
++        self.stops.append(tool_reason)
++
++    def reach_boundary(self):
++        assert boundary.stop_here(self)
++        self._execution_thread_id = None
++        self._handoff_capture()
++
++
++@pytest.fixture
++def quiet_state(monkeypatch):
++    monkeypatch.setattr(handoff, "_child_state", lambda child: {"session_id": child.session_id})
++    monkeypatch.setattr(subunits, "is_waiting", lambda _agent: False)
++
++
++def _helper_unit(subagent, helper):
++    unit = subunits.Unit("deleg-h", ["help"], [0], ["sa-h"], None, "leaf", "m",
++                         {"version": 1, "children": {"0": {"goal": "help"}}}, [helper])
++    unit.stop_fn = lambda: subunits._signal_child_stop(helper, "Stopped by its parent subagent")
++    subunits._add(subagent, unit)
++    return unit
++
++
++def _handed_off_result():
++    return {"results": [{"task_index": 0, "status": "interrupted", "exit_reason": "handed_off", "summary": None}]}
++
++
++@pytest.mark.parametrize("subagent_in_turn", [True, False])
++def test_a_helper_in_a_model_call_reaches_its_boundary_before_the_subagent_is_handed_off(quiet_state,
++                                                                                        subagent_in_turn):
++    subagent, helper = _Agent("sub", in_turn=subagent_in_turn), _Agent("helper")
++    unit = _helper_unit(subagent, helper)
++    woken = []
++    subunits._wake, original = (lambda agent: woken.append(agent)), subunits._wake
++    try:
++        state = {}
++        started = time.monotonic()
++        worker = threading.Thread(target=handoff._handoff_fn({0: subagent}), args=(started, state),
++                                  kwargs={"boundary_until": started + 10})
++        worker.start()
++        wait_until(lambda: boundary.requested(helper), what="the helper's boundary was requested")
++        if subagent_in_turn:
++            wait_until(lambda: boundary.requested(subagent), what="the subagent's boundary was requested")
++            threading.Thread(target=subagent.reach_boundary).start()
++        time.sleep(0.3)
++        # Neither is stopped while the helper's model call runs: the subagent's stop waits for it.
++        assert helper.stops == [] and subagent.stops == [] and state == {}
++        assert boundary.stop_here(helper, tool_round=True) is False  # its tool round runs
++        helper.reach_boundary()
++        subunits._finish(weakref.ref(subagent), unit, _handed_off_result())
++        worker.join(5)
++        assert not worker.is_alive()
++    finally:
++        subunits._wake = original
++    assert woken == []  # a helper stopped for the restart has nothing to deliver here
++    assert helper.stops == [] and subagent.stops == [handoff.RESTART_TOOL_REASON]
++    units = state["0"]["units"]
++    assert len(units) == 1 and units[0]["done"] is False and units[0]["kept"] == {}
++    assert units[0]["spec"]["children"]["0"]["session_id"] == "helper"
++
++
++def test_a_helper_not_in_a_turn_stops_with_the_subagent_as_before(quiet_state):
++    subagent, helper = _Agent("sub", in_turn=False), _Agent("helper", in_turn=False)
++    _helper_unit(subagent, helper)
++    state = {}
++    started = time.monotonic()
++    handoff._handoff_fn({0: subagent})(started, state, boundary_until=started + 10)
++    assert time.monotonic() - started < 2
++    assert not boundary.requested(helper) and helper._delegate_restart_handoff is True
++    assert state["0"]["units"][0]["done"] is False
++
++
++def test_a_helper_that_finished_normally_is_still_delivered():
++    subagent = _Agent("sub")
++    unit = _helper_unit(subagent, _Agent("helper"))
++    unit.carried[0] = None
++    woken = []
++    original, subunits._wake = subunits._wake, (lambda agent: woken.append(agent))
++    try:
++        subunits._finish(weakref.ref(subagent), unit, {"results": [{"task_index": 0, "status": "completed",
++                                                                     "exit_reason": "completed"}]})
++    finally:
++        subunits._wake = original
++    assert woken == [subagent]
++    assert subunits.hand_off(subagent)[0]["done"] is True
+diff --git a/tools/delegate_tool_handoff.py b/tools/delegate_tool_handoff.py
+index 38343a1f..317bba79 100644
+--- a/tools/delegate_tool_handoff.py
++++ b/tools/delegate_tool_handoff.py
+@@ -315,12 +315,15 @@ def _handoff_fn(children: dict[int, Any]) -> Callable[..., None]:
+         pending = dict(children)
+         captured: set = set()
+         lock = threading.Lock()
++        helpers: dict[int, list] = {}
+ 
+         def stop(index: int, child: Any) -> None:
+             with lock:
+                 if index in captured:
+                     return
+                 captured.add(index)
++            for event in helpers.get(index, ()):  # its own subagents first reach their boundaries too
++                event.wait(max(0.0, boundary_until - time.monotonic()) if boundary_until is not None else 0.0)
+             state[str(index)] = _child_state(child)
+             from tools.delegate_tool_subunits import hand_off as _hand_off_children, is_waiting
+             if units := _hand_off_children(child):  # its own children go to the next gateway with it
+@@ -330,6 +333,12 @@ def _handoff_fn(children: dict[int, Any]) -> Callable[..., None]:
+ 
+         if boundary_until is not None:
+             from agent import turn_boundary_handoff as boundary
++            from tools.delegate_tool_subunits import carry_to_boundaries
++            for index, child in list(pending.items()):
++                try:
++                    helpers[index] = carry_to_boundaries(child)
++                except Exception:
++                    logger.debug("Could not carry a subagent's own subagents to their boundaries", exc_info=True)
+             reached: dict[int, threading.Event] = {}
+             for index, child in list(pending.items()):
+                 if not _in_turn(child):
+diff --git a/tools/delegate_tool_subunits.py b/tools/delegate_tool_subunits.py
+index 6d6222f2..3b100c6c 100644
+--- a/tools/delegate_tool_subunits.py
++++ b/tools/delegate_tool_subunits.py
+@@ -63,6 +63,9 @@ class Unit:
+         self.delivered = False
+         self.handed_off = False
+         self.stop_fn: Any = None
++        # Carried to their step boundaries by a restart (``carry_to_boundaries``): task index -> the state each
++        # child had there. Such a child's run ends handed off; the unit is resumed, not finished.
++        self.carried: dict = {}
+ 
+     def describe(self) -> str:
+         goal = next((self.goals[i] for i in self.indexes if i < len(self.goals) and self.goals[i]), "")
+@@ -135,11 +138,22 @@ def _wake(agent: Any) -> None:
+ def _finish(agent_ref: Any, unit: Unit, result: dict) -> None:
+     unit.result = result
+     unit.done.set()
++    if _carried_off(unit):
++        return  # stopped at its boundary for a restart: nothing to deliver, the next gateway resumes it
+     agent = agent_ref()
+     if agent is not None:
+         _wake(agent)
+ 
+ 
++def _carried_off(unit: Unit) -> bool:
++    """Whether every child of a finished unit stopped at its step boundary for a restart (``carry_to_boundaries``)."""
++    if not unit.carried:
++        return False
++    results = [r for r in (unit.result or {}).get("results") or [] if isinstance(r, dict)]
++    return bool(results) and all(r.get("exit_reason") == "handed_off" and r.get("task_index") in unit.carried
++                                 for r in results)
++
++
+ def _crash_result(unit: Unit, error: str) -> dict:
+     from tools.delegate_tool_child_run import _fabricated_entry
+     return {"results": [_fabricated_entry(i, "error", error, None) for i in unit.indexes], "error": error}
+@@ -256,6 +270,37 @@ def stop_all(agent: Any, entry: Optional[dict] = None) -> None:
+ 
+ 
+ # ── Restart handoff ─────────────────────────────────────────────────────────
++def carry_to_boundaries(agent: Any) -> list:
++    """The per-turn restart carry (``gateway.restart_turn_handoff_per_turn``): each running child of the subagent that
++    is in a turn runs its model call and tool round on to its next step boundary and stops there, as the subagent
++    does (``delegate_tool_handoff._handoff_fn``), so the next gateway repeats no model call of it and runs no tool
++    call of it again. Stopping the children with the subagent cut them. Returns one event per child asked, set once
++    it stopped; its state is kept on the unit (``Unit.carried``) for ``hand_off``. A child with no resume record,
++    or not in a turn (it waits on its own processes), stops with the subagent as before."""
++    from agent import turn_boundary_handoff as boundary
++    from tools.delegate_tool_handoff import _child_state, _in_turn
++    events = []
++    for unit in running(agent):
++        if unit.spec is None:
++            continue
++        for child, index in zip(list(unit.children), unit.indexes):
++            if index in unit.carried or not _in_turn(child):
++                continue
++            event = threading.Event()
++
++            def at_boundary(u=unit, c=child, i=index, e=event) -> None:
++                try:
++                    u.carried[i] = _child_state(c)
++                finally:
++                    e.set()
++            child._delegate_restart_handoff = True  # a wait it starts now ends at once
++            child._handoff_capture = at_boundary  # its cleanup calls it once its run ended
++            unit.carried.setdefault(index, None)
++            boundary.request(child, tool_round=False)
++            events.append(event)
++    return events
++
++
+ def hand_off(agent: Any) -> list:
+     """The subagent stops for a restart handoff: mark its running children as handed off (their tool state is kept for
+     the next gateway) and return each unit's resume record. Finished but unread results ride along as kept entries."""
+@@ -264,7 +309,8 @@ def hand_off(agent: Any) -> list:
+     for unit in units_of(agent):
+         if unit.delivered or unit.handed_off:
+             continue
+-        done = unit.done.is_set()
++        carried = unit.done.is_set() and _carried_off(unit)
++        done = unit.done.is_set() and not carried
+         kept = {}
+         if done:
+             for r in (unit.result or {}).get("results") or []:
+@@ -277,7 +323,8 @@ def hand_off(agent: Any) -> list:
+             for child, i in zip(unit.children, unit.indexes):
+                 child._delegate_restart_handoff = True
+                 try:
+-                    state = _child_state(child)
++                    # A child carried to its boundary already ended: its state is the one it had there.
++                    state = unit.carried.get(i) if carried and unit.carried.get(i) else _child_state(child)
+                 except Exception:
+                     state = {}
+                 (spec.get("children") or {}).setdefault(str(i), {}).update(
+-- 
+2.56.0
+
