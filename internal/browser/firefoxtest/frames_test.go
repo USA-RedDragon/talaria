@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/USA-RedDragon/talaria/internal/browser/broker"
 )
@@ -35,6 +36,23 @@ type recorder struct {
 	mu    sync.Mutex
 	puts  []string
 	leaks int
+	posts map[string]int
+}
+
+// post counts a POST to /api/post by the host it reached.
+func (r *recorder) post(host string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.posts == nil {
+		r.posts = map[string]int{}
+	}
+	r.posts[host]++
+}
+
+func (r *recorder) postsTo(host string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.posts[host]
 }
 
 func (r *recorder) put(body string) {
@@ -93,6 +111,22 @@ func framePages(cross string, rec *recorder) http.HandlerFunc {
 		case "/later":
 			_, _ = io.WriteString(w, `<title>later</title><p>soon</p><script>setTimeout(() =>`+
 				` document.body.insertAdjacentHTML("beforeend", "<p>late text</p>"), 800);</script>`)
+		case "/poster":
+			// Like Salesforce Lightning or a login page: after the document is
+			// complete the page loads with POSTs to its own site and to
+			// another one (a captcha, telemetry), and a button posts again.
+			_, _ = io.WriteString(w, `<title>poster</title><p id="st">loading</p>`+
+				`<button id="send" onclick="send()">send</button><div style="height: 5000px">tall</div><script>`+
+				`function send() { return Promise.all([fetch("/api/post", {method: "POST", body: "x"}).then((r) => r.ok ? "own ok" : "own bad"),`+
+				` fetch("`+cross+`/api/post", {method: "POST", mode: "no-cors", body: "x"}).then(() => "cross ok")])`+
+				`.then((v) => v.join(" "), (e) => "failed " + e); }`+
+				`addEventListener("load", () => fetch("/api/data").then(() => send())`+
+				`.then((v) => { document.getElementById("st").textContent = v; }));</script>`)
+		case "/api/post":
+			if r.Method == http.MethodPost {
+				rec.post(r.Host[:strings.LastIndex(r.Host, ":")])
+			}
+			_, _ = io.WriteString(w, "ok")
 		case "/api/data":
 			w.Header().Set("Content-Type", "application/json")
 			if r.Method == http.MethodPut {
@@ -169,6 +203,7 @@ func frameFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int) (
 
 	interactFlow(ctx, t, b, tabID, page.URL, snap.Snapshot)
 	scriptFlow(ctx, t, b, tabID, page.URL, cross.URL, rec)
+	pageWritesFlow(ctx, t, b, tabID, page.URL, rec)
 	confirmFlow(ctx, t, b, tabID, confirm.URL)
 	return page.URL, rec
 }
@@ -210,9 +245,11 @@ func scriptFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int, 
 	if out := evalIn(ctx, t, b, map[string]any{keyTab: tabID, keyScript: get, keyGuard: read}); string(out.Result) != `{"value":42,"items":[1,2]}` || !out.ReadOnly {
 		t.Errorf("GET fetch result = %s", out.Result)
 	}
+	// A read-only script's page is loaded again when it returns, so what it
+	// put on window is gone.
 	evalIn(ctx, t, b, map[string]any{keyTab: tabID, keyScript: `window.__kept = {n: 7}; return true;`, keyGuard: read})
-	if out := evalIn(ctx, t, b, map[string]any{keyTab: tabID, keyScript: `return window.__kept.n + document.querySelectorAll("iframe").length;`, keyGuard: read}); string(out.Result) != "9" {
-		t.Errorf("state on window = %s", out.Result)
+	if out := evalIn(ctx, t, b, map[string]any{keyTab: tabID, keyScript: `return typeof window.__kept + document.querySelectorAll("iframe").length;`, keyGuard: read}); string(out.Result) != `"undefined2"` {
+		t.Errorf("state on window after a read-only script = %s", out.Result)
 	}
 	sameFrame := `const d = [...document.querySelectorAll("iframe")].map((f) => { try { return f.contentDocument; } catch (e) { return null; } }).filter(Boolean);` +
 		` return d.map((x) => x.querySelector("p").textContent);`
@@ -310,6 +347,103 @@ func scriptFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int, 
 	call(ctx, t, b, "navigate", map[string]any{keyTab: tabID, keyURL: base + "/frames"}, nil)
 	call(ctx, t, b, "snapshot", map[string]any{keyTab: tabID}, &snap)
 	call(ctx, t, b, "click", map[string]any{keyTab: tabID, keyRef: refByName(snap.Snapshot, `"hover me"`)}, nil)
+}
+
+// waitPosts waits until the servers got want POSTs on each of the hosts.
+func waitPosts(ctx context.Context, t *testing.T, rec *recorder, what string, want int, hosts ...string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ok := true
+		for _, h := range hosts {
+			if rec.postsTo(h) < want {
+				ok = false
+			}
+		}
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			for _, h := range hosts {
+				t.Errorf("%s: %d POSTs reached %s, want %d", what, rec.postsTo(h), h, want)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// pageWritesFlow checks that a read-only script does not break the page
+// (the Salesforce Lightning and Atlassian login regression of 0.32.3): the
+// script waits for the page's own POSTs while it loads, the page is loaded
+// again when the script returns, so it posts to its own site and to another
+// site again, clicks work, and the scroll position stays. A read-only script
+// still cannot post, through fetch or through the page.
+func pageWritesFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int, base string, rec *recorder) {
+	t.Helper()
+	call(ctx, t, b, "navigate", map[string]any{keyTab: tabID, keyURL: base + "/poster"}, nil)
+	read := map[string]any{keyScripts: []string{loopback}}
+	var out struct {
+		Result   json.RawMessage `json:"result"`
+		Reloaded bool            `json:"reloaded"`
+	}
+	call(ctx, t, b, "eval", map[string]any{keyTab: tabID, keyScript: `return document.getElementById("st").textContent;`, keyGuard: read}, &out)
+	t.Logf("read-only script on a loading page: %s reloaded=%v", out.Result, out.Reloaded)
+	if string(out.Result) != `"own ok cross ok"` {
+		t.Errorf("the page's own POSTs while it loaded were cut by the script: %s", out.Result)
+	}
+	if !out.Reloaded {
+		t.Error("the page was not loaded again after a read-only script")
+	}
+	waitPosts(ctx, t, rec, "the page posting after it was loaded again", 2, loopback, crossHost)
+	var snap snapResult
+	call(ctx, t, b, "snapshot", map[string]any{keyTab: tabID}, &snap)
+	call(ctx, t, b, "click", map[string]any{keyTab: tabID, keyRef: refByName(snap.Snapshot, `"send"`)}, nil)
+	waitPosts(ctx, t, rec, "a click after a read-only script", 3, loopback, crossHost)
+
+	// A read-only script still cannot write: not with fetch, not through
+	// the page's button, not with a timer it leaves behind.
+	own, cross := rec.postsTo(loopback), rec.postsTo(crossHost)
+	mustFail(ctx, t, b, "POST in a read-only script", "NetworkError", "eval", map[string]any{keyTab: tabID,
+		keyScript: `const r = await fetch("/api/post", {method: "POST", body: "x"}); return r.status;`, keyGuard: read})
+	for _, s := range []string{
+		`document.getElementById("send").click(); await new Promise((r) => setTimeout(r, 500)); return 1;`,
+		`window.wrappedJSObject.eval('setTimeout(() => document.getElementById("send").click(), 0)'); return 1;`,
+		`window.wrappedJSObject.eval('setTimeout(() => document.getElementById("send").click(), 150)'); return 1;`,
+	} {
+		call(ctx, t, b, "eval", map[string]any{keyTab: tabID, keyScript: s, keyGuard: read}, nil)
+	}
+	// Each reload posts on load once more (4 scripts, 4 loads); nothing else may arrive.
+	waitPosts(ctx, t, rec, "the page posting after each read-only script", own+4, loopback)
+	waitPosts(ctx, t, rec, "the page posting after each read-only script", cross+4, crossHost)
+	time.Sleep(500 * time.Millisecond)
+	if g, c := rec.postsTo(loopback)-own, rec.postsTo(crossHost)-cross; g != 4 || c != 4 {
+		t.Errorf("after 4 read-only scripts, %d POSTs reached the page's site and %d another site, want 4 and 4 (the page's loads)", g, c)
+	}
+
+	// The scroll position survives the reload; a script with allow_writes
+	// keeps its page (and its limits).
+	write := map[string]any{"write_hosts": []string{loopback}}
+	out.Reloaded = false
+	call(ctx, t, b, "eval", map[string]any{keyTab: tabID, keyScript: `window.scrollTo(0, 1200); window.__w = 1; return scrollY;`, keyWrites: true, keyGuard: write}, &out)
+	t.Logf("scrolled to %s", out.Result)
+	if out.Reloaded {
+		t.Error("a script with allow_writes reloaded the page")
+	}
+	call(ctx, t, b, "eval", map[string]any{keyTab: tabID, keyScript: `return window.__w;`, keyWrites: true, keyGuard: write}, &out)
+	if string(out.Result) != "1" {
+		t.Errorf("state on window after a script with allow_writes = %s", out.Result)
+	}
+	call(ctx, t, b, "eval", map[string]any{keyTab: tabID, keyScript: `return 1;`, keyGuard: read}, nil)
+	out.Reloaded = false
+	call(ctx, t, b, "eval", map[string]any{keyTab: tabID, keyScript: `return [Math.round(scrollY), typeof window.__w];`, keyGuard: read}, &out)
+	if string(out.Result) != `[1200,"undefined"]` {
+		t.Errorf("scroll and window state after a read-only script = %s, want [1200,\"undefined\"]", out.Result)
+	}
 }
 
 // confirmFlow checks a protected site (browser.confirm-hosts, as for

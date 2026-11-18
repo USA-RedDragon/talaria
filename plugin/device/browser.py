@@ -1914,6 +1914,11 @@ def extension_update_note(conn: Any) -> str:
                 f"Until then, fixes in the newer extension are not active.")
     if not newer or state == "current":
         return ""
+    if state == "manual":
+        return (f"The Firefox extension ({ext}) is older than {' and '.join(newer)}. Firefox does not let an extension ask "
+                f"for its own update, so it arrives with Firefox's daily check; to get it now, the user opens about:addons, "
+                f"clicks the gear button and Check for Updates. The extension then installs it as soon as no agent action "
+                f"is running.")
     if state in ("checking", "throttled", "error"):
         how = {"checking": "is asking Firefox for an update now", "throttled": "was told by Firefox to check again later",
                "error": "could not ask Firefox for an update"}[state]
@@ -2843,8 +2848,9 @@ SCHEMAS = {
         "browser_eval", "Run JavaScript in a tab; returns the result as JSON. script is an async function body "
         "that ends with return. To run a script file that a skill ships, give script_ref and its inputs in args "
         "(the script reads them as ARGS); never retype a skill's script. fetch() reaches only the page's site, GET "
-        "and HEAD unless allow_writes. Use wait_for or wait_selector, not sleeps. After a script, clicks and typing "
-        "in that tab are refused until browser_navigate. Example: {\"tab_id\": 12, \"script_ref\": {\"skill\": "
+        "and HEAD unless allow_writes. Use wait_for or wait_selector, not sleeps. After a script with allow_writes, clicks and typing "
+        "in that tab are refused until browser_navigate; a read-only script's page is loaded again when it returns "
+        "(scroll kept, values the script left on window gone), so clicks work after it. Example: {\"tab_id\": 12, \"script_ref\": {\"skill\": "
         "\"report-reader\", \"file\": \"scripts/read.js\"}, \"args\": {\"id\": \"42\"}}",
         {"tab_id": _TAB,
          "script": {"type": "string", "description": "Async function body that ends with return <value>"},

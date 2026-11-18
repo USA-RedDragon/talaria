@@ -796,6 +796,75 @@ async function loadIn(tabId, url) {
   return loaded;
 }
 
+// lastRequest holds, per tab, when the tab last started a request. A
+// script waits for a quiet page (pageQuiet) before it runs: a page that is
+// still loading (Salesforce Lightning loads a record with POSTs to /aura
+// after the document is complete) would have those requests cancelled by
+// the script's limits.
+const lastRequest = new Map();
+browser.webRequest.onBeforeRequest.addListener((d) => {
+  if (d.tabId >= 0) {
+    lastRequest.set(d.tabId, Date.now());
+  }
+}, { urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"] });
+browser.tabs.onRemoved.addListener((tabId) => lastRequest.delete(tabId));
+const QUIET_MS = 600;
+const QUIET_MAX_MS = 10000;
+
+// pageQuiet waits until the tab has finished loading and started no request
+// for QUIET_MS, at most QUIET_MAX_MS (a page that polls is never quiet).
+async function pageQuiet(tabId) {
+  const deadline = Date.now() + QUIET_MAX_MS;
+  for (;;) {
+    const tab = await browser.tabs.get(tabId);
+    const idle = Date.now() - (lastRequest.get(tabId) || 0);
+    if ((tab.status === "complete" && idle >= QUIET_MS) || Date.now() >= deadline) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, Math.max(50, Math.min(QUIET_MS - idle, 200))));
+  }
+}
+
+// tabScrollOf returns the top frame's scroll position, clamped numbers.
+async function tabScrollOf(tabId) {
+  const [s] = await browser.tabs.executeScript(tabId, { code: "[window.scrollX, window.scrollY]", frameId: 0 });
+  return (Array.isArray(s) ? s : [0, 0]).slice(0, 2).map((v) => (Number.isFinite(v) && v > 0 ? Math.min(Math.round(v), 1e7) : 0));
+}
+
+async function tabScrollTo(tabId, x, y) {
+  const [ok] = await browser.tabs.executeScript(tabId, { frameId: 0,
+    code: "window.scrollTo(" + x + ", " + y + "); Math.abs(window.scrollX - " + x + ") < 2 && Math.abs(window.scrollY - " + y + ") < 2" });
+  return ok === true;
+}
+
+// resetAfterScript loads the page again after a read-only script returned,
+// the way browser_navigate does (about:blank first, so the page that ran
+// the script is gone before its limits end), at the address the browser
+// had before the script ran, never one the script set. The page then works
+// again, its own writes included, and clicks are allowed. Values the script
+// left on window are gone. The scroll position comes back as far as the new
+// page allows within a few seconds.
+async function resetAfterScript(tabId, url, scroll) {
+  await loadIn(tabId, url);
+  const [x, y] = scroll || [0, 0];
+  if (!(x > 0 || y > 0)) {
+    return;
+  }
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    let ok = false;
+    try {
+      ok = await tabScrollTo(tabId, x, y);
+    } catch (e) {
+      // The page may still be swapping documents; try again.
+    }
+    if (ok || Date.now() >= deadline) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 async function inFrame(tabId, frameId, func, args, withHelpers) {
   const target = { tabId, frameIds: [frameId] };
   if (withHelpers) {
@@ -2255,9 +2324,29 @@ const OPS = {
     if (sensitive.length && !g.sensitive) {
       throw new Refused("this page has " + sensitive.join(", ") + " fields; the user must confirm each script here");
     }
-    // The limits apply before the script runs and stay until the agent
-    // loads another page in the tab (docs/browser.md section 7.2).
-    // Writes are allowed only to the site the user approved them for.
+    // The script runs on a page that finished loading, so the page's own
+    // requests are not cut by the limits below.
+    await pageQuiet(tab_id);
+    // A page may change its address while it loads (pushState); another
+    // host is another page.
+    const before = await browser.tabs.get(tab_id);
+    if (hostOf(before.url) !== topHost) {
+      throw new Refused("the page went to " + (hostOf(before.url) || "another page") + " while the script waited for it " +
+        "to load; take a new snapshot and run it again");
+    }
+    let scroll = [0, 0];
+    if (!allow_writes) {
+      try {
+        scroll = await tabScrollOf(tab_id);
+      } catch (e) {
+        // No scroll position to bring back.
+      }
+    }
+    // The limits apply before the script runs. A read-only script's stay
+    // until the extension loaded the page again after it returned; a
+    // script with allow_writes keeps them until the agent loads another
+    // page in the tab (docs/browser.md section 7.2). Writes are allowed only
+    // to the site the user approved them for.
     const old = taints.get(tab_id);
     const sites = new Map(old ? old.sites : []);
     if (!sites.has(siteOf(topHost))) {
@@ -2269,6 +2358,7 @@ const OPS = {
     everScripted.add(tab_id);
     unsealed.add(tab_id);
     let res;
+    let resetError = "";
     try {
       [res] = await browser.tabs.executeScript(tab_id, { code: evalCode(script, site, [...autologinHosts]), frameId });
     } finally {
@@ -2277,6 +2367,18 @@ const OPS = {
       // went away) leaves the window open until the tab loads a page again.
       if (res && typeof res === "object" && res.sealed === true) {
         unsealed.delete(tab_id);
+      }
+      // A read-only script's page is loaded again, so the page can send its
+      // own writes and reach its other sites (a login page's check, a
+      // captcha, telemetry) again. A page with allow_writes is kept: the
+      // user approved writes there, and a reload would undo the script's
+      // work in progress.
+      if (!allow_writes) {
+        try {
+          await resetAfterScript(tab_id, before.url, scroll);
+        } catch (e) {
+          resetError = String(e && e.message ? e.message : e);
+        }
       }
     }
     if (!res || typeof res !== "object") {
@@ -2290,6 +2392,14 @@ const OPS = {
     }
     const max = Math.max(1, Math.min(Number(max_chars) || MAX_TEXT, MAX_EVAL_RESULT));
     const out = { tab_id, url: tab.url, title: tab.title, read_only: !allow_writes };
+    if (!allow_writes) {
+      // Values the script put on window are gone with the old page.
+      out.reloaded = !resetError;
+      if (resetError) {
+        out.reload_error = resetError.slice(0, 300);
+        out.hint = "the page did not load again after the script; load it with browser_navigate before clicking";
+      }
+    }
     if (frameId) {
       out.frame = "f" + frameNum(tab_id, frameId);
     }
@@ -2302,7 +2412,7 @@ const OPS = {
       out.result = JSON.parse(json);
     }
     if (res.undef) {
-      out.hint = "the script returned nothing; end it with return <value>";
+      out.hint = (out.hint ? out.hint + "; " : "") + "the script returned nothing; end it with return <value>";
     }
     return out;
   },
