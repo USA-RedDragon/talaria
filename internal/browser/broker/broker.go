@@ -88,7 +88,8 @@ type Message struct {
 	PluginVersion string `json:"plugin_version,omitempty"`
 	// Update is the extension's own update state: "checking", "current",
 	// "pending" (an update waits for no action to be in flight),
-	// "throttled" or "error". UpdateVersion is the version that waits.
+	// "throttled", "error" or "manual" (Firefox cannot be asked for a
+	// check). UpdateVersion is the version that waits.
 	Update        string `json:"update,omitempty"`
 	UpdateVersion string `json:"update_version,omitempty"`
 	// HubURL is the daemon's hub.url. The extension keeps agent tabs off

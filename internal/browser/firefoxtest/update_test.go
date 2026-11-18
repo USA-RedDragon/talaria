@@ -33,10 +33,11 @@ func TestExtensionRequestsUpdateCheck(t *testing.T) { //nolint:paralleltest // o
 		h, ok := b.Connected()
 		if ok && h.Update != "" && h.Update != "checking" {
 			t.Logf("extension %s reports update state %q (%s)", h.Version, h.Update, h.UpdateVersion)
-			switch h.Update {
-			case "current", "throttled", "error":
-			default:
-				t.Fatalf("update state = %q", h.Update)
+			// Firefox has no runtime.requestUpdateCheck (its schema marks it
+			// unsupported), so the extension says it cannot ask: "manual".
+			// Before 0.32.6 it called the missing function and said "error".
+			if h.Update != "manual" {
+				t.Fatalf("update state = %q, want manual", h.Update)
 			}
 			return
 		}

@@ -128,3 +128,17 @@ test("update_available in the answer alone also reloads", async () => {
   await u.check();
   assert.equal(calls.reload, 1);
 });
+
+test("a browser without requestUpdateCheck reports manual and still applies an update", async () => {
+  // Firefox: the runtime schema marks requestUpdateCheck unsupported, so it is undefined.
+  const { u, calls, timers, env } = rig();
+  delete env.runtime.requestUpdateCheck;
+  await u.check();
+  assert.deepEqual(calls.reports, [["manual", ""]]);
+  assert.equal(timers.length, 0);
+  assert.equal(u.noteVersions("0.40.0"), true);
+  await settle();
+  assert.deepEqual(calls.reports, [["manual", ""], ["manual", ""]]);
+  u.onUpdateAvailable({ version: "0.40.0" });
+  assert.equal(calls.reload, 1);
+});

@@ -1,9 +1,14 @@
 // Self-update of the extension. Firefox checks for extension updates once a
-// day, so a fix can wait hours. The extension therefore asks for a check
-// itself when it starts, every few hours, and whenever the daemon or the
-// plugin names a version newer than its own, and it applies an available
-// update (runtime.reload) as soon as no agent action is in flight, so a
-// running action is never cut. The logic takes its environment as
+// day, so a fix can wait hours. Where the browser has
+// runtime.requestUpdateCheck, the extension asks for a check itself when it
+// starts, every few hours, and whenever the daemon or the plugin names a
+// version newer than its own. Firefox does not implement it (its runtime
+// schema marks it "unsupported", so browser.runtime.requestUpdateCheck is
+// undefined, checked on Firefox 157); there the state is "manual": the
+// update comes with Firefox's daily check or a check in about:addons. Either
+// way an available update (runtime.onUpdateAvailable) is applied with
+// runtime.reload as soon as no agent action is in flight, so a running
+// action is never cut. The logic takes its environment as
 // arguments, so a unit test can run it with a stubbed runtime
 // (update_test.js).
 "use strict";
@@ -44,7 +49,8 @@ function compareVersions(a, b) {
 //   ownVersion    the extension's own version
 //   busy()        true while an agent action, batch or script is in flight
 //   report(state, version) tells the daemon: "checking", "current", "pending",
-//                 "throttled" or "error"
+//                 "throttled", "error" or "manual" (the browser cannot be
+//                 asked for a check)
 //   setTimeout, clearTimeout (default: the globals)
 function createUpdater(env) {
   const st = env.setTimeout || setTimeout;
@@ -97,6 +103,11 @@ function createUpdater(env) {
   // check asks Firefox for an update now.
   u.check = async () => {
     if (checking || pending) {
+      return;
+    }
+    if (typeof env.runtime.requestUpdateCheck !== "function") {
+      // Nothing to retry: only Firefox's own check finds the update.
+      env.report("manual", "");
       return;
     }
     checking = true;

@@ -282,6 +282,8 @@ class ToolTests(BrowserBase):
         self.assertIn("no agent action is running", out["extension_update_note"])
         browser_conn.update(extension_update="throttled")
         self.assertIn("check again later", self.run_tool("browser_status")["extension_update_note"])
+        browser_conn.update(extension_update="manual")
+        self.assertIn("Check for Updates", self.run_tool("browser_status")["extension_update_note"])
         browser_conn.update(extension_update="current")
         self.assertNotIn("extension_update_note", self.run_tool("browser_status"))
         browser_conn["extension_version"] = "0.99.0"

@@ -73,4 +73,4 @@ jobs:
       - name: End-to-end test
         env:
           HERMES_BROWSER_E2E: "1"
-        run: go test -count=1 -v -timeout 15m -run 'TestFirefoxEndToEnd|TestFirefoxBatchFlow' ./internal/browser/firefoxtest/
+        run: go test -count=1 -v -timeout 15m -run 'TestFirefoxEndToEnd|TestFirefoxBatchFlow|TestExtensionRequestsUpdateCheck' ./internal/browser/firefoxtest/
