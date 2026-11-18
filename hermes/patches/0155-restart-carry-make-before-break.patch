@@ -1,0 +1,460 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 03:21:59 +0000
+Subject: [PATCH] fix(gateway): a takeover lets the hub move its socket to the
+ next gateway before the old one closes
+
+With gateway.restart_turn_handoff_per_turn the old gateway kept the hub's socket open past the seal and closed it with 1012 once the next gateway was ready and the socket was idle (KEPT_IDLE_S), a request came, or a carried turn moved over. The hub then dialed again through the Service and re-attached every chat it watched in turn: each chat's events paused for 0.6 to 0.8 s in a live rollout (up to 2 s on a CPU-capped gateway), and a chat whose turn was still carried could miss frames between the close and its re-attach.
+
+A client that asks for it on its dial (?successor_hint=1) now gets a gateway.successor_ready event on the kept socket once the next gateway answers ready, with that gateway's listener address when it runs in another pod ({"host", "port"}; empty when it shares this one's). The socket is not closed for being idle: it goes on streaming the carried turns while the client opens its next socket and moves its sessions over, and the client closes it. A request on it, or the end of the relay window, still ends it with 1012 as before; a socket that did not ask, or a takeover whose next gateway never answered ready, is closed as before.
+
+Each frame the next gateway relays for a carried turn (turn_carry._relay_one) now names the carrier's frame it comes from, carried_from: {"replay_epoch", "seq"}, live and in its session.events.since replay. A client that moved its socket drops the frames it already got from the carrier. Frames the next gateway publishes itself carry none.
+---
+ gateway/run_api.py                            |  49 +++++
+ gateway/session_events.py                     |   7 +
+ gateway/turn_carry.py                         |  81 +++----
+ .../test_restart_carry_make_before_break.py   | 203 ++++++++++++++++++
+ 4 files changed, 304 insertions(+), 36 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_make_before_break.py
+
+diff --git a/gateway/run_api.py b/gateway/run_api.py
+index c200d3eb..208bef9e 100644
+--- a/gateway/run_api.py
++++ b/gateway/run_api.py
+@@ -15,6 +15,7 @@ process that already imported it mount it before the listener starts, exactly as
+ 
+ import asyncio
+ from dataclasses import dataclass
++import json
+ import logging
+ import os
+ import socket
+@@ -542,6 +543,13 @@ KEPT_ASKED_KEY = 'hermes.socket_kept_asked'
+ #: A kept socket ends once it sent nothing for this long (after the next gateway is ready): its client reconnects
+ #: between two of its frames, so the carried turns it shows do not pause.
+ KEPT_IDLE_S = 1.5
++#: The send of a kept socket whose client asked for the successor hint (``?successor_hint=1`` on its dial): once the
++#: next gateway is ready it gets a ``gateway.successor_ready`` event instead of a close, opens its next socket while
++#: this one still streams the carried turns, and closes this one itself (make before break).
++KEPT_HINT_KEY = 'hermes.socket_kept_hint'
++#: Set when the client of a kept socket closed it.
++KEPT_LEFT_KEY = 'hermes.socket_kept_left'
++SUCCESSOR_READY_EVENT = 'gateway.successor_ready'
+ #: Close codes of a socket that ends because its gateway goes away; a parked socket sends 1012 for them.
+ _RESTART_CLOSE_CODES = frozenset({1000, 1001, 1012, 1013})
+ _READY_POLL_S = 0.05
+@@ -645,6 +653,8 @@ class GatewayRuntimeAPI:
+         #: ``gateway.restart_socket_close_delay_seconds``: set once parked sockets may close.
+         self._sockets_may_close: asyncio.Event | None = None
+         self._settle_task: asyncio.Task | None = None
++        #: True once the successor answered ready (the close gate also opens when it never did).
++        self.successor_ready = False
+ 
+     async def __call__(self, scope, receive, send):
+         task = asyncio.current_task()
+@@ -689,6 +699,19 @@ class GatewayRuntimeAPI:
+                 await asyncio.wait_for(self._close_gate().wait(), max(0.0, bound))
+                 last = loop.time()
+                 stop_at = min(started + bound, last + max(window, KEPT_IDLE_S))
++                if await self._hint_successor(scope):
++                    # The client moves to the next gateway itself and closes this socket; until then it streams on.
++                    # A request it still sends here ends it as before, and so does the end of the relay window.
++                    left = scope[KEPT_LEFT_KEY]
++                    wakes = {asyncio.ensure_future(asked.wait()), asyncio.ensure_future(left.wait()),
++                             asyncio.ensure_future(ending.wait())}
++                    try:
++                        await asyncio.wait(wakes, timeout=max(0.0, stop_at - loop.time()),
++                                           return_when=asyncio.FIRST_COMPLETED)
++                    finally:
++                        for wake in wakes:
++                            wake.cancel()
++                    return
+                 while not ending.is_set() and not self.kept_release.is_set() and not asked.is_set():
+                     now = loop.time()
+                     quiet = now - scope[KEPT_SENT_KEY][0]
+@@ -710,6 +733,26 @@ class GatewayRuntimeAPI:
+         self._kept_tasks.add(task)
+         task.add_done_callback(self._kept_tasks.discard)
+ 
++    async def _hint_successor(self, scope) -> bool:
++        """Send a kept socket whose client asked for it the ``gateway.successor_ready`` event, with the next gateway's
++        listener address when it runs in another network namespace. False when the client did not ask, the next
++        gateway never answered ready, or the send failed."""
++        hint = scope.get(KEPT_HINT_KEY)
++        if hint is None or not self.successor_ready or scope[KEPT_LEFT_KEY].is_set():
++            return False
++        payload = {}
++        if self.successor:
++            host, port = self.successor[0], self.successor[1]
++            payload = {'host': str(host), 'port': int(port)}
++        frame = {'jsonrpc': '2.0', 'method': 'event',
++                 'params': {'type': SUCCESSOR_READY_EVENT, 'session_id': '', 'payload': payload}}
++        try:
++            await hint({'type': 'websocket.send', 'text': json.dumps(frame)})
++        except Exception:
++            logger.debug('Could not send the successor hint', exc_info=True)
++            return False
++        return True
++
+     def end_kept(self) -> None:
+         """Every kept socket ends once the close gate opened (a carried turn moved to the next gateway)."""
+         self.kept_release.set()
+@@ -730,6 +773,7 @@ class GatewayRuntimeAPI:
+         of their clients reach the successor's own listener, not this one's relay."""
+         try:
+             if target is not None and await await_successor_ready(target, self.forward_deadline):
++                self.successor_ready = True
+                 await asyncio.sleep(delay)
+         except Exception:
+             logger.debug('Waiting for the next gateway to be ready failed', exc_info=True)
+@@ -751,6 +795,9 @@ class GatewayRuntimeAPI:
+         scope[KEPT_SCOPE_KEY] = kept
+         scope[KEPT_SENT_KEY] = [asyncio.get_running_loop().time()]
+         scope[KEPT_ASKED_KEY] = asyncio.Event()
++        scope[KEPT_LEFT_KEY] = asyncio.Event()
++        if b'successor_hint=1' in (scope.get('query_string') or b'').split(b'&'):
++            scope[KEPT_HINT_KEY] = send
+         client_left = False
+         runner = self.runner
+ 
+@@ -768,6 +815,8 @@ class GatewayRuntimeAPI:
+                     end.cancel()
+                 if step.done():
+                     message = step.result()
++                    if message.get('type') == 'websocket.disconnect':
++                        scope[KEPT_LEFT_KEY].set()
+                     if message.get('type') == 'websocket.disconnect' and not stopping():
+                         client_left = True
+                     if not kept.is_set() or message.get('type') == 'websocket.disconnect':
+diff --git a/gateway/session_events.py b/gateway/session_events.py
+index 6c0a5972..e9f956f2 100644
+--- a/gateway/session_events.py
++++ b/gateway/session_events.py
+@@ -44,6 +44,11 @@ class SessionEvents:
+         # session's turn, every published frame is also handed to this callable (``gateway.turn_carry``), which
+         # writes it for the next gateway to relay to its viewers.
+         self.mirror = None
++        # gateway.restart_turn_handoff_per_turn: set by the next gateway (``turn_carry._relay_one``, under ``lock``) while
++        # it publishes a frame the carrier published first: ``{'replay_epoch', 'seq'}`` of the carrier's frame, which goes
++        # out as the frame's ``carried_from``. A client that moved its socket from the carrier drops the frames it got
++        # there already.
++        self.origin = None
+ 
+     # The most a running turn's frames keep; past it the oldest tool results are shortened.
+     TURN_BYTES = 4 << 20
+@@ -168,6 +173,8 @@ class SessionEvents:
+             frame = {'jsonrpc': '2.0', 'method': 'event', 'params': {
+                 **(self.execution if execution is None else execution), 'type': event_type, 'session_id': self._key,
+                 'payload': deepcopy(payload), 'replay_epoch': self.epoch}}
++            if self.origin is not None:
++                frame['params']['carried_from'] = dict(self.origin)
+             event_replay._stamp_event(frame)
+             if frame['params']['seq'] <= self.sequence:
+                 # Another publisher may evict us after watermark's lookup.
+diff --git a/gateway/turn_carry.py b/gateway/turn_carry.py
+index 5e47c2f8..4e273334 100644
+--- a/gateway/turn_carry.py
++++ b/gateway/turn_carry.py
+@@ -1175,45 +1175,54 @@ def _relay_one(remote: _Remote, params: dict) -> None:
+     generation = turn["generation"]
+     stream, controls = live.event_stream, live.controls
+     from gateway.session_contract import SessionRef
++    # A frame the carrier published first names it (``carried_from``): a client that moved its socket from the carrier
++    # drops the ones it got there. A session.info is this gateway's own pending list, not the carrier's frame.
++    origin = None
++    if event_type != "session.info" and isinstance(params.get("replay_epoch"), str) and type(params.get("seq")) is int:
++        origin = {"replay_epoch": params["replay_epoch"], "seq": params["seq"]}
+     with stream.lock:
+-        if event_type == "session.info":
+-            authority._publish_pending(SessionRef(authority.profile_id, session_id))
+-            return
+-        if event_type in ("approval.request", "clarify.request"):
+-            pid = payload.get("prompt_id")
+-            if not pid:
++        stream.origin = origin
++        try:
++            if event_type == "session.info":
++                authority._publish_pending(SessionRef(authority.profile_id, session_id))
+                 return
+-            controls.pending[pid] = (None, dict(payload))
+-            controls.background.add(pid)  # answerable whatever generation this gateway reads as running
+-            controls.remote_responders[pid] = _forward_answer(remote, session_id, generation)
+-            remote.prompts.setdefault(session_id, set()).add(pid)
+-            if hasattr(controls, "announce"):
+-                controls.announce(session_id, dict(payload), event_type)
+-            else:
++            if event_type in ("approval.request", "clarify.request"):
++                pid = payload.get("prompt_id")
++                if not pid:
++                    return
++                controls.pending[pid] = (None, dict(payload))
++                controls.background.add(pid)  # answerable whatever generation this gateway reads as running
++                controls.remote_responders[pid] = _forward_answer(remote, session_id, generation)
++                remote.prompts.setdefault(session_id, set()).add(pid)
++                if hasattr(controls, "announce"):
++                    controls.announce(session_id, dict(payload), event_type)
++                else:
++                    stream.publish(session_id, payload, event_type=event_type)
++                return
++            if event_type in ("approval.settled", "clarify.settled"):
++                pid = payload.get("prompt_id")
++                if pid in controls.pending and pid in controls.remote_responders:
++                    controls.pending.pop(pid, None)
++                    controls.background.discard(pid)
++                    controls.remote_responders.pop(pid, None)
++                remote.prompts.get(session_id, set()).discard(pid)
++                getattr(controls, "announced", {}).pop(pid, None)
+                 stream.publish(session_id, payload, event_type=event_type)
+-            return
+-        if event_type in ("approval.settled", "clarify.settled"):
+-            pid = payload.get("prompt_id")
+-            if pid in controls.pending and pid in controls.remote_responders:
+-                controls.pending.pop(pid, None)
+-                controls.background.discard(pid)
+-                controls.remote_responders.pop(pid, None)
+-            remote.prompts.get(session_id, set()).discard(pid)
+-            getattr(controls, "announced", {}).pop(pid, None)
+-            stream.publish(session_id, payload, event_type=event_type)
+-            return
+-        execution = {k: params[k] for k in ("authority_epoch", "execution_generation", "admission_id") if k in params}
+-        if execution:
+-            # Served by this gateway now: its viewers check frames against the epoch they attached under.
+-            execution["authority_epoch"] = authority.epoch
+-        if running and execution.get("execution_generation") == generation and execution.get("admission_id") == aid:
+-            stream.execution = execution
+-            stream.note_progress(generation, event_type, payload)
+-            stream.publish(session_id, payload, event_type=event_type, execution=execution)
+-            stream.note_reply(generation, event_type, payload)
+-            stream.note_turn(generation, event_type, payload)
+-        else:
+-            stream.publish(session_id, payload, event_type=event_type, execution=execution or None)
++                return
++            execution = {k: params[k] for k in ("authority_epoch", "execution_generation", "admission_id") if k in params}
++            if execution:
++                # Served by this gateway now: its viewers check frames against the epoch they attached under.
++                execution["authority_epoch"] = authority.epoch
++            if running and execution.get("execution_generation") == generation and execution.get("admission_id") == aid:
++                stream.execution = execution
++                stream.note_progress(generation, event_type, payload)
++                stream.publish(session_id, payload, event_type=event_type, execution=execution)
++                stream.note_reply(generation, event_type, payload)
++                stream.note_turn(generation, event_type, payload)
++            else:
++                stream.publish(session_id, payload, event_type=event_type, execution=execution or None)
++        finally:
++            stream.origin = None
+ 
+ 
+ def _forward_answer(remote, session_id, generation):
+diff --git a/tests/gateway/test_restart_carry_make_before_break.py b/tests/gateway/test_restart_carry_make_before_break.py
+new file mode 100644
+index 00000000..22d60994
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_make_before_break.py
+@@ -0,0 +1,203 @@
++"""gateway.restart_turn_handoff_per_turn with a client that moves its own socket (make before break):
++
++- a kept hub socket whose dial asked for it (``?successor_hint=1``) gets a ``gateway.successor_ready`` event, with the
++  next gateway's listener address, once that gateway is ready, and stays open while idle until its client closes it
++  (a request on it or the end of the relay window still ends it as before);
++- a socket that did not ask is closed as before;
++- each frame the next gateway relays for a carried turn names the carrier's frame (``carried_from``), live and in its
++  replay, so a client that moved drops the frames it already got from the carrier.
++"""
++import asyncio
++import json
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++
++
++async def _open(monkeypatch, runner, query):
++    """test_restart_carry_no_pause._open with the dial's query string *query*."""
++    from gateway.run_api import GatewayRuntimeAPI
++    monkeypatch.setattr("hermes_cli.web_server_boundary._gateway_ws_ticket_from_subprotocol",
++                        lambda ws: ("abc", "ok"))
++    monkeypatch.setattr("hermes_cli.web_server_surface.policy", lambda state: SimpleNamespace(gateway_ticket=True))
++    got, opened, ended, app_send = [], asyncio.Event(), asyncio.Event(), []
++
++    async def dashboard(scope, receive, send):
++        app_send.append(send)
++        await send({"type": "websocket.accept"})
++        opened.set()
++        while True:
++            message = await receive()
++            got.append(message)
++            if message["type"] == "websocket.disconnect":
++                ended.set()
++                await send({"type": "websocket.close", "code": 1000})
++                return
++
++    api = GatewayRuntimeAPI(dashboard, runner, SimpleNamespace(state=SimpleNamespace()))
++    to_app: asyncio.Queue = asyncio.Queue()
++    from_app: asyncio.Queue = asyncio.Queue()
++    scope = {"type": "websocket", "path": "/api/ws", "raw_path": b"/api/ws", "query_string": query,
++             "headers": [(b"host", b"hermes:9120"), (b"origin", b"http://hermes:9120"),
++                         (b"sec-websocket-protocol", b"hermes.v1, ticket.abc"), (b"sec-websocket-key", b"x")],
++             "subprotocols": ["hermes.v1", "ticket.abc"], "client": ("10.0.0.9", 1),
++             "server": ("10.0.0.1", 9120), "scheme": "ws"}
++    task = asyncio.ensure_future(api(scope, to_app.get, from_app.put))
++    await asyncio.wait_for(opened.wait(), 2)
++    assert from_app.get_nowait() == {"type": "websocket.accept"}
++    return SimpleNamespace(api=api, task=task, scope=scope, to_app=to_app, from_app=from_app, got=got, ended=ended,
++                           app_send=app_send)
++
++
++async def _kept(monkeypatch, query=b"native_dial=browser&successor_hint=1", window=None):
++    from tests.gateway.test_restart_carry_no_pause import _carrier_runner
++    from tests.gateway.test_restart_socket_close_delay import _seal, _wait
++    runner = _carrier_runner()
++    if window is not None:
++        runner.config.restart_listener_relay_seconds = window
++    s = await _open(monkeypatch, runner, query)
++    _wait(runner)
++    runner._running = False  # the stop begins (the carrier released the profile)
++    assert _seal(s.api, s.scope) == []
++    return runner, s
++
++
++async def _hint(s):
++    message = await asyncio.wait_for(s.from_app.get(), 3)
++    assert message["type"] == "websocket.send"
++    return json.loads(message["text"])
++
++
++@pytest.mark.asyncio
++async def test_a_hinted_socket_learns_the_successor_and_stays_open_until_its_client_closes_it(monkeypatch):
++    from gateway.run_api import KEPT_IDLE_S
++    from tests.gateway.test_restart_socket_close_delay import _successor
++    _runner, s = await _kept(monkeypatch)
++    successor, target, _asked = await _successor(ready_after=0.2)
++    try:
++        s.api.forward_to(target, 10)
++        frame = await _hint(s)
++        assert frame["method"] == "event"
++        assert frame["params"]["type"] == "gateway.successor_ready"
++        assert frame["params"]["payload"] == {"host": target[0], "port": target[1]}
++        # Idle for longer than a kept socket may be: the client moves at its own pace, so it is not closed.
++        await asyncio.sleep(KEPT_IDLE_S + 0.5)
++        assert not s.ended.is_set()
++        assert s.from_app.empty()
++        # The carried turn still streams here meanwhile.
++        await s.app_send[0]({"type": "websocket.send", "text": "delta"})
++        assert await asyncio.wait_for(s.from_app.get(), 2) == {"type": "websocket.send", "text": "delta"}
++        # The client opened its next socket and closes this one.
++        await s.to_app.put({"type": "websocket.disconnect", "code": 1000})
++        await asyncio.wait_for(s.ended.wait(), 2)
++        await asyncio.wait_for(s.task, 3)
++    finally:
++        await successor.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_a_request_on_a_hinted_socket_still_ends_it(monkeypatch):
++    from tests.gateway.test_restart_socket_close_delay import _successor
++    _runner, s = await _kept(monkeypatch)
++    successor, target, _asked = await _successor()
++    try:
++        s.api.forward_to(target, 10)
++        await _hint(s)
++        await s.to_app.put({"type": "websocket.receive", "text": '{"method": "prompt.submit"}'})
++        await asyncio.wait_for(s.ended.wait(), 2)
++        assert all(m.get("text") != '{"method": "prompt.submit"}' for m in s.got)  # sent again on the next gateway
++        assert await asyncio.wait_for(s.from_app.get(), 2) == {"type": "websocket.close", "code": 1012}
++    finally:
++        await successor.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_a_hinted_socket_ends_with_the_relay_window(monkeypatch):
++    from tests.gateway.test_restart_socket_close_delay import _successor
++    _runner, s = await _kept(monkeypatch, window=0.5)
++    successor, target, _asked = await _successor()
++    try:
++        loop = asyncio.get_running_loop()
++        s.api.forward_to(target, 10)
++        await _hint(s)
++        hinted = loop.time()
++        await asyncio.wait_for(s.ended.wait(), 4)
++        from gateway.run_api import KEPT_IDLE_S
++        assert loop.time() - hinted >= KEPT_IDLE_S - 0.2  # max(window, KEPT_IDLE_S) after the gate opened
++        assert await asyncio.wait_for(s.from_app.get(), 2) == {"type": "websocket.close", "code": 1012}
++    finally:
++        await successor.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_a_socket_that_did_not_ask_gets_no_hint_and_closes_as_before(monkeypatch):
++    from tests.gateway.test_restart_socket_close_delay import _successor
++    _runner, s = await _kept(monkeypatch, query=b"native_dial=browser")
++    successor, target, _asked = await _successor()
++    try:
++        s.api.forward_to(target, 10)
++        await asyncio.wait_for(s.ended.wait(), 4)
++        assert await asyncio.wait_for(s.from_app.get(), 2) == {"type": "websocket.close", "code": 1012}
++    finally:
++        await successor.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_no_hint_when_the_successor_never_answered_ready(monkeypatch):
++    _runner, s = await _kept(monkeypatch)
++    s.api.forward_to(("127.0.0.1", 9), 0.3)  # nothing listens there
++    await asyncio.wait_for(s.ended.wait(), 4)
++    assert await asyncio.wait_for(s.from_app.get(), 2) == {"type": "websocket.close", "code": 1012}
++
++
++def test_relayed_frames_name_the_carriers_frame(owner, tmp_path):
++    from tests.gateway.test_restart_turn_carry import _NextAuthority, _claimed_turn
++    from gateway.session_authority import LiveSession
++    from hermes_state_runtime import begin_turn_carry, turn_carry_record
++    row, live, _agent = _claimed_turn(owner, "carried")
++    begin_turn_carry(owner.db, epoch=owner.epoch, record={
++        "turns": {row["admission_id"]: {"session_id": "carried", "generation": row["generation"]}}})
++    nxt = _NextAuthority(owner.db)
++    nxt.sessions["carried"] = LiveSession(live.source, live.route)
++    stream = nxt.sessions["carried"].event_stream
++    seen = []
++    stream.observers.add(lambda frame: seen.append(frame["params"]))
++    remote = turn_carry._Remote(SimpleNamespace(), nxt, turn_carry_record(owner.db), tmp_path)
++    execution = {"authority_epoch": owner.epoch, "execution_generation": row["generation"],
++                 "admission_id": row["admission_id"]}
++    turn_carry._relay_one(remote, {**execution, "type": "message.delta", "session_id": "carried",
++                                   "payload": {"text": "a"}, "replay_epoch": "old-epoch", "seq": 41})
++    prompt = {"kind": "clarify", "prompt_id": "q1", "execution_generation": row["generation"], "question": "which?",
++              "choices": ["a"], "multi_select": False}
++    turn_carry._relay_one(remote, {"type": "clarify.request", "session_id": "carried", "payload": prompt,
++                                   "replay_epoch": "old-epoch", "seq": 42})
++    turn_carry._relay_one(remote, {"type": "message.delta", "session_id": "carried", "payload": {"text": "b"}})
++    assert [(p["type"], p.get("carried_from")) for p in seen] == [
++        ("message.delta", {"replay_epoch": "old-epoch", "seq": 41}),
++        ("clarify.request", {"replay_epoch": "old-epoch", "seq": 42}),
++        ("message.delta", None),  # a frame that names no carrier frame
++    ]
++    assert stream.origin is None
++    # The replay a moved client reads has them too, under this gateway's own epoch and sequence.
++    epoch, _seq = stream.watermark()
++    replay = stream.since(epoch, 0)
++    assert not replay["snapshot_required"]
++    assert [f.get("carried_from") for f in replay["events"]] == [
++        {"replay_epoch": "old-epoch", "seq": 41}, {"replay_epoch": "old-epoch", "seq": 42}, None]
++    assert all(f["replay_epoch"] == epoch for f in replay["events"])
++    # A frame this gateway publishes itself names none.
++    stream.publish("carried", {"text": "c"}, event_type="message.delta")
++    assert seen[-1].get("carried_from") is None
+-- 
+2.56.0
+

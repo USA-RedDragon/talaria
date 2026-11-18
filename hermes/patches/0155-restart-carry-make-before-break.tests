@@ -1,0 +1,12 @@
+# The successor hint on a kept hub socket and carried_from on relayed frames (this patch)
+tests/gateway/test_restart_carry_make_before_break.py
+# The per-turn carry, its kept sockets and API relay (0136 to 0154) and the listener relay it builds on (0035 to 0041)
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_carry_no_pause.py
+tests/gateway/test_restart_carry_api_drain.py
+tests/gateway/test_restart_socket_close_delay.py
+tests/gateway/test_restart_listener_relay.py
+tests/gateway/test_restart_listener_relay_close.py
+tests/gateway/test_restart_listener_hold.py
+tests/gateway/test_restart_listener_handover.py
+tests/gateway/test_restart_reattach_burst.py
