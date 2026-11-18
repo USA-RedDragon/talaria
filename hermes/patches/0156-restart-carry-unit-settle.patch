@@ -1,0 +1,368 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 22:49:22 -0600
+Subject: [PATCH] fix(delegate): a subagent that does not settle no longer
+ holds the restart's hand-over of the others
+
+With gateway.restart_turn_handoff_per_turn and delegation.restart_handoff the old gateway carries the background subagents and their helpers to their step boundaries, then hands them and the background processes to the next gateway, which adopts the subagents once the processes are handed (0138). The subagent carry waited until every unit had settled, for up to the whole boundary window (the carry ceiling less 60 s, 1020 s at 1080). In a live rollout a helper finished its foreground command inside the carry, its subagent stopped a second later, and the old gateway still sent no process handoff until the ceiling: every handed-off subagent of the instance was resumed about 18 minutes late. Two waits could hold it so: a unit whose children all stopped but whose runner did not return (a teardown that hangs), and a stop waiting for a carried child (or a subagent's helper) that left its turn without recording its boundary.
+
+Both are bounded now. A carried child is waited for only while it is in its turn or recording its boundary; one that left its turn without reaching its boundary is given 5 s and then stopped as at the end of the window. A unit whose handoff stopped all its children and that has not settled 10 s later (UNIT_SETTLE_SECONDS) is recorded as handed off on its own, with the state its handoff kept and the children that had finished, and the restart goes on: the processes are handed over and the next gateway adopts every unit at once. The stuck runner's own finalize later updates the record while this gateway still owns it and changes nothing once the next gateway adopted it. A child still in a carried step (a foreground command, a model call) is waited for as before.
+---
+ .../gateway/test_restart_carry_helper_wake.py | 162 ++++++++++++++++++
+ tools/async_delegation.py                     |  60 ++++++-
+ tools/delegate_tool_handoff.py                |   6 +-
+ tools/delegate_tool_subunits.py               |  37 +++-
+ 4 files changed, 255 insertions(+), 10 deletions(-)
+
+diff --git a/tests/gateway/test_restart_carry_helper_wake.py b/tests/gateway/test_restart_carry_helper_wake.py
+index 69bd7415..ed2e2b95 100644
+--- a/tests/gateway/test_restart_carry_helper_wake.py
++++ b/tests/gateway/test_restart_carry_helper_wake.py
+@@ -324,3 +324,165 @@ async def test_a_helper_still_running_at_the_subagents_stop_point_is_resumed_and
+     assert event["results"][0]["status"] == "completed"
+     assert len(resumed_helper_calls) == 1
+     assert len(resumed_calls) == 1 and _helper_results_read(resumed_calls) == 1
++
++
++# --- the hand-over after the carry (0156) -------------------------------------------------------------------------
++# Live (p107): a helper that finished during the carry, and the restart still carried for the whole ceiling: the old
++# gateway sent no process handoff, so the next gateway resumed every handed-off subagent of the instance ~18 minutes
++# late. The subagent carry waited until every unit settled, and a unit that does not settle (its runner stuck after
++# its children stopped, or a stop waiting on a helper that left its turn without recording its boundary) held every
++# other unit and the process handoff until the end of the boundary window.
++
++OTHER, OTHER_SID = "child-9", "sa-9-other"
++_STEP = "for i in 1 2 3; do sleep 1; done; echo zd-step"
++
++
++def _other_subagent(db, tmp_path, commands):
++    """An unrelated background subagent of the same chat, running foreground commands one after the other."""
++    import tests.tools.test_delegate_resume_action as ra
++    record = ra._record()
++    record[handoff.RESUME_KEY]["children"]["0"].update(subagent_id=OTHER_SID, session_id=OTHER)
++    record[handoff.RESUME_KEY]["live_deleg_id"] = "deleg_other"
++    record[handoff.RESUME_STATE_KEY].update(session_id=OTHER, cwd=str(tmp_path))
++    db.create_session(session_id=OTHER, source="subagent", parent_session_id=PARENT,
++                      model_config={"_delegate_from": PARENT, "_subagent_id": OTHER_SID, **record})
++    db.append_message(OTHER, "user", content="build it")
++    db.append_message(OTHER, "assistant", content="Built.")
++    db.end_session(OTHER, "agent_close")
++    script = [lambda n=n, **_k: _response("", [_tool_call("terminal", {"command": f"sleep 1; echo other{n}"},
++                                                          f"call_o{n}")]) for n in range(commands)]
++    other = _real(db, OTHER, OTHER_SID, 1, PARENT, [*script, lambda **_k: _response("Built it.")])
++    other.valid_tool_names = {"terminal"}
++    return other
++
++
++@pytest.fixture
++def real_steps(monkeypatch, tmp_path):
++    """The terminal tool for real (local backend); each command's end is recorded."""
++    import model_tools
++    from tools.terminal_tool import terminal_tool
++    original, ends = model_tools.handle_function_call, []
++
++    def call(name, args, *a, **k):
++        if name != "terminal":
++            return original(name, args, *a, **k)
++        try:
++            return terminal_tool(args["command"], task_id=k.get("task_id") or "zd", timeout=60)
++        finally:
++            ends.append(time.monotonic())
++    monkeypatch.setattr("model_tools.handle_function_call", call)
++    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
++    return ends
++
++
++def _watching_next_gateway(monkeypatch, owner, tmp_path):
++    """The next gateway's real watch of the carrier; when it reattaches the processes and adopts the subagents."""
++    from hermes_state_runtime import turn_carry_record
++    from tests.gateway.test_restart_turn_carry import _NextAuthority
++    log = []
++
++    async def reattach(_runner):
++        log.append(("reattach", time.monotonic()))
++    monkeypatch.setattr(turn_carry, "_reattach_processes", reattach)
++    monkeypatch.setattr(handoff, "resume_handed_off_delegations", lambda: log.append(("adopt", time.monotonic())) or 1)
++    nxt = _NextAuthority(owner.db)
++    remote = turn_carry._Remote(owner.runner, nxt, turn_carry_record(owner.db), tmp_path)
++    nxt._turn_carrier = remote
++    return log, asyncio.ensure_future(turn_carry._watch(remote))
++
++
++def _frames(monkeypatch):
++    sent = []
++    write = turn_carry._write_frame
++
++    def recording(carry, params):
++        if params.get("type") == turn_carry.PROCESSES_HANDED:
++            sent.append(time.monotonic())
++        return write(carry, params)
++    monkeypatch.setattr(turn_carry, "_write_frame", recording)
++    return sent
++
++
++def _rows(db_path):
++    import sqlite3
++    with sqlite3.connect(db_path) as conn:
++        return {r[0]: (r[1], json.loads(r[2] or "{}")) for r in
++                conn.execute("SELECT delegation_id, state, task_json FROM async_delegations")}
++
++
++@pytest.mark.live_system_guard_bypass
++@pytest.mark.asyncio
++@pytest.mark.parametrize("stuck", [None, "teardown", "lost-boundary"])
++async def test_the_carry_hands_every_subagent_and_the_processes_over_right_after_the_last_step(
++        owner, tmp_path, seams, monkeypatch, real_steps, stuck):
++    """The k13 shape: a subagent waiting on its helper, the helper in a foreground command, an unrelated subagent in
++    its own commands. The old gateway hands the processes and every subagent over a few seconds after the last
++    carried step ends and the next gateway adopts them within a second, whatever one unit does after its step:
++    ``teardown``, the unrelated unit's runner hangs after its subagent stopped; ``lost-boundary``, the helper leaves
++    its turn without recording its boundary."""
++    from hermes_state_registry import acquire
++    from tools import delegate_tool_subunits as subunits
++    db = acquire()
++    _finished_child(db, record=_record_with_cwd(tmp_path))
++    sent = _frames(monkeypatch)
++    hang = threading.Event()
++    if stuck == "lost-boundary":
++        carry_helpers = subunits.carry_to_boundaries
++
++        def losing(agent):
++            events = carry_helpers(agent)
++            for unit in subunits.units_of(agent):
++                for child in unit.children:
++                    child._handoff_capture = None  # its run ends without its cleanup recording the boundary
++            return events
++        monkeypatch.setattr(subunits, "carry_to_boundaries", losing)
++
++    scene = _Scene(db, seams, helper_calls=[
++        lambda **_k: _response("", [_tool_call("terminal", {"command": _STEP}, "call_h1")]),
++        lambda **_k: _response(RESULT)], subagent_wake_calls=[])
++    scene.helper.valid_tool_names = {"terminal"}
++    await asyncio.to_thread(wait_until, lambda: len(seams.built) >= 2, timeout=20, what="subagent and helper built")
++    other = _other_subagent(db, tmp_path, commands=6)
++    if stuck == "teardown":
++        other.release_clients = lambda: hang.wait(60)  # e.g. a client close that does not return
++    seams(other)
++    _call(_Parent(db), subagent_id=OTHER_SID, message="build it")
++    await asyncio.to_thread(wait_until, lambda: scene.waiting() and real_steps == [] and other.calls,
++                            timeout=20, what="the helper and the other subagent in their first commands")
++
++    _reserve_profile(tmp_path)
++    # 120 s ceiling: the subagents' boundary window is 60 s (turn_carry.SUBAGENT_STOP_RESERVE_S is 60).
++    runner = _idle(_old_runner(owner, restart_turn_carry_ceiling_seconds=120.0))
++    restart = asyncio.create_task(_restart_and_close(runner))
++    try:
++        await asyncio.to_thread(wait_until, turn_carry.released, timeout=20, what="the profile released")
++        log, watch = _watching_next_gateway(monkeypatch, owner, tmp_path)
++        await asyncio.to_thread(wait_until, lambda: sent, timeout=40, what="the process handoff")
++        last_step = max(real_steps)
++        bound = 3.0 + (ad.UNIT_SETTLE_SECONDS if stuck == "teardown" else 0.0) + (
++            subunits._RESULT_SETTLE_SECONDS if stuck == "lost-boundary" else 0.0)
++        assert sent[0] - last_step <= bound, (sent[0] - last_step, bound)
++        await asyncio.to_thread(wait_until, lambda: any(k == "adopt" for k, _ in log), timeout=5,
++                                what="the next gateway adopting the subagents")
++        adopted = next(t for k, t in log if k == "adopt")
++        assert [k for k, _ in log][:2] == ["reattach", "adopt"]
++        assert adopted - sent[0] <= 1.0
++        # Every unit is recorded as handed off by then, with the state its subagent had at its boundary.
++        rows = _rows(ad._db_path())
++        assert len(rows) == 2 and all(state == "handed_off" for state, _ in rows.values())
++        for _state, task in rows.values():
++            assert task["handoff"]["resume"] == [0]
++            assert task["handoff"]["children"]["0"].get("session_id") in (CHILD, OTHER)
++        orchestrator = next(task for _s, task in rows.values() if task["handoff"]["children"]["0"]["session_id"] == CHILD)
++        assert orchestrator["handoff"]["children"]["0"]["units"][0]["task_indexes"] == [0]  # the helper rides along
++    finally:
++        hang.set()
++        await asyncio.wait_for(restart, 60)
++    await asyncio.wait_for(watch, 5.0)
++    assert len(scene.helper.calls) == 1  # its command ran once, here
++    assert _completions(scene.run_id) == []  # nothing delivered here; the next gateway resumes them
++    if stuck == "teardown":
++        # The stuck runner settles later; the unit stays handed off and nothing is delivered from this gateway.
++        await asyncio.to_thread(wait_until, lambda: not ad.active_count(), timeout=20, what="the stuck unit settled")
++        assert all(state == "handed_off" for state, _ in _rows(ad._db_path()).values())
++        assert _completions() == []
+diff --git a/tools/async_delegation.py b/tools/async_delegation.py
+index 2e021f0e..bbe8532f 100644
+--- a/tools/async_delegation.py
++++ b/tools/async_delegation.py
+@@ -1423,18 +1423,36 @@ def hand_off_for_restart(grace_seconds: float, timeout_seconds: float, *, bounda
+             marked.set()
+     deadline = time.monotonic() + max(0.0, grace_seconds)
+     boundary_until = time.monotonic() + max(0.0, boundary_seconds) if boundary else None
++    threads = {}
+     for record in targets:
+-        threading.Thread(target=_call_handoff, args=(record, deadline, boundary_until), daemon=True,
+-                         name=f"async-delegate-handoff-{record['delegation_id']}").start()
++        threads[record["delegation_id"]] = thread = threading.Thread(
++            target=_call_handoff, args=(record, deadline, boundary_until), daemon=True,
++            name=f"async-delegate-handoff-{record['delegation_id']}")
++        thread.start()
+     end = time.monotonic() + max(grace_seconds, timeout_seconds) + max(0.0, boundary_seconds or 0.0)
++    stopped_at: dict[str, float] = {}
+     while time.monotonic() < end:
+         with _records_lock:
+-            if not any((_records.get(i) or {}).get("status") in _LIVE_STATES for i in ids):
++            live = [i for i in ids if (_records.get(i) or {}).get("status") in _LIVE_STATES]
++        if not live:
++            break
++        if boundary:
++            # The per-turn carry: a unit whose children all stopped settles at once. One that does not (its runner
++            # is stuck after its children stopped) is handed over on its own after UNIT_SETTLE_SECONDS: it held
++            # every other unit and the process handoff (``gateway.turn_carry.subagents_carried``) until the end.
++            now = time.monotonic()
++            for i in live:
++                if not threads[i].is_alive():
++                    stopped_at.setdefault(i, now)
++            if all(now - stopped_at.get(i, now) >= UNIT_SETTLE_SECONDS and i in stopped_at for i in live):
++                _hand_off_unsettled(live)
+                 break
+         time.sleep(0.2)
+     with _records_lock:
+-        handed = sum(1 for i in ids if (_records.get(i) or {}).get("status") == "handed_off")
+-        unsettled = sum(1 for i in ids if (_records.get(i) or {}).get("status") in _LIVE_STATES)
++        handed = sum(1 for i in ids if (_records.get(i) or {}).get("status") == "handed_off"
++                     or (_records.get(i) or {}).get("_handed_unsettled"))
++        unsettled = sum(1 for i in ids if (_records.get(i) or {}).get("status") in _LIVE_STATES
++                        and not (_records.get(i) or {}).get("_handed_unsettled"))
+     if unsettled:
+         logger.warning("Restart handoff: %d background delegation(s) did not stop in time; the next gateway "
+                        "resumes them from their stored transcripts", unsettled)
+@@ -1443,6 +1461,38 @@ def hand_off_for_restart(grace_seconds: float, timeout_seconds: float, *, bounda
+     return handed + queued_handed
+ 
+ 
++# The per-turn carry (``hand_off_for_restart`` with ``boundary_seconds``): how long a unit may take to settle after
++# its handoff stopped all its children, before the restart goes on without it and it is handed over on its own.
++UNIT_SETTLE_SECONDS = 10.0
++
++
++def _hand_off_unsettled(ids: list[str]) -> None:
++    """Record each unit whose children all stopped for the carry but whose runner has not settled since as handed
++    off now, with the state its handoff kept (``_handoff_state``) and the children that had finished, so the next
++    gateway resumes it with the others. Its own finalize later updates the record while this process still owns
++    it, and is a no-op once the next gateway adopted it (``_persist_handoff``)."""
++    for delegation_id in ids:
++        with _records_lock:
++            record = _records.get(delegation_id)
++            if record is None or record.get("status") not in _LIVE_STATES:
++                continue
++            snapshot = dict(record)
++        indexes = list(snapshot.get("task_indexes") or range(len(snapshot.get("goals") or [])))
++        finished = dict(snapshot.get("_finished_children") or {})
++        resume = [i for i in indexes if i not in finished]
++        kept = [redact_child_result(finished[i]) for i in indexes if i in finished]
++        try:
++            if _persist_handoff(delegation_id, kept, resume, snapshot.get("_handoff_state") or {}):
++                with _records_lock:
++                    if delegation_id in _records:
++                        _records[delegation_id]["_handed_unsettled"] = True
++                logger.warning("Async delegation %s did not settle within %.0fs after its subagents stopped for the "
++                               "restart; handed to the next gateway on its own", delegation_id, UNIT_SETTLE_SECONDS)
++        except Exception:
++            logger.error("Async delegation %s: could not hand the unsettled unit to the next gateway", delegation_id,
++                         exc_info=True)
++
++
+ def _hand_off_queued(records: list[dict[str, Any]]) -> int:
+     """Record each queued unit as handed off with every task to resume, then release its unstarted children."""
+     handed = 0
+diff --git a/tools/delegate_tool_handoff.py b/tools/delegate_tool_handoff.py
+index 317bba79..cd7fa3a1 100644
+--- a/tools/delegate_tool_handoff.py
++++ b/tools/delegate_tool_handoff.py
+@@ -347,6 +347,7 @@ def _handoff_fn(children: dict[int, Any]) -> Callable[..., None]:
+                 child._delegate_restart_handoff = True  # a wait it starts now ends at once; its helpers are kept
+ 
+                 def at_boundary(i=index, c=child, e=event) -> None:
++                    c._handoff_capturing = True  # its stop may wait for its own subagents' boundaries
+                     stop(i, c)
+                     e.set()
+                 child._handoff_capture = at_boundary  # its cleanup calls it once its run ended
+@@ -356,8 +357,11 @@ def _handoff_fn(children: dict[int, Any]) -> Callable[..., None]:
+                 if index not in reached:
+                     stop(index, child)
+                     del pending[index]
++            from tools.delegate_tool_subunits import wait_while_carried
+             for index, event in reached.items():
+-                if event.wait(max(0.0, boundary_until - time.monotonic())):
++                # Only while the child is still in its turn: one that left it without reaching its boundary is
++                # stopped below at once instead of holding the whole carry for the boundary window.
++                if wait_while_carried(event, pending[index], max(0.0, boundary_until - time.monotonic())):
+                     del pending[index]
+             deadline = max(deadline, boundary_until)
+         yielded = False
+diff --git a/tools/delegate_tool_subunits.py b/tools/delegate_tool_subunits.py
+index d9e249f1..872bc914 100644
+--- a/tools/delegate_tool_subunits.py
++++ b/tools/delegate_tool_subunits.py
+@@ -294,6 +294,7 @@ def carry_to_boundaries(agent: Any) -> list:
+             event = threading.Event()
+ 
+             def at_boundary(u=unit, c=child, i=index, e=event) -> None:
++                c._handoff_capturing = True
+                 try:
+                     u.carried[i] = _child_state(c)
+                 finally:
+@@ -302,7 +303,7 @@ def carry_to_boundaries(agent: Any) -> list:
+             child._handoff_capture = at_boundary  # its cleanup calls it once its run ended
+             unit.carried.setdefault(index, None)
+             boundary.request(child, tool_round=False)
+-            events.append(_Reached(event, unit))
++            events.append(_Reached(event, unit, child))
+     return events
+ 
+ 
+@@ -310,19 +311,47 @@ def carry_to_boundaries(agent: Any) -> list:
+ _RESULT_SETTLE_SECONDS = 5.0
+ 
+ 
++def wait_while_carried(event: Any, child: Any, timeout: Optional[float]) -> bool:
++    """Wait for a carried child's boundary ``event`` for up to ``timeout``, but only while the child is still in its
++    turn or recording its boundary. A child out of its turn whose boundary was not recorded within
++    ``_RESULT_SETTLE_SECONDS`` (its run ended without reaching the capture) carries nothing any more; waiting on for
++    the whole boundary window held every other subagent and the process handoff of the restart until the ceiling."""
++    from tools.delegate_tool_handoff import _in_turn
++    until = None if timeout is None else time.monotonic() + max(0.0, timeout)
++    idle_since = None
++    while True:
++        now = time.monotonic()
++        step = 0.1 if until is None else min(0.1, max(0.0, until - now))
++        if event.wait(step):
++            return True
++        now = time.monotonic()
++        if until is not None and now >= until:
++            return False
++        if _in_turn(child) or getattr(child, "_handoff_capturing", False) is True:
++            idle_since = None  # in its turn, or its cleanup is recording its boundary
++        elif idle_since is None:
++            idle_since = now
++        elif now - idle_since >= _RESULT_SETTLE_SECONDS:
++            logger.warning("Restart carry: a subagent left its turn without reaching its step boundary; not waiting "
++                           "for it any longer")
++            return False
++
++
+ class _Reached:
+     """Set once a carried child stopped (its cleanup recorded its state) and its unit holds the result: the cleanup
+     runs before the unit's runner returns, so a child that finished in that gap would read as still running."""
+ 
+-    def __init__(self, stopped: threading.Event, unit: Unit):
+-        self.stopped, self.unit = stopped, unit
++    def __init__(self, stopped: threading.Event, unit: Unit, child: Any = None):
++        self.stopped, self.unit, self.child = stopped, unit, child
+ 
+     def is_set(self) -> bool:
+         return self.stopped.is_set() and self.unit.done.is_set()
+ 
+     def wait(self, timeout: Optional[float] = None) -> bool:
+         started = time.monotonic()
+-        if not self.stopped.wait(timeout):
++        reached = (self.stopped.wait(timeout) if self.child is None
++                   else wait_while_carried(self.stopped, self.child, timeout))
++        if not reached:
+             return False
+         left = _RESULT_SETTLE_SECONDS if timeout is None else max(0.0, timeout - (time.monotonic() - started))
+         return self.unit.done.wait(min(left, _RESULT_SETTLE_SECONDS)) or True

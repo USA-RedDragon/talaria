@@ -1,0 +1,15 @@
+# The hand-over after the carry of subagents and helpers (this patch, in the test file 0154 added)
+tests/gateway/test_restart_carry_helper_wake.py
+# The per-turn carry of subagents and their helpers (0150, 0152, 0154), the carry it ends (0136 to 0144) and its process handoff (0138)
+tests/tools/test_restart_carry_subagent_helpers.py
+tests/tools/test_restart_carry_subagent_boundary.py
+tests/gateway/test_restart_carry_subagent_boundary.py
+tests/gateway/test_restart_carry_subagent_command.py
+tests/gateway/test_restart_carry_subagents_alone.py
+tests/gateway/test_restart_carry_background_work.py
+tests/gateway/test_restart_turn_carry.py
+# The subagent handoff (0016) and its waits (0092, 0105, 0139)
+tests/tools/test_delegation_restart_handoff.py
+tests/tools/test_async_delegation.py
+tests/tools/test_restart_carry_subagent_wait.py
+tests/tools/test_delegate_resume_action.py
