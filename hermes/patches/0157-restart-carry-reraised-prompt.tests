@@ -1,0 +1,15 @@
+# The boundary handoff of a parked prompt (0131) and its resume under the same id (0135)
+tests/gateway/test_restart_turn_boundary.py
+tests/gateway/test_restart_turn_resume_pending_call.py
+tests/agent/test_turn_boundary_handoff.py
+# The per-turn carry (0136) and its waits (0154, 0155, 0156)
+tests/gateway/test_restart_turn_carry.py
+tests/gateway/test_restart_carry_helper_wake.py
+tests/gateway/test_restart_carry_subagent_boundary.py
+# The session prompts the turn binds (PendingControls, 0112) and the waits it adopts
+tests/gateway/test_authority_approval_projection.py
+tests/gateway/test_clarify_card_record.py
+tests/tools/test_approval_gateway_wait_coalesce_race.py
+tests/tools/test_approval_gateway_wait_late_choice.py
+tests/tools/test_clarify_gateway.py
+tests/tools/test_subagent_clarify_routing.py

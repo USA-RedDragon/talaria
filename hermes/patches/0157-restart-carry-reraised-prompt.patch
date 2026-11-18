@@ -1,0 +1,534 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 05:24:20 +0000
+Subject: [PATCH] fix(gateway): a turn parked on a prompt an earlier restart
+ handed over is handed over at once again
+
+With gateway.restart_turn_handoff_per_turn a restart hands a turn parked on its own clarify or approval to the next gateway at once (0131's withdraw), and the next gateway resumes the stored call, which adopts the prompt under its old id (0135). At the next restart that turn was not seen as parked: the next gateway lists a handed-over prompt as the session's (background, with the generation it read before the claim) so it stays answerable before the resume, and the adopting call raised no card, so the prompt never became the resumed execution's own. The carry then held the turn until restart_turn_carry_ceiling_seconds (1080 s in a live rollout), and with it the process handoff and every handed-off subagent of the instance, and stopped it the 0048 way: an interrupted-message notice, a restart continuation with synthetic text, a new model call and a new prompt id.
+
+An adopted prompt is the turn's own again. take_clarify and take_approval record the adoption (prompt_handoff.adopted) and tell the turn that runs on the session (on_adopt, registered by the turn runner next to its approval notifier), which binds the listed card to the running execution (PendingControls.bind: its generation, no longer background). The parked-turn check (turn_boundary._parked_prompts) counts a pending prompt the turn's call adopted even when nothing bound it. Every restart then hands the turn over at once under the same id, however many restarts the prompt waits through, and the answer on the last gateway is applied once.
+---
+ gateway/run_turn_runner.py                    |  20 +-
+ gateway/session_pending_controls.py           |  11 +
+ gateway/turn_boundary.py                      |   9 +-
+ .../test_restart_carry_reraised_prompt.py     | 307 ++++++++++++++++++
+ tools/approval_gateway_wait.py                |   3 +
+ tools/prompt_handoff.py                       |  52 +++
+ 6 files changed, 399 insertions(+), 3 deletions(-)
+ create mode 100644 tests/gateway/test_restart_carry_reraised_prompt.py
+
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+index 048df2e4..3d0c98da 100644
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -735,7 +735,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 # gateway.restart_turn_handoff_boundary: the previous gateway asked this and handed the card over
+                 # (same id, shown already); its answer, if one came, is read at once.
+                 from gateway.run_turn_runner_clarify_delivery import wait_handed_over
+-                response, answered = wait_handed_over(handed.clarify_id, clarify_mod)
++                try:
++                    response, answered = wait_handed_over(handed.clarify_id, clarify_mod)
++                finally:
++                    from tools.prompt_handoff import release
++                    release(handed.clarify_id)
+                 if self._approval_owner is not None:
+                     authority, session_id, generation = self._approval_owner
+                     if (live := authority.sessions.get(session_id)) is not None:
+@@ -1159,6 +1163,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+         if session_key:
+             from tools.clarify_gateway import register_subagent_asker
+             register_subagent_asker(session_key, self._background_clarify_ask)
++            from tools.prompt_handoff import on_adopt
++            on_adopt(session_key, self._bind_handed_prompt)
+         try:
+             run_message = self._native_image_run_message()
+             api_message = _wrap_current_message_with_observed_context(run_message, observed_group_context)
+@@ -1241,8 +1247,20 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
+                 if not keep_clarify:
+                     unregister_subagent_asker(session_key)
+                 clear_session(session_key, keep_subagent=keep_clarify)
++            if session_key:
++                from tools.prompt_handoff import off_adopt
++                off_adopt(session_key, self._bind_handed_prompt)
+             reset_current_session_key(token)
+ 
++    def _bind_handed_prompt(self, kind, prompt_id) -> None:
++        """A call of this turn adopted a prompt an earlier restart handed over (``tools.prompt_handoff``): the
++        card listed for the session is this execution's own again, so the next restart hands it over at once."""
++        if self._approval_owner is None:
++            return
++        authority, session_id, generation = self._approval_owner
++        if (live := authority.sessions.get(session_id)) is not None:
++            live.controls.bind(prompt_id, generation)
++
+     def _finish_stream_consumer(self, result, agent_history, stream_consumer):
+         ctx = self._ctx
+         # Canonicalize a model-emitted computer-use screenshot path at the common result boundary so
+diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
+index 9d8cf28b..8452a7d3 100644
+--- a/gateway/session_pending_controls.py
++++ b/gateway/session_pending_controls.py
+@@ -68,6 +68,17 @@ class PendingControls:
+             self.snapshot(session_id, generation)
+             return bool(self.background & self.pending.keys())
+ 
++    def bind(self, prompt_id, generation):
++        """A handed-over prompt (listed by the restart as the session's, ``turn_boundary.show_record``) that the
++        resumed turn's call now waits on: it is that execution's own prompt again. True when it is listed."""
++        with self.events.lock:
++            entry = self.pending.get(prompt_id)
++            if entry is None or entry[1].get('subagent'):
++                return False
++            entry[1]['execution_generation'] = generation
++            self.background.discard(prompt_id)
++            return True
++
+     def register(self, session_id, route, generation, data, *, timeout_s=None, background=False):
+         from gateway.run import _redact_approval_command
+         with self.events.lock:
+diff --git a/gateway/turn_boundary.py b/gateway/turn_boundary.py
+index 0042c5ec..8a365011 100644
+--- a/gateway/turn_boundary.py
++++ b/gateway/turn_boundary.py
+@@ -97,12 +97,17 @@ def _in_process(agent) -> bool:
+ 
+ 
+ def _parked_prompts(turn: _Turn) -> list[tuple[str, Any, dict]]:
+-    """``(prompt_id, route_or_entry, prompt)`` of the turn's own pending prompts (not a subagent's)."""
++    """``(prompt_id, route_or_entry, prompt)`` of the turn's own pending prompts (not a subagent's). A prompt an
++    earlier restart handed over, which this turn's resumed call waits on (``prompt_handoff.adopted``), is the
++    turn's own too, whatever generation and flag it was listed with before the call took it."""
++    from tools import prompt_handoff
+     controls = turn.live.controls
+     with turn.live.event_stream.lock:
+         controls.snapshot(turn.session_id, turn.generation)
+         return [(pid, route, dict(prompt)) for pid, (route, prompt) in controls.pending.items()
+-                if prompt.get("execution_generation") == turn.generation and pid not in controls.background]
++                if (prompt.get("execution_generation") == turn.generation and pid not in controls.background)
++                or (pid not in controls.remote_responders and not prompt.get("subagent")
++                    and prompt_handoff.adopted(pid))]
+ 
+ 
+ def _prompt_record(turn: _Turn, prompt_id, route, prompt) -> dict | None:
+diff --git a/tests/gateway/test_restart_carry_reraised_prompt.py b/tests/gateway/test_restart_carry_reraised_prompt.py
+new file mode 100644
+index 00000000..71e2a00b
+--- /dev/null
++++ b/tests/gateway/test_restart_carry_reraised_prompt.py
+@@ -0,0 +1,307 @@
++"""gateway.restart_turn_handoff_per_turn with a prompt nobody answers through several restarts: a turn parked on
++its own clarify or approval is handed over at once at every restart, also when the prompt is one an earlier
++restart handed over and the resumed call re-raised (adopted, ``tools.prompt_handoff``). The carrier never holds
++it to ``restart_turn_carry_ceiling_seconds``; the prompt keeps its id on every gateway and is answered once.
++
++Each gateway is a ``SessionAuthority`` over the one shared state.db; the process state a gateway loses when it
++exits (prompt waiters, handoff lists, the carry lock) is dropped between them.
++"""
++import asyncio
++import os
++import threading
++import time
++from functools import partial
++from types import SimpleNamespace
++
++import pytest
++
++from gateway import turn_boundary, turn_carry, turn_handoff
++from gateway.config import GatewayConfig, Platform
++from gateway.run_turn_runner import TurnRunner
++from gateway.session import SessionSource, SessionStore
++from gateway.session_authority import LiveSession, SessionAuthority
++from hermes_state import SessionDB
++from hermes_state_runtime import (admit_session_input, begin_runtime_epoch, claim_session_input,
++                                  get_session_admission, resume_record)
++from tools import clarify_gateway, prompt_handoff
++from tools.interrupt import set_interrupt
++
++SID, ROUTE = "ask", "route-ask"
++QUESTION, CHOICES = "Pick a color", ["blue", "green"]
++CEILING = 20.0
++
++
++async def _noop(*_args, **_kwargs):
++    return None
++
++
++def _process_state(monkeypatch):
++    """What one gateway process holds in memory, fresh."""
++    monkeypatch.setattr(turn_handoff, "_handing_off", False)
++    monkeypatch.setattr(turn_boundary, "_resuming", set())
++    monkeypatch.setattr(turn_boundary, "_handed_off", set())
++    monkeypatch.setattr(turn_carry, "_released", False)
++    monkeypatch.setattr(turn_carry, "_carrying", False)
++    monkeypatch.setattr(turn_carry, "_api_target", None)
++    prompt_handoff.clear()
++    clarify_gateway.clear_session(ROUTE)
++    from tools import approval as A
++    with A._lock:
++        A._gateway_queues.pop(ROUTE, None)
++        A._gateway_notify_cbs.pop(ROUTE, None)
++
++
++@pytest.fixture
++def home(monkeypatch, tmp_path):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(turn_carry, "_stop_cron", _noop)
++    monkeypatch.setattr(turn_carry, "_hand_off_background", _noop)
++    monkeypatch.setattr(turn_carry, "_disconnect_messaging", _noop)
++    _process_state(monkeypatch)
++    db = SessionDB(tmp_path / "state.db")
++    db.create_session(SID, source="local")
++    yield SimpleNamespace(path=tmp_path, db=db)
++    prompt_handoff.clear()
++    clarify_gateway.clear_session(ROUTE)
++    db.close()
++
++
++class _Agent:
++    """The turn's agent: its prompt wait runs on its own thread and ends on the interrupt a withdraw sends."""
++
++    def __init__(self):
++        self.thread_id = None
++        self.interrupts = 0
++
++    def interrupt(self, **_kwargs):
++        self.interrupts += 1
++        set_interrupt(True, self.thread_id)
++
++
++class _Gateway:
++    def __init__(self, home, name):
++        from gateway.runtime_ownership import process_ownership
++        process_ownership.reserve([home.path])
++        self.home = home
++        store = SessionStore(config=GatewayConfig(), sessions_dir=home.path / ("sessions-" + name))
++        store._db = home.db
++        self.runner = SimpleNamespace(_draining=False, session_store=store)
++        self.authority = SessionAuthority(self.runner, profile_id="default", instance_id=name, db=home.db,
++                                          epoch=begin_runtime_epoch(home.db, instance_id=name))
++        self.runner.session_authority = self.authority
++        self.runner.config = GatewayConfig(
++            restart_turn_handoff=True, restart_turn_handoff_boundary=True, restart_turn_handoff_wait_seconds=60.0,
++            restart_turn_handoff_per_turn=True, restart_turn_carry_ceiling_seconds=CEILING)
++        self.runner._restart_requested = True
++        self.runner.session_authorities = None
++        self.runner.session_runtime_descriptor = {"state": "ready"}
++        self.runner._mark_api_runs_shutdown_requested = lambda: 0
++        self.runner._active_api_run_count = lambda: 0
++        self.live = LiveSession(SessionSource(platform=Platform.LOCAL, chat_id=SID), ROUTE)
++        self.authority.sessions[SID] = self.live
++        self.frames = []
++        original = self.live.event_stream.publish
++
++        def publish(sid, payload, event_type="message.complete", **kwargs):
++            self.frames.append((event_type, dict(payload) if isinstance(payload, dict) else payload))
++            return original(sid, payload, event_type=event_type, **kwargs)
++        self.live.event_stream.publish = publish
++        self.agent = _Agent()
++        self.row = None
++
++    def run(self, row):
++        """The claimed turn runs here, in this process."""
++        self.row = row
++        self.live.event_stream.execution = {"authority_epoch": self.authority.epoch,
++                                            "execution_generation": row["generation"],
++                                            "admission_id": row["admission_id"]}
++        self.authority.adopted[SID] = (row["generation"], self.agent)
++        self.authority.executing[SID] = row["generation"]
++
++    def start(self, wait):
++        """The agent thread, blocked in the prompt's wait; its result lands in ``self.result``."""
++        self.result = []
++
++        def body():
++            self.agent.thread_id = threading.get_ident()
++            try:
++                self.result.append(wait())
++            finally:
++                set_interrupt(False, self.agent.thread_id)
++        self.thread = threading.Thread(target=body, daemon=True)
++        self.thread.start()
++
++    def prompts(self):
++        return [p["prompt_id"] for p in self.live.controls.snapshot(SID, self.row["generation"])]
++
++    def bound(self, prompt_id):
++        """The listed card is the running execution's own prompt (not a subagent's, not an older turn's)."""
++        _route, prompt = self.live.controls.pending[prompt_id]
++        return prompt["execution_generation"] == self.row["generation"] and prompt_id not in self.live.controls.background
++
++    def requests(self, kind):
++        return [p["prompt_id"] for event_type, p in self.frames if event_type == kind + ".request"]
++
++
++async def _until(predicate, timeout=5.0):
++    end = time.monotonic() + timeout
++    while not predicate():
++        assert time.monotonic() < end, "timed out"
++        await asyncio.sleep(0.01)
++    await asyncio.sleep(0.05)  # the call that took it is in its wait
++
++
++def _taken(kind):
++    """The resumed call took the handed-over prompt and waits on it."""
++    if kind == "clarify":
++        return lambda: not prompt_handoff._clarify.get(ROUTE)
++    return lambda: not prompt_handoff.has_approvals(ROUTE)
++
++
++async def _restart(gw):
++    """The per-turn restart of *gw*: its carry must hand the parked turn over at once, not at the ceiling."""
++    started = time.monotonic()
++    assert await asyncio.wait_for(turn_carry.carry_restart(gw.runner), CEILING + 10) is True
++    elapsed = time.monotonic() - started
++    os.close(gw.runner._turn_carry.lock_fd)
++    assert elapsed < 5.0, f"the carrier held the parked turn for {elapsed:.1f}s"
++    gw.thread.join(5.0)
++    assert not gw.thread.is_alive()
++    assert gw.agent.interrupts == 1 and turn_boundary._turns(gw.runner) == []  # nothing left for the 0048 stop
++    row = get_session_admission(gw.home.db, admission_id=gw.row["admission_id"])
++    assert row["status"] == "queued"  # back in its FIFO place, nothing settled
++    record = resume_record(gw.home.db, admission_id=gw.row["admission_id"])
++    assert not any(t in ("message.complete", "message.start") for t, _ in gw.frames)  # no notice, no new turn
++    return record
++
++
++def _next_gateway(home, name, monkeypatch, bind):
++    """The gateway that takes over: the handed-over prompt waits under its id before any claim, then the claim
++    resumes the turn, whose stored call adopts the prompt (no new card)."""
++    _process_state(monkeypatch)  # the previous process exited
++    gw = _Gateway(home, name)
++    assert turn_boundary.restore_prompts(gw.runner) == 1
++    turn_boundary.show_prompts(gw.runner)
++    row = claim_session_input(home.db, epoch=gw.authority.epoch, session_id=SID)
++    assert row["resume"]["prompts"]
++    turn_boundary.claimed(gw.authority, SID, row)
++    gw.run(row)
++    turn = SimpleNamespace(_ctx=SimpleNamespace(_status_adapter=object(), session_key=ROUTE),
++                           _approval_owner=(gw.authority, SID, row["generation"]))
++    if bind:  # what TurnRunner._run_conversation_with_approval registers for the turn
++        prompt_handoff.on_adopt(ROUTE, partial(TurnRunner._bind_handed_prompt, turn))
++    return gw, turn
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("bind", [True, False], ids=["bound", "adopted-only"])
++async def test_reraised_clarify_is_handed_over_at_once_at_every_restart(home, monkeypatch, bind):
++    # Gateway 1: the turn asks; nobody answers.
++    gw = _Gateway(home, "g1")
++    admit_session_input(home.db, epoch=gw.authority.epoch, principal_id="p", session_id=SID, request_id="r1",
++                        payload={"text": "do the thing"})
++    gw.run(claim_session_input(home.db, epoch=gw.authority.epoch, session_id=SID))
++    entry = clarify_gateway.register("cq-1", ROUTE, QUESTION, CHOICES)
++    gw.live.controls.register_clarify(SID, gw.row["generation"], entry, timeout_s=1800)
++    gw.start(lambda: clarify_gateway.wait_for_response("cq-1", timeout=600))
++    record = await _restart(gw)
++    assert [p["prompt_id"] for p in record["prompts"]] == ["cq-1"]
++
++    # Two more restarts with the question still open, each on the gateway that re-raised it.
++    for name in ("g2", "g3"):
++        gw, turn = _next_gateway(home, name, monkeypatch, bind)
++        gw.start(lambda t=turn: TurnRunner._ask_clarify_question(t, QUESTION, CHOICES, False))
++        await _until(_taken("clarify"))
++        assert gw.prompts() == ["cq-1"] and gw.requests("clarify") == ["cq-1"]  # listed once, same id
++        assert gw.bound("cq-1") is bind
++        record = await _restart(gw)
++        assert [p["prompt_id"] for p in record["prompts"]] == ["cq-1"]
++        assert gw.requests("clarify") == ["cq-1"]  # no second card, no new prompt id
++
++    # The final gateway: the user answers the same card, once.
++    gw, turn = _next_gateway(home, "g4", monkeypatch, bind)
++    gw.start(lambda: TurnRunner._ask_clarify_question(turn, QUESTION, CHOICES, False))
++    await _until(_taken("clarify"))
++    assert gw.prompts() == ["cq-1"]
++    controls = gw.live.controls
++    assert controls.respond(SID, gw.row["generation"], "cq-1", {"answer": "green"}, kind="clarify")["status"] == "resolved"
++    gw.thread.join(5.0)
++    assert gw.result == [("green", True)]
++    assert controls.respond(SID, gw.row["generation"], "cq-1", {"answer": "blue"}, kind="clarify")["status"] == "already_resolved"
++    assert gw.prompts() == [] and gw.requests("clarify") == ["cq-1"]
++
++
++@pytest.fixture
++def gateway_approvals(monkeypatch):
++    from tools import approval as A
++    from tools import approval_context, approval_detection
++    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
++    for name in ("HERMES_INTERACTIVE", "HERMES_CRON_SESSION", "HERMES_EXEC_ASK", "HERMES_YOLO_MODE"):
++        monkeypatch.delenv(name, raising=False)
++    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
++    monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", False)
++    danger = lambda command: (True, "reraise-test-danger", f"risk:{command}")  # noqa: E731
++    monkeypatch.setattr(A, "detect_dangerous_command", danger)
++    monkeypatch.setattr(approval_detection, "detect_dangerous_command", danger)
++    with A._lock:
++        A._permanent_approved.discard("reraise-test-danger")
++        A._session_approved.pop(ROUTE, None)
++    yield A
++    with A._lock:
++        A._gateway_queues.pop(ROUTE, None)
++        A._gateway_notify_cbs.pop(ROUTE, None)
++        A._session_approved.pop(ROUTE, None)
++
++
++def _guard(A):
++    """The terminal tool's guard on the agent thread of the turn."""
++    from tools import approval_context
++    token = approval_context.set_current_session_key(ROUTE)
++    try:
++        return A.check_all_command_guards("rm -rf build", "local")
++    finally:
++        approval_context.reset_current_session_key(token)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("bind", [True, False], ids=["bound", "adopted-only"])
++async def test_reraised_approval_is_handed_over_at_once_at_every_restart(home, monkeypatch, gateway_approvals, bind):
++    A = gateway_approvals
++    gw = _Gateway(home, "g1")
++    admit_session_input(home.db, epoch=gw.authority.epoch, principal_id="p", session_id=SID, request_id="r1",
++                        payload={"text": "clean up"})
++    gw.run(claim_session_input(home.db, epoch=gw.authority.epoch, session_id=SID))
++
++    def first_card(data, gw=gw):  # the turn's own card (TurnRunner._approval_notify_sync)
++        gw.authority.register_approval(SID, gw.row["generation"], ROUTE, data, timeout_s=1800)
++    with A._lock:
++        A._gateway_notify_cbs[ROUTE] = first_card
++    gw.start(lambda: _guard(A))
++    await _until(lambda: gw.prompts())
++    request_id = gw.prompts()[0]
++    record = await _restart(gw)
++    assert [p["prompt_id"] for p in record["prompts"]] == [request_id]
++
++    for name in ("g2", "g3"):
++        gw, _turn = _next_gateway(home, name, monkeypatch, bind)
++        with A._lock:
++            A._gateway_notify_cbs[ROUTE] = lambda data: pytest.fail("a second card was raised")
++        gw.start(lambda: _guard(A))
++        await _until(_taken("approval"))
++        assert gw.prompts() == [request_id] and gw.requests("approval") == [request_id]
++        assert gw.bound(request_id) is bind
++        record = await _restart(gw)
++        assert [p["prompt_id"] for p in record["prompts"]] == [request_id]
++        assert gw.requests("approval") == [request_id]
++
++    gw, _turn = _next_gateway(home, "g4", monkeypatch, bind)
++    with A._lock:
++        A._gateway_notify_cbs[ROUTE] = lambda data: pytest.fail("a second card was raised")
++    gw.start(lambda: _guard(A))
++    await _until(_taken("approval"))
++    controls = gw.live.controls
++    assert controls.respond(SID, gw.row["generation"], request_id, {"choice": "once"})["status"] == "resolved"
++    gw.thread.join(5.0)
++    assert gw.result and gw.result[0]["approved"] is True
++    assert controls.respond(SID, gw.row["generation"], request_id, {"choice": "once"})["status"] == "already_resolved"
++    assert gw.prompts() == [] and gw.requests("approval") == [request_id]
+diff --git a/tools/approval_gateway_wait.py b/tools/approval_gateway_wait.py
+index 8f88f9d2..c50cd095 100644
+--- a/tools/approval_gateway_wait.py
++++ b/tools/approval_gateway_wait.py
+@@ -342,6 +342,9 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
+             entry.cancelled = cancelled
+             entry.event.set()
+         choice = _drop_entry(state)
++        if adopted is not None:
++            from tools.prompt_handoff import release
++            release(entry.data.get("request_id"))
+         if state == "interrupted":
+             # Our own decision stays a fail-closed deny.
+             choice = "deny"
+diff --git a/tools/prompt_handoff.py b/tools/prompt_handoff.py
+index 616b16ff..cf817795 100644
+--- a/tools/prompt_handoff.py
++++ b/tools/prompt_handoff.py
+@@ -7,6 +7,10 @@ given to the old gateway after the handoff is applied here once. When the resume
+ question or the same approval, it adopts that entry (``take_clarify`` / ``take_approval``) instead of
+ asking again: same prompt id, no second card, no second smart review, and an answer that came first is
+ read at once.
++
++An adopted prompt is the resumed turn's own again (``adopted``, and the turn's ``on_adopt`` listener binds its
++listed card to the running execution), so a restart that follows finds the turn parked on it and hands it over
++at once, under the same id, however many restarts it waits through.
+ """
+ from __future__ import annotations
+ 
+@@ -19,6 +23,8 @@ logger = logging.getLogger(__name__)
+ _lock = threading.Lock()
+ _clarify: dict[str, list[str]] = {}  # session key -> clarify ids waiting for their call
+ _approvals: dict[str, list[Any]] = {}  # session key -> approval entries waiting for their call
++_adopted: dict[str, str] = {}  # prompt id -> session key: a handed-over prompt its resumed call waits on here
++_listeners: dict[str, Any] = {}  # session key -> callback(kind, prompt_id) of the turn that runs there
+ 
+ 
+ def _norm_choices(choices) -> Optional[list[str]]:
+@@ -62,6 +68,7 @@ def take_clarify(session_key: str, question: str, choices=None) -> Any:
+                     waiting.remove(cid)
+                 if not waiting:
+                     _clarify.pop(session_key, None)
++            _note_adopted(session_key, "clarify", cid)
+             return entry
+     return None
+ 
+@@ -119,17 +126,62 @@ def take_approval(session_key: str, approval_data: dict) -> Any:
+             waiting.remove(entry)
+             if not waiting:
+                 _approvals.pop(session_key, None)
++    if entry is not None:
++        _note_adopted(session_key, "approval", entry.data.get("request_id"))
+     return entry
+ 
+ 
++def on_adopt(session_key: str, callback) -> None:
++    """The turn running on *session_key* hears ``callback(kind, prompt_id)`` when its call adopts a
++    handed-over prompt."""
++    with _lock:
++        _listeners[session_key] = callback
++
++
++def off_adopt(session_key: str, callback) -> None:
++    """The turn that registered *callback* ended (a later turn's listener stays)."""
++    with _lock:
++        if _listeners.get(session_key) == callback:
++            _listeners.pop(session_key, None)
++
++
++def _note_adopted(session_key: str, kind: str, prompt_id) -> None:
++    if not prompt_id:
++        return
++    with _lock:
++        _adopted[str(prompt_id)] = session_key
++        listener = _listeners.get(session_key)
++    if listener is not None:
++        try:
++            listener(kind, str(prompt_id))
++        except Exception:
++            logger.warning("Could not bind adopted prompt %s to its turn", prompt_id, exc_info=True)
++
++
++def adopted(prompt_id) -> bool:
++    """Whether a resumed call here waits on this handed-over prompt (it is that turn's own, not a subagent's)."""
++    with _lock:
++        return str(prompt_id) in _adopted
++
++
++def release(prompt_id) -> None:
++    """The adopted prompt's wait ended."""
++    with _lock:
++        _adopted.pop(str(prompt_id), None)
++
++
+ def forget_session(session_key: str) -> None:
+     """Drop what still waits for a session (its resumed turn ended without raising it)."""
+     with _lock:
+         _clarify.pop(session_key, None)
+         _approvals.pop(session_key, None)
++        for pid in [p for p, key in _adopted.items() if key == session_key]:
++            _adopted.pop(pid, None)
+ 
+ 
+ def clear() -> None:
+     with _lock:
+         _clarify.clear()
+         _approvals.clear()
++        _adopted.clear()
++        _listeners.clear()
