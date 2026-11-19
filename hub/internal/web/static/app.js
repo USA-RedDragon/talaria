@@ -1926,7 +1926,11 @@
         fallback = "";
         a.href = img.src = mediaURL(base, other);
       } else if (p && mediaPath(p)) a.replaceWith(mediaFile(base, p, true));
-      else a.replaceWith(el("div", "att", el("span", "file", "image")));
+      else {
+        const box = el("div", "att");
+        box.append(el("span", "file", "image"));
+        a.replaceWith(box);
+      }
     };
     a.append(img);
     zoomable(a, () => a.href, baseName(p || "image"));

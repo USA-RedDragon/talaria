@@ -17,10 +17,14 @@ import (
 )
 
 const (
-	seenID     = "3f2a9c5e7b1d4086a2c9e5f7103b6d8a4c2e9f1b7a3d5c8e0f2b4a6c8d0e1f23"
-	otherID    = "00000000000000000000000000000000000000000000000000000000000000ff"
-	relift     = "/home/reddragon/.cache/relift/work/sheet.png"
-	stepVision = "vision_analyze"
+	kImageURL   = "image_url"
+	kSeenImages = "seen_images"
+	kBytes      = "bytes"
+	kQuestion   = "question"
+	seenID      = "3f2a9c5e7b1d4086a2c9e5f7103b6d8a4c2e9f1b7a3d5c8e0f2b4a6c8d0e1f23"
+	otherID     = "00000000000000000000000000000000000000000000000000000000000000ff"
+	relift      = "/home/reddragon/.cache/relift/work/sheet.png"
+	stepVision  = "vision_analyze"
 )
 
 // seenSteps are a subagent's vision call on a file that is nowhere the chat
@@ -29,10 +33,10 @@ func seenSteps(md map[string]any) []map[string]any {
 	return []map[string]any{
 		{kRole: roleUser, keyText: goalRead, kTimestamp: 1000.0},
 		{kRole: roleAssistant, keyText: "", kTimestamp: 1001.0,
-			"tool_calls": []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{"image_url": relift, "question": "what"}}}},
-		{kRole: stepTool, fieldName: stepVision, "tool_call_id": "v1", kTimestamp: 1002.0,
-			kArgs:    map[string]any{"image_url": relift, "question": "what"},
-			"result": "Image loaded into your context", keyResultSize: 30, keyDisplayMeta: md},
+			kCalls: []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: relift, kQuestion: "what"}}}},
+		{kRole: stepTool, fieldName: stepVision, kCallID: "v1", kTimestamp: 1002.0,
+			kArgs:    map[string]any{kImageURL: relift, kQuestion: "what"},
+			sjResult: "Image loaded into your context", keyResultSize: 30, keyDisplayMeta: md},
 	}
 }
 
@@ -48,8 +52,8 @@ func TestSubagentVisionStepShowsTheStoredCopy(t *testing.T) {
 	e := activityEnv(t)
 	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
 	e.gw.SetSeenImage(seenID, []byte(shotPNG))
-	rec := map[string]any{"id": seenID, "mime": mimePNG, "bytes": len(shotPNG), "w": 64, "h": 48, "thumb": true}
-	e.gw.AddChildRows("s1", "sa-0-a", seenSteps(map[string]any{"seen_images": []any{rec, map[string]any{"id": "../etc/passwd"}}})...)
+	rec := map[string]any{"id": seenID, "mime": mimePNG, kBytes: len(shotPNG), "w": 64, "h": 48, "thumb": true}
+	e.gw.AddChildRows("s1", "sa-0-a", seenSteps(map[string]any{kSeenImages: []any{rec, map[string]any{"id": "../etc/passwd"}}})...)
 	c := client(t)
 	login(t, e, c)
 
@@ -118,8 +122,8 @@ func TestSubagentVisionPathIsServedOnceItsStepsWereRead(t *testing.T) {
 	e.gw.SetFile(p, []byte(shotPNG))
 	e.gw.SetFile(shotDir+"other.png", []byte(shotPNG))
 	rows := seenSteps(nil)
-	rows[1]["tool_calls"] = []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{"image_url": p}}}
-	rows[2][kArgs] = map[string]any{"image_url": p}
+	rows[1][kCalls] = []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: p}}}
+	rows[2][kArgs] = map[string]any{kImageURL: p}
 	e.gw.AddChildRows("s1", "sa-0-a", rows...)
 	c := client(t)
 	login(t, e, c)
@@ -176,7 +180,7 @@ func TestEveryImageTheModelSawIsShown(t *testing.T) {
 	rec := map[string]any{"id": seenID, "mime": mimePNG, "w": 64, "h": 48, "thumb": true}
 	call := func(id, p string) map[string]any {
 		return map[string]any{kRole: roleAssistant, kText: "", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: stepVision,
-			ilArgs: `{"image_url":"` + p + `","question":"What is on screen?"}`}}}}
+			ilArgs: `{kImageURL:"` + p + `",kQuestion:"What is on screen?"}`}}}}
 	}
 	result := func(id string, md map[string]any) map[string]any {
 		return map[string]any{kRole: stepTool, kCallID: id, fieldName: stepVision, kTimestamp: 1763000000.0,
@@ -186,16 +190,16 @@ func TestEveryImageTheModelSawIsShown(t *testing.T) {
 		Subagents: []gateway.SubagentRow{{SubagentID: subA, Goal: "Look at the sheet", Status: optr(statusRunning), AcceptingSteer: optr(true)}},
 		Messages: []map[string]any{
 			{kRole: roleUser, kText: "what is on screen?"},
-			call("c1", "/home/reddragon/.cache/relift/work/main.png"), result("c1", map[string]any{"seen_images": []any{rec}}),
+			call("c1", "/home/reddragon/.cache/relift/work/main.png"), result("c1", map[string]any{kSeenImages: []any{rec}}),
 			call("c2", "/home/reddragon/.cache/relift/work/old.png"), result("c2", nil),
 			{kRole: roleAssistant, kText: "done"},
 		}})
 	e.gw.AddChildRows("s9", subA, map[string]any{kRole: roleUser, keyText: "Look at the sheet", kTimestamp: 1000.0},
 		map[string]any{kRole: roleAssistant, keyText: "", kTimestamp: 1001.0,
-			"tool_calls": []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{"image_url": relift, "question": "what"}}}},
-		map[string]any{kRole: stepTool, fieldName: stepVision, "tool_call_id": "v1", kTimestamp: 1002.0,
-			kArgs: map[string]any{"image_url": relift, "question": "what"}, "result": "Image loaded into your context", keyResultSize: 30,
-			keyDisplayMeta: map[string]any{"seen_images": []any{rec}}})
+			kCalls: []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: relift, kQuestion: "what"}}}},
+		map[string]any{kRole: stepTool, fieldName: stepVision, kCallID: "v1", kTimestamp: 1002.0,
+			kArgs: map[string]any{kImageURL: relift, kQuestion: "what"}, sjResult: "Image loaded into your context", keyResultSize: 30,
+			keyDisplayMeta: map[string]any{kSeenImages: []any{rec}}})
 	prof := t.TempDir()
 	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "seenimg", "run.js"), chrome, e.url, prof, seenID)
 	if out, err := cmd.CombinedOutput(); err != nil {
