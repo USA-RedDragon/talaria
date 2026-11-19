@@ -1100,15 +1100,100 @@ class ToolTests(BrowserBase):
         self.assertIn("browser.autologin-hosts", out["error"])
         self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
 
-    def test_actions_refused_on_autologin_login_page(self):
+    def test_actions_on_autologin_login_page_ask_the_user_each_time(self):
+        """A sign-in page of an autologin host was a hard refusal; now each action is a person-only card."""
         self.login_page()
+        self.fake.inspect["target"] = {"kind": "other", "label": "w3id Password"}
+        out = self.run_tool("browser_click", tab_id=7, ref="e3")
+        self.assertNotIn("error", out)
+        text = self.confirmed.call_args[0][0]
+        self.assertTrue(text.startswith('Allow clicking the element "w3id Password" on the sign-in page login.example.com'),
+                        text)
+        guard = self.last("click")["args"]["guard"]
+        self.assertTrue(guard["login_page"])
+        self.assertTrue(guard["sensitive"])
+        # Typing into the password field says so on the card.
+        self.fake.inspect["target"] = {"kind": "field", "field": "password"}
+        self.run_tool("browser_type", tab_id=7, ref="e2", text="x")
+        self.assertIn("password field", self.confirmed.call_args[0][0])
+        self.assertTrue(self.last("type")["args"]["guard"]["login_page"])
+        # Deny refuses, and nothing reaches the page.
+        self.confirmed.return_value = False
+        before = len([r for r in self.fake.requests if r["op"] in ("type", "click", "press")])
         for tool, args in (("browser_type", {"ref": "e2", "text": "x"}), ("browser_click", {"ref": "e3"}),
                            ("browser_press", {"key": "a", "ref": "e2"})):
             out = self.run_tool(tool, tab_id=7, **args)
-            self.assertEqual(self.decision["action"], "block", tool)
-            self.assertIn("use browser_login", out["error"])
-        self.assertEqual(self.confirmed.call_count, 0)
-        self.assertFalse([r for r in self.fake.requests if r["op"] in ("type", "click", "press")])
+            self.assertIn("error", out, tool)
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] in ("type", "click", "press")]), before)
+
+    def test_actions_on_autologin_login_page_without_a_user_are_blocked(self):
+        self.login_page()
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+            out = self.run_tool("browser_click", tab_id=7, ref="e3")
+        self.assertEqual(self.decision["action"], "block")
+        self.assertIn("no user is present", out["error"])
+        self.assertFalse([r for r in self.fake.requests if r["op"] == "click"])
+
+    def test_guard_has_login_page_only_with_a_confirm(self):
+        self.assertNotIn("login_page", browser.guard_of({"login_page": True}))
+        self.assertTrue(browser.guard_of({"login_page": True, "confirm": ["password"]})["login_page"])
+
+    W3ID = "w3id Password Use your w3id and password if you can't use a passkey."
+
+    def test_method_name_drops_a_description_that_names_a_passkey(self):
+        self.assertEqual(browser.method_name(self.W3ID), "w3id Password")
+        self.assertEqual(browser.method_name("Passkey Use your passkey"), "")
+        self.assertEqual(browser.method_name("IBM Verify Approve on your phone"), "")
+        self.assertEqual(browser.method_name("Password"), "Password")
+        self.assertEqual(browser.grant_methods(["Passkey", self.W3ID, "IBM Verify", "Email link"]),
+                         ["w3id Password", "Email link"])
+
+    def picker_login(self, answer, reason="the page offers sign-in methods", needs=True):
+        self.login_page()
+        first = {"tab_id": 7, "filled": False, "submitted": False, "landed_host": "login.example.com", "reason": reason,
+                 "methods_seen": ["Passkey", self.W3ID, "IBM Verify"]}
+        if needs:
+            first["needs_method"] = True
+        self.fake.login_results = [first]
+        asked = []
+
+        def ask(tool_name, reason, rule_key="", approval_callback=None, login_grant=None):
+            asked.append({"message": reason, "rule_key": rule_key, "login_grant": login_grant})
+            return {"approved": answer}
+        with mock.patch("tools.approval.request_tool_approval", ask):
+            out = self.run_tool("browser_login", tab_id=7)
+        return out, asked
+
+    def test_login_without_a_matching_method_raises_the_picker_and_retries(self):
+        out, asked = self.picker_login(True)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0]["login_grant"]["methods"], ["w3id Password"])
+        self.assertEqual(asked[0]["login_grant"]["host"], "login.example.com")
+        self.assertIn("never offered", asked[0]["message"])
+        logins = [r["args"] for r in self.fake.requests if r["op"] == "login"]
+        self.assertEqual(len(logins), 2)
+        self.assertEqual(logins[1]["tab_id"], 7)
+        self.assertNotIn("url", logins[1])
+        self.assertTrue(out["submitted"])
+
+    def test_login_picker_with_an_older_extension_reason(self):
+        out, asked = self.picker_login(True, reason='the page offers sign-in methods ("x") but none has exactly the '
+                                                   'configured text "w3id Password"', needs=False)
+        self.assertEqual(len(asked), 1)
+        self.assertTrue(out["submitted"])
+
+    def test_login_picker_denied_does_not_retry(self):
+        out, asked = self.picker_login(False)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "login"]), 1)
+        self.assertIn("did not pick", out["reason"])
+
+    def test_login_picker_without_a_user_asks_nothing(self):
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+            out, asked = self.picker_login(True)
+        self.assertEqual(asked, [])
+        self.assertIn("No user is present", out["reason"])
+        self.assertIn("w3id Password", out["reason"])
 
     def test_check_passes_through(self):
         out = self.run_tool("browser_check", tab_id=7)

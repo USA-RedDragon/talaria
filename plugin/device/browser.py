@@ -804,13 +804,42 @@ def grants_op(device_id: str, req: dict, in_hook: bool = False) -> dict:
     return res if isinstance(res, dict) else {}
 
 
+def method_name(label: str) -> str:
+    """The name of a sign-in method button, for a card: the label, or, when the label names a
+    passkey or an approval on another device only in a description after the name (\"w3id
+    Password Use your w3id and password if you can't use a passkey.\"), the words before that
+    description: the longest run of leading words that ends before a capitalized word and before
+    the refused words, and names none of them. "" when no such name is left."""
+    label = " ".join(str(label or "").split())
+    hit = REFUSED_METHOD.search(label)
+    if not hit:
+        return label
+    words = label.split(" ")
+    best, end = "", 0
+    for i, word in enumerate(words[:-1]):
+        end += len(word) + (1 if i else 0)
+        rest = words[i + 1:]
+        if end >= hit.start():
+            break
+        # The same test as pageMethod in the extension: a description of at least three words
+        # whose first three name no passkey or approval ("IBM Verify ..." gives no "IBM").
+        if rest[0][:1].isupper() and len(rest) >= 3 and not REFUSED_METHOD.search(" ".join(rest[:3])):
+            name = " ".join(words[:i + 1])
+            if not REFUSED_METHOD.search(name):
+                best = name
+    return best
+
+
 def grant_methods(seen: Any) -> list[str]:
-    """Sign-in method labels that may go on a card: short visible text, no passkey or approval
-    on another device, no repeats, at most MAX_GRANT_METHODS."""
+    """Sign-in method names that may go on a card (method_name of each label): short visible
+    text, no passkey or approval on another device, no repeats, at most MAX_GRANT_METHODS. The
+    extension clicks the button whose text is the name or starts with it."""
     out: list[str] = []
-    for label in seen if isinstance(seen, list) else []:
-        if (isinstance(label, str) and label.strip() and label == label.strip() and len(label) <= MAX_METHOD_LEN
-                and not any(c in label for c in "\r\n\t") and not REFUSED_METHOD.search(label) and label not in out):
+    for raw in seen if isinstance(seen, list) else []:
+        ok = isinstance(raw, str) and raw == raw.strip() and not any(c in raw for c in "\r\n\t")
+        label = method_name(raw) if ok else ""
+        if (label and len(label) <= MAX_METHOD_LEN and not any(c in label for c in "\r\n\t")
+                and not REFUSED_METHOD.search(label) and label not in out):
             out.append(label)
     return out[:MAX_GRANT_METHODS]
 
@@ -953,6 +982,12 @@ def _tab_id(args: dict) -> Optional[int]:
         return int(value) if value is not None and str(value).strip() != "" else None
     except (TypeError, ValueError):
         return None
+
+
+def what_el_of(target: dict) -> str:
+    """' "<label>"' of an element, for a card, or ""."""
+    label = str((target or {}).get("label") or "").strip()
+    return f" {json.dumps(label[:80], ensure_ascii=False)}" if label else ""
 
 
 def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dict]]:
@@ -1180,15 +1215,23 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
         grant["page_url"] = info["url"]  # the page before the action, to tell whether it navigated
     sensitive = [s for s in (info.get("sensitive") or []) if isinstance(s, str)]
     if info.get("autologin") and "password" in sensitive:
-        return {}, {"action": "block", "message": (
-            f"{tool_name}: this is a login page on a host in the device's browser.autologin-hosts "
-            f"({info.get('top_host') or page}). Clicks, typing and key presses are refused there; use browser_login, "
-            f"which submits the login Firefox filled.")}
+        # A sign-in page of an autologin host: every action asks the user (only a person can answer),
+        # and the extension acts there only with this grant (docs/browser.md section 7.4).
+        login_host = str(info.get("top_host") or info.get("host") or page)
+        how = (f"pressing {str(args.get('key'))[:20]} on" if press else
+               "typing into" if tool_name == "browser_type" else "clicking")
+        grant["confirm"] = sensitive
+        grant["login_page"] = True
+        grant["confirm_text"] = (
+            f"Allow {how} {('the element' + what_el_of(t)) if what_el_of(t) else 'an element'} on the sign-in page "
+            f"{login_host} in {where}? Firefox has a saved login there; "
+            + ("the text goes into a password field. " if t.get("field") == "password" else "")
+            + "Every action on this page needs your OK.")
+        return grant, None
     on_salesforce = bool(info.get("protected")) or protected(str(info.get("host") or "")) or protected(
         str(info.get("top_host") or ""))
     clicks = tool_name == "browser_click" or (tool_name == "browser_type" and bool(args.get("submit"))) or activates
-    label = str(t.get("label") or "").strip()
-    what_el = f" {json.dumps(label[:80], ensure_ascii=False)}" if label else ""
+    what_el = what_el_of(t)
     if on_salesforce and clicks:
         how = (f"pressing {str(args.get('key'))[:20]} on" if press else
                "submitting" if tool_name == "browser_type" else "clicking")
@@ -2432,8 +2475,11 @@ def act_req(op: str, a: dict) -> dict:
 
 
 def guard_of(grant: dict) -> dict:
-    return {"submit_hosts": grant.get("submit_hosts") or [], "visit_hosts": grant.get("visit_hosts") or [],
-            "sensitive": bool(grant.get("confirm")), "confirmed": bool(grant.get("protected_ok"))}
+    out = {"submit_hosts": grant.get("submit_hosts") or [], "visit_hosts": grant.get("visit_hosts") or [],
+           "sensitive": bool(grant.get("confirm")), "confirmed": bool(grant.get("protected_ok"))}
+    if grant.get("login_page") and grant.get("confirm"):
+        out["login_page"] = True  # the user allowed this one action on a sign-in page of an autologin host
+    return out
 
 
 def _batch_tool(args: dict, conn: Any, sid: str) -> str:
@@ -2498,8 +2544,7 @@ def _act(op: str) -> Callable[[dict, Any, str], str]:
                 return refusal
         if grant.get("confirm") and not _confirm(grant.get("confirm_text") or "Allow this browser action?"):
             return _err("the user did not allow this action", "declined")
-        req["guard"] = {"submit_hosts": grant.get("submit_hosts") or [], "visit_hosts": grant.get("visit_hosts") or [],
-                        "sensitive": bool(grant.get("confirm")), "confirmed": bool(grant.get("protected_ok"))}
+        req["guard"] = guard_of(grant)
         if op == "type":
             req["text"] = str(args.get("text") or "")
             req["submit"] = bool(args.get("submit"))
@@ -2597,6 +2642,8 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     post = _post_host(res)
     if post and not res.get("submitted"):
         res = _login_post_host(conn, sid, req, res, post)
+    elif _needs_method(res):
+        res = _login_pick_method(conn, sid, req, res)
     out = {k: res[k] for k in ("tab_id", "filled", "submitted", "landed_host", "reason") if k in res}
     if isinstance(res.get("needs_post_host"), str):
         out["needs_post_host"] = res["needs_post_host"][:253]
@@ -2610,6 +2657,57 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     if not out.get("submitted"):
         out["note"] = "The sign-in did not happen. Do not try to type the password; report that it needs the user."
     return _ok(out)
+
+
+def _needs_method(res: dict) -> bool:
+    """The login stopped on a sign-in method picker because no method is chosen for the host, or
+    no button is or starts with the chosen one, and the page offers a method a card may list."""
+    if res.get("submitted") or not grant_methods(res.get("methods_seen")):
+        return False
+    reason = str(res.get("reason") or "")
+    # Extensions before 0.32.7 send no needs_method; their reasons say the same.
+    return bool(res.get("needs_method")) or "no method is configured" in reason or "none has exactly" in reason
+
+
+def _login_pick_method(conn: Any, sid: str, req: dict, res: dict) -> dict:
+    """The page asks how to sign in and no method matches: raise the sign-in card with the page's
+    methods to pick from (passkeys and approvals on another device are never listed). After the
+    user picks one, the hub gave the device a grant with that method, and the login runs once more
+    in the same tab. With no user present nothing is asked."""
+    host = str(res.get("landed_host") or res.get("login_host") or "").lower()
+    if not host or not isinstance(res.get("tab_id"), int):
+        return res
+    name = str(conn.name or conn.device_id)
+    methods = grant_methods(res.get("methods_seen"))
+    if no_user():
+        try:
+            told = _jobs().ask_chat(_session(sid), _rule("login", host), "browser_login")
+        except Exception:
+            _core().logger.warning("device-browser: could not tell the job's chat", exc_info=True)
+            told = ""
+        return dict(res, reason=(
+            f"{res.get('reason') or 'no sign-in method matches'}. No user is present in this run to pick one "
+            f"({', '.join(methods)}). Report that the user can pick it on the sign-in card from a chat.{told}"))
+    status = _status(conn, host, in_hook=False) or {}
+    status = dict(status, methods_seen=list(res.get("methods_seen") or []))
+    grant = status.get("grant") if isinstance(status.get("grant"), dict) else {}
+    card = login_grant_card(conn, host, status, existing=str(grant.get("scope") or ""))
+    message = (f"Pick how to sign in on {host} with the saved login. Computer: {name}. The page offers "
+               f"{', '.join(methods)}; the agent clicks the one you pick, and Firefox fills the password form. "
+               f"Passkeys and approvals on another device are never offered.")
+    try:
+        from tools.approval import request_tool_approval
+        answer = request_tool_approval("browser_login", message, rule_key=card["rule_key"],
+                                       login_grant=card["login_grant"])
+    except Exception:
+        _core().logger.warning("device-browser: could not ask for a sign-in method", exc_info=True)
+        return res
+    if not (isinstance(answer, dict) and answer.get("approved")):
+        return dict(res, reason=f"the user did not pick a sign-in method for {host}")
+    retry = {k: v for k, v in req.items() if k != "url"}
+    retry["tab_id"] = res["tab_id"]
+    again = call(conn, "login", retry, LOGIN_TIMEOUT_S)
+    return again if isinstance(again, dict) else {}
 
 
 _HOST_NAME = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
