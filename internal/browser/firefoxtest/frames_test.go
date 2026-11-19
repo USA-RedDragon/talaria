@@ -24,12 +24,14 @@ const (
 	crossHost   = "127.0.0.2"
 	confirmHost = "127.0.0.3"
 	keyScript   = "script"
-	keyWrites   = "allow_writes"
-	keyFrame    = "frame"
-	keyKey      = "key"
-	keyTimeout  = "timeout_ms"
-	keyScripts  = "script_hosts"
-	keyWriteH   = "write_hosts"
+	// scriptOne is a script that only returns 1.
+	scriptOne  = "return 1"
+	keyWrites  = "allow_writes"
+	keyFrame   = "frame"
+	keyKey     = "key"
+	keyTimeout = "timeout_ms"
+	keyScripts = "script_hosts"
+	keyWriteH  = "write_hosts"
 )
 
 // recorder counts what the test servers got.
@@ -319,7 +321,7 @@ func scriptFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int, 
 	// the cross-origin frame's site (in the tab's sites after a script
 	// there) stays refused.
 	inCross := `return document.body.innerText;`
-	mustFail(ctx, t, b, "frame script in a scripted tab", "wait until browser_navigate", "eval",
+	mustFail(ctx, t, b, "frame script in a scripted tab", "[allow:scripted ", "eval",
 		map[string]any{keyTab: tabID, keyFrame: "f2", keyScript: inCross, keyGuard: map[string]any{keyScripts: []string{crossHost}}})
 
 	// A script in the cross-origin frame needs that site's approval.
@@ -470,8 +472,8 @@ func confirmFlow(ctx context.Context, t *testing.T, b *broker.Broker, tabID int,
 	mustFail(ctx, t, b, "Enter on a protected site", "needs the user's approval", "press", map[string]any{keyTab: tabID, keyRef: button, keyKey: "Enter"})
 	call(ctx, t, b, "press", map[string]any{keyTab: tabID, keyRef: button, keyKey: "Tab"}, nil)
 	call(ctx, t, b, "click", map[string]any{keyTab: tabID, keyRef: button, keyGuard: map[string]any{"confirmed": true}}, nil)
-	mustFail(ctx, t, b, "write script on a protected site", "never allowed", "eval", map[string]any{keyTab: tabID,
-		keyScript: `return 1`, keyWrites: true, keyGuard: map[string]any{keyWriteH: []string{confirmHost}}})
+	mustFail(ctx, t, b, "write script on a protected site", "[allow:protected_write ", "eval", map[string]any{keyTab: tabID,
+		keyScript: scriptOne, keyWrites: true, keyGuard: map[string]any{keyWriteH: []string{confirmHost}}})
 	out := evalIn(ctx, t, b, map[string]any{keyTab: tabID, keyScript: `return document.querySelectorAll("iframe").length;`,
 		keyGuard: map[string]any{keyScripts: []string{confirmHost}}})
 	if string(out.Result) != "2" {

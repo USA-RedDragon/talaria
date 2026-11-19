@@ -93,7 +93,22 @@ const SESSION_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
 
 // Refused marks an error the extension chose: the device reports it with
 // code "refused" instead of "failed".
-class Refused extends Error {}
+class Refused extends Error {
+  // allow, when set, names the check that refused ({ kind, host }): the plugin
+  // can ask the user and send the action again with "<kind> <host>" in
+  // guard.allow, which lets that one check pass (docs/browser.md section 7.5).
+  // The message then ends with " [allow:<kind> <host>]".
+  constructor(message, allow) {
+    super(allow ? message + " [allow:" + allow.kind + " " + (allow.host || "-") + "]" : message);
+    this.allow = allow || null;
+  }
+}
+
+// allows reports whether the plugin passed the user's answer for the check
+// kind on host in the guard.
+function allows(g, kind, host) {
+  return Array.isArray(g && g.allow) && g.allow.includes(kind + " " + (host || "-"));
+}
 
 // The badge says "on" while the extension is connected to the talaria
 // daemon, in a dark green that reads on light and dark toolbars. The title
@@ -187,6 +202,13 @@ async function onMessage(msg) {
       throw new Refused("unknown op " + msg.op);
     }
     reply = { type: "response", id: msg.id, ok: true, result: await handler(msg.args || {}) };
+    const blocked = drainBlocked();
+    if (blocked && reply.result && typeof reply.result === "object" && !Array.isArray(reply.result)) {
+      reply.result.blocked_requests = blocked;
+    } else if (blocked) {
+      blocked.forEach((n) => blockedNotes.set(n.tab_id, { tab_id: n.tab_id, count: n.count, hosts: new Set(n.hosts),
+        kinds: new Set(n.kinds) }));
+    }
   } catch (e) {
     reply = {
       type: "response", id: msg.id, ok: false, code: e instanceof Refused ? "refused" : "failed",
@@ -284,6 +306,42 @@ function inheritTaint(tab) {
 // it goes to another site than the ones the script ran on, or it is not a
 // GET or HEAD (or it opens a WebSocket) to a site where scripts may only
 // read. t.sites maps each site to whether writes are approved there.
+// blockedNotes counts, per tab (-1 for requests with no tab), the requests
+// the checks below cancelled while no tool call could ask the user. The next
+// response of any op carries them as blocked_requests, so the plugin can tell
+// the agent and offer the user to lift the limit (op lift_limits).
+const blockedNotes = new Map();
+// Tabs whose script taint the user lifted, and until when requests with no
+// tab are let through during scripts.
+const taintLifted = new Set();
+let tablessLiftedUntil = 0;
+const TABLESS_LIFT_MS = 10 * 60 * 1000;
+
+function cancelled(d, kind) {
+  const key = d.tabId;
+  let n = blockedNotes.get(key);
+  if (!n) {
+    n = { tab_id: key, count: 0, hosts: new Set(), kinds: new Set() };
+    blockedNotes.set(key, n);
+  }
+  n.count++;
+  if (n.hosts.size < 8) {
+    n.hosts.add(hostPortOf(d.url) || "?");
+  }
+  n.kinds.add(kind);
+  return { cancel: true };
+}
+
+function drainBlocked() {
+  if (!blockedNotes.size) {
+    return null;
+  }
+  const out = [...blockedNotes.values()].slice(0, 10).map((n) => ({ tab_id: n.tab_id, count: n.count, hosts: [...n.hosts],
+    kinds: [...n.kinds].sort() }));
+  blockedNotes.clear();
+  return out;
+}
+
 function taintBlocks(t, d) {
   let host;
   try {
@@ -511,8 +569,8 @@ function siteOf(host) {
 function checkVisit(target, from, guard) {
   const to = siteOf(new URL(target).hostname);
   const approved = ((guard && guard.visit_hosts) || []).map(siteOf);
-  if (to !== siteOf(from) && !approved.includes(to)) {
-    throw new Refused("opening " + to + " needs the user's approval");
+  if (to !== siteOf(from) && !approved.includes(to) && !allows(guard, "visit", to)) {
+    throw new Refused("opening " + to + " needs the user's approval", { kind: "visit", host: to });
   }
 }
 
@@ -532,18 +590,45 @@ function hermesHost(host) {
   return hubHost !== "" && String(host || "").toLowerCase().replace(/\.$/, "") === hubHost;
 }
 
-function checkURL(url) {
+// checkURL refuses a URL an agent tab may not open. The hub and loopback
+// or private hosts are allowed when the user allowed them on a card (guard
+// allow "hub <host>" or "private <host>"); permitTab then lets that tab's
+// requests reach the host.
+function checkURL(url, guard) {
   const u = new URL(url);
   if (u.protocol !== "https:" && u.protocol !== "http:") {
     throw new Refused("only http and https URLs are allowed, got " + u.protocol);
   }
-  if (hermesHost(u.host)) {
-    throw new Refused("the agent may not open the Talaria hub in its tabs");
+  if (hermesHost(u.host) && !allows(guard, "hub", u.host.toLowerCase())) {
+    throw new Refused("opening the Talaria hub in an agent tab needs the user's OK, since the tab has the user's hub " +
+      "session", { kind: "hub", host: u.host.toLowerCase() });
   }
-  if (privateHost(u.hostname) && !allowHosts.has(u.hostname.toLowerCase())) {
-    throw new Refused(u.hostname + " is on a loopback or private network; allow it in the device config");
+  const name = u.hostname.toLowerCase();
+  if (privateHost(u.hostname) && !allowHosts.has(name) && !allows(guard, "private", name)) {
+    throw new Refused(u.hostname + " is on a loopback or private network; opening it needs the user's OK",
+      { kind: "private", host: name });
   }
   return u.href;
+}
+
+// tabPermits holds, per tab, the hub and private hosts the user allowed for
+// it, so the request check lets them through.
+const tabPermits = new Map();
+
+function permitTab(tabId, url, guard) {
+  const u = new URL(url);
+  const add = (h) => {
+    if (!tabPermits.has(tabId)) {
+      tabPermits.set(tabId, new Set());
+    }
+    tabPermits.get(tabId).add(h);
+  };
+  if (allows(guard, "hub", u.host.toLowerCase())) {
+    add(u.host.toLowerCase());
+  }
+  if (allows(guard, "private", u.hostname.toLowerCase())) {
+    add(u.hostname.toLowerCase());
+  }
 }
 
 function ipv4Private(a) {
@@ -642,8 +727,8 @@ browser.webRequest.onBeforeRequest.addListener(
       // running in a tab: from its start until it returned and sealed the
       // extension world's network calls, plus a short grace. At any other
       // time they are not ours to judge.
-      return taints.size && (unsealed.size > 0 || Date.now() < scriptGraceUntil) && !details.originUrl && !details.documentUrl ?
-        { cancel: true } : {};
+      return taints.size && (unsealed.size > 0 || Date.now() < scriptGraceUntil) && !details.originUrl && !details.documentUrl &&
+        Date.now() >= tablessLiftedUntil ? cancelled(details, "tabless") : {};
     }
     const lg = loginGuards.get(details.tabId);
     if (loginRequestCancels(lg, details.method, details.url)) {
@@ -655,9 +740,10 @@ browser.webRequest.onBeforeRequest.addListener(
       lg.leaked = true;
       return { cancel: true };
     }
+    const lifted = taintLifted.has(details.tabId);
     const own = taints.get(details.tabId);
-    if (own && taintBlocks(own, details)) {
-      return { cancel: true };
+    if (own && !lifted && taintBlocks(own, details)) {
+      return cancelled(details, "taint");
     }
     let tab;
     try {
@@ -667,34 +753,35 @@ browser.webRequest.onBeforeRequest.addListener(
     }
     if (!own) {
       const inherited = inheritTaint(tab);
-      if (inherited && taintBlocks(inherited, details)) {
-        return { cancel: true };
+      if (inherited && !lifted && taintBlocks(inherited, details)) {
+        return cancelled(details, "taint");
       }
     }
     if (!inGroup(tab)) {
       return {};
     }
     const target = new URL(details.url);
+    const permits = tabPermits.get(details.tabId);
     if (hermesHost(target.host)) {
-      return { cancel: true };
+      return permits && permits.has(target.host.toLowerCase()) ? {} : cancelled(details, "hub");
     }
     const host = target.hostname.toLowerCase();
-    if (allowHosts.has(host)) {
+    if (allowHosts.has(host) || (permits && permits.has(host))) {
       return {};
     }
     if (privateHost(host)) {
-      return { cancel: true };
+      return cancelled(details, "private");
     }
     if (parseIPv4(host) || host.startsWith("[")) {
       return {};
     }
     try {
       const rec = await browser.dns.resolve(host);
-      return rec.addresses.some(privateAddress) ? { cancel: true } : {};
+      return rec.addresses.some(privateAddress) ? cancelled(details, "private") : {};
     } catch (e) {
       // A name the browser cannot resolve here is not loaded either; failing
       // closed keeps a resolver error from skipping the check.
-      return { cancel: true };
+      return cancelled(details, "dns");
     }
   },
   { urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"] },
@@ -807,7 +894,12 @@ browser.webRequest.onBeforeRequest.addListener((d) => {
     lastRequest.set(d.tabId, Date.now());
   }
 }, { urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"] });
-browser.tabs.onRemoved.addListener((tabId) => lastRequest.delete(tabId));
+browser.tabs.onRemoved.addListener((tabId) => {
+  lastRequest.delete(tabId);
+  tabPermits.delete(tabId);
+  taintLifted.delete(tabId);
+  blockedNotes.delete(tabId);
+});
 const QUIET_MS = 600;
 const QUIET_MAX_MS = 10000;
 
@@ -911,9 +1003,9 @@ async function tabSensitive(tabId) {
 async function prepare(tabId, ref, kind, guard) {
   const tab = await agentTab(tabId);
   const g = guard || {};
-  if (kind !== "hover" && scripted.has(tabId)) {
-    throw new Refused("this tab ran a script, so clicks, typing and key presses are refused in it until the agent " +
-      "loads a page in it again with browser_navigate");
+  if (kind !== "hover" && scripted.has(tabId) && !allows(g, "scripted", hostOf(tab.url))) {
+    throw new Refused("this tab ran a script that could have changed the page's helpers, so clicks, typing and key " +
+      "presses in it need the user's OK until browser_navigate loads a page again", { kind: "scripted", host: hostOf(tab.url) });
   }
   const { frameId, ref: local } = ref ? parseRef(tabId, ref) : { frameId: 0, ref: "" };
   if (kind === "hover") {
@@ -921,22 +1013,25 @@ async function prepare(tabId, ref, kind, guard) {
   }
   const frameHost = String(await inFrame(tabId, frameId, () => location.hostname) || "").toLowerCase();
   if ((kind === "click" || kind === "submit" || kind === "activate") &&
-    (protectedHost(hostOf(tab.url)) || protectedHost(frameHost)) && !g.confirmed) {
+    (protectedHost(hostOf(tab.url)) || protectedHost(frameHost)) && !g.confirmed &&
+    !allows(g, "click", siteOf(hostOf(tab.url)))) {
     const topHost = hostOf(tab.url);
     const site = (h) => (h.startsWith("www.") ? h.slice(4) : h);
     const ruleHost = frameHost && frameHost !== topHost && protectedHost(topHost) && protectedHost(frameHost) ? topHost :
       (frameHost || topHost);
     throw new Refused("on Salesforce (and the sites in browser.confirm-hosts) every click and every Enter or Space key " +
       "press needs the user's approval, and the plugin passed none for this " + kind + " (page host " + topHost +
-      ", frame host " + (frameHost || "none") + "; it needs the approval rule browser:click:" + site(ruleHost) + ")");
+      ", frame host " + (frameHost || "none") + "; it needs the approval rule browser:click:" + site(ruleHost) + ")",
+    { kind: "click", host: siteOf(hostOf(tab.url)) });
   }
   const sensitive = await tabSensitive(tabId);
   if (sensitive.includes("password") && (autologinHost(hostOf(tab.url)) || autologinHost(frameHost)) && !g.login_page) {
     throw new Refused("this is a login page on a host in browser.autologin-hosts; clicks, typing and key presses here " +
       "need the user's OK on each action, and the plugin passed none (an older plugin). Use browser_login, or update Talaria");
   }
-  if (sensitive.length && !g.sensitive) {
-    throw new Refused("this page has " + sensitive.join(", ") + " fields; the user must confirm each action here");
+  if (sensitive.length && !g.sensitive && !allows(g, "sensitive", hostOf(tab.url))) {
+    throw new Refused("this page has " + sensitive.join(", ") + " fields; the user must confirm each action here",
+      { kind: "sensitive", host: hostOf(tab.url) });
   }
   return { frameId, local };
 }
@@ -1390,7 +1485,7 @@ function sealCode() {
     "}\n";
 }
 
-function evalCode(script, site, blocked) {
+function evalCode(script, site, blocked, filledOK) {
   // The extension API (native messaging, tabs) is
   // taken out of this world before agent code runs; the helpers keep only
   // getFrameId, saved by installHelpers. The script runs only in a document
@@ -1404,8 +1499,8 @@ function evalCode(script, site, blocked) {
     "  if (!/^https?:$/.test(location.protocol) || s !== " + JSON.stringify(site) + " || " + JSON.stringify(blocked) + ".includes(h)) {\n" +
     "    return { ok: false, refused: true, sealed: true, error: 'the frame shows another page than the one approved; take a new snapshot' };\n" +
     "  }\n" +
-    "  if ([...document.querySelectorAll('input[type=password]')].some((f) => f.value !== '')) {\n" +
-    "    return { ok: false, refused: true, sealed: true, error: 'scripts are refused on a page with a filled password field' };\n" +
+    "  if (!" + JSON.stringify(Boolean(filledOK)) + " && [...document.querySelectorAll('input[type=password]')].some((f) => f.value !== '')) {\n" +
+    "    return { ok: false, refused: true, sealed: true, filled: true, error: 'a script on a page with a filled password field could read the password, so it needs the user\\'s OK' };\n" +
     "  }\n" +
     "}\n" +
     "for (const k of ['browser', 'chrome', 'messenger']) {\n" +
@@ -2126,15 +2221,49 @@ const OPS = {
     return { tabs: tabs.filter(inGroup).map(tabInfo) };
   },
   async tab_open({ url, guard }) {
-    const target = checkURL(url || "https://example.com/");
+    const target = checkURL(url || "https://example.com/", guard);
     checkVisit(target, "", guard);
     // Group the blank tab first, so the private network block covers the
     // first request and its redirects.
     const tab = await browser.tabs.create({ url: "about:blank", active: false });
+    permitTab(tab.id, target, guard);
     await addToGroup(tab.id);
     const loaded = waitComplete(tab.id, true);
     await browser.tabs.update(tab.id, { url: target });
     return tabInfo(await loaded);
+  },
+  // lift_limits lifts, after the user allowed it on a card, the request
+  // limits that cancelled requests of a tab: its script taint (taint), the
+  // block of requests with no tab during scripts (tabless, for ten minutes),
+  // or loopback, private and hub hosts (private, hub: the hosts given).
+  async lift_limits({ tab_id, kinds, hosts }) {
+    const k = new Set(Array.isArray(kinds) ? kinds : []);
+    const out = { lifted: [] };
+    if (k.has("tabless")) {
+      tablessLiftedUntil = Date.now() + TABLESS_LIFT_MS;
+      out.lifted.push("tabless");
+    }
+    if (tab_id === undefined || tab_id === null || tab_id < 0) {
+      return out;
+    }
+    await agentTab(tab_id, true);
+    if (k.has("taint")) {
+      taintLifted.add(tab_id);
+      out.lifted.push("taint");
+    }
+    for (const kind of ["private", "hub"]) {
+      if (k.has(kind)) {
+        const set = tabPermits.get(tab_id) || new Set();
+        for (const h of (Array.isArray(hosts) ? hosts : []).slice(0, 8)) {
+          const name = String(h).toLowerCase();
+          // The hub is matched with its port, other hosts without.
+          set.add(kind === "hub" ? name : name.replace(/:\d+$/, ""));
+        }
+        tabPermits.set(tab_id, set);
+        out.lifted.push(kind);
+      }
+    }
+    return out;
   },
   async tab_close({ tab_id }) {
     await agentTab(tab_id, true);
@@ -2143,7 +2272,7 @@ const OPS = {
   },
   async navigate({ tab_id, url, guard }) {
     const tab = await agentTab(tab_id, true);
-    const target = checkURL(url);
+    const target = checkURL(url, guard);
     let from = "";
     try {
       from = /^https?:/.test(tab.url || "") ? new URL(tab.url).hostname : "";
@@ -2151,12 +2280,14 @@ const OPS = {
       from = "";
     }
     checkVisit(target, from, guard);
+    permitTab(tab_id, target, guard);
     return tabInfo(await loadIn(tab_id, target));
   },
-  async back({ tab_id }) {
-    await agentTab(tab_id);
-    if (everScripted.has(tab_id)) {
-      throw new Refused("this tab ran a script, so it cannot go back; open the page with browser_navigate");
+  async back({ tab_id, guard }) {
+    const tab = await agentTab(tab_id);
+    if (everScripted.has(tab_id) && !allows(guard, "scripted", hostOf(tab.url))) {
+      throw new Refused("this tab ran a script, so going back needs the user's OK (the earlier page could be one the " +
+        "script set up); browser_navigate opens a page without asking", { kind: "scripted", host: hostOf(tab.url) });
     }
     const loaded = waitComplete(tab_id, true);
     await browser.tabs.goBack(tab_id);
@@ -2182,7 +2313,7 @@ const OPS = {
   async inspect({ tab_id, ref, url, frame, focus }) {
     const out = {};
     if (url) {
-      const u = new URL(checkURL(url));
+      const u = new URL(url);
       out.url_host = u.hostname.toLowerCase();
       out.url_autologin = u.protocol === "https:" && autologinHost(out.url_host);
     }
@@ -2268,19 +2399,21 @@ const OPS = {
     }
     return Object.assign(res, { tab_id, url: tab.url, title: tab.title });
   },
-  async wait({ tab_id, text, selector, timeout_ms }) {
+  async wait({ tab_id, text, selector, timeout_ms, guard }) {
     const tab = await agentTab(tab_id);
     if (!text && !selector) {
       throw new Refused("give the text or the CSS selector to wait for");
     }
-    if (selector && await onLoginPage(tab)) {
-      throw new Refused("CSS selector waits are refused on a login page of a host in browser.autologin-hosts; wait for a text");
+    const loginOK = allows(guard, "login_page", hostOf(tab.url));
+    if (selector && !loginOK && await onLoginPage(tab)) {
+      throw new Refused("a CSS selector wait on a login page of a host in browser.autologin-hosts could test the filled " +
+        "password, so it needs the user's OK; a wait for a text does not", { kind: "login_page", host: hostOf(tab.url) });
     }
     const limit = Math.max(0, Math.min(Number(timeout_ms) || 10000, MAX_WAIT_MS));
     const start = Date.now();
     for (;;) {
       const res = await inAllFrames(tab_id, pageHas, [text ? String(text) : "", selector ? String(selector) : "",
-        [...autologinHosts]], true);
+        loginOK ? [] : [...autologinHosts]], true);
       const bad = res.find((r) => r.result.error);
       if (bad) {
         throw new Refused(bad.result.error);
@@ -2304,14 +2437,15 @@ const OPS = {
     if (typeof script !== "string" || !script.trim()) {
       throw new Refused("script is empty");
     }
-    if (tab.openerTabId !== undefined) {
-      throw new Refused("this tab was opened from another tab, which a script could reach; open the page in a new " +
-        "agent tab with browser_navigate");
+    const g = guard || {};
+    if (tab.openerTabId !== undefined && !allows(g, "opener", hostOf(tab.url))) {
+      throw new Refused("this tab was opened from another tab, which a script could reach, so a script here needs the " +
+        "user's OK; a page opened in a new agent tab with browser_navigate does not", { kind: "opener", host: hostOf(tab.url) });
     }
     const frameId = frameIdOf(tab_id, frame);
-    if (frameId && scripted.has(tab_id)) {
-      throw new Refused("a script already ran in this tab, so scripts in its frames wait until browser_navigate loads " +
-        "a page in it again");
+    if (frameId && scripted.has(tab_id) && !allows(g, "scripted", hostOf(tab.url))) {
+      throw new Refused("a script already ran in this tab, so a script in its frames needs the user's OK until " +
+        "browser_navigate loads a page in it again", { kind: "scripted", host: hostOf(tab.url) });
     }
     // The top frame's address comes from the browser, not from the page's
     // world, which an earlier script could have changed.
@@ -2323,28 +2457,33 @@ const OPS = {
     const topHost = hostOf(tab.url);
     const host = hostOf(where);
     const site = siteOf(host);
-    if (autologinHost(topHost) || autologinHost(host)) {
-      throw new Refused("scripts are never allowed on a host in browser.autologin-hosts (" + (autologinHost(topHost) ? topHost : host) +
-        "), where Firefox fills a saved password");
+    const loginHostHere = autologinHost(topHost) ? topHost : host;
+    if ((autologinHost(topHost) || autologinHost(host)) && !allows(g, "login_script", loginHostHere)) {
+      throw new Refused("a script on a host in browser.autologin-hosts (" + loginHostHere + "), where Firefox fills a saved " +
+        "password, needs the user's OK", { kind: "login_script", host: loginHostHere });
     }
-    if (allow_writes && (protectedHost(topHost) || protectedHost(host))) {
-      throw new Refused("scripts that change data are never allowed on Salesforce (or the sites in browser.confirm-hosts); " +
-        "run it without allow_writes");
+    const protHost = protectedHost(topHost) ? topHost : host;
+    if (allow_writes && (protectedHost(topHost) || protectedHost(host)) && !allows(g, "protected_write", protHost)) {
+      throw new Refused("a script that changes data on Salesforce (or a site in browser.confirm-hosts) needs the user's OK " +
+        "each time; without allow_writes it does not", { kind: "protected_write", host: protHost });
     }
-    const g = guard || {};
     const writes = (g.write_hosts || []).map(siteOf);
-    if (!writes.includes(site) && !(g.script_hosts || []).map(siteOf).includes(site)) {
-      throw new Refused("running scripts on " + site + " needs the user's approval");
+    if (!writes.includes(site) && !(g.script_hosts || []).map(siteOf).includes(site) && !allows(g, "script", site) &&
+      !allows(g, "script_write", site)) {
+      throw new Refused("running scripts on " + site + " needs the user's approval", { kind: "script", host: site });
     }
-    if (allow_writes && !writes.includes(site)) {
-      throw new Refused("scripts that change data on " + site + " need the user's separate approval");
+    if (allow_writes && !writes.includes(site) && !allows(g, "script_write", site)) {
+      throw new Refused("scripts that change data on " + site + " need the user's separate approval",
+        { kind: "script_write", host: site });
     }
     const sensitive = await tabSensitive(tab_id);
-    if (sensitive.length && allow_writes) {
-      throw new Refused("scripts that change data are not allowed on a page with " + sensitive.join(", ") + " fields");
+    if (sensitive.length && allow_writes && !allows(g, "sensitive_write", host)) {
+      throw new Refused("a script that changes data on a page with " + sensitive.join(", ") + " fields needs the user's OK " +
+        "each time", { kind: "sensitive_write", host });
     }
-    if (sensitive.length && !g.sensitive) {
-      throw new Refused("this page has " + sensitive.join(", ") + " fields; the user must confirm each script here");
+    if (sensitive.length && !g.sensitive && !allows(g, "sensitive", host)) {
+      throw new Refused("this page has " + sensitive.join(", ") + " fields; the user must confirm each script here",
+        { kind: "sensitive", host });
     }
     // The script runs on a page that finished loading, so the page's own
     // requests are not cut by the limits below.
@@ -2376,13 +2515,16 @@ const OPS = {
     }
     sites.set(site, Boolean(allow_writes));
     taints.set(tab_id, { sites });
+    taintLifted.delete(tab_id); // a new script is a new taint
     scripted.add(tab_id);
     everScripted.add(tab_id);
     unsealed.add(tab_id);
     let res;
     let resetError = "";
     try {
-      [res] = await browser.tabs.executeScript(tab_id, { code: evalCode(script, site, [...autologinHosts]), frameId });
+      const blocked = allows(g, "login_script", loginHostHere) ? [] : [...autologinHosts];
+      [res] = await browser.tabs.executeScript(tab_id, { code: evalCode(script, site, blocked, allows(g, "filled_password", host)),
+        frameId });
     } finally {
       scriptGraceUntil = Date.now() + SCRIPT_GRACE_MS;
       // A script that did not report its seal (it threw before, the frame
@@ -2407,7 +2549,7 @@ const OPS = {
       throw new Error("the script did not finish");
     }
     if (res.refused) {
-      throw new Refused(String(res.error));
+      throw new Refused(String(res.error), res.filled ? { kind: "filled_password", host } : null);
     }
     if (!res.ok) {
       throw new Error("script error: " + String(res.error).slice(0, 2000));
@@ -2478,8 +2620,9 @@ const OPS = {
       if (!approved.has(host)) {
         throw new Refused("browser_login on " + host + " needs the user's approval");
       }
-      if (taints.has(tabId) || scripted.has(tabId)) {
-        throw new Refused("this tab ran a script; open the login page in a new tab with browser_navigate");
+      if ((taints.has(tabId) || scripted.has(tabId)) && !allows(guard, "scripted", host)) {
+        throw new Refused("this tab ran a script, which could read the password Firefox fills, so signing in here needs " +
+          "the user's OK; a login page opened in a new tab with browser_navigate does not", { kind: "scripted", host });
       }
       const hosts = [...autologinHosts];
       let state = await inPage(tabId, pageLogin, [hosts, host, false]);
@@ -2629,11 +2772,12 @@ const OPS = {
     out.would_fill = out.after_activate.visibility === "visible";
     return out;
   },
-  async screenshot({ tab_id, format, quality, full_page }) {
+  async screenshot({ tab_id, format, quality, full_page, guard }) {
     const tab = await agentTab(tab_id);
-    if (await onLoginPage(tab)) {
-      throw new Refused("screenshots are refused on a login page of a host in browser.autologin-hosts, since they " +
-        "would show how long a filled password is");
+    const loginOK = allows(guard, "login_page", hostOf(tab.url));
+    if (!loginOK && await onLoginPage(tab)) {
+      throw new Refused("a screenshot of a login page of a host in browser.autologin-hosts shows how long a filled password " +
+        "is, so it needs the user's OK", { kind: "login_page", host: hostOf(tab.url) });
     }
     const opts = format === "jpeg" ? { format: "jpeg", quality: Math.max(10, Math.min(Number(quality) || 80, 100)) } : { format: "png" };
     const out = { tab_id, url: tab.url, title: tab.title };
@@ -2649,9 +2793,10 @@ const OPS = {
       Object.assign(out, { page_height: d.h, clipped: d.h > h, scale: Math.round(opts.scale * 1000) / 1000 });
     }
     out.data_url = await browser.tabs.captureTab(tab_id, opts);
-    if (await onLoginPage(await browser.tabs.get(tab_id))) {
+    const now = await browser.tabs.get(tab_id);
+    if (!allows(guard, "login_page", hostOf(now.url)) && await onLoginPage(now)) {
       throw new Refused("the tab loaded a login page of a host in browser.autologin-hosts during the screenshot, so it " +
-        "was dropped");
+        "was dropped; showing it needs the user's OK", { kind: "login_page", host: hostOf(now.url) });
     }
     return out;
   },

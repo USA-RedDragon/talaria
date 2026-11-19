@@ -595,6 +595,34 @@ func loginPageApproved(ctx context.Context, t *testing.T, rig *loginRig, show fu
 		keyRef: refByName(snap.Snapshot, "Show"), keyGuard: map[string]any{keySensitive: true}})
 	rig.r.must(ctx, t, "click", map[string]any{keyTab: tab, keyRef: refByName(snap.Snapshot, "Show"),
 		keyGuard: map[string]any{keySensitive: true, "login_page": true}}, nil)
+
+	// Former hard refusals, after the user's Allow (guard allow): they run.
+	allowLogin := map[string]any{"allow": []string{"login_page " + loginHost}}
+	var shot struct {
+		DataURL string `json:"data_url"`
+	}
+	rig.r.must(ctx, t, "screenshot", map[string]any{keyTab: tab, keyGuard: allowLogin}, &shot)
+	if !strings.HasPrefix(shot.DataURL, "data:image/") {
+		t.Errorf("allowed screenshot of the login page: no image")
+	}
+	rig.r.must(ctx, t, "wait", map[string]any{keyTab: tab, keySelector: "input[name=pass]", keyTimeout: 2000,
+		keyGuard: allowLogin}, nil)
+
+	// A script on the autologin host, in a tab of its own (a script taints its tab).
+	own := rig.open(ctx, t, rig.mainURL+"/")
+	rig.r.refused(ctx, t, "script on the autologin host", "[allow:login_script "+loginHost+"]", "eval",
+		map[string]any{keyTab: own.TabID, keyScript: scriptOne, keyGuard: map[string]any{keyScripts: []string{loginHost}, keySensitive: true}})
+	var ev struct {
+		Result any `json:"result"`
+	}
+	rig.r.must(ctx, t, "eval", map[string]any{keyTab: own.TabID, keyScript: scriptOne, keyGuard: map[string]any{
+		keyScripts: []string{loginHost}, keySensitive: true,
+		"allow": []string{"login_script " + loginHost, "filled_password " + loginHost}}}, &ev)
+	if fmt.Sprint(ev.Result) != "1" {
+		t.Errorf("allowed script on the autologin host = %v", ev.Result)
+	}
+	// The tab ran a script: going back is a card now, and runs after Allow.
+	rig.r.refused(ctx, t, "back after a script", "[allow:scripted "+loginHost+"]", "back", map[string]any{keyTab: own.TabID})
 }
 
 // loginEdges checks a login from a URL, two saved logins, a GET form and
@@ -668,7 +696,7 @@ func loginEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	// show a tab with a password field.
 	other := rig.open(ctx, t, rig.otherURL+"/prefilled")
 	rig.r.refused(ctx, t, "eval on a page with a filled password", "filled password", "eval", map[string]any{keyTab: other.TabID,
-		"script": "return 1", keyGuard: map[string]any{keyScripts: []string{otherLoginHost}, keySensitive: true}})
+		keyScript: scriptOne, keyGuard: map[string]any{keyScripts: []string{otherLoginHost}, keySensitive: true}})
 	var check map[string]any
 	rig.r.must(ctx, t, "check", map[string]any{keyTab: other.TabID}, &check)
 	if _, shown := check["after_activate"]; shown || !strings.Contains(fmt.Sprint(check["note"]), "not activated") {
@@ -692,8 +720,9 @@ func loginRefusals(ctx context.Context, t *testing.T, r *recorded, tabID int) {
 		keyRef: refByName(snap.Snapshot, "Password"), keyText: "x", keyGuard: map[string]any{keySensitive: true}})
 	r.refused(ctx, t, "click the show button", "browser_login", "click", map[string]any{keyTab: tabID,
 		keyRef: refByName(snap.Snapshot, "Show"), keyGuard: map[string]any{keySensitive: true}})
-	r.refused(ctx, t, "screenshot of the login page", "autologin", "screenshot", map[string]any{keyTab: tabID})
-	r.refused(ctx, t, "selector wait on the login page", "autologin", "wait",
+	// Each refusal names the check the user can let pass on a card (docs/browser.md section 7.5).
+	r.refused(ctx, t, "screenshot of the login page", "[allow:login_page "+loginHost+"]", "screenshot", map[string]any{keyTab: tabID})
+	r.refused(ctx, t, "selector wait on the login page", "[allow:login_page "+loginHost+"]", "wait",
 		map[string]any{keyTab: tabID, keySelector: "input[name=pass]:placeholder-shown", keyTimeout: 500})
 	r.refused(ctx, t, "login without approval", "needs the user's approval", "login", map[string]any{keyTab: tabID})
 }
