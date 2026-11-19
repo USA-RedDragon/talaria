@@ -27,6 +27,8 @@ const (
 	otherID     = "00000000000000000000000000000000000000000000000000000000000000ff"
 	relift      = "/home/reddragon/.cache/relift/work/sheet.png"
 	stepVision  = "vision_analyze"
+	stepShot    = "browser_screenshot"
+	kTabID      = "tab_id"
 )
 
 // seenSteps are a subagent's vision call on a file that is nowhere the chat
@@ -180,20 +182,27 @@ func TestEveryImageTheModelSawIsShown(t *testing.T) {
 	e.gw.SetCapabilities(gateway.CapTranscriptToolDetails)
 	e.gw.SetSeenImage(seenID, smallPicture(t))
 	rec := map[string]any{"id": seenID, "mime": mimePNG, "w": 64, "h": 48, "thumb": true}
-	call := func(id, p string) map[string]any {
-		return map[string]any{kRole: roleAssistant, kText: "", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: stepVision,
-			ilArgs: `{kImageURL:"` + p + `",kQuestion:"What is on screen?"}`}}}}
+	call := func(id, name, args string) map[string]any {
+		return map[string]any{kRole: roleAssistant, kText: "", kCalls: []any{map[string]any{"id": id, fnKey: map[string]any{fieldName: name, ilArgs: args}}}}
 	}
-	result := func(id string, md map[string]any) map[string]any {
-		return map[string]any{kRole: stepTool, kCallID: id, fieldName: stepVision, kTimestamp: 1763000000.0,
-			kText: "Image loaded into your context \u2014 you can see it natively now.\n\nQuestion: q", keyDisplayMeta: md}
+	visionCall := func(id, p string) map[string]any {
+		return call(id, stepVision, `{"image_url":"`+p+`","question":"What is on screen?"}`)
 	}
+	result := func(id, name, text string, md map[string]any) map[string]any {
+		return map[string]any{kRole: stepTool, kCallID: id, fieldName: name, kTimestamp: 1763000000.0, kText: text, keyDisplayMeta: md}
+	}
+	visionText := "Image loaded into your context \u2014 you can see it natively now.\n\nQuestion: q"
+	gonePage := "/home/reddragon/.hermes/cache/screenshots/hermes-device/s9/shot-20261101-000000-ab12cd34.png"
+	pageInfo := `{kTabID: 7, "title": "Example Domain", "url": "https://example.com/", "path": "` + gonePage + `"}`
+	shotInfo := `{kTabID: 7, "title": "Example Domain", "url": "https://example.com/", "path": "` + gonePage + `", "seen_images": [{"id": "` + seenID + `"}]}`
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: "Seen", Live: true, StartedAt: 900,
 		Subagents: []gateway.SubagentRow{{SubagentID: subA, Goal: "Look at the sheet", Status: optr(statusRunning), AcceptingSteer: optr(true)}},
 		Messages: []map[string]any{
-			{kRole: roleUser, kText: "what is on screen?"},
-			call("c1", "/home/reddragon/.cache/relift/work/main.png"), result("c1", map[string]any{kSeenImages: []any{rec}}),
-			call("c2", "/home/reddragon/.cache/relift/work/old.png"), result("c2", nil),
+			{kRole: roleUser, kText: "what is on screen?\n@image:/home/reddragon/.cache/relift/work/sent.png", keyDisplayMeta: map[string]any{kSeenImages: []any{rec}}},
+			visionCall("c1", "/home/reddragon/.cache/relift/work/main.png"), result("c1", stepVision, visionText, map[string]any{kSeenImages: []any{rec}}),
+			visionCall("c2", "/home/reddragon/.cache/relift/work/old.png"), result("c2", stepVision, visionText, nil),
+			call("c3", toolBrowserVision, `{kTabID:7}`), result("c3", toolBrowserVision, pageInfo, map[string]any{kSeenImages: []any{rec}}),
+			call("c4", stepShot, `{kTabID:7}`), result("c4", stepShot, shotInfo, map[string]any{kSeenImages: []any{rec}}),
 			{kRole: roleAssistant, kText: qDone},
 		}})
 	e.gw.AddChildRows("s9", subA, map[string]any{kRole: roleUser, keyText: "Look at the sheet", kTimestamp: 1000.0},
@@ -201,7 +210,15 @@ func TestEveryImageTheModelSawIsShown(t *testing.T) {
 			kCalls: []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: relift, kQuestion: qWhat}}}},
 		map[string]any{kRole: stepTool, fieldName: stepVision, kCallID: "v1", kTimestamp: 1002.0,
 			kArgs: map[string]any{kImageURL: relift, kQuestion: qWhat}, sjResult: "Image loaded into your context", keyResultSize: 30,
-			keyDisplayMeta: map[string]any{kSeenImages: []any{rec}}})
+			keyDisplayMeta: map[string]any{kSeenImages: []any{rec}}},
+		map[string]any{kRole: roleAssistant, keyText: "", kTimestamp: 1003.0,
+			kCalls: []map[string]any{{"id": "v2", fieldName: toolBrowserVision, kArgs: map[string]any{kTabID: 7}}}},
+		map[string]any{kRole: stepTool, fieldName: toolBrowserVision, kCallID: "v2", kTimestamp: 1004.0, kArgs: map[string]any{kTabID: 7},
+			sjResult: pageInfo, keyResultSize: len(pageInfo), keyDisplayMeta: map[string]any{kSeenImages: []any{rec}}},
+		map[string]any{kRole: roleAssistant, keyText: "", kTimestamp: 1005.0,
+			kCalls: []map[string]any{{"id": "v3", fieldName: stepShot, kArgs: map[string]any{kTabID: 7}}}},
+		map[string]any{kRole: stepTool, fieldName: stepShot, kCallID: "v3", kTimestamp: 1006.0, kArgs: map[string]any{kTabID: 7},
+			sjResult: shotInfo, keyResultSize: len(shotInfo), keyDisplayMeta: map[string]any{kSeenImages: []any{rec}}})
 	prof := t.TempDir()
 	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "seenimg", "run.js"), chrome, e.url, prof, seenID)
 	if out, err := cmd.CombinedOutput(); err != nil {

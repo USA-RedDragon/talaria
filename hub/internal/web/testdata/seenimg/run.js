@@ -1,6 +1,8 @@
 "use strict";
 // Drives the real hub page in headless Chrome (DevTools protocol).
 // usage: node run.js CHROME HUB_URL PROFILE_DIR SEEN_ID (SEENIMG_SHOTS=dir keeps screenshots)
+// Every tool that gives the model an image shows it: vision_analyze, browser_vision, browser_screenshot
+// (its own file is gone), and an image the user sent, in the chat and in a subagent's steps.
 // The model looked at three images: two files that are not served (outside the
 // chat's folder) and one old row with only a path. The rows that name a copy
 // Hermes kept show that image, in the chat and in a subagent's steps in
@@ -37,9 +39,28 @@ const { proc, connect } = launch(bin, dir);
     assert.ok(await ev(`!${card(0)}.querySelector(".vis-gone")`), tag + ": no placeholder when a copy exists");
     // An old row with only a path that is gone: the honest placeholder, never a broken image.
     await until(`!${card(1)}.querySelector("img") && !!${card(1)}.querySelector(".vis-gone")`, tag + ": the old row without a copy shows a placeholder");
+    // browser_vision and browser_screenshot, whose own screenshot file was deleted, and the user's own image.
+    const loaded = async (root, tool, what) => {
+      const sel = `${root}.querySelector('.tool[data-tool="${tool}"]')`;
+      await until(`!!${sel} && !!${sel}.querySelector(".vis-thumb img") && ${sel}.querySelector(".vis-thumb img").complete`, what + ": the " + tool + " image to load");
+      assert.ok(await ev(`${sel}.querySelector(".vis-thumb img").naturalWidth === 64`), what + ": the " + tool + " image is the kept copy");
+      assert.ok(await ev(`!${sel}.querySelector(".vis-gone") && !/not available|removed after/.test(${sel}.innerText)`), what + ": " + tool + " says nothing is missing");
+      return sel;
+    };
+    for (const tool of ["browser_vision", "browser_screenshot"]) {
+      const sel = await loaded("document.querySelector('#log')", tool, tag + " chat");
+      await ev(`${sel}.scrollIntoView({ block: "center" })`);
+      await c.frames(3);
+      await shot(tool + "-chat-" + tag);
+    }
+    await until(`!!document.querySelector("#log .atts img") && document.querySelector("#log .atts img").complete`, tag + ": the user's image to load");
+    assert.ok(await ev(`document.querySelector("#log .atts img").naturalWidth === 64`), tag + ": the user's image is the kept copy");
     await ev(`${card(0)}.scrollIntoView({ block: "center" })`);
     await c.frames(3);
     await shot("chat-" + tag);
+    await ev(`document.querySelector("#log .atts").scrollIntoView({ block: "center" })`);
+    await c.frames(3);
+    await shot("attachment-" + tag);
 
     // Open it: the full copy.
     await ev(`${card(0)}.querySelector(".notice-head").click()`);
@@ -61,6 +82,14 @@ const { proc, connect } = launch(bin, dir);
     await ev(`${sub}.scrollIntoView({ block: "center" })`);
     await c.frames(3);
     await shot("subagent-" + tag);
+    for (const tool of ["browser_vision", "browser_screenshot"]) {
+      await until(`!!document.querySelector('.act .tool[data-tool="${tool}"]')`, tag + ": the subagent's " + tool + " card");
+      await ev(`document.querySelectorAll(".act details.toolgroup").forEach((d) => { d.open = true; })`);
+      const s2 = await loaded("document.querySelector('.act')", tool, tag + " subagent");
+      await ev(`${s2}.scrollIntoView({ block: "center" })`);
+      await c.frames(3);
+      await shot(tool + "-subagent-" + tag);
+    }
     assert.ok(await ev(`document.documentElement.scrollWidth <= window.innerWidth + 1`), tag + ": the page does not scroll sideways");
     await ev(`document.getElementById("actbtn").click()`);
   }
