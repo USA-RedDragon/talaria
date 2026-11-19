@@ -1,0 +1,6 @@
+# Tool rows, user rows and the dashboard routes the kept copies ride on
+tests/agent/test_tool_outcome_metadata.py
+tests/agent/test_turn_context.py
+tests/tools/test_vision_native_fast_path.py
+tests/tools/test_vision_tools.py
+tests/hermes_cli/test_serve_handler_ledger.py

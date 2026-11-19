@@ -1,0 +1,744 @@
+From 62d286df9fe363f0a0c82c04efb511e5411136f2 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 11:37:11 -0600
+Subject: [PATCH] feat(display): keep a copy of every image the model saw
+
+Hermes stores the exact bytes of each image it gives the model (vision_analyze on either path, tool results that carry images, images a user sends natively), content-addressed by sha256 with a capped JPEG thumbnail, under HERMES_HOME/seen_images (400 days, 4 GiB). The tool or user row's display_metadata.seen_images lists the ids and tool.complete carries them. GET /api/seen-images/{id} serves a copy by id only, with the dashboard token check. A client can then show the image the model saw when its file is gone, outside the chat folder, on another machine or a subagent's.
+---
+ agent/message_metadata.py                  |   3 +
+ agent/tool_executor.py                     |   9 +-
+ agent/turn_context.py                      |   7 +
+ hermes_cli/web_routers/seen_images.py      |  32 +++
+ hermes_cli/web_server.py                   |   2 +
+ tests/hermes_cli/serve_handler_ledger.json |   7 +-
+ tests/tools/test_seen_images.py            | 181 ++++++++++++
+ tools/seen_images.py                       | 307 +++++++++++++++++++++
+ tools/vision_tools.py                      |  13 +
+ tui_gateway/tool_progress.py               |   5 +
+ 10 files changed, 563 insertions(+), 3 deletions(-)
+ create mode 100644 hermes_cli/web_routers/seen_images.py
+ create mode 100644 tests/tools/test_seen_images.py
+ create mode 100644 tools/seen_images.py
+
+diff --git a/agent/message_metadata.py b/agent/message_metadata.py
+index 426d5203..c2eb67d3 100644
+--- a/agent/message_metadata.py
++++ b/agent/message_metadata.py
+@@ -59,6 +59,9 @@ DATA_USE = "data_use"
+ # How long a tool call ran and whether it failed (``{"duration_ms", "is_error"}``), inside a tool message's
+ # ``display_metadata`` while sessions.tool_outcome_metadata is on; never sent to a model.
+ TOOL_OUTCOME = "tool_outcome"
++# The kept copies of the images a tool result gave the model (``[{"id", "mime", "bytes", "w", "h", "thumb"}]``,
++# tools/seen_images.py), inside a tool message's ``display_metadata``; never sent to a model.
++SEEN_IMAGES = "seen_images"
+ 
+ 
+ def _set_display_metadata_key(message: MutableMapping[str, Any], key: str, value: Any) -> None:
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+index 2540c215..01e8ed4f 100644
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -44,7 +44,7 @@ from agent.inline_tool_executors import (
+     emit_terminal_post_tool_call,
+     tool_hook_ids,
+ )
+-from agent.message_metadata import TOOL_OUTCOME, _set_display_metadata_key, stamp_data_use
++from agent.message_metadata import SEEN_IMAGES, TOOL_OUTCOME, _set_display_metadata_key, stamp_data_use
+ from agent.session_persistence import sync_rewritten_tool_rows
+ from agent.tool_dispatch_helpers import (
+     _NEVER_PARALLEL_TOOLS,
+@@ -1202,6 +1202,13 @@ def _commit_tool_result(
+         except Exception as callback_error:
+             logging.debug("Tool result metadata callback error: %s", callback_error)
+     stamp_data_use(tool_message, sorted(data_use))
++    if not blocked:
++        # Every image the model got keeps a copy of exactly those bytes, so a card can always show it.
++        from tools.seen_images import collect as _collect_seen_images
++
++        seen_images = _collect_seen_images(function_result)
++        if seen_images:
++            _set_display_metadata_key(tool_message, SEEN_IMAGES, seen_images)
+     if not blocked and _tool_outcome_metadata_enabled():
+         _set_display_metadata_key(tool_message, TOOL_OUTCOME,
+                                   {"duration_ms": max(0, int(tool_duration * 1000)), "is_error": bool(is_error)})
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index b83b49a2..59f25775 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -764,6 +764,13 @@ def _stage_turn_user_message(
+         user_msg["display_kind"] = persist_user_display_kind
+     if persist_user_display_metadata:
+         user_msg["display_metadata"] = persist_user_display_metadata
++    # Images the user sent natively: a copy of the bytes the model gets, for a client that cannot reach the file.
++    if isinstance(user_message, list):
++        from agent.message_metadata import SEEN_IMAGES, _set_display_metadata_key
++        from tools.seen_images import collect as _collect_seen_images
++
++        if seen_images := _collect_seen_images(user_message):
++            _set_display_metadata_key(user_msg, SEEN_IMAGES, seen_images)
+     # The platform message id survives the turn-start flush; restart drain-window
+     # recovery dedups via ``has_platform_message_id`` against this row.
+     if persist_user_platform_id is not None:
+diff --git a/hermes_cli/web_routers/seen_images.py b/hermes_cli/web_routers/seen_images.py
+new file mode 100644
+index 00000000..7e6a5a63
+--- /dev/null
++++ b/hermes_cli/web_routers/seen_images.py
+@@ -0,0 +1,32 @@
++"""GET /api/seen-images/{id}: the kept copy of an image Hermes loaded for the model (tools/seen_images.py).
++
++Content-addressed (sha256 of the bytes), so a copy never changes and a client may cache it for good. The id
++is the only input: no path reaches the disk. The caller is authenticated like the other /api routes."""
++
++import asyncio
++
++from fastapi import APIRouter, HTTPException, Request
++from fastapi.responses import Response
++
++from hermes_cli.web_deps import late
++
++router = APIRouter()
++_require_token = late("_require_token")
++
++
++@router.get("/api/seen-images/{image_id}")
++async def get_seen_image(image_id: str, request: Request, size: str = "full"):
++    """The stored copy of image *image_id*; with ``size=thumb`` its thumbnail when it has one."""
++    _require_token(request)
++    from tools import seen_images
++
++    got = await asyncio.to_thread(seen_images.read, image_id, "thumb" if size == "thumb" else "full")
++    if got is None:
++        raise HTTPException(status_code=404, detail="No such image")
++    mime, data = got
++    return Response(content=data, media_type=mime, headers={
++        "Cache-Control": "private, max-age=31536000, immutable",
++        "X-Content-Type-Options": "nosniff",
++        "Content-Disposition": "inline",
++        "Content-Security-Policy": "default-src 'none'; sandbox",
++    })
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 2b13b583..8c303e2a 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -812,6 +812,7 @@ from hermes_cli.web_routers import (
+     gateway_connections as _gateway_connections_routes,
+     gateway_connections_reach as _gateway_connections_reach_routes,
+     webapp_relay_proxy as _webapp_relay_proxy_routes,
++    seen_images as _seen_images_routes,
+ )
+ 
+ import hermes_cli.web_routers.desktop_plugins as _desktop_plugin_routes
+@@ -820,6 +821,7 @@ from fastapi import Depends as _Depends
+ from hermes_cli.web_server_surface import route_on as _route_on
+ 
+ app.include_router(_files_routes.router)
++app.include_router(_seen_images_routes.router)
+ # The Webapp's routes exist only on the surfaces whose policy names them (404 elsewhere).
+ app.include_router(_upload_routes.router, dependencies=[_Depends(_route_on("browser_files"))])
+ app.include_router(_desktop_plugin_routes.router, dependencies=[_Depends(_route_on("desktop_plugins"))])
+diff --git a/tests/hermes_cli/serve_handler_ledger.json b/tests/hermes_cli/serve_handler_ledger.json
+index 044cd4e3..05c38cb9 100644
+--- a/tests/hermes_cli/serve_handler_ledger.json
++++ b/tests/hermes_cli/serve_handler_ledger.json
+@@ -2,10 +2,10 @@
+  "counts": {
+   "http": {
+    "keep-host-wide": 1,
+-   "undecided": 343
++   "undecided": 345
+   },
+   "rpc": {
+-   "authority": 109,
++   "authority": 110,
+    "keep-host-wide": 1,
+    "undecided": 182
+   },
+@@ -156,6 +156,7 @@
+   {"current_path": "hermes_cli.web_routers.oauth:list_oauth_providers", "decision": "undecided", "handler": "GET /api/providers/oauth", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.oauth:nous_handoff_status", "decision": "undecided", "handler": "GET /api/providers/oauth/nous/handoff", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.oauth:poll_oauth_session", "decision": "undecided", "handler": "GET /api/providers/oauth/{provider_id}/poll/{session_id}", "kind": "http", "ref": ""},
++  {"current_path": "hermes_cli.web_routers.seen_images:get_seen_image", "decision": "undecided", "handler": "GET /api/seen-images/{image_id}", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.sessions:get_sessions", "decision": "undecided", "handler": "GET /api/sessions", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.sessions:count_empty_sessions_endpoint", "decision": "undecided", "handler": "GET /api/sessions/empty/count", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.sessions:search_sessions", "decision": "undecided", "handler": "GET /api/sessions/search", "kind": "http", "ref": ""},
+@@ -228,6 +229,7 @@
+   {"current_path": "hermes_cli.web_routers.dashboard_ui:post_agent_plugin_disable", "decision": "undecided", "handler": "POST /api/dashboard/agent-plugins/{name:path}/disable", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.dashboard_ui:post_agent_plugin_enable", "decision": "undecided", "handler": "POST /api/dashboard/agent-plugins/{name:path}/enable", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.dashboard_ui:post_agent_plugin_update", "decision": "undecided", "handler": "POST /api/dashboard/agent-plugins/{name:path}/update", "kind": "http", "ref": ""},
++  {"current_path": "hermes_cli.web_routers.tools:apply_to_live_chats", "decision": "undecided", "handler": "POST /api/dashboard/apply-live", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.dashboard_ui:post_plugin_visibility", "decision": "undecided", "handler": "POST /api/dashboard/plugins/{name:path}/visibility", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.desktop_plugins:reconcile_desktop_plugins; surface: desktop_plugins", "decision": "undecided", "handler": "POST /api/desktop-plugins/reconcile", "kind": "http", "ref": ""},
+   {"current_path": "hermes_cli.web_routers.config_env:reveal_env_var", "decision": "undecided", "handler": "POST /api/env/reveal", "kind": "http", "ref": ""},
+@@ -607,6 +609,7 @@
+   {"current_path": "authority refuses (-32601); standalone: legacy server.dispatch", "decision": "undecided", "handler": "session.status", "kind": "rpc", "ref": "D3"},
+   {"current_path": "authority; standalone: legacy server.dispatch", "decision": "authority", "handler": "session.steer", "kind": "rpc", "ref": ""},
+   {"current_path": "authority refuses (-32601); standalone: legacy server.dispatch", "decision": "undecided", "handler": "session.title", "kind": "rpc", "ref": "D3"},
++  {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "session.todos", "kind": "rpc", "ref": ""},
+   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "session.transcript", "kind": "rpc", "ref": ""},
+   {"current_path": "authority refuses (-32601); standalone: legacy server.dispatch", "decision": "undecided", "handler": "session.undo", "kind": "rpc", "ref": "D3"},
+   {"current_path": "authority refuses (-32601); standalone: legacy server.dispatch", "decision": "undecided", "handler": "session.usage", "kind": "rpc", "ref": "D3"},
+diff --git a/tests/tools/test_seen_images.py b/tests/tools/test_seen_images.py
+new file mode 100644
+index 00000000..f49dc229
+--- /dev/null
++++ b/tests/tools/test_seen_images.py
+@@ -0,0 +1,181 @@
++"""Every image Hermes loads for the model keeps a copy, and the tool row records its id.
++
++A client that draws the tool card (the Talaria hub) shows that copy when the file the model looked at is gone,
++outside the chat's folder, on another machine or a subagent's.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import base64
++import hashlib
++import json
++import os
++import time
++from io import BytesIO
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import pytest
++
++from tests.agent.test_tool_call_incremental_persistence import (
++    _attach_real_session_db, _durable_messages, _make_agent, _mock_tool_call,
++)
++from tools import seen_images
++
++PIL = pytest.importorskip("PIL.Image")
++
++
++@pytest.fixture(autouse=True)
++def _home(tmp_path, monkeypatch):
++    home = tmp_path / "hermes-home"
++    home.mkdir()
++    monkeypatch.setenv("HERMES_HOME", str(home))
++    monkeypatch.setattr(seen_images, "_last_prune", time.time())
++    return home
++
++
++def _png(size=(32, 32), color=(200, 30, 30)) -> bytes:
++    out = BytesIO()
++    PIL.new("RGB", size, color).save(out, "PNG")
++    return out.getvalue()
++
++
++def _noise_png(size) -> bytes:
++    out = BytesIO()
++    PIL.frombytes("RGB", size, os.urandom(size[0] * size[1] * 3)).save(out, "PNG")
++    return out.getvalue()
++
++
++def _envelope(data: bytes, mime="image/png") -> dict:
++    url = f"data:{mime};base64,{base64.b64encode(data).decode()}"
++    return {"_multimodal": True, "content": [{"type": "text", "text": "Image loaded into your context"},
++                                             {"type": "image_url", "image_url": {"url": url}}],
++            "text_summary": "Image attached natively."}
++
++
++def test_collect_keeps_exactly_the_bytes_the_model_got():
++    data = _png()
++    got = seen_images.collect(_envelope(data))
++    assert [g["id"] for g in got] == [hashlib.sha256(data).hexdigest()]
++    assert got[0]["mime"] == "image/png" and got[0]["bytes"] == len(data) and (got[0]["w"], got[0]["h"]) == (32, 32)
++    assert seen_images.read(got[0]["id"]) == ("image/png", data)
++    # Content-addressed: the same bytes again are the same record and one stored copy.
++    assert seen_images.collect(_envelope(data)) == got
++    assert len(list(seen_images.root().rglob("*.img"))) == 1
++
++
++def test_a_large_image_has_a_capped_thumbnail_and_the_full_image():
++    data = _noise_png((1400, 900))
++    rec = seen_images.collect(_envelope(data))[0]
++    assert rec["thumb"] is True
++    mime, thumb = seen_images.read(rec["id"], "thumb")
++    assert mime == "image/jpeg" and len(thumb) <= seen_images.THUMB_BYTES
++    with PIL.open(BytesIO(thumb)) as im:
++        assert max(im.size) <= seen_images.THUMB_EDGE
++    assert seen_images.read(rec["id"]) == ("image/png", data)
++
++
++def test_anthropic_style_parts_non_images_and_bad_ids_are_handled():
++    data = _png(color=(1, 2, 3))
++    part = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
++                                         "data": base64.b64encode(data).decode()}}
++    assert seen_images.collect([part])[0]["id"] == hashlib.sha256(data).hexdigest()
++    assert seen_images.collect(_envelope(b"not an image at all")) == []
++    assert seen_images.collect("plain text") == [] and seen_images.collect(None) == []
++    assert seen_images.read("../../etc/passwd") is None
++    assert seen_images.read("0" * 64) is None
++
++
++def test_the_json_result_of_the_auxiliary_vision_path_names_its_copies():
++    data = _png(color=(9, 9, 9))
++    rec = seen_images.collect(_envelope(data))[0]
++    text = json.dumps({"success": True, "analysis": "a red square", "seen_images": [rec, {"id": "../x"}]})
++    assert seen_images.collect(text) == seen_images.clean([rec])
++    assert [r["id"] for r in seen_images.collect(text)] == [rec["id"]]
++
++
++def test_prune_drops_old_copies_and_keeps_the_total_under_the_cap(monkeypatch):
++    old, new = seen_images.store(_png(color=(1, 1, 1))), seen_images.store(_png(color=(2, 2, 2)))
++    for p in seen_images._paths(old["id"]):
++        if p.exists():
++            os.utime(p, (time.time() - 500 * 86400,) * 2)
++    assert seen_images.prune() == 1
++    assert seen_images.read(old["id"]) is None and seen_images.read(new["id"]) is not None
++    monkeypatch.setenv("HERMES_SEEN_IMAGES_MAX_BYTES", "1")
++    assert seen_images.prune() == 1
++    assert seen_images.read(new["id"]) is None
++
++
++def test_vision_analyze_on_a_device_file_outside_the_chat_folder_records_a_copy(tmp_path, monkeypatch):
++    """The card of this call must show the image after the file is deleted and for a subagent's call."""
++    from tools import vision_tools
++
++    elsewhere = tmp_path / "cache" / "relift" / "work" / "sheet.png"
++    elsewhere.parent.mkdir(parents=True)
++    data = _png((64, 48), (10, 120, 200))
++    elsewhere.write_bytes(data)
++    monkeypatch.setattr(vision_tools, "_should_use_native_vision_fast_path", lambda: True)
++    result = asyncio.run(vision_tools._handle_vision_analyze({"image_url": str(elsewhere), "question": "what"}))
++    assert isinstance(result, dict) and result["_multimodal"] is True
++    sent = result["content"][1]["image_url"]["url"]
++
++    agent = _make_agent()
++    agent._append_guardrail_observation = lambda name, args, res, **kw: res
++    db_path = Path(tmp_path) / "state.db"
++    db = _attach_real_session_db(agent, db_path, "seen")
++    messages = [{"role": "user", "content": "look"},
++                {"role": "assistant", "content": "", "tool_calls": [
++                    {"id": "call-1", "type": "function", "function": {"name": "vision_analyze", "arguments": "{}"}}]}]
++    agent._flush_messages_to_session_db(messages)
++    try:
++        with (patch("model_tools.handle_function_call", return_value=result),
++              patch("agent.tool_executor.maybe_persist_tool_result", side_effect=lambda **kw: kw["content"])):
++            agent._execute_tool_calls_sequential(
++                SimpleNamespace(content="", tool_calls=[_mock_tool_call(call_id="call-1")]), messages, "task-1")
++    finally:
++        db.close()
++    elsewhere.unlink()
++    live, durable = messages[-1], _durable_messages(db_path, "seen")[-1]
++    for row in (live, durable):
++        seen = row["display_metadata"]["seen_images"]
++        assert len(seen) == 1 and seen[0]["mime"] in ("image/png", "image/jpeg")
++    seen = durable["display_metadata"]["seen_images"][0]
++    mime, stored = seen_images.read(seen["id"])
++    assert base64.b64encode(stored).decode() in sent  # exactly the bytes the model received
++    assert hashlib.sha256(stored).hexdigest() == seen["id"]
++    # The model never sees the record.
++    assert "seen_images" not in json.dumps(durable["content"])
++
++
++def test_the_route_serves_a_stored_copy_only_to_an_authenticated_caller_and_only_by_id():
++    from starlette.testclient import TestClient
++
++    from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
++
++    data = _noise_png((900, 700))
++    rec = seen_images.collect(_envelope(data))[0]
++    client = TestClient(app)
++    url = f"/api/seen-images/{rec['id']}"
++    assert client.get(url, headers={_SESSION_HEADER_NAME: "wrong"}).status_code == 401
++    ok = client.get(url, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
++    assert ok.status_code == 200 and ok.content == data and ok.headers["content-type"] == "image/png"
++    assert "immutable" in ok.headers["cache-control"]
++    thumb = client.get(url + "?size=thumb", headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
++    assert thumb.status_code == 200 and thumb.headers["content-type"] == "image/jpeg" and len(thumb.content) < len(data)
++    for bad in ("0" * 64, "..%2f..%2fetc%2fpasswd", "short"):
++        assert client.get(f"/api/seen-images/{bad}", headers={_SESSION_HEADER_NAME: _SESSION_TOKEN}).status_code == 404
++
++
++def test_images_the_user_sent_natively_are_kept_on_the_user_row():
++    from agent.turn_context import _stage_turn_user_message
++
++    data = _png(color=(5, 6, 7))
++    content = [{"type": "text", "text": "what is this"}, _envelope(data)["content"][1]]
++    agent = SimpleNamespace(_pending_cli_user_message=None)
++    row, _ = _stage_turn_user_message(agent, content, "what is this", None, None, None, {"submission_id": "s1"})
++    seen = row["display_metadata"]["seen_images"]
++    assert seen[0]["id"] == hashlib.sha256(data).hexdigest() and row["display_metadata"]["submission_id"] == "s1"
++    plain, _ = _stage_turn_user_message(agent, "hello", "hello", None, None, None, None)
++    assert "display_metadata" not in plain
+diff --git a/tools/seen_images.py b/tools/seen_images.py
+new file mode 100644
+index 00000000..9d327287
+--- /dev/null
++++ b/tools/seen_images.py
+@@ -0,0 +1,307 @@
++"""A kept copy of every image Hermes loads for the model.
++
++A client that draws a tool card (the Talaria hub, a desktop app) must be able to show the image the model
++saw even when the file it came from is gone, outside the chat's folder, on another machine, or only a
++subagent's. So when a tool result carries image content, ``collect`` stores exactly those bytes here,
++content-addressed by sha256, and returns the ids to record in the tool row's ``display_metadata``
++(``seen_images``). ``GET /api/seen-images/<id>`` serves a copy to an authenticated caller.
++
++Layout: ``$HERMES_HOME/seen_images/<id[:2]>/<id>.img`` (the full image), ``<id>.thumb`` (a JPEG of at most
++``THUMB_EDGE`` px and ``THUMB_BYTES``) and ``<id>.json`` (mime, sizes). Copies are kept ``RETENTION_DAYS``
++days after the last write or read (longer than any chat is displayed for) and at most ``MAX_TOTAL_BYTES`` in
++all, oldest first. ``HERMES_SEEN_IMAGES_RETENTION_DAYS`` and ``HERMES_SEEN_IMAGES_MAX_BYTES`` override both.
++"""
++
++from __future__ import annotations
++
++import base64
++import binascii
++import hashlib
++import json
++import logging
++import os
++import re
++import threading
++import time
++from io import BytesIO
++from pathlib import Path
++from typing import Any, Optional
++
++logger = logging.getLogger(__name__)
++
++DIR_NAME = "seen_images"
++ID_RE = re.compile(r"[0-9a-f]{64}")
++MIME_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
++MAX_IMAGE_BYTES = 24 * 1024 * 1024
++MAX_PER_RESULT = 8
++THUMB_EDGE = 640
++THUMB_BYTES = 96 * 1024
++RETENTION_DAYS = 400
++MAX_TOTAL_BYTES = 4 * 1024 ** 3
++_PRUNE_EVERY_S = 3600
++_TOUCH_EVERY_S = 86400
++
++_DATA_URL = re.compile(r"data:(image/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)", re.I)
++_prune_lock = threading.Lock()
++_last_prune = 0.0
++
++
++def _env_number(name: str, default: float) -> float:
++    try:
++        value = float(os.environ.get(name, ""))
++    except ValueError:
++        return default
++    return value if value > 0 else default
++
++
++def root() -> Path:
++    from hermes_constants import get_hermes_home
++
++    return Path(get_hermes_home()) / DIR_NAME
++
++
++def _paths(image_id: str, base: Optional[Path] = None) -> tuple[Path, Path, Path]:
++    d = (base or root()) / image_id[:2]
++    return d / f"{image_id}.img", d / f"{image_id}.thumb", d / f"{image_id}.json"
++
++
++def _sniff(data: bytes) -> Optional[str]:
++    if data.startswith(b"\x89PNG\r\n\x1a\n"):
++        return "image/png"
++    if data.startswith(b"\xff\xd8\xff"):
++        return "image/jpeg"
++    if data[:6] in (b"GIF87a", b"GIF89a"):
++        return "image/gif"
++    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
++        return "image/webp"
++    return None
++
++
++def _write(path: Path, data: bytes) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
++    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
++    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++    with os.fdopen(fd, "wb") as handle:
++        handle.write(data)
++    os.replace(tmp, path)
++
++
++def _thumb(data: bytes) -> tuple[Optional[bytes], int, int]:
++    """(JPEG thumbnail or None, width, height) of the image; None when it is small already or Pillow cannot
++    read it."""
++    try:
++        from PIL import Image
++    except Exception:
++        return None, 0, 0
++    try:
++        with Image.open(BytesIO(data)) as im:
++            width, height = im.size
++            if max(width, height) <= THUMB_EDGE and len(data) <= THUMB_BYTES:
++                return None, width, height
++            im.seek(0)
++            im = im.convert("RGBA") if im.mode in ("P", "LA", "RGBA") else im.convert("RGB")
++            if im.mode == "RGBA":
++                from PIL import Image as _I
++
++                bg = _I.new("RGB", im.size, (255, 255, 255))
++                bg.paste(im, mask=im.getchannel("A"))
++                im = bg
++            im.thumbnail((THUMB_EDGE, THUMB_EDGE))
++            for quality in (82, 70, 58, 46, 34):
++                out = BytesIO()
++                im.save(out, "JPEG", quality=quality, optimize=True)
++                if out.tell() <= THUMB_BYTES:
++                    break
++            return out.getvalue(), width, height
++    except Exception as exc:
++        logger.debug("seen_images: no thumbnail: %s", exc)
++        return None, 0, 0
++
++
++def store(data: bytes, mime: Optional[str] = None) -> Optional[dict]:
++    """Keep *data* (the image bytes the model got) and return its record, or None when it is not an image
++    or too large. Storing the same bytes again only refreshes its age."""
++    if not data or len(data) > MAX_IMAGE_BYTES:
++        return None
++    kind = _sniff(data)  # the bytes decide the type, never a declared one
++    if kind is None:
++        return None
++    image_id = hashlib.sha256(data).hexdigest()
++    full, thumb, meta = _paths(image_id)
++    record = None
++    try:
++        if meta.is_file() and full.is_file():
++            record = json.loads(meta.read_text())
++            _touch(full, thumb, meta)
++    except Exception:
++        record = None
++    if not isinstance(record, dict) or record.get("id") != image_id:
++        small, width, height = _thumb(data)
++        record = {"id": image_id, "mime": kind, "bytes": len(data), "w": width, "h": height,
++                  "thumb": small is not None}
++        _write(full, data)
++        if small is not None:
++            _write(thumb, small)
++            record["thumb_bytes"] = len(small)
++        _write(meta, json.dumps(record).encode())
++    _maybe_prune()
++    return {k: record[k] for k in ("id", "mime", "bytes", "w", "h", "thumb") if k in record}
++
++
++def _touch(*paths: Path) -> None:
++    now = time.time()
++    for p in paths:
++        try:
++            if now - p.stat().st_mtime > _TOUCH_EVERY_S:
++                os.utime(p, (now, now))
++        except OSError:
++            pass
++
++
++def _data_url_bytes(url: Any) -> Optional[tuple[bytes, str]]:
++    if not isinstance(url, str) or not url.startswith("data:"):
++        return None
++    m = _DATA_URL.fullmatch(url.strip())
++    if not m:
++        return None
++    try:
++        return base64.b64decode(re.sub(r"\s+", "", m.group(2)), validate=False), m.group(1).lower()
++    except (binascii.Error, ValueError):
++        return None
++
++
++def _part_images(part: Any):
++    """The (bytes, mime) of one content part that carries an image inline."""
++    if not isinstance(part, dict):
++        return
++    kind = part.get("type")
++    if kind in ("image_url", "input_image"):
++        v = part.get("image_url")
++        got = _data_url_bytes(v.get("url") if isinstance(v, dict) else v)
++        if got:
++            yield got
++    elif kind == "image":
++        src = part.get("source")
++        if isinstance(src, dict) and src.get("type") == "base64" and isinstance(src.get("data"), str):
++            try:
++                yield base64.b64decode(src["data"]), str(src.get("media_type") or "")
++            except (binascii.Error, ValueError):
++                pass
++
++
++def collect(result: Any) -> list[dict]:
++    """Store the images a tool result gives the model and return their records (at most MAX_PER_RESULT).
++
++    Reads a multimodal envelope (``{"_multimodal": True, "content": [...]}``) or a bare content list, and the
++    ``seen_images`` a tool put in its own JSON result when the image never reached the main model (the
++    auxiliary-model path of vision_analyze). Never raises: a failure to keep a copy must not fail the call."""
++    try:
++        parts: Any = None
++        if isinstance(result, dict):
++            parts = result.get("content") if result.get("_multimodal") else None
++        elif isinstance(result, list):
++            parts = result
++        elif isinstance(result, str) and result.lstrip().startswith("{") and "\"seen_images\"" in result[:200000]:
++            data = json.loads(result)
++            return clean(data.get("seen_images")) if isinstance(data, dict) else []
++        out: list[dict] = []
++        for part in parts if isinstance(parts, list) else ():
++            for data, mime in _part_images(part):
++                rec = store(data, mime)
++                if rec and all(rec["id"] != o["id"] for o in out):
++                    out.append(rec)
++                if len(out) >= MAX_PER_RESULT:
++                    return out
++        return out
++    except Exception as exc:
++        logger.warning("seen_images: could not keep a copy: %s", exc)
++        return []
++
++
++def clean(records: Any) -> list[dict]:
++    """The well-formed records of *records*, so metadata read back from a tool result is never trusted."""
++    out: list[dict] = []
++    for r in records if isinstance(records, list) else ():
++        if isinstance(r, dict) and isinstance(r.get("id"), str) and ID_RE.fullmatch(r["id"]):
++            out.append({"id": r["id"], "mime": r.get("mime") if r.get("mime") in MIME_TYPES else "image/png",
++                        **{k: r[k] for k in ("bytes", "w", "h") if isinstance(r.get(k), int)},
++                        "thumb": bool(r.get("thumb"))})
++    return out[:MAX_PER_RESULT]
++
++
++def read(image_id: str, size: str = "full") -> Optional[tuple[str, bytes]]:
++    """(mime, bytes) of a kept copy: the thumbnail for size "thumb" when there is one, else the full image.
++    None when the id is not a stored copy."""
++    if not isinstance(image_id, str) or not ID_RE.fullmatch(image_id):
++        return None
++    full, thumb, meta = _paths(image_id)
++    try:
++        if size == "thumb" and thumb.is_file():
++            data = thumb.read_bytes()
++            _touch(full, thumb, meta)
++            return "image/jpeg", data
++        data = full.read_bytes()
++        mime = _sniff(data) or "image/png"
++        _touch(full, thumb, meta)
++        return mime, data
++    except OSError:
++        return None
++
++
++def _maybe_prune() -> None:
++    global _last_prune
++    now = time.time()
++    if now - _last_prune < _PRUNE_EVERY_S or not _prune_lock.acquire(blocking=False):
++        return
++    try:
++        if now - _last_prune < _PRUNE_EVERY_S:
++            return
++        _last_prune = now
++        threading.Thread(target=_prune_safely, daemon=True, name="seen-images-prune").start()
++    finally:
++        _prune_lock.release()
++
++
++def _prune_safely() -> None:
++    try:
++        prune()
++    except Exception as exc:
++        logger.debug("seen_images: prune failed: %s", exc)
++
++
++def prune(now: Optional[float] = None) -> int:
++    """Drop copies unused for RETENTION_DAYS, then the oldest until the total fits MAX_TOTAL_BYTES. Returns
++    how many images it removed."""
++    base = root()
++    if not base.is_dir():
++        return 0
++    now = time.time() if now is None else now
++    keep_s = _env_number("HERMES_SEEN_IMAGES_RETENTION_DAYS", RETENTION_DAYS) * 86400
++    cap = int(_env_number("HERMES_SEEN_IMAGES_MAX_BYTES", MAX_TOTAL_BYTES))
++    entries: list[tuple[float, int, str]] = []
++    for shard in base.iterdir():
++        if not shard.is_dir():
++            continue
++        for meta in shard.glob("*.json"):
++            image_id = meta.stem
++            if not ID_RE.fullmatch(image_id):
++                continue
++            full, thumb, _ = _paths(image_id)
++            try:
++                age = max(p.stat().st_mtime for p in (meta, full) if p.exists())
++                size = sum(p.stat().st_size for p in (meta, full, thumb) if p.exists())
++            except (OSError, ValueError):
++                continue
++            entries.append((age, size, image_id))
++    removed, total = 0, sum(e[1] for e in entries)
++    for age, size, image_id in sorted(entries):
++        if now - age <= keep_s and total <= cap:
++            break
++        for p in _paths(image_id):
++            try:
++                p.unlink()
++            except OSError:
++                pass
++        total -= size
++        removed += 1
++    return removed
+diff --git a/tools/vision_tools.py b/tools/vision_tools.py
+index 2914fbeb..9446e6ff 100644
+--- a/tools/vision_tools.py
++++ b/tools/vision_tools.py
+@@ -867,6 +867,13 @@ async def _call_vision_llm(call_kwargs: dict, empty_log: str, response=None):
+     return analysis
+ 
+ 
++def _seen_image_records(image_data_url: str) -> list:
++    """The kept copy of an image an auxiliary vision model is given (tools/seen_images.py)."""
++    from tools.seen_images import collect
++
++    return collect([{"type": "image_url", "image_url": {"url": image_data_url}}])
++
++
+ async def _run_analysis(
+     kind: str, source: str, user_prompt: str, model: Optional[str],
+     stage: Callable[[str, dict, list], Awaitable[tuple]]) -> str:
+@@ -883,6 +890,9 @@ async def _run_analysis(
+     temp_paths: list = []
+ 
+     def finish(result: dict) -> str:
++        seen = debug_call_data.pop("_seen_images", None)
++        if seen:
++            result["seen_images"] = seen
+         _debug.log_call(tool_name, debug_call_data)
+         _debug.save()
+         return json.dumps(result, indent=2, ensure_ascii=False)
+@@ -942,6 +952,8 @@ async def vision_analyze_tool(
+             if len(image_data_url) > _MAX_BASE64_BYTES:
+                 raise ValueError(_too_large_message(image_data_url))
+         debug_call_data["image_size_bytes"] = prepared.size_bytes
++        # The auxiliary model sees this image, so the card of the call keeps a copy of it too.
++        debug_call_data["_seen_images"] = _seen_image_records(image_data_url)
+         messages = _media_messages(prompt, "image_url", image_data_url)
+         logger.info("Processing image with vision model...")
+         call_kwargs = _aux_call_kwargs(messages, model, 120.0)
+@@ -956,6 +968,7 @@ async def vision_analyze_tool(
+                 len(image_data_url) / (1024 * 1024), _RESIZE_TARGET_BYTES / (1024 * 1024))
+             image_data_url = await _resize_prepared(prepared, _scale_info)
+             messages[0]["content"][1]["image_url"]["url"] = image_data_url
++            debug_call_data["_seen_images"] = _seen_image_records(image_data_url)
+             response = await async_call_llm(**call_kwargs)
+         analysis = await _call_vision_llm(
+             call_kwargs, "Vision LLM returned empty content, retrying once", response)
+diff --git a/tui_gateway/tool_progress.py b/tui_gateway/tool_progress.py
+index cbee5b74..27de64dd 100644
+--- a/tui_gateway/tool_progress.py
++++ b/tui_gateway/tool_progress.py
+@@ -359,6 +359,11 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
+         metadata = _prepare_tool_result_metadata(sid, tool_call_id, name, args, result).get("tool_result_metadata", {})
+         prepared.pop(tool_call_id, None)
+     payload.update(metadata)
++    # The kept copies of the images the call gave the model, for a card that draws as the call ends.
++    from tools.seen_images import collect as _collect_seen_images
++
++    if seen_images := _collect_seen_images(result):
++        payload["seen_images"] = seen_images
+     started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None) if session is not None else None
+     duration_s = time.time() - started_at if started_at else None
+     if duration_s is not None:
+-- 
+2.56.0
+
