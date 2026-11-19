@@ -41,7 +41,8 @@ func runPeer(t *testing.T, h *harness) func() {
 		stopped = true
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			_ = err
 		case <-time.After(5 * time.Second):
 			t.Error("bot did not stop")
 		}

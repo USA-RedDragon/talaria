@@ -21,6 +21,8 @@ const (
 	kSeenImages = "seen_images"
 	kBytes      = "bytes"
 	kQuestion   = "question"
+	qWhat       = "what"
+	qDone       = "done"
 	seenID      = "3f2a9c5e7b1d4086a2c9e5f7103b6d8a4c2e9f1b7a3d5c8e0f2b4a6c8d0e1f23"
 	otherID     = "00000000000000000000000000000000000000000000000000000000000000ff"
 	relift      = "/home/reddragon/.cache/relift/work/sheet.png"
@@ -33,9 +35,9 @@ func seenSteps(md map[string]any) []map[string]any {
 	return []map[string]any{
 		{kRole: roleUser, keyText: goalRead, kTimestamp: 1000.0},
 		{kRole: roleAssistant, keyText: "", kTimestamp: 1001.0,
-			kCalls: []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: relift, kQuestion: "what"}}}},
+			kCalls: []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: relift, kQuestion: qWhat}}}},
 		{kRole: stepTool, fieldName: stepVision, kCallID: "v1", kTimestamp: 1002.0,
-			kArgs:    map[string]any{kImageURL: relift, kQuestion: "what"},
+			kArgs:    map[string]any{kImageURL: relift, kQuestion: qWhat},
 			sjResult: "Image loaded into your context", keyResultSize: 30, keyDisplayMeta: md},
 	}
 }
@@ -192,13 +194,13 @@ func TestEveryImageTheModelSawIsShown(t *testing.T) {
 			{kRole: roleUser, kText: "what is on screen?"},
 			call("c1", "/home/reddragon/.cache/relift/work/main.png"), result("c1", map[string]any{kSeenImages: []any{rec}}),
 			call("c2", "/home/reddragon/.cache/relift/work/old.png"), result("c2", nil),
-			{kRole: roleAssistant, kText: "done"},
+			{kRole: roleAssistant, kText: qDone},
 		}})
 	e.gw.AddChildRows("s9", subA, map[string]any{kRole: roleUser, keyText: "Look at the sheet", kTimestamp: 1000.0},
 		map[string]any{kRole: roleAssistant, keyText: "", kTimestamp: 1001.0,
-			kCalls: []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: relift, kQuestion: "what"}}}},
+			kCalls: []map[string]any{{"id": "v1", fieldName: stepVision, kArgs: map[string]any{kImageURL: relift, kQuestion: qWhat}}}},
 		map[string]any{kRole: stepTool, fieldName: stepVision, kCallID: "v1", kTimestamp: 1002.0,
-			kArgs: map[string]any{kImageURL: relift, kQuestion: "what"}, sjResult: "Image loaded into your context", keyResultSize: 30,
+			kArgs: map[string]any{kImageURL: relift, kQuestion: qWhat}, sjResult: "Image loaded into your context", keyResultSize: 30,
 			keyDisplayMeta: map[string]any{kSeenImages: []any{rec}}})
 	prof := t.TempDir()
 	cmd := browserCmd(t.Context(), t, node, filepath.Join("testdata", "seenimg", "run.js"), chrome, e.url, prof, seenID)
