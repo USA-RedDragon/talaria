@@ -1,0 +1,4 @@
+# The tool executor hook, the user row, computer_use and the seen-images store (0158)
+tests/tools/test_seen_images.py
+tests/tools/test_computer_use_capture_routing.py
+tests/tools/test_browser_use_cli.py

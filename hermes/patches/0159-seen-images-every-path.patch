@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 19:18:07 +0000
+Subject: [PATCH] fix(tools): keep a copy of the images an auxiliary vision model or a text-mode attachment showed
+
+0158 kept a copy of what vision_analyze, a tool result with image content and a native user image gave the model. Two paths still showed no copy: a computer_use capture that the auxiliary vision model looked at (the result is text, so the hook saw no image), and the image files a text-mode user message names (the auxiliary model described them for the main model), so the card said the image was not available.
+
+computer_use now carries the auxiliary call's seen_images in its text payload, and the turn's user row records a copy of the local image files its text-mode image notes name (tools.seen_images.collect_files; unreadable, read-blocked, oversized or non-image files are skipped). Every other path already goes through the one hook in the tool executor (sequential and concurrent batches, computer_use, browser_use, MCP and browser_vision envelopes, the plugin tool results that name seen_images); tests pin each of them.
+---
+ agent/turn_context.py                      |   8 ++
+ tests/tools/test_seen_images_every_path.py | 127 +++++++++++++++++++++++++++++
+ tools/computer_use/tool.py                 |   5 +-
+ tools/seen_images.py                       |  25 ++++++
+ 4 files changed, 164 insertions(+), 1 deletion(-)
+
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index 59f25775..f1e6dae6 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -771,6 +771,14 @@ def _stage_turn_user_message(
+ 
+         if seen_images := _collect_seen_images(user_message):
+             _set_display_metadata_key(user_msg, SEEN_IMAGES, seen_images)
++    elif isinstance(user_message, str) and "image_url:" in user_message:
++        # Text mode: the auxiliary vision model looked at the files the message names; keep what it saw.
++        from agent.image_routing import split_image_notes
++        from agent.message_metadata import SEEN_IMAGES, _set_display_metadata_key
++        from tools.seen_images import collect_files
++
++        if seen_images := collect_files(split_image_notes(user_message)[1]):
++            _set_display_metadata_key(user_msg, SEEN_IMAGES, seen_images)
+     # The platform message id survives the turn-start flush; restart drain-window
+     # recovery dedups via ``has_platform_message_id`` against this row.
+     if persist_user_platform_id is not None:
+diff --git a/tests/tools/test_seen_images_every_path.py b/tests/tools/test_seen_images_every_path.py
+new file mode 100644
+index 00000000..bd200da0
+--- /dev/null
++++ b/tests/tools/test_seen_images_every_path.py
+@@ -0,0 +1,127 @@
++"""No image a model looked at goes without a kept copy: every tool result and user message that carries one."""
++
++from __future__ import annotations
++
++import asyncio
++import base64
++import hashlib
++import json
++import time
++from io import BytesIO
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import pytest
++
++from tools import seen_images
++
++PIL = pytest.importorskip("PIL.Image")
++
++
++@pytest.fixture(autouse=True)
++def _home(tmp_path, monkeypatch):
++    home = tmp_path / "hermes-home"
++    home.mkdir()
++    monkeypatch.setenv("HERMES_HOME", str(home))
++    monkeypatch.setattr(seen_images, "_last_prune", time.time())
++    return home
++
++
++def _png(color=(200, 30, 30), size=(40, 30)) -> bytes:
++    out = BytesIO()
++    PIL.new("RGB", size, color).save(out, "PNG")
++    return out.getvalue()
++
++
++def _sha(data: bytes) -> str:
++    return hashlib.sha256(data).hexdigest()
++
++
++def test_computer_use_native_capture_is_kept_by_the_executor_hook():
++    from tools.computer_use import tool as cu_tool
++    from tools.computer_use.backend import CaptureResult
++
++    data = _png()
++    cap = CaptureResult(mode="som", width=40, height=30, png_b64=base64.b64encode(data).decode(), elements=[],
++                        app="App", window_title="W", png_bytes_len=len(data))
++    with patch.object(cu_tool, "_should_route_through_aux_vision", return_value=False):
++        resp = cu_tool._capture_response(cap)
++    assert [r["id"] for r in seen_images.collect(resp)] == [_sha(data)]
++
++
++def test_computer_use_capture_routed_to_the_auxiliary_model_keeps_the_image_it_saw():
++    from tools.computer_use import tool as cu_tool
++    from tools.computer_use.backend import CaptureResult
++
++    data = _png((1, 2, 3))
++    cap = CaptureResult(mode="som", width=40, height=30, png_b64=base64.b64encode(data).decode(), elements=[],
++                        app="App", window_title="W", png_bytes_len=len(data))
++
++    async def aux(path, prompt, *a, **k):  # what vision_analyze_tool returns for the image it was given
++        from pathlib import Path
++
++        url = "data:image/png;base64," + base64.b64encode(Path(path).read_bytes()).decode()
++        recs = seen_images.collect([{"type": "image_url", "image_url": {"url": url}}])
++        return json.dumps({"success": True, "analysis": "a button", "seen_images": recs})
++
++    with patch.object(cu_tool, "_should_route_through_aux_vision", return_value=True), \
++            patch("tools.vision_tools.vision_analyze_tool", aux), \
++            patch("model_tools._run_async", lambda coro: asyncio.run(coro)):
++        resp = cu_tool._capture_response(cap)
++    assert isinstance(resp, str) and json.loads(resp)["vision_analysis"] == "a button"
++    kept = seen_images.collect(resp)
++    assert len(kept) == 1
++    assert seen_images.read(kept[0]["id"]) is not None
++
++
++def test_browser_use_native_screenshot_is_kept(tmp_path):
++    from tools import browser_use_cli
++
++    shot = tmp_path / "shot.png"
++    shot.write_bytes(_png((9, 9, 9)))
++    with patch("tools.vision_tools._should_use_native_vision_fast_path", return_value=True):
++        env = browser_use_cli._native_screenshot_result({"ok": True}, str(shot))
++    assert env is not None and len(seen_images.collect(env)) == 1
++
++
++def test_a_mcp_style_envelope_and_a_bare_part_list_are_kept():
++    data = _png((7, 8, 9))
++    part = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(data).decode()}}
++    env = {"_multimodal": True, "content": [{"type": "text", "text": "x"}, part], "text_summary": "x"}
++    assert [r["id"] for r in seen_images.collect(env)] == [_sha(data)]
++    assert [r["id"] for r in seen_images.collect([part])] == [_sha(data)]
++
++
++def test_text_mode_attachments_are_kept_on_the_user_row(tmp_path):
++    """The auxiliary vision model described these files for the main model: the row keeps what it looked at."""
++    from agent.turn_context import _stage_turn_user_message
++
++    data = _png((50, 60, 70))
++    path = tmp_path / "photo.png"
++    path.write_bytes(data)
++    note = (f"[The user sent an image~ Here's what I can see:\na cat]\n[If you need a closer look, use "
++            f"vision_analyze with image_url: {path} ~]\n\nwhat is it")
++    agent = SimpleNamespace(_pending_cli_user_message=None)
++    row, _ = _stage_turn_user_message(agent, note, "what is it", None, None, None, None)
++    assert [r["id"] for r in row["display_metadata"]["seen_images"]] == [_sha(data)]
++    plain, _ = _stage_turn_user_message(agent, "no image here", "no image here", None, None, None, None)
++    assert "display_metadata" not in plain
++    gone, _ = _stage_turn_user_message(agent, note.replace(str(path), str(tmp_path / "gone.png")), "x", None, None, None, None)
++    assert "display_metadata" not in gone
++
++
++def test_collect_files_skips_what_is_not_an_image(tmp_path):
++    text = tmp_path / "a.txt"
++    text.write_text("hello")
++    assert seen_images.collect_files([str(text), str(tmp_path / "missing.png"), None]) == []
++
++
++def test_the_executor_keeps_copies_on_both_commit_paths():
++    """Sequential and concurrent tool batches both commit through one function that calls the hook."""
++    import inspect
++
++    from agent import tool_executor
++
++    src = inspect.getsource(tool_executor)
++    assert src.count("_commit_tool_result(") == 3  # the definition and the two batch paths
++    assert "_collect_seen_images(function_result)" in inspect.getsource(tool_executor._commit_tool_result)
+diff --git a/tools/computer_use/tool.py b/tools/computer_use/tool.py
+index bd59a307..d09c0ec9 100644
+--- a/tools/computer_use/tool.py
++++ b/tools/computer_use/tool.py
+@@ -953,8 +953,10 @@ def _route_capture_through_aux_vision(cap: CaptureResult, summary: str, *, visib
+                 os.unlink(str(temp_image_path))
+     # The ``analysis`` field of vision_analyze_tool's JSON result; raw text when it isn't JSON; empty -> no merge.
+     analysis_text = result_json.strip() if isinstance(result_json, str) else ""
++    seen_records: list = []
+     with contextlib.suppress(TypeError, json.JSONDecodeError):
+         parsed = json.loads(analysis_text)
++        seen_records = parsed.get("seen_images") or [] if isinstance(parsed, dict) else []
+         analysis_text = str(parsed.get("analysis") or "").strip() if isinstance(parsed, dict) else ""
+     if not analysis_text:
+         return None
+@@ -964,7 +966,8 @@ def _route_capture_through_aux_vision(cap: CaptureResult, summary: str, *, visib
+                            total=len(cap.elements), width=cap.width, height=cap.height, truncated=truncated_elements,
+                            elements_file=elements_file, screenshot_path=screenshot_path, bounds_scale=None)
+     return _text_capture_payload(view, summary, {"vision_analysis": analysis_text,
+-                                                 "vision_analysis_routed_via": "auxiliary.vision"})
++                                                 "vision_analysis_routed_via": "auxiliary.vision",
++                                                 **({"seen_images": seen_records} if seen_records else {})})
+ 
+ # ── Availability check (used by the tool registry check_fn) ─────────────────
+ def check_computer_use_requirements() -> bool:
+diff --git a/tools/seen_images.py b/tools/seen_images.py
+index 9d327287..b9a14ac1 100644
+--- a/tools/seen_images.py
++++ b/tools/seen_images.py
+@@ -218,6 +218,31 @@ def collect(result: Any) -> list[dict]:
+         return []
+ 
+ 
++def collect_files(paths: Any) -> list[dict]:
++    """Store the images in the local files a text-mode user message names (the auxiliary vision model looked
++    at them for the main model). Unreadable, blocked, oversized or non-image files are skipped; never raises."""
++    out: list[dict] = []
++    try:
++        from agent.file_safety import raise_if_read_blocked
++
++        for raw in paths if isinstance(paths, (list, tuple)) else ():
++            try:
++                path = Path(str(raw)).expanduser()
++                if not path.is_file() or path.stat().st_size > MAX_IMAGE_BYTES:
++                    continue
++                raise_if_read_blocked(str(path))
++                rec = store(path.read_bytes())
++            except Exception:
++                continue
++            if rec and all(rec["id"] != o["id"] for o in out):
++                out.append(rec)
++            if len(out) >= MAX_PER_RESULT:
++                break
++    except Exception as exc:
++        logger.warning("seen_images: could not keep a copy of an attachment: %s", exc)
++    return out
++
++
+ def clean(records: Any) -> list[dict]:
+     """The well-formed records of *records*, so metadata read back from a tool result is never trusted."""
+     out: list[dict] = []
+-- 
+2.56.0
