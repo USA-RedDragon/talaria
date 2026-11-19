@@ -436,13 +436,14 @@ The agent acts with the user's logins, so a page's text is untrusted input to th
 | Run a script that changes data (`browser_eval` with `allow_writes`) | Ask once per site per session (`rule_key` `browser:script-write:<site>`); covers read-only scripts there too |
 | Any click, Enter or Space key press, or `browser_type` with `submit` on Salesforce (section 7.1) | Ask once per host per session (`rule_key` `browser:click:<host>`, the exact host); "always" lets unattended runs click there |
 | The same on a site in the device's `browser.confirm-hosts` (section 7.1) | Ask every time |
-| A script that changes data on Salesforce | Refused; no approval can allow it |
+| A script that changes data on Salesforce | Ask every time; only a person answers it (section 7.5) |
 | Any script on a page with a password, payment or one-time code field | Ask every time |
 | Sign in with the login Firefox saved (`browser_login`) on a host with no grant and not in `browser.autologin-hosts` | A sign-in card on the hub: Allow once, Allow on this computer, or Deny. Never answered by auto-approval (section 7.4.1) |
 | The same on a host the user allowed on this computer | Nothing more is asked, also in unattended runs, until the user revokes it |
 | The same on a host in `browser.autologin-hosts` | Ask once per host (`rule_key` `browser:login:<host>`, the exact host); "always" lets unattended runs sign in (section 7.4) |
 | Clicks, typing and key presses on a page of an autologin host (in `browser.autologin-hosts` or granted) with a password field | Ask every time: "Allow clicking <element> on the sign-in page <host>?". Only a person answers it (never auto-approval, yolo or an allowlist); with no user present it is refused (section 7.4) |
-| Scripts on an autologin host; screenshots and selector waits on its pages with a password field | Refused; no approval can allow it |
+| Scripts on an autologin host; screenshots and selector waits on its pages with a password field | Ask every time; only a person answers it (section 7.5) |
+| Anything else the plugin or the extension checks (the list in section 7.5) | An approval card when the check fires: a person-only card, or the normal approval with Allow once, Allow for this chat and Allow always |
 | Downloads, file uploads, permission prompts, browser dialogs | Not offered |
 
 A site is the host name in lower case without a leading `www.`. It is not the registrable domain: `accounts.example.com` and `example.com` are separate sites. That asks more often, but an approval never covers a host the user did not see.
@@ -494,8 +495,8 @@ The limits:
 - Writes are tracked per site: a script with `allow_writes` lifts the read-only limit only for the site the user approved writes on. Every other site in the tab's list (the top page's, another frame's) stays read-only (measured: after an approved write on the page, a POST to a frame's site is refused).
 - A script in a frame of a tab that already ran a script is refused until the next navigation, and the top frame's address is taken from the browser, not from the page's world, because an earlier script could have changed what that world reports.
 - A tab opened from another tab (it has an opener) may not run scripts, since a script could navigate its opener, which has no limits. Agent tabs that `browser_navigate` opens have no opener.
-- Scripts with `allow_writes` are refused on pages with password, payment or one-time code fields; read-only scripts there ask every time.
-- After a script with `allow_writes`, clicks, typing and key presses are refused in the tab until the next `browser_navigate`, because the script could have changed the extension's helpers in that world. Scroll, hover, snapshots, text and screenshots still work. After a read-only script the page is new, so they work.
+- Scripts with `allow_writes` on pages with password, payment or one-time code fields ask a person every time (section 7.5); read-only scripts there ask every time.
+- After a script with `allow_writes`, clicks, typing and key presses in the tab ask the user (`browser:allow-scripted:<site>`) until the next `browser_navigate`, because the script could have changed the extension's helpers in that world. Scroll, hover, snapshots, text and screenshots still work. After a read-only script the page is new, so they work.
 - `browser_back` is refused in a tab that ever ran a script, so a page that ran agent code is not restored from the history cache without its limits.
 
 Writes and "always": `browser:script-write:<site>` is a separate approval, so the user grants it knowingly. "Always" for `browser:script:<site>` covers only read-only scripts; "always" for `browser:script-write:<site>` covers writes and reads there. Both are entries `plugin_rule:browser:script:<site>` and `plugin_rule:browser:script-write:<site>` in Hermes's `command_allowlist`; remove the entry (Hermes picks up the change at once) to revoke it.
@@ -518,7 +519,8 @@ A scheduled job (cron), a one-shot query (`-q`) or a webhook session has no user
 
 - An approval kind the user granted before ("always", or "session" in the same session) counts as granted, through Hermes's `tools.approval.is_approved` for `plugin_rule:<rule_key>`. The call then runs with no prompt.
 - Anything else is blocked at once, in `pre_tool_call`, with a message that names the rule (`plugin_rule:browser:visit:<site>` and so on) and says the user must grant it once with "always" or add it to `command_allowlist`. This holds whatever `approvals.cron_mode` says: browser approvals are not granted by default in an unattended run.
-- Actions that ask every time (pages with secret fields, clicks on a site in `browser.confirm-hosts`) are blocked at once with a message that they need the user each time. Clicks on Salesforce run when the user granted `browser:click:<host>` with "always".
+- In a scheduled run, a call that needs an approval the user did not give as "always" (or a sign-in grant) does not fail at once: the job's chat is told (the hub shows it and Telegram notifies), and the call waits up to 10 minutes (`JOB_WAIT_S`) for the user to allow it there, then fails with a plain message that names the rule. A one-shot query, and a run whose chat could not be told, fail at once as before.
+- Actions that ask every time (pages with secret fields, clicks on a site in `browser.confirm-hosts`, and the person-only cards of section 7.5) are blocked at once with a message that they need the user each time. Clicks on Salesforce run when the user granted `browser:click:<host>` with "always".
 
 To prepare a scheduled job: run it once in a chat and answer "always" for each site and kind it needs, or add the `plugin_rule:browser:...` entries to `command_allowlist` in the Hermes config. A config managed in git keeps them across rebuilds. Create the job in a chat whose browser device (section 3.2) is the computer the job should use, or set it later with `browser_use_device` and `job_id`. The job's commands run in the sandbox; only its browser calls go to that computer, which starts Firefox when it is closed (section 5.1). A job with no browser device uses the sandbox's own Firefox (section 5.2).
 
@@ -600,11 +602,11 @@ Scheduled jobs: a run's `browser_login` on a host the user has not allowed on th
 
 Hardening on autologin hosts, enforced by the extension and also checked by the plugin:
 
-- `browser_eval` is refused on a tab or frame whose host is in the list. No approval allows it. The injected script checks again, before the agent's code runs, that its document is on the approved site and not on a listed host, since the frame can load another page between the extension's checks and the injection.
+- `browser_eval` on a tab or frame whose host is in the list asks a person every time (section 7.5). The injected script checks again, before the agent's code runs, that its document is on the approved site and not on a listed host, since the frame can load another page between the extension's checks and the injection.
 - On every site, `browser_eval` is refused in a document with a filled password field, so a script cannot read a password Firefox filled. Clicks, typing and key presses on a listed host's login page check the host again in the page right before they act, and a screenshot is dropped when the tab shows such a page after the capture.
 - On a page of such a host with a password field, each `browser_click`, `browser_type` and `browser_press` asks the user on a card that names the element and the host ("Allow clicking "Show" on the sign-in page login.example.com?"), and says so when the text goes into a password field. Only a person can answer it, and the plugin then passes `login_page` in the action's guard; the extension and the in-page check refuse the action without it. With no user present it is refused. Hover, scrolling, snapshots and text work without a card.
 - Snapshots show no field values at all on such hosts (elsewhere they omit only password, card and one-time code values), so a field whose type a page changed cannot show the password.
-- Screenshots (`browser_vision`, `browser_screenshot`) and `browser_snapshot` waits with a CSS selector are refused on such a page with a password field. A screenshot of a filled password field shows one dot per character, which tells its length.
+- Screenshots (`browser_vision`, `browser_screenshot`) and waits with a CSS selector on such a page with a password field ask a person every time (section 7.5). A screenshot of a filled password field shows one dot per character, which tells its length.
 - `inspect` never uses a field's value as its `label`. This applies on every site: before, a text field's value could become the label, and the plugin puts the label into the Salesforce confirmation text.
 
 Diagnostic: `browser_check` (op `check`) shows an agent tab for a moment (not a tab with a password field off the list, where Firefox would fill a saved login, and not while a `login` runs) and reports `document.visibilityState` before and after, whether the page has focus, the window state, and `would_fill` (the tab became visible), then restores the previously active tab. The daemon adds `screen_lock` from logind: `loginctl show-user <uid> -p Display` names the graphical session and `loginctl show-session <id> -p LockedHint` says whether it is locked (KDE Plasma and GNOME set it). On macOS, or without logind, `known` is false. Use it at night with the screen locked to see whether Firefox on Wayland still treats the shown tab as visible.
@@ -617,6 +619,46 @@ Known gaps:
 - A password field inside an `about:blank`, `srcdoc` or `blob:` frame of a listed page is not seen by the screenshot refusal, which could show its length.
 - A page that signs in with script (`fetch`) instead of a form post works only when its submit handler runs on `requestSubmit`; the extension then waits up to 30 seconds for a page load.
 - The site itself (the identity provider) receives the password, as it would from the user, and can redirect to any application after the sign-in.
+
+### 7.5 Every refusal is a card
+
+Since 0.32.7 no check in the browser stack is a hard refusal that a user cannot get past. A check still fires where it did; what it does then is ask. There are three kinds of answer:
+
+- **Person-only card.** Only a person answers it: never smart approval, yolo, `approvals.mode: off`, cron auto-approve or an allowlist entry. It asks every time (Allow or Deny; nothing is stored), through the same elicitation the secret-field pages use. With no user present the call is refused with a message saying so. These are the checks on password and payment fields, typing into secret fields, scripts that change data on Salesforce or on a page with secret fields, loopback and private addresses, the user's hub, and a password leaving in a URL or going to an unapproved host during a sign-in (the sign-in card, section 7.4.2).
+- **Normal approval.** The plugin's `pre_tool_call` approval, with Allow once, Allow for this chat and Allow always. "Always" lets scheduled runs pass it. The rule is the plugin's own rule where one exists (`browser:visit:<site>`, `browser:script:<site>` and so on), else `browser:allow-<check>:<site>`.
+- **Note with Allow.** A request the extension cancels while no tool call runs cannot wait for a person. The extension counts it per tab, and the next response of any operation carries `blocked_requests`. The plugin then asks once whether to lift that limit for the tab (person-only for loopback, private and hub hosts, else the normal approval), sends `lift_limits` after Allow, and the tool result gets `blocked_requests_note`: "Talaria blocked N requests from tab T to hosts (kind); lifted after the user allowed it" or why not. The hub shows the note as a line on the browser card.
+
+How a refusal in the extension becomes a card: the extension ends the refusal's message with `[allow:<check> <host>]`. The plugin's `call` reads it (in a tool handler only), asks as above, and sends the same operation once more with `"<check> <host>"` in `guard.allow`. The extension lets exactly that check pass for that host and that call; the guard is never stored. A Deny answers with the refusal and "The user did not allow it." Checks the plugin can see before the call (the page inspect) ask in `pre_tool_call` instead, so the card comes before anything reaches Firefox.
+
+| Check | Where | Before 0.32.7 | Now |
+|---|---|---|---|
+| Click, type or key press on a sign-in page (password field) of an autologin host | plugin `decide`, extension `prepare` and `guardCheck` | Refused | Person-only card per action ("Allow clicking "X" on the sign-in page host?"); guard `login_page` |
+| No sign-in method on the page matches the configured or granted one | extension `pageMethod`, plugin `_login` | Refused with the labels seen | The sign-in card's method picker, in the same call; the login runs again after a pick |
+| A method label that only starts with the configured text | extension `pageMethod` | No match | Clicked when the rest is a description of three or more words that names no passkey or approval |
+| Script on an autologin host | plugin `_decide_eval`, extension `eval` | Refused | Person-only card; `allow: login_script <host>` |
+| Script that changes data on Salesforce or a `browser.confirm-hosts` site | plugin, extension | Refused | Person-only card each time, after the `script-write` approval; `allow: protected_write <host>` |
+| Script that changes data on a page with secret fields | plugin, extension | Refused | Person-only card each time; `allow: sensitive_write <host>` |
+| Script in a page with a filled password field | extension (in the page) | Refused | Person-only card; `allow: filled_password <host>` |
+| Screenshot of, or a CSS selector wait on, an autologin sign-in page | extension | Refused | Person-only card; `allow: login_page <host>` |
+| Opening a loopback or private host not in `browser.allow-hosts` | extension `checkURL` | Refused ("allow it in the device config") | Person-only card; the tab may then reach that host |
+| Opening the Talaria hub in an agent tab | extension `checkURL` | Refused | Person-only card; the tab may then reach the hub |
+| Click, type or key press in a tab that ran a script | extension `prepare` | Refused until browser_navigate | Normal approval, `browser:allow-scripted:<site>` |
+| browser_back in a tab that ran a script | extension `back` | Refused | Normal approval, `browser:allow-scripted:<site>` |
+| browser_login in a tab that ran a script | extension `login` | Refused | Person-only card (the script could read the filled password) |
+| Script in a tab another tab opened | extension `eval` | Refused | Normal approval, `browser:allow-opener:<site>` |
+| Script in a frame of a tab that already ran a script | extension `eval` | Refused | Normal approval, `browser:allow-scripted:<site>` |
+| Visit, submit, script, click and secret-field checks the plugin did not pass (a page that changed between the check and the action) | extension `checkVisit`, `prepare`, `guardCheck`, `eval` | Refused | The matching card: normal approval with the plugin's rule, person-only for secret fields |
+| The plugin's own check before a call failed (an exception) | plugin `pre_tool_call` | Refused | Normal approval "Run it anyway?" (the extension still checks everything); refused with no user |
+| A scheduled run needs an approval or a sign-in grant | plugin `pre_tool_call` | Refused at once | Waits up to 10 minutes for the user in the job's chat, then a plain failure (section 7.3) |
+| Requests of a tab that ran a script, outside its taint | extension `onBeforeRequest` | Cancelled silently | Note with Allow (`taint`) |
+| Requests with no tab while an agent script may run | extension `onBeforeRequest` | Cancelled silently | Note with Allow (`tabless`, lifted for 10 minutes) |
+| Requests of an agent tab to loopback, private or hub hosts, or to names that resolve there | extension `onBeforeRequest` | Cancelled silently | Note with Allow (person-only; `private`, `hub`) |
+| Requests to names that do not resolve | extension `onBeforeRequest` | Cancelled silently | Note only (nothing to lift: the name does not load anyway) |
+| A login form posts to, or a 307 or 308 sends the login to, another host | extension `loginguard.js` | Cancelled, reported | Unchanged: the sign-in card asks for the post host (section 7.4.2) |
+| The filled password in a request URL | extension `onBeforeRequest` | Cancelled | Unchanged: the password must not leave in a URL; the login reports it |
+| browser_login on a host with no grant and not listed | daemon gate, plugin | The sign-in card | Unchanged |
+
+What stays a refusal with no card, because no answer could make it safe or it is not an action: argument errors (a bad ref, an unknown key, a missing tab), a URL that is not http or https, a tab outside the Talaria tab group or showing `about:` or `file:` content (the user moves a tab into the group to share it), a second browser_login while one runs, a sign-in grant token that does not verify, is for another user or computer, or was used before, and a page that went to another host while a script waited for it (take a new snapshot).
 
 ## 8. Security analysis
 
@@ -632,7 +674,7 @@ Who can drive the browser:
 - The hub: relays messages and cannot mint them except as the pod would (protocol.md section 10).
 - The approvals in section 7 are decided by the plugin in the pod. A compromised pod can send any `guard`; the extension's checks stop mistakes and changed pages, not a hostile pod.
 
-What the agent can see: the content of pages in its group, including whatever the user's cookies show there. Password field values are omitted from snapshots, but a screenshot shows what is on screen, including one dot per character of a filled password field (except on autologin hosts, where such screenshots are refused, section 7.4). Users should not move tabs with secrets into the group.
+What the agent can see: the content of pages in its group, including whatever the user's cookies show there. Password field values are omitted from snapshots, but a screenshot shows what is on screen, including one dot per character of a filled password field (except on autologin hosts, where such screenshots ask a person each time, section 7.5). Users should not move tabs with secrets into the group.
 
 Prompt injection: page text reaches the model. The confirmation rules in section 7 and the scope rules above limit what an injected instruction can do. The plugin SHOULD wrap page text in a marked block that tells the model it is untrusted data.
 
