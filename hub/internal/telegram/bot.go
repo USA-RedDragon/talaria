@@ -153,7 +153,9 @@ type Bot struct {
 	// guards chats.
 	loop  sync.Mutex
 	chats map[dest]*chatState
-	wg    sync.WaitGroup
+	// restoring is set while Run attaches the stored chats; loop guards it.
+	restoring bool
+	wg        sync.WaitGroup
 
 	// fmu guards forums, the linked groups by chat ID.
 	fmu    sync.Mutex
@@ -257,7 +259,13 @@ type attachment struct {
 	// and prompts how many prompts it shows; the topic sync reads both.
 	lastEvent atomic.Int64
 	prompts   atomic.Int64
+	// primed closes once the pump has drawn the stream's first snapshot,
+	// which shows the prompts that still wait, or when the pump ends.
+	primed     chan struct{}
+	primedOnce sync.Once
 }
+
+func (a *attachment) markPrimed() { a.primedOnce.Do(func() { close(a.primed) }) }
 
 func (a *attachment) stop() {
 	a.once.Do(func() {
@@ -357,7 +365,9 @@ func New(cfg Config, opts Options) (*Bot, error) {
 func (b *Bot) Run(ctx context.Context) error {
 	b.loop.Lock()
 	b.chats = make(map[dest]*chatState)
+	b.restoring = true
 	offset := b.restore(ctx)
+	b.restoring = false
 	b.loop.Unlock()
 	defer b.shutdown()
 	syncDone := make(chan struct{})
@@ -505,7 +515,8 @@ func (b *Bot) restore(ctx context.Context) int64 {
 // attaches its session again.
 func detached(to dest, user, backendID, sessionID string) *attachment {
 	a := &attachment{to: to, user: user, backendID: backendID, sessionID: sessionID,
-		cancel: func() {}, detach: func() {}, done: make(chan struct{})}
+		cancel: func() {}, detach: func() {}, done: make(chan struct{}), primed: make(chan struct{})}
+	a.markPrimed()
 	close(a.done)
 	return a
 }
@@ -1013,7 +1024,11 @@ func (b *Bot) attach(ctx context.Context, to dest, user, backendID, sessionID st
 	}
 	a := &attachment{
 		cancel: acancel, to: to, user: user, backendID: backendID, sessionID: sessionID,
-		events: events, detach: detach, done: make(chan struct{}),
+		events: events, detach: detach, done: make(chan struct{}), primed: make(chan struct{}),
+	}
+	if !b.restoring {
+		// Only a chat restored at startup can hold a last leader's buttons.
+		a.markPrimed()
 	}
 	a.lastSeq.Store(max(since, 0))
 	a.lastEvent.Store(b.now().UnixNano())
@@ -1101,6 +1116,7 @@ func (b *Bot) stop(ctx context.Context, to dest, user string) {
 func (b *Bot) pump(ctx context.Context, a *attachment) {
 	defer b.wg.Done()
 	defer close(a.done)
+	defer a.markPrimed()
 	interval := b.cfg.EditInterval
 	if a.to.thread != 0 {
 		interval = max(interval, groupEditInterval)
@@ -1179,6 +1195,9 @@ func (b *Bot) pump(ctx context.Context, a *attachment) {
 			r.cause, r.causeN = ev.Cursor, 0
 			r.handle(ctx, ev)
 			r.cause = hub.Cursor{}
+			if ev.Kind == hub.KindSnapshot {
+				a.markPrimed()
+			}
 			if ev.Seq > a.lastSeq.Load() {
 				a.lastSeq.Store(ev.Seq)
 			}

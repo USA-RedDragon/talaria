@@ -883,6 +883,16 @@ func (b *Bot) noticeTarget(ctx context.Context, to dest, msgID int64, user, key 
 func (b *Bot) attachedTarget(ctx context.Context, to dest, msgID int64, key string) (promptTarget, string) {
 	b.mu.Lock()
 	p, ok := b.approvals[key]
+	if !ok {
+		// A replica that just took the bot over attached the chat but has not
+		// drawn the running turn's prompts yet. Their buttons are the last
+		// leader's, so wait for the first snapshot before saying no.
+		primed := b.primedOf(to)
+		b.mu.Unlock()
+		b.waitPrimed(ctx, primed)
+		b.mu.Lock()
+		p, ok = b.approvals[key]
+	}
 	if ok && p.messageID == 0 && p.bound != nil {
 		// Telegram can deliver a press of the message's buttons before the
 		// bot has the answer to its send, so wait for the bind.
@@ -903,6 +913,27 @@ func (b *Bot) attachedTarget(ctx context.Context, to dest, msgID int64, key stri
 	}
 	return promptTarget{prefix: cbApproval, key: key, to: p.to, backendID: p.backendID, sessionID: p.sessionID,
 		prompt: p.prompt, body: p.body}, ""
+}
+
+// primedOf is the channel that closes when the chat's attachment has drawn
+// its first snapshot, nil when the chat has no attachment.
+func (b *Bot) primedOf(to dest) <-chan struct{} {
+	if st := b.chats[to]; st != nil && st.att != nil {
+		return st.att.primed
+	}
+	return nil
+}
+
+func (b *Bot) waitPrimed(ctx context.Context, primed <-chan struct{}) {
+	if primed == nil {
+		return
+	}
+	wctx, cancel := context.WithTimeout(ctx, bindWait)
+	defer cancel()
+	select {
+	case <-primed:
+	case <-wctx.Done():
+	}
 }
 
 // bindWait bounds how long a button press waits for the bot to learn the
