@@ -63,6 +63,25 @@ const out = process.env.SHOT_DIR || "";
   // The signed-in unknown computer card has its allow buttons locked.
   assert.ok(await ev(`[...${approval}.querySelectorAll("button")].filter((b) => /^Allow/.test(b.textContent)).every((b) => b.disabled)`), "unknown computer: Allow buttons are locked");
 
+  // Former hard refusals of the browser stack, now cards (docs/browser.md section 7.5).
+  for (const [id, title, name, nbuttons] of [
+    ["c8", "Shot sign-in page click", "approveall-signin-page-click", 2],
+    ["c9", "Shot allow check", "approveall-allow-check", 4],
+    ["c10", "Shot sign-in method picker", "approveall-method-picker", 3],
+  ]) {
+    await open(id, title);
+    await until(ev, `${approval} && ${approval}.querySelectorAll("button").length >= ${nbuttons}`, name + " card is drawn");
+    const text = await ev(`${approval}.innerText`);
+    assert.ok(!/^\s*[{[]/.test(text) && !/\bundefined\b|\[object/.test(text), name + ": raw text in the card: " + text);
+    await shoot(name, approval);
+  }
+  // A browser card with requests Firefox blocked while no tool call ran.
+  await open("c11", "Shot blocked requests");
+  await until(ev, `!!document.querySelector("#log details.toolgroup")`, "the tool group");
+  await ev(`document.querySelector("#log details.toolgroup").open = true`);
+  await until(ev, `[...document.querySelectorAll("#log .tool")].some((n) => /Talaria blocked 3 requests/.test(n.textContent))`, "the blocked requests line");
+  await shoot("approveall-blocked-requests", `[...document.querySelectorAll("#log .tool")].find((n) => /Talaria blocked 3 requests/.test(n.textContent))`);
+
   await open("f1", "Shot failed turn");
   await new Promise((res, rej) => require("http").get(pokeURL, (r) => { r.resume(); r.on("end", res); }).on("error", rej));
   await until(ev, `!!document.querySelector("#log .failline")`, "the failed turn's line");

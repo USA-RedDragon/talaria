@@ -323,6 +323,14 @@ window.HubToolCard = (() => {
       d.vision.seen = kept[0];
       d.vision.more = kept.slice(1);
     }
+    // Requests Firefox blocked while no tool call ran (docs/browser.md section 7.5): a plain line
+    // in view on every browser card, and each note in the expanded card.
+    const blocked = name.startsWith("browser_") && isObj(c.res) && Array.isArray(c.res.blocked_requests_note) ?
+      c.res.blocked_requests_note.filter((x) => typeof x === "string" && x).slice(0, 10) : [];
+    if (blocked.length) {
+      d.lines = [{ parts: [{ tone: "warn", text: plain(blocked[0]).split("; ")[0] }], dim: false }, ...(d.lines || [])];
+      d.blocks.push({ label: "Blocked requests", plain: true, text: blocked.map(plain).join("\n") });
+    }
     d.state = !c.done ? "run" : c.failed || d.bad ? "bad" : "ok";
     if (c.failed && d.state === "bad" && !d.ownFailure) d.status = failure(c) || d.status;
     if (!c.done && !d.keepRunStatus) d.status = d.waiting ? "Waiting for approval" : "";

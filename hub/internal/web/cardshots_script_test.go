@@ -60,6 +60,17 @@ func TestCardShotsChrome(t *testing.T) {
 	}
 	add("c6", "Shot sign-in grant", 850, card("p6", "browser_login", "", gateway.Prompt{Choices: []string{once, gateway.ChoiceDevice, deny}, LoginGrant: grant(e.id, pcName)}))
 	add("c7", "Shot sign-in unknown", 840, card("p7", "browser_login", "", gateway.Prompt{Choices: []string{once, gateway.ChoiceDevice, deny}, LoginGrant: grant("d_not_mine", "")}))
+	// Former hard refusals of the browser stack, now cards (docs/browser.md section 7.5).
+	add("c8", "Shot sign-in page click", 830, card("p8", `Allow clicking the element "w3id Password" on the sign-in page login.w3.ibm.com in the Firefox on device pc? Firefox has a saved login there. Every action on this page needs your OK.`,
+		"Each action on a page with password, payment or one-time code fields needs your OK.", gateway.Prompt{Choices: []string{once, deny}}))
+	add("c9", "Shot allow check", 829, card("p9", `browser_back`, `Allow the agent to act in a tab that ran a script, on example.com in the Firefox on device pc? The check said: this tab ran a script, so going back needs the user's OK. Allow for this chat (or always) lets it pass again without asking.`,
+		gateway.Prompt{Choices: []string{once, choiceSession, "always", deny}}))
+	w3 := grant(e.id, pcName)
+	w3.Host, w3.Methods = "login.w3.ibm.com", []string{"w3id Password"}
+	add("c10", "Shot sign-in method picker", 828, card("p10", "browser_login", "", gateway.Prompt{Choices: []string{once, gateway.ChoiceDevice, deny}, LoginGrant: w3}))
+	add("c11", "Shot blocked requests", 827, nil,
+		map[string]any{kRole: roleAssistant, kText: "", kCalls: []map[string]any{{"id": "t9", fnKey: map[string]any{fieldName: "browser_snapshot", ilArgs: `{"tab_id":12}`}}}},
+		map[string]any{kRole: stepTool, kCallID: "t9", fieldName: "browser_snapshot", kText: `{"tab_id":12,"url":"https://app.example.com/","title":"App","snapshot":"- heading \"App\"","blocked_requests_note":["Talaria blocked 3 requests from tab 12 to cdn.example.net, api.example.net (taint); lifted after the user allowed it; the page may need browser_navigate to load again."]}`})
 	e.gw.AddSession(&gatewaytest.Session{ID: "f1", Title: "Shot failed turn", Live: true, StartedAt: 830, Messages: []map[string]any{{kRole: roleUser, kText: "search it"}}})
 	// The failed turn arrives live, after the page has the chat.
 	poke := pokeServer(t, func() {
