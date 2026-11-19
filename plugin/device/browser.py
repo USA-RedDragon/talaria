@@ -1826,10 +1826,24 @@ def save_shot(session_id: str, data_url: str, *, root: Optional[Path] = None) ->
     return path
 
 
+def kept_copy(path: Path) -> list:
+    """The records of the copy Hermes keeps of the image in path (Talaria Hermes 0158), so the hub shows it
+    after the plugin's own week-old screenshots are gone. [] on a Hermes without 0158 or when it cannot."""
+    try:
+        from tools.seen_images import store
+        rec = store(Path(path).read_bytes())
+    except Exception:
+        return []
+    return [rec] if rec else []
+
+
 def screenshot_result(page: dict, path: Path) -> str:
     """The browser_screenshot result: the saved file and how to show it to the user."""
     out = dict(page)
     out["path"] = str(path)
+    kept = kept_copy(path)
+    if kept:
+        out["seen_images"] = kept
     title = re.sub(r"[\[\]\r\n]+", " ", str(page.get("title") or "")).strip()[:80]
     target = f"<{path}>" if re.search(r"[\s()]", str(path)) else str(path)
     out["show_user"] = f"![Screenshot of {title or 'the page'}]({target})"

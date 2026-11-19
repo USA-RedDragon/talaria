@@ -1557,6 +1557,24 @@ class ToolTests(BrowserBase):
         self.assertEqual(path.read_bytes(), b"small")
         self.assertEqual(json.loads(out["content"][0]["text"].split("\n\n")[0])["path"], str(path))
 
+    def test_every_image_the_model_gets_has_a_copy_in_hermes(self):
+        """Talaria Hermes 0158 keeps what tools give the model, by the id the hub shows it with: the
+        browser_vision envelope through Hermes's own hook, and browser_screenshot's file in its result."""
+        try:
+            from tools import seen_images
+        except ImportError:
+            self.skipTest("this Hermes keeps no copies of seen images (Talaria Hermes 0158)")
+        shot = base64.b64decode(PNG)
+        with mock.patch.object(browser, "_native_vision", lambda: True), \
+                mock.patch.object(browser, "_resize", lambda path, mime: "data:image/png;base64," + PNG):
+            vision = self.run_tool("browser_vision", tab_id=7)
+        kept = seen_images.collect(vision)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(seen_images.read(kept[0]["id"])[1], shot)
+        shot_out = self.run_tool("browser_screenshot", tab_id=7)
+        self.assertEqual([r["id"] for r in shot_out["seen_images"]], [kept[0]["id"]])
+        self.assertEqual([r["id"] for r in seen_images.collect(json.dumps(shot_out))], [kept[0]["id"]])
+
     def test_vision_text_fallback_keeps_no_file(self):
         with mock.patch.object(browser, "_native_vision", lambda: False):
             out = self.run_tool("browser_vision", tab_id=7)
