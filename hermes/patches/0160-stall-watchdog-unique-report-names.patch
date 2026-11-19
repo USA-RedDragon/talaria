@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 19:18:07 +0000
+Subject: [PATCH] fix(gateway): two stall reports in one second are two files
+
+test_a_second_report_is_written_once_the_gap_has_passed failed under CI load. The watchdog named a report stall-<UTC time to the second>, so a second report written within the same wall-clock second as the first (min_gap_s=0, two stalls about a second apart, which a loaded runner makes likely) overwrote it: two reports counted, one file. The name now carries milliseconds, and the prune pattern accepts both forms. The test no longer depends on how the wall clock falls: a new test freezes the clock inside one second and asserts two files.
+---
+ gateway/stall_watchdog.py            |  8 +++++---
+ tests/gateway/test_stall_watchdog.py | 26 ++++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/gateway/stall_watchdog.py b/gateway/stall_watchdog.py
+index 25079861..e9a6e730 100644
+--- a/gateway/stall_watchdog.py
++++ b/gateway/stall_watchdog.py
+@@ -2,7 +2,7 @@
+ 
+ A daemon thread asks the loop every second to set an event (``call_soon_threadsafe``). When the loop has
+ not run the callback within ``logging.stall_watchdog_threshold_seconds`` (default 5), the thread writes one
+-report to ``$HERMES_HOME/logs/stalls/stall-<UTC time>.txt``: a timestamp, the loop thread's stack and
++report to ``$HERMES_HOME/logs/stalls/stall-<UTC time to the millisecond>.txt``: a timestamp, the loop thread's stack and
+ every other thread's stack (innermost frame first, file:line and function only), the coroutine chain of the
+ task the loop is running, the number of live child processes (by command name) and the number of requests
+ in flight per method. No local variables, arguments, message text or environment are read. When the loop
+@@ -36,7 +36,7 @@ MIN_REPORT_GAP_S = 60.0
+ KEEP_REPORTS = 50
+ MAX_FRAMES = 60
+ _POLL_S = 0.05
+-_REPORT_RE = re.compile(r"^stall-\d{8}T\d{6}Z\.txt$")
++_REPORT_RE = re.compile(r"^stall-\d{8}T\d{6}(?:\d{3})?Z\.txt$")
+ _NAME_RE = re.compile(r"[^A-Za-z0-9_.:-]")
+ 
+ _inflight_lock = threading.Lock()
+@@ -232,7 +232,9 @@ class StallWatchdog:
+         self._last_report = now
+         try:
+             self.directory.mkdir(parents=True, exist_ok=True)
+-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
++            # To the millisecond: two reports less than a second apart (a short min_gap_s) must not share a file.
++            when = datetime.now(timezone.utc)
++            stamp = when.strftime("%Y%m%dT%H%M%S") + f"{when.microsecond // 1000:03d}Z"
+             path = self.directory / f"stall-{stamp}.txt"
+             path.write_text(build_report(self.loop, self.loop_thread, stalled_s), encoding="utf-8")
+             self.reports += 1
+diff --git a/tests/gateway/test_stall_watchdog.py b/tests/gateway/test_stall_watchdog.py
+index f337a02d..bae92bf6 100644
+--- a/tests/gateway/test_stall_watchdog.py
++++ b/tests/gateway/test_stall_watchdog.py
+@@ -134,6 +134,32 @@ def test_a_second_report_is_written_once_the_gap_has_passed(tmp_path):
+     assert len(_reports(directory)) == 2
+ 
+ 
++def test_two_reports_in_one_wall_clock_second_are_two_files(tmp_path, monkeypatch):
++    """The flaky CI failure: min_gap_s=0 and two stalls about a second apart wrote stall-<second>.txt twice."""
++    import datetime as real
++
++    class FrozenSecond(real.datetime):
++        ticks = iter([real.datetime(2026, 11, 19, 12, 0, 7, 120000, tzinfo=real.timezone.utc),
++                      real.datetime(2026, 11, 19, 12, 0, 7, 940000, tzinfo=real.timezone.utc)])
++
++        @classmethod
++        def now(cls, tz=None):
++            return next(cls.ticks)
++
++    monkeypatch.setattr(stall_watchdog, "datetime", FrozenSecond)
++    directory = tmp_path / "stalls"
++
++    async def main():
++        dog = StallWatchdog(asyncio.get_running_loop(), directory, min_gap_s=0.0)
++        assert dog._write(5.0) is not None
++        assert dog._write(5.0) is not None
++        assert dog.reports == 2
++
++    monkeypatch.setattr(stall_watchdog, "build_report", lambda *a, **k: "report\n")
++    _run(main)
++    assert [p.name for p in _reports(directory)] == ["stall-20261119T120007120Z.txt", "stall-20261119T120007940Z.txt"]
++
++
+ def test_only_the_newest_fifty_reports_are_kept(tmp_path):
+     directory = tmp_path / "stalls"
+     directory.mkdir()
+-- 
+2.56.0
