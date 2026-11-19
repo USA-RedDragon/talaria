@@ -50,13 +50,15 @@ const (
 	postHost = "api." + grantHost
 	// pickerMethod is the label configured for loginHost in browser.autologin-methods.
 	pickerMethod = "Password"
-	keyLogins    = "login_hosts"
-	keySensitive = "sensitive"
-	keySelector  = "selector"
-	keyAwait     = "awaitPromise"
-	keyContext   = "context"
-	keyExpr      = "expression"
-	keyTarget    = "target"
+	// pickerDescLabel is a method button with a description that names a passkey.
+	pickerDescLabel = "Password Use your password if you can't use a passkey."
+	keyLogins       = "login_hosts"
+	keySensitive    = "sensitive"
+	keySelector     = "selector"
+	keyAwait        = "awaitPromise"
+	keyContext      = "context"
+	keyExpr         = "expression"
+	keyTarget       = "target"
 )
 
 type loginResult struct {
@@ -107,7 +109,7 @@ func pickerPage(buttons ...string) string {
 	b.WriteString(`</div><script>
 function pick(m) {
   fetch("/clicked?m=" + encodeURIComponent(m), {method: "POST"});
-  if (m !== "Password") { return; }
+  if (!/^Password( Use|$)/.test(m)) { return; }
   setTimeout(() => { document.getElementById("root").innerHTML = '<form method="post" action="/login">' +
     '<label>Email <input name="user" autocomplete="username"></label>' +
     '<label>Password <input type="password" name="pass" autocomplete="current-password"></label>' +
@@ -180,6 +182,12 @@ func (l *loginServer) handler(other string) http.HandlerFunc {
 			_, _ = io.WriteString(w, pickerPage("Passkey", "Password", "Approve on phone"))
 		case "/picker-nomatch":
 			_, _ = io.WriteString(w, pickerPage("Passkey", "Approve on phone", "Other options"))
+		case "/picker-desc":
+			// A button whose text is the method name and a description, as on w3id:
+			// the configured "Password" is a word-break prefix of it.
+			_, _ = io.WriteString(w, pickerPage("Passkey Use a passkey on this device", pickerDescLabel))
+		case "/picker-tail":
+			_, _ = io.WriteString(w, pickerPage("Password with passkey", "Password-reset"))
 		case "/picker-dup":
 			_, _ = io.WriteString(w, pickerPage("Password", "Password"))
 		case "/picker-offsite":
@@ -544,7 +552,8 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 
 	before := len(rig.main.clicked())
 	for _, page := range []struct{ path, want string }{
-		{"/picker-nomatch", "none has exactly"},
+		{"/picker-nomatch", "none is or starts"},
+		{"/picker-tail", "none is or starts"},
 		{"/picker-dup", "more than one button"},
 	} {
 		tab := show(rig.mainURL + page.path)
@@ -559,6 +568,33 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 	off := show(rig.mainURL + "/picker-offsite")
 	rig.r.refused(ctx, t, "a method button that leads off the autologin hosts", "browser.autologin-hosts", "login",
 		map[string]any{keyTab: off, keyGuard: approve(loginHost), keyTimeout: 3000})
+
+	// The configured label starts the button's text: that button is clicked.
+	before = len(rig.main.clicked())
+	desc := show(rig.mainURL + "/picker-desc")
+	res = rig.login(ctx, t, map[string]any{keyTab: desc, keyGuard: approve(loginHost)})
+	t.Logf("login through a picker with descriptions: %+v", res)
+	if !res.Filled || !res.Submitted || res.Method != pickerMethod || res.Reason != "" {
+		t.Errorf("login through a picker with descriptions = %+v", res)
+	}
+	if got := rig.main.clicked(); len(got) != before+1 || got[before] != pickerDescLabel {
+		t.Errorf("buttons clicked = %q, want only %q", got[before:], pickerDescLabel)
+	}
+	loginPageApproved(ctx, t, rig, show)
+}
+
+// loginPageApproved checks an action on a login page of an autologin host
+// that the user allowed on its card (the plugin passes login_page): it runs.
+// Without it the action is refused (loginRefusals).
+func loginPageApproved(ctx context.Context, t *testing.T, rig *loginRig, show func(string) int) {
+	t.Helper()
+	tab := show(rig.mainURL + "/")
+	var snap snapResult
+	rig.r.must(ctx, t, "snapshot", map[string]any{keyTab: tab}, &snap)
+	rig.r.refused(ctx, t, "click without the card", "browser_login", "click", map[string]any{keyTab: tab,
+		keyRef: refByName(snap.Snapshot, "Show"), keyGuard: map[string]any{keySensitive: true}})
+	rig.r.must(ctx, t, "click", map[string]any{keyTab: tab, keyRef: refByName(snap.Snapshot, "Show"),
+		keyGuard: map[string]any{keySensitive: true, "login_page": true}}, nil)
 }
 
 // loginEdges checks a login from a URL, two saved logins, a GET form and

@@ -931,9 +931,9 @@ async function prepare(tabId, ref, kind, guard) {
       ", frame host " + (frameHost || "none") + "; it needs the approval rule browser:click:" + site(ruleHost) + ")");
   }
   const sensitive = await tabSensitive(tabId);
-  if (sensitive.includes("password") && (autologinHost(hostOf(tab.url)) || autologinHost(frameHost))) {
-    throw new Refused("this is a login page on a host in browser.autologin-hosts; clicks, typing and key presses are " +
-      "refused here, so the saved password cannot be shown or changed. Use browser_login");
+  if (sensitive.includes("password") && (autologinHost(hostOf(tab.url)) || autologinHost(frameHost)) && !g.login_page) {
+    throw new Refused("this is a login page on a host in browser.autologin-hosts; clicks, typing and key presses here " +
+      "need the user's OK on each action, and the plugin passed none (an older plugin). Use browser_login, or update Talaria");
   }
   if (sensitive.length && !g.sensitive) {
     throw new Refused("this page has " + sensitive.join(", ") + " fields; the user must confirm each action here");
@@ -1108,12 +1108,17 @@ const REFUSED_METHOD = /passkey|pass key|security key|verify|verification|push|a
 // pageMethod handles a sign-in method picker: a page of an autologin host
 // with no password field that offers the ways to sign in as buttons or
 // links. It lists their labels and, with a label and click, clicks the one
-// element whose whole visible text is that label. It does nothing when the
-// page has a password field, when the label names a passkey or an approval
-// on another device, when no element or more than one has exactly that text
-// (a paragraph or a longer text that only contains it is not a match), and
-// when the click would leave the autologin hosts. It never returns more than
-// labels. It is self-contained, so nothing a page left in this world is used.
+// element whose whole visible text is that label, or, when none is, the one
+// element whose text starts with the label, a space and a description of at
+// least three words (a button "w3id Password Use your w3id and password" for
+// the label "w3id Password").
+// It does nothing when the page has a password field, when the label names a
+// passkey or an approval on another device, when the words right after the
+// label on a button that only starts with it do, when no element or more
+// than one matches (a paragraph that only contains the label is not a
+// match), and when the click would leave the autologin hosts. It never
+// returns more than labels. It is self-contained, so nothing a page left in
+// this world is used.
 function pageMethod(hosts, tabHost, label, click, refusedSource) {
   const allowed = new Set(hosts);
   if (location.protocol !== "https:") {
@@ -1141,10 +1146,12 @@ function pageMethod(hosts, tabHost, label, click, refusedSource) {
     "button, a[href], input[type=button], input[type=submit], [role=button], [role=link], [role=radio], [role=option], [role=tab], [role=menuitem]")]
     .filter((el) => shown(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true")
     .map((el) => ({ el, text: textOf(el) }))
-    .filter((c) => c.text !== "" && c.text.length <= 80);
+    .filter((c) => c.text !== "" && c.text.length <= 300);
   // An outer element with the same text as one inside it is one choice.
   const own = choices.filter((c) => !choices.some((d) => d !== c && c.el.contains(d.el) && d.text.toLowerCase() === c.text.toLowerCase()));
-  const labels = [...new Set(own.map((c) => c.text))].slice(0, 12);
+  // A label is at most 80 characters, cut at a word break.
+  const short = (t) => (t.length <= 80 ? t : (t.slice(0, 81).replace(/\s+\S*$/, "") || t.slice(0, 80)));
+  const labels = [...new Set(own.map((c) => short(c.text)))].slice(0, 12);
   const out = { passwords: 0, labels, matched: 0, clicked: false };
   if (!click || !label) {
     return out;
@@ -1153,7 +1160,21 @@ function pageMethod(hosts, tabHost, label, click, refusedSource) {
     return Object.assign(out, { error: "the configured sign-in method names a passkey or an approval on another device, which browser_login never chooses" });
   }
   const want = norm(label).toLowerCase();
-  const hits = own.filter((c) => c.text.toLowerCase() === want);
+  let hits = own.filter((c) => c.text.toLowerCase() === want);
+  if (!hits.length) {
+    const refused = new RegExp(refusedSource, "i");
+    hits = own.filter((c) => {
+      const t = c.text.toLowerCase();
+      if (!t.startsWith(want) || !/\s/.test(t.charAt(want.length))) {
+        return false;
+      }
+      // The rest must be a description of at least three words ("Password help" is
+      // another link), and "Password with passkey" is not the label "Password".
+      const rest = t.slice(want.length).trim().split(/\s+/);
+      return rest.length >= 3 && !refused.test(rest.slice(0, 3).join(" "));
+    });
+    out.prefix = hits.length > 0;
+  }
   out.matched = hits.length;
   if (hits.length !== 1) {
     return out;
@@ -1226,16 +1247,17 @@ async function chooseMethod(tabId, host, hosts, timeoutMs) {
       } else if (!clicked && seen.length) {
         if (!label) {
           return stop("the page asks how to sign in (it offers: " + seen.map((l) => JSON.stringify(l)).join(", ") + ") and no " +
-            "method is configured for " + here + ". The user can add one to the device config, for example " +
-            "browser.autologin-methods: {" + here + ": " + JSON.stringify(seen[0]) + "}, naming the button for a password " +
-            "sign-in. browser_login never picks a passkey or an approval on another device.", { methods_seen: seen });
+            "method is chosen for " + here + " (no method is configured). The user picks one on the sign-in card. " +
+            "browser_login never picks a passkey or an approval on another device.", { methods_seen: seen, needs_method: true });
         }
         if (s.matched === 0 && Date.now() - start >= Math.min(limit, 5000)) {
-          return stop("the page offers sign-in methods (" + seen.map((l) => JSON.stringify(l)).join(", ") + ") but none has exactly the " +
-            "configured text " + JSON.stringify(label) + " in browser.autologin-methods for " + here, { methods_seen: seen });
+          return stop("the page offers sign-in methods (" + seen.map((l) => JSON.stringify(l)).join(", ") + ") but none is or starts " +
+            "with the chosen text " + JSON.stringify(label) + " for " + here + ". The user picks one on the sign-in card",
+          { methods_seen: seen, needs_method: true });
         }
         if (s.matched > 1) {
-          return stop("more than one button has the configured text " + JSON.stringify(label) + ", so none was clicked", { methods_seen: seen });
+          return stop("more than one button has the chosen text " + JSON.stringify(label) + ", so none was clicked", { methods_seen: seen,
+            needs_method: true });
         }
       }
     }
@@ -1757,9 +1779,9 @@ function installHelpers() {
   // the plugin asked cannot slip an action past the user.
   function guardCheck(info, action, submit, guard) {
     const g = guard || {};
-    if ((g.autologin_hosts || []).includes(info.host) && info.sensitive.includes("password")) {
-      return "this is a login page on a host in browser.autologin-hosts; clicks, typing and key presses are refused " +
-        "here. Use browser_login";
+    if ((g.autologin_hosts || []).includes(info.host) && info.sensitive.includes("password") && !g.login_page) {
+      return "this is a login page on a host in browser.autologin-hosts; clicks, typing and key presses here need the " +
+        "user's OK on each action. Use browser_login";
     }
     if (info.sensitive.length && !g.sensitive) {
       return "this page has " + info.sensitive.join(", ") + " fields; the user must confirm each action here";
