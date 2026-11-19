@@ -376,14 +376,14 @@ window.HubChatView = (() => {
 
     // userText adds a user message. atts are the files the page sent with
     // it; without them they come from the lines Hermes keeps in the text.
-    userText(text, pending, atts) {
+    userText(text, pending, atts, seen) {
       const { el, media } = this.env;
       const shown = atts ? { text, atts } : media.split(text);
       const from = window.HubPageSend.split(shown.text);
       shown.text = from.text;
       const m = el("div", "msg user" + (pending ? " pending" : ""));
       if (from.page) m.append(el("div", "frompage", "From page: " + from.page));
-      if (shown.atts.length) m.append(media.attachmentRow(shown.atts, this.base));
+      if (shown.atts.length) m.append(media.attachmentRow(shown.atts, this.base, seen));
       if (shown.text) {
         // The user's own words render as Markdown, as a reply does.
         const body = el("div", "utext");
@@ -480,7 +480,7 @@ window.HubChatView = (() => {
     toolDone(card, p, at = this.at) {
       window.HubToolCard.finish(this.cardContext(), card, { result: p.result, result_text: p.result_text, is_error: p.is_error, error: p.error,
         inline_diff: p.inline_diff, duration: typeof p.duration_s === "number" ? p.duration_s : undefined, endedAt: at || 0, cut: p.cut,
-        size: typeof p.size === "number" ? p.size : undefined, args: p.args });
+        size: typeof p.size === "number" ? p.size : undefined, args: p.args, seen: seenImages(p.seen_images) });
       if (this.answers) this.answers.tool(card);
     }
 
@@ -555,7 +555,7 @@ window.HubChatView = (() => {
         this.turn = null;
         const v = window.HubOrigin.classify(m);
         if (this.originCard(v, text)) return;
-        const b = this.userText(v.text);
+        const b = this.userText(v.text, false, undefined, seenImages(seenOf(m.display_metadata)));
         if (b && Number.isInteger(rid)) b.dataset.row = rid;
         this.afterCards(v);
         return;
@@ -611,6 +611,7 @@ window.HubChatView = (() => {
         const cut = m.output_size ? { row: Number.isInteger(m.row_id) ? m.row_id : 0, call: m.tool_call_id || "", size: m.output_size, lines: m.output_lines || 0 } : null;
         const oc = toolOutcome(m.display_metadata);
         this.toolDone(card, { result: m.content != null ? m.content : text, cut, is_error: oc.is_error === true,
+          seen_images: seenOf(m.display_metadata),
           duration_s: typeof oc.duration_ms === "number" ? oc.duration_ms / 1000 : undefined });
         return;
       }
@@ -662,6 +663,23 @@ window.HubChatView = (() => {
     }
   }
 
+  // seenImages keeps the well-formed records of the copies Hermes stored of
+  // the images a call gave the model ({ id, mime, w, h, thumb }).
+  function seenImages(list) {
+    return Array.isArray(list)
+      ? list.filter((x) => x && typeof x === "object" && /^[0-9a-f]{64}$/.test(x.id)).slice(0, 8)
+      : [];
+  }
+
+  // seenOf is the seen_images of a stored row's display metadata, an object
+  // or a JSON string of one.
+  function seenOf(md) {
+    if (typeof md === "string") {
+      try { md = JSON.parse(md); } catch (_) { md = null; }
+    }
+    return md && typeof md === "object" ? md.seen_images : null;
+  }
+
   // toolOutcome is the tool_outcome of a stored tool row's display metadata
   // ({ duration_ms, is_error }), or {}.
   function toolOutcome(md) {
@@ -672,5 +690,5 @@ window.HubChatView = (() => {
     return o && typeof o === "object" ? o : {};
   }
 
-  return { ChatView, scroller, jumpButton, probe, toolOutcome };
+  return { ChatView, scroller, jumpButton, probe, toolOutcome, seenImages, seenOf };
 })();

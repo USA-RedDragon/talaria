@@ -199,6 +199,7 @@ func (ls *live) offers(p string) offer {
 	ls.mu.Lock()
 	snap := ls.snapshot.Data
 	ring := ls.ring[:len(ls.ring):len(ls.ring)]
+	_, bySubagent := ls.subImages[p]
 	// A message that waits for the running turn is in neither the
 	// snapshot's transcript nor the ring yet, but its page already shows
 	// the images it carries.
@@ -216,6 +217,7 @@ func (ls *live) offers(p string) offer {
 	}
 	ls.mu.Unlock()
 	var o offer
+	o.named = bySubagent
 	for _, t := range queued {
 		if slices.Contains(hub.AttachedImages(t), p) {
 			o.named = true

@@ -460,6 +460,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/sessions/{backend}/{session}/media", s.api(s.handleMedia))
 	mux.Handle("GET /api/sessions/{backend}/{session}/media/info", s.api(s.handleMediaInfo))
 	mux.Handle("GET /api/sessions/{backend}/{session}/media/preview", s.api(s.handleMediaPreview))
+	mux.Handle("GET /api/sessions/{backend}/{session}/seen/{id}", s.api(s.handleSeenImage))
 	mux.Handle("POST /api/sessions/{backend}/{session}/media/stop", s.api(s.handleMediaStop))
 	mux.Handle("GET /api/sessions/{backend}/{session}/tool-output", s.api(s.handleToolOutput))
 	mux.Handle("GET /api/sessions/{backend}/{session}/page", s.api(s.handlePage))

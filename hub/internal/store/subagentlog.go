@@ -65,13 +65,19 @@ func (s *Store) insertEvents(ctx context.Context, tx *sql.Tx, k hub.SubagentKey,
 		if len(e.Args) > 0 {
 			args = string(e.Args)
 		}
+		seen := ""
+		if len(e.Seen) > 0 {
+			if b, err := json.Marshal(e.Seen); err == nil {
+				seen = string(b)
+			}
+		}
 		var atMS int64
 		if !e.TS.IsZero() {
 			atMS = e.TS.UnixMilli()
 		}
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO subagent_events ("user", backend_id, session_id, subagent_id, seq, at_ms, kind,
-			call_id, name, args, result, result_size, duration_ms, failed, text, display_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			append(keyArgs(k), e.Seq, atMS, e.Type, e.CallID, e.Name, args, e.Result, e.ResultSize, dur, failed, e.Text, e.DisplayKind)...); err != nil {
+			call_id, name, args, result, result_size, duration_ms, failed, text, display_kind, seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			append(keyArgs(k), e.Seq, atMS, e.Type, e.CallID, e.Name, args, e.Result, e.ResultSize, dur, failed, e.Text, e.DisplayKind, seen)...); err != nil {
 			return 0, fmt.Errorf("subagent event: %w", err)
 		}
 	}
@@ -113,7 +119,7 @@ func (s *Store) AppendSubagentEvents(ctx context.Context, k hub.SubagentKey, fro
 
 // SubagentEvents lists up to limit events of the key after seq after.
 func (s *Store) SubagentEvents(ctx context.Context, k hub.SubagentKey, after int64, limit int) ([]hub.SubagentEvent, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT seq, at_ms, kind, call_id, name, args, result, result_size, duration_ms, failed, text, display_kind
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT seq, at_ms, kind, call_id, name, args, result, result_size, duration_ms, failed, text, display_kind, seen
 		FROM subagent_events WHERE `+subagentKeyWhere+` AND seq > ? ORDER BY seq LIMIT ?`), append(keyArgs(k), after, limit)...)
 	if err != nil {
 		return nil, err
@@ -123,10 +129,10 @@ func (s *Store) SubagentEvents(ctx context.Context, k hub.SubagentKey, after int
 	for rows.Next() {
 		var e hub.SubagentEvent
 		var at int64
-		var args string
+		var args, seen string
 		var dur sql.NullInt64
 		var failed int
-		if err := rows.Scan(&e.Seq, &at, &e.Type, &e.CallID, &e.Name, &args, &e.Result, &e.ResultSize, &dur, &failed, &e.Text, &e.DisplayKind); err != nil {
+		if err := rows.Scan(&e.Seq, &at, &e.Type, &e.CallID, &e.Name, &args, &e.Result, &e.ResultSize, &dur, &failed, &e.Text, &e.DisplayKind, &seen); err != nil {
 			return nil, err
 		}
 		if at > 0 {
@@ -138,6 +144,9 @@ func (s *Store) SubagentEvents(ctx context.Context, k hub.SubagentKey, after int
 		if dur.Valid {
 			d := dur.Int64
 			e.DurationMS = &d
+		}
+		if seen != "" {
+			_ = json.Unmarshal([]byte(seen), &e.Seen)
 		}
 		e.Error = failed != 0
 		out = append(out, e)

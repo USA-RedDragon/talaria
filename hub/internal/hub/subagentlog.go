@@ -51,7 +51,10 @@ type SubagentEvent struct {
 	// DurationMS is how long the call ran, when Hermes recorded it.
 	DurationMS *int64 `json:"duration_ms,omitempty"`
 	Error      bool   `json:"error,omitempty"`
-	Text       string `json:"text,omitempty"`
+	// Seen are the kept copies of the images the call gave the model, so
+	// the step's card shows them whatever became of the file.
+	Seen []SeenImage `json:"seen,omitempty"`
+	Text string      `json:"text,omitempty"`
 	// DisplayKind is the display_kind Hermes gave a user row (a failed
 	// turn, a steer): the page shows the row as the chat shows the same row.
 	DisplayKind string `json:"display_kind,omitempty"`

@@ -315,6 +315,14 @@ window.HubToolCard = (() => {
     }
     const d = fn(c) || basic(c);
     if (!d.blocks) d.blocks = [];
+    // Every image the call gave the model shows, whatever the tool: Hermes
+    // kept a copy of those bytes (c.seen, as the stored records name them).
+    const kept = Array.isArray(c.seen) ? c.seen.filter((x) => isObj(x) && typeof x.id === "string") : [];
+    if (kept.length && c.done) {
+      if (!d.vision) d.vision = { kind: "none", path: "", question: "", answer: "", hidePath: true };
+      d.vision.seen = kept[0];
+      d.vision.more = kept.slice(1);
+    }
     d.state = !c.done ? "run" : c.failed || d.bad ? "bad" : "ok";
     if (c.failed && d.state === "bad" && !d.ownFailure) d.status = failure(c) || d.status;
     if (!c.done && !d.keepRunStatus) d.status = d.waiting ? "Waiting for approval" : "";
@@ -742,7 +750,7 @@ window.HubToolCard = (() => {
     // is closed, the image (tap for full screen), the question and the whole
     // answer when it is open. An image that cannot be shown, or that fails
     // to load, is a dashed placeholder, never a broken image.
-    let seen = { key: "", broken: false };
+    let seen = { key: "", failed: new Set(), src: "" };
     function gone() {
       const g = el("div", "vis-gone");
       g.setAttribute("aria-hidden", "true");
@@ -776,20 +784,26 @@ window.HubToolCard = (() => {
         vis.hidden = visBig.hidden = true;
         return;
       }
-      let src = "";
-      if (v.kind === "data") src = v.url;
-      else if (v.kind === "file" && ctx.image) src = ctx.image(v.path) || "";
+      // The copy Hermes kept of exactly what the model saw comes first (the
+      // thumbnail while the card is closed), then the image the call named;
+      // an address that fails to load gives way to the next.
+      const stored = v.seen && ctx.seen ? ctx.seen(v.seen.id, !open && !!v.seen.thumb) || "" : "";
+      const storedFull = v.seen && ctx.seen ? ctx.seen(v.seen.id, false) || "" : "";
+      let own = "";
+      if (v.kind === "data") own = v.url;
+      else if (v.kind === "file" && ctx.image) own = ctx.image(v.path) || "";
+      const failed = seen.failed || new Set();
+      const src = [stored, storedFull, own].find((u) => u && !failed.has(u)) || "";
       const answer = str(v.answer);
-      const key = v.kind + "|" + (v.path || "") + "|" + src.length + "|" + v.question + "|" + answer + "|" + open + "|" + d.state;
+      const key = v.kind + "|" + (v.path || "") + "|" + (v.more || []).length + "|" + src.length + "|" + src.slice(-24) + "|" + v.question + "|" + answer + "|" + open + "|" + d.state;
       if (key === seen.key) return;
-      const keep = seen.broken && seen.src === src;
-      seen = { key, broken: keep, src };
+      seen = { key, failed, src };
       const broken = () => {
-        seen.broken = true;
+        failed.add(src);
         seen.key = "";
         drawVision(d);
       };
-      const shown = src && !seen.broken && !!ctx.zoom;
+      const shown = !!src && !!ctx.zoom;
       const name = v.path ? base(v.path) : "image";
       const path = v.path && !v.hidePath ? el("span", "vis-path", v.path) : null;
       vis.replaceChildren();
@@ -799,6 +813,11 @@ window.HubToolCard = (() => {
         visBig.hidden = false;
         if (shown) {
           visBig.append(picture(src, name, "vis-big", broken));
+          for (const x of v.more || []) {
+            const u = ctx.seen ? ctx.seen(x.id, false) : "";
+            if (u) visBig.append(picture(u, "image", "vis-big", () => {}));
+          }
+          if (v.kind === "link") visBig.append(link(v.url));
           if (path) visBig.append(path);
         } else if (v.kind === "link") {
           visBig.append(link(v.url));
@@ -819,6 +838,7 @@ window.HubToolCard = (() => {
       if (answer && v.question) q.append(el("small", "vis-ask", v.question));
       if (shown) {
         vis.append(picture(src, name, "vis-thumb", broken), q);
+        if (v.kind === "link") q.append(link(v.url));
       } else if (v.kind === "nothing") {
         vis.append(q);
       } else {
@@ -1010,6 +1030,7 @@ window.HubToolCard = (() => {
     const whole = typeof p.size === "number" && typeof p.result === "string" && p.size > p.result.length;
     call.out = (out || "") + (whole ? "\n… (" + p.size + " characters in all)" : "");
     call.diff = typeof p.inline_diff === "string" ? p.inline_diff : "";
+    call.seen = Array.isArray(p.seen) ? p.seen : [];
     call.endedAt = p.endedAt || 0;
     // How long it ran: as the event says, else from its start and end when
     // both are known. A duration of 0 is no measure.

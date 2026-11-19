@@ -648,6 +648,27 @@ func (d *Dialer) File(ctx context.Context, path string) (*http.Response, error) 
 	return resp, nil
 }
 
+// SeenImage opens a kept copy of an image the model saw, by its sha256 id:
+// GET /api/seen-images/<id>, the thumbnail with thumb when Hermes kept one.
+// The caller closes the response body. A copy Hermes does not have is
+// ErrNoFile.
+func (d *Dialer) SeenImage(ctx context.Context, id string, thumb bool) (*http.Response, error) {
+	p := "/api/seen-images/" + url.PathEscape(id)
+	if thumb {
+		p += "?size=thumb"
+	}
+	resp, err := d.request(ctx, d.slow, http.MethodGet, p, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := fileStatus(resp, "seen image"); err != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_ = resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
+}
+
 func fileStatus(resp *http.Response, what string) error {
 	switch resp.StatusCode {
 	case http.StatusOK:

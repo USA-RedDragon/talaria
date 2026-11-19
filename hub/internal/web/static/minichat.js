@@ -226,7 +226,8 @@ window.HubMiniChat = (() => {
           v.at = at;
           // Hermes keeps one result row for each call a tool_call carries.
           v.draw("tool.complete", { tool_id: callID(e), name: e.name, args: e.args || null, result: e.result, is_error: !!e.error, one: true,
-            duration_s: typeof e.duration_ms === "number" ? e.duration_ms / 1000 : undefined, size: typeof e.result_size === "number" ? e.result_size : undefined });
+            duration_s: typeof e.duration_ms === "number" ? e.duration_ms / 1000 : undefined, size: typeof e.result_size === "number" ? e.result_size : undefined,
+            seen_images: e.seen });
           break;
         case "steer": steer(e); break;
       }

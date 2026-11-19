@@ -369,6 +369,7 @@ func New(username, password string) *Gateway {
 	mux.HandleFunc("GET /api/ws", g.ws)
 	g.Handle("POST /api/files/ticket", http.HandlerFunc(g.fileTicket), true)
 	g.Handle("GET /api/fs/download", http.HandlerFunc(g.fileDownload), true)
+	g.Handle("GET /api/seen-images/{id}", http.HandlerFunc(g.seenImage), true)
 	g.submissions = map[string]submission{}
 	g.Server = httptest.NewUnstartedServer(g.notReadyGate(mux))
 	g.down = &gatedListener{Listener: g.Server.Listener}

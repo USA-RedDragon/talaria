@@ -373,6 +373,11 @@ var migrations = []migration{
 			key TEXT NOT NULL, message_id BIGINT NOT NULL, sent_at BIGINT NOT NULL, PRIMARY KEY (bot_id, chat_id, thread_id, key))`,
 			`CREATE INDEX telegram_sent_at ON telegram_sent (sent_at)`},
 	},
+	{
+		version:  28,
+		sqlite:   []string{`ALTER TABLE subagent_events ADD COLUMN seen TEXT NOT NULL DEFAULT ''`},
+		postgres: []string{`ALTER TABLE subagent_events ADD COLUMN seen TEXT NOT NULL DEFAULT ''`},
+	},
 }
 
 // migrateLockKey is the PostgreSQL advisory lock that keeps two replicas

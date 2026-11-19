@@ -14,6 +14,44 @@ type fileStore struct {
 	files   map[string][]byte
 	tickets map[string]string
 	reads   []string
+	// seen are the kept copies of images the model saw, by sha256 id, and
+	// seenReads the ids read, in order (hermes_cli/web_routers/seen_images.py).
+	seen      map[string][]byte
+	seenReads []string
+}
+
+// SetSeenImage keeps a copy of an image the model saw under id, as Hermes
+// does when it loads the image.
+func (g *Gateway) SetSeenImage(id string, data []byte) {
+	g.files.mu.Lock()
+	defer g.files.mu.Unlock()
+	if g.files.seen == nil {
+		g.files.seen = map[string][]byte{}
+	}
+	g.files.seen[id] = data
+}
+
+// SeenImageReads lists the ids of the copies read, in order.
+func (g *Gateway) SeenImageReads() []string {
+	g.files.mu.Lock()
+	defer g.files.mu.Unlock()
+	return append([]string(nil), g.files.seenReads...)
+}
+
+func (g *Gateway) seenImage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	g.files.mu.Lock()
+	data, ok := g.files.seen[id]
+	if ok {
+		g.files.seenReads = append(g.files.seenReads, id)
+	}
+	g.files.mu.Unlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(data)
 }
 
 // SetFile puts a file on the fake's server.

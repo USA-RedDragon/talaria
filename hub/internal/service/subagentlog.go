@@ -115,6 +115,7 @@ func (s *Service) SubagentEvents(ctx context.Context, user, backendID, sessionID
 		if liveErr == nil {
 			out.Live = true
 		}
+		s.noteSubagentImages(ctx, user, backendID, sessionID, evs)
 		return out, nil
 	}
 	// Without a log the hub reads the whole transcript every time.
@@ -133,8 +134,47 @@ func (s *Service) SubagentEvents(ctx context.Context, user, backendID, sessionID
 	})
 	if err == nil {
 		out.Live = true
+		s.noteSubagentImages(ctx, user, backendID, sessionID, out.Events)
 	}
 	return out, err
+}
+
+// subImagesMax bounds the images a chat remembers its subagents looked at.
+const subImagesMax = 1024
+
+// noteSubagentImages remembers the images the steps' vision calls looked at,
+// so the chat serves them to the card of that step (offers). A subagent's
+// calls are not in the chat's own rows. It is best effort: a chat that is not
+// loaded is not loaded for it.
+func (s *Service) noteSubagentImages(ctx context.Context, user, backendID, sessionID string, evs []hub.SubagentEvent) {
+	var paths []string
+	for _, e := range evs {
+		if e.Type != hub.StepToolStart && e.Type != hub.StepToolEnd || len(e.Args) == 0 || !isVisionTool(e.Name) {
+			continue
+		}
+		var a struct {
+			ImageURL string `json:"image_url"`
+		}
+		if json.Unmarshal(e.Args, &a) == nil && hub.MediaPath(a.ImageURL) && hub.ImagePath(a.ImageURL) {
+			paths = append(paths, a.ImageURL)
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	lctx, cancel := context.WithTimeout(ctx, subagentLiveWait)
+	defer cancel()
+	_ = s.withSession(lctx, user, backendID, sessionID, func(_ *backend, ls *live) error {
+		ls.mu.Lock()
+		defer ls.mu.Unlock()
+		if ls.subImages == nil || len(ls.subImages)+len(paths) > subImagesMax {
+			ls.subImages = map[string]struct{}{}
+		}
+		for _, p := range paths {
+			ls.subImages[p] = struct{}{}
+		}
+		return nil
+	})
 }
 
 // syncSubagent reads what the subagent's transcript gained since the log's
@@ -297,6 +337,7 @@ func (c *rowConverter) row(row gateway.TranscriptRow) []hub.SubagentEvent {
 			e.Result, e.ResultSize = capText(*row.Result), row.ResultSize
 			e.Error = resultFailed(*row.Result)
 		}
+		e.Seen = hub.SeenImagesOf(row.DisplayMetadata)
 		var md struct {
 			ToolOutcome *gateway.ToolOutcome `json:"tool_outcome"`
 		}

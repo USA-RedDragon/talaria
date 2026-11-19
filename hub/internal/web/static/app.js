@@ -1187,6 +1187,7 @@
       if (!this.cctx) {
         this.cctx = { el, toast, highlight: highlightBash, diff: diffView, page: (p) => this.publishedPage(p),
           image: (p) => (mediaPath(p) && imagePath(p) ? mediaURL(this.base, p) : ""), zoom: openImage,
+          seen: (id, thumb) => seenURL(this.base, id, thumb),
           fileCard: (o) => fileCard(this.base, o),
           here: () => this.computerName(),
           activity: { opens: (n, a) => activity.opens(n, a), open: (n, a, r) => activity.fromTool(n, a, r) } };
@@ -1842,6 +1843,8 @@
   }
 
   const mediaURL = (base, p) => base + "/media?path=" + encodeURIComponent(p);
+  // seenURL is the copy Hermes kept of an image the model saw, by its id.
+  const seenURL = (base, id, thumb) => (/^[0-9a-f]{64}$/.test(id) ? base + "/seen/" + id + (thumb ? "?size=thumb" : "") : "");
 
   // openImage shows an image full size over the page. A click anywhere or
   // Escape closes it; the link opens the original in a new tab.
@@ -1901,25 +1904,32 @@
 
   // mediaImage is a thumbnail of an image the agent named that opens
   // full size. It turns into the file's name when the hub cannot show it.
-  function mediaImage(base, p, cls, fallback) {
+  function mediaImage(base, p, cls, fallback, seenId) {
     const a = el("a", cls || "media-img");
-    a.href = mediaURL(base, p);
+    // The copy Hermes kept of what the model saw is the first choice when the
+    // row names one; the file the agent named is the second (old rows have only it).
+    let kept = seenId ? seenURL(base, seenId) : "";
+    a.href = kept || mediaURL(base, p);
     a.target = "_blank";
     a.rel = "noopener";
-    a.title = baseName(p);
+    a.title = baseName(p || "image");
     const img = el("img");
-    img.alt = baseName(p);
+    img.alt = baseName(p || "image");
     img.loading = "lazy";
     img.src = a.href;
     img.onerror = () => {
-      if (fallback && imagePath(fallback) && mediaPath(fallback) && fallback !== p) {
+      if (kept && p && mediaPath(p)) {
+        kept = "";
+        a.href = img.src = mediaURL(base, p);
+      } else if (fallback && imagePath(fallback) && mediaPath(fallback) && fallback !== p) {
         const other = fallback;
         fallback = "";
         a.href = img.src = mediaURL(base, other);
-      } else a.replaceWith(mediaFile(base, p, true));
+      } else if (p && mediaPath(p)) a.replaceWith(mediaFile(base, p, true));
+      else a.replaceWith(el("div", "att", el("span", "file", "image")));
     };
     a.append(img);
-    zoomable(a, () => a.href, baseName(p));
+    zoomable(a, () => a.href, baseName(p || "image"));
     return a;
   }
 
@@ -2349,12 +2359,19 @@
 
   // attachmentRow shows a message's attachments: a thumbnail when the page
   // has the image or the hub can fetch it from Hermes, else the file's name.
-  function attachmentRow(atts, base) {
+  function attachmentRow(atts, base, seen) {
     const row = el("div", "atts");
+    // The images Hermes gave the model keep a copy, in the order they were attached.
+    let nth = 0;
     for (const a of atts) {
+      const kept = a.image || (a.path && imagePath(a.path)) ? (seen || [])[nth++] : null;
       const fetched = !a.url && base && a.path && imagePath(a.path) && mediaPath(a.path);
       if (fetched) {
-        row.append(mediaImage(base, a.path, "att image", a.fallback));
+        row.append(mediaImage(base, a.path, "att image", a.fallback, kept && kept.id));
+        continue;
+      }
+      if (!a.url && base && kept && seenURL(base, kept.id)) {
+        row.append(mediaImage(base, a.path || "", "att image", "", kept.id));
         continue;
       }
       const box = el("div", "att" + (a.url ? " image" : ""));

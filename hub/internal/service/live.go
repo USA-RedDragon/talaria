@@ -28,6 +28,10 @@ type live struct {
 	client *gateway.Client
 
 	mu sync.Mutex
+	// subImages are the images the chat's subagents looked at, as their
+	// steps named them: a step's card asks for the file through this chat,
+	// whose own rows never name it (ls.mu; see noteSubagentImages).
+	subImages map[string]struct{}
 	// withPrompts is the last snapshot with prompts made (ls.mu).
 	withPrompts promptedSnapshot
 	// questions are the settled questions of subagents, oldest first

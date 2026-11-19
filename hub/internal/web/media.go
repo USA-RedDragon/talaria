@@ -448,3 +448,30 @@ func (ts *transfers) stop(key string) {
 		t.cancel()
 	}
 }
+
+// handleSeenImage serves the kept copy of an image the model saw (Hermes
+// stores it when it loads the image), by its sha256 id, with ?size=thumb for
+// the smaller one. A copy never changes, so it is cached for good.
+func (s *Server) handleSeenImage(w http.ResponseWriter, r *http.Request) {
+	si, ok := s.svc.(hub.SeenImages)
+	id := r.PathValue("id")
+	if !ok || !hub.SeenImageID(id) {
+		errorJSON(w, http.StatusNotFound, hub.ErrNoMedia.Error())
+		return
+	}
+	f, err := si.SeenImage(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("session"), id, r.URL.Query().Get("size") == "thumb")
+	if err != nil {
+		s.fileError(w, err)
+		return
+	}
+	defer func() { _ = f.Body.Close() }()
+	h := w.Header()
+	h.Set("Content-Type", f.MIME)
+	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cache-Control", "private, max-age=31536000, immutable")
+	if f.Size >= 0 {
+		h.Set("Content-Length", strconv.FormatInt(f.Size, 10))
+	}
+	_, _ = io.Copy(w, f.Body) //nolint:gosec // an image whose type the hub sniffed, served with a sandbox CSP
+}
