@@ -189,6 +189,13 @@ class BrowserBase(Base):
         p.start()
         self.addCleanup(p.stop)
         self.registry = self.registered()
+        # A scheduled run waits for the job's chat (JOB_WAIT_S); tests that need it set it.
+        p = mock.patch.object(browser, "JOB_WAIT_S", 0)
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(browser, "JOB_WAIT_POLL_S", 0.01)
+        p.start()
+        self.addCleanup(p.stop)
         self.confirm = mock.patch.object(browser, "_confirm", return_value=True)
         self.confirmed = self.confirm.start()
         self.addCleanup(self.confirm.stop)
@@ -608,12 +615,19 @@ class ToolTests(BrowserBase):
         self.assertIsNone(self.decision)
         self.assertEqual(self.last("eval")["args"]["guard"]["script_hosts"], ["example.com"])
 
-    def test_eval_write_never_on_salesforce(self):
+    def test_eval_write_on_salesforce_asks_a_person_each_time(self):
         self.salesforce()
-        out = self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
-        self.assertEqual(self.decision["action"], "block")
-        self.assertIn("never allowed on Salesforce", out["error"])
-        self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
+        with mock.patch.object(browser, "approved", lambda k: True):
+            self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.assertIn("Only you can allow this, each time", self.confirmed.call_args[0][0])
+        self.assertEqual(self.last("eval")["args"]["guard"]["allow"], ["protected_write acme.lightning.force.com"])
+        self.confirmed.return_value = False
+        before = len([r for r in self.fake.requests if r["op"] == "eval"])
+        with mock.patch.object(browser, "approved", lambda k: True):
+            out = self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.assertIn("did not allow", out["error"])
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "eval"]), before)
+        self.confirmed.return_value = True
         self.run_tool("browser_eval", tab_id=7, script="return 1")
         self.assertEqual(self.decision["rule_key"], "browser:script:acme.lightning.force.com")
 
@@ -624,12 +638,13 @@ class ToolTests(BrowserBase):
         self.assertEqual(self.confirmed.call_count, 1)
         self.assertTrue(self.last("eval")["args"]["guard"]["sensitive"])
 
-    def test_eval_write_never_on_secret_page(self):
+    def test_eval_write_on_secret_page_asks_a_person(self):
         self.fake.inspect = dict(self.fake.inspect, sensitive=["password"])
-        out = self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
-        self.assertEqual(self.decision["action"], "block")
-        self.assertIn("not allowed on a page with password fields", out["error"])
-        self.assertEqual(self.confirmed.call_count, 0)
+        with mock.patch.object(browser, "approved", lambda k: True):
+            self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.assertEqual(self.confirmed.call_count, 1)
+        self.assertIn("password fields", self.confirmed.call_args[0][0])
+        self.assertEqual(self.last("eval")["args"]["guard"]["allow"], ["sensitive_write example.com"])
 
     def test_secret_page_confirmation_is_not_a_salesforce_one(self):
         self.fake.inspect = dict(self.fake.inspect, sensitive=["password"], target={"kind": "other"})
@@ -761,11 +776,12 @@ class ToolTests(BrowserBase):
         self.assertIn("browser:script:acme.lightning.force.com", out["error"])
         self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
 
-    def test_eval_write_without_hook_inspect_is_still_blocked_on_salesforce(self):
+    def test_eval_write_without_hook_inspect_still_asks_on_salesforce(self):
         self.salesforce()
+        self.confirmed.return_value = False
         with mock.patch.object(browser, "approved", lambda k: True):
             out = self.hook_misses("browser_eval", tab_id=7, script="return 1", allow_writes=True)
-        self.assertIn("never allowed on Salesforce", out["error"])
+        self.assertIn("did not allow", out["error"])
         self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
 
     def test_navigate_without_hook_inspect_uses_the_always_grant(self):
@@ -1093,11 +1109,26 @@ class ToolTests(BrowserBase):
         self.assertFalse(out["filled"])
         self.assertIn("needs the user", out["note"])
 
-    def test_eval_refused_on_autologin_host(self):
+    def test_eval_on_autologin_host_asks_a_person_each_time(self):
+        """Was a hard refusal; now a person-only card, and Deny still sends nothing."""
         self.login_page()
+        self.run_tool("browser_eval", tab_id=7, script="return 1")
+        self.assertIn("sign-in host", self.confirmed.call_args[0][0])
+        guard = self.last("eval")["args"]["guard"]
+        self.assertEqual(guard["allow"], ["login_script login.example.com"])
+        self.assertTrue(guard["sensitive"])
+        self.confirmed.return_value = False
+        before = len([r for r in self.fake.requests if r["op"] == "eval"])
         out = self.run_tool("browser_eval", tab_id=7, script="return 1")
+        self.assertIn("did not allow", out["error"])
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "eval"]), before)
+
+    def test_eval_on_autologin_host_without_a_user_is_blocked(self):
+        self.login_page()
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+            out = self.run_tool("browser_eval", tab_id=7, script="return 1")
         self.assertEqual(self.decision["action"], "block")
-        self.assertIn("browser.autologin-hosts", out["error"])
+        self.assertIn("no user is present", out["error"])
         self.assertFalse([r for r in self.fake.requests if r["op"] == "eval"])
 
     def test_actions_on_autologin_login_page_ask_the_user_each_time(self):
@@ -1139,6 +1170,93 @@ class ToolTests(BrowserBase):
         self.assertTrue(browser.guard_of({"login_page": True, "confirm": ["password"]})["login_page"])
 
     W3ID = "w3id Password Use your w3id and password if you can't use a passkey."
+
+    def refuse_once(self, op, message):
+        """The extension refuses op once with message, then answers as usual."""
+        real = self.fake.answer
+        state = {"n": 0}
+
+        def answer(msg):
+            if msg["op"] == op and state["n"] == 0:
+                state["n"] += 1
+                self.fake.requests.append(msg)
+                return {"ok": False, "code": "refused", "error": message}
+            return real(msg)
+        p = mock.patch.object(self.fake, "answer", answer)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_extension_refusal_with_a_check_asks_and_runs_again(self):
+        """A refusal that names its check is a card; Allow sends the call again with the answer."""
+        self.refuse_once("screenshot", "a screenshot of a login page ... needs the user's OK [allow:login_page login.example.com]")
+        self.run_tool("browser_screenshot", tab_id=7)
+        self.assertIn("sign-in page", self.confirmed.call_args[0][0])
+        shots = [r["args"] for r in self.fake.requests if r["op"] == "screenshot"]
+        self.assertEqual(len(shots), 2)
+        self.assertNotIn("guard", shots[0])
+        self.assertEqual(shots[1]["guard"]["allow"], ["login_page login.example.com"])
+
+    def test_extension_refusal_denied_stays_refused(self):
+        self.confirmed.return_value = False
+        self.refuse_once("screenshot", "a screenshot needs the user's OK [allow:login_page login.example.com]")
+        out = self.run_tool("browser_screenshot", tab_id=7)
+        self.assertIn("did not allow", out["error"])
+        self.assertNotIn("[allow:", out["error"])
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "screenshot"]), 1)
+
+    def test_person_only_refusal_without_a_user_is_not_asked(self):
+        self.refuse_once("navigate", "10.0.0.5 is on a loopback or private network [allow:private 10.0.0.5]")
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+            out = self.run_tool("browser_navigate", tab_id=7, url="http://10.0.0.5/")
+        self.assertIn("Only a person can allow this", out["error"])
+        self.assertEqual(self.confirmed.call_count, 0)
+
+    def test_normal_refusal_goes_through_the_approval_gate(self):
+        self.refuse_once("back", "this tab ran a script, so going back needs the user's OK [allow:scripted example.com]")
+        asked = []
+        with mock.patch("tools.approval.request_tool_approval",
+                        lambda tool, reason, rule_key="", **k: asked.append(rule_key) or {"approved": True}):
+            self.run_tool("browser_back", tab_id=7)
+        self.assertEqual(asked, ["browser:allow-scripted:example.com"])
+        self.assertEqual(self.confirmed.call_count, 0)
+        backs = [r["args"] for r in self.fake.requests if r["op"] == "back"]
+        self.assertEqual(backs[-1]["guard"]["allow"], ["scripted example.com"])
+
+    def test_blocked_requests_are_noted_and_can_be_lifted(self):
+        real = self.fake.answer
+
+        def answer(msg):
+            out = real(msg)
+            if msg["op"] == "read_text" and out and out.get("ok"):
+                out = dict(out, result=dict(out["result"], blocked_requests=[
+                    {"tab_id": 7, "count": 3, "hosts": ["cdn.example.net"], "kinds": ["taint"]}]))
+            if msg["op"] == "lift_limits":
+                return {"ok": True, "result": {"lifted": ["taint"]}}
+            return out
+        with mock.patch.object(self.fake, "answer", answer), mock.patch(
+                "tools.approval.request_tool_approval", lambda *a, **k: {"approved": True}):
+            out = self.run_tool("browser_snapshot", tab_id=7, mode="text")
+        note = " ".join(out.get("blocked_requests_note") or [])
+        self.assertIn("Talaria blocked 3 requests from tab 7 to cdn.example.net", note)
+        self.assertIn("lifted", note)
+        lifts = [r["args"] for r in self.fake.requests if r["op"] == "lift_limits"]
+        self.assertEqual(lifts, [{"tab_id": 7, "kinds": ["taint"], "hosts": ["cdn.example.net"]}])
+
+    def test_job_wait_returns_once_the_rule_is_approved(self):
+        calls = {"n": 0}
+
+        def approved(rule):
+            calls["n"] += 1
+            return calls["n"] >= 2
+        with mock.patch.object(browser, "approved", approved), mock.patch.object(browser, "JOB_WAIT_S", 5):
+            self.assertEqual(browser.job_wait({"job_wait": {"rule": "browser:visit:example.org"}}, self.device.conn), "")
+
+    def test_job_wait_fails_plainly_after_the_limit(self):
+        with mock.patch.object(browser, "approved", lambda r: False), mock.patch.object(browser, "JOB_WAIT_S", 0), \
+                mock.patch.object(browser, "JOB_WAIT_POLL_S", 0.01):
+            out = json.loads(browser.job_wait({"job_wait": {"rule": "browser:visit:example.org"}}, self.device.conn))
+        self.assertIn("waited 0 minutes", out["error"])
+        self.assertIn("job's chat", out["error"])
 
     def test_method_name_drops_a_description_that_names_a_passkey(self):
         self.assertEqual(browser.method_name(self.W3ID), "w3id Password")

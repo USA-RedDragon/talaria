@@ -401,12 +401,14 @@ def ask_chat(session_id: str, rule: str, tool_name: str) -> str:
         return ""
     kind, site = rule.split(":", 2)[1:]
     if kind == "login":
-        text = (f"Scheduled job {job_id} could not run {tool_name}: signing in on {site} with Firefox's saved login has "
+        text = (f"Scheduled job {job_id} is waiting up to {_br().JOB_WAIT_S // 60} minutes to run {tool_name}: signing in "
+                f"on {site} with Firefox's saved login has "
                 f"not been allowed by the user on its computer, and nobody can answer a card in a run. Tell the user, "
                 f"and if they want it, call {ALLOW_TOOL} with rule \"{rule}\" and job_id \"{job_id}\": it shows the "
                 f"user a sign-in card (allow once, allow on that computer, or deny). This message is sent once.")
     else:
-        text = (f"Scheduled job {job_id} could not run {tool_name} because the user has not approved \"{kind}\" on "
+        text = (f"Scheduled job {job_id} is waiting up to {_br().JOB_WAIT_S // 60} minutes to run {tool_name} because the "
+                f"user has not approved \"{kind}\" on "
                 f"{site} with \"always\" (rule {rule}), and nobody can answer an approval in a run. Tell the user, "
                 f"and if they want it, call {ALLOW_TOOL} with rule \"{rule}\" and job_id \"{job_id}\": it asks the user, "
                 f"and an \"Always\" answer lets the job's later runs do it. This message is sent once.")

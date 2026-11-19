@@ -720,8 +720,149 @@ def _await_status(conn: Any) -> None:
 
 
 def call(conn: Any, op: str, args: dict, timeout: float = 0) -> Any:
+    """Run a browser operation on the device. In a tool handler, a refusal that names its check
+    (``[allow:<kind> <host>]``, docs/browser.md section 7.5) asks the user on a card and, after
+    Allow, runs the operation once more with the answer in the guard; requests the extension
+    cancelled while no tool call was running (``blocked_requests``) ask whether to lift that limit."""
     core = _core()
-    return core.hub().browser_call(conn.device_id, op, args, timeout or core.BROWSER_DEFAULT_TIMEOUT_S)
+    asked: set[str] = set()
+    while True:
+        try:
+            res = core.hub().browser_call(conn.device_id, op, args, timeout or core.BROWSER_DEFAULT_TIMEOUT_S)
+        except core.BrowserError as exc:
+            m = ALLOW_MARK.search(str(exc))
+            if exc.code != core.BROWSER_REFUSED or not m or not _IN_HANDLER.get():
+                raise
+            kind, host = m.group(1), m.group(2)
+            key = f"{kind} {host}"
+            text = ALLOW_MARK.sub("", str(exc)).split(": ", 1)[-1]
+            if key in asked or len(asked) >= 4:
+                raise
+            why = ask_allow(conn, op, kind, host, text)
+            if why:
+                raise core.BrowserError(exc.code, f"{op}: {text}. {why}") from None
+            asked.add(key)
+            guard = dict(args.get("guard") or {}) if isinstance(args.get("guard"), dict) else {}
+            guard["allow"] = [*(guard.get("allow") or []), key]
+            if kind in _ALLOW_FLAGS:
+                guard[_ALLOW_FLAGS[kind]] = True  # the in-page check reads the same answer
+            args = dict(args, guard=guard)
+            continue
+        if isinstance(res, dict) and "blocked_requests" in res:
+            res = dict(res)
+            _blocked_requests(conn, res.pop("blocked_requests"))
+        return res
+
+
+# The end of a refusal that names its check: the user can allow it on a card (section 7.5).
+ALLOW_MARK = re.compile(r"\s*\[allow:([a-z_]{1,32}) ([A-Za-z0-9.:\[\]_-]{1,260})\]\s*$")
+# Checks that only a person may let pass: password, payment and one-time code pages, scripts that
+# change data on Salesforce or such pages, loopback and private addresses, the user's hub.
+PERSON_ONLY = frozenset({"hub", "private", "login_page", "login_script", "protected_write", "sensitive_write",
+                         "filled_password", "sensitive"})
+# Checks that the plugin's own approvals already name: an answer there counts here too.
+_ALLOW_RULES = {"visit": "visit", "click": "click", "script": "script", "script_write": "script-write"}
+# Checks the in-page guard also makes, with the guard flag that carries the user's answer.
+_ALLOW_FLAGS = {"sensitive": "sensitive", "click": "confirmed"}
+_ALLOW_WORDS = {
+    "visit": "open",
+    "click": "click (or press Enter or Space) on",
+    "sensitive": "act on a page with password, payment or one-time code fields on",
+    "script": "run a read-only script on",
+    "script_write": "run a script that changes data on",
+    "hub": "open the Talaria hub, with your hub session, in an agent tab on",
+    "private": "reach the loopback or private network host",
+    "login_page": "act on the sign-in page (screenshot or selector wait) of",
+    "login_script": "run a script on the sign-in host, where Firefox fills your saved password,",
+    "protected_write": "run a script that changes data on",
+    "sensitive_write": "run a script that changes data on a page with password, payment or one-time code fields on",
+    "filled_password": "run a script on a page with a filled password field on",
+    "scripted": "act in a tab that ran a script, on",
+    "opener": "run a script in a tab another tab opened, on",
+}
+
+
+def ask_allow(conn: Any, op: str, kind: str, host: str, why: str) -> str:
+    """Ask the user to let one refused check pass. Returns "" after Allow, else the reason to add
+    to the refusal. Person-only checks ask every time on a card only a person can answer (never
+    smart approval, yolo or an allowlist) and are refused with no user present; the others go
+    through the approval gate with the rule ``browser:allow-<kind>:<site>``, so Allow for this chat
+    and Allow always hold."""
+    where = f"the Firefox on device {conn.name or conn.device_id}"
+    what = _ALLOW_WORDS.get(kind, f"let the check {kind} pass on")
+    person = kind in PERSON_ONLY or (kind == "scripted" and op == "login")
+    text = f"Allow the agent to {what} {host} in {where}? The check said: {why}."
+    if person:
+        if no_user():
+            return ("Only a person can allow this, and no user is present in this run. Report that this step needs "
+                    "the user.")
+        return "" if _confirm(text) else "The user did not allow it."
+    rule = _rule(_ALLOW_RULES.get(kind, f"allow-{kind}"), (host if kind == "click" else site_of(host)) or "unknown")
+    if approved(rule):
+        return ""
+    if no_user():
+        return (f"It needs the user's approval (rule {rule}), and no user is present in this run. Only \"always\" "
+                f"answers count here.")
+    try:
+        from tools.approval import request_tool_approval
+        answer = request_tool_approval("browser_" + op, text + " Allow for this chat (or always) lets it pass again "
+                                       "without asking.", rule_key=rule)
+    except Exception:
+        _core().logger.warning("device-browser: could not ask to allow %s", kind, exc_info=True)
+        return "The approval could not be asked."
+    return "" if isinstance(answer, dict) and answer.get("approved") else "The user did not allow it."
+
+
+# Notes about requests the extension cancelled with no tool call running, for this tool result.
+_BLOCKED_NOTES: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar("hermes_device_blocked_notes",
+                                                                                default=None)
+
+
+def _blocked_requests(conn: Any, notes: Any) -> None:
+    """The extension cancelled requests of a tab while no tool call was running (its script taint,
+    requests with no tab during a script, loopback or private hosts, the hub, names that do not
+    resolve). Ask whether to lift that limit for the tab; whatever the answer, the tool result
+    says what was blocked."""
+    for n in (notes if isinstance(notes, list) else [])[:10]:
+        if not isinstance(n, dict):
+            continue
+        tab = n.get("tab_id") if isinstance(n.get("tab_id"), int) else -1
+        hosts = [str(h)[:260] for h in (n.get("hosts") or []) if isinstance(h, str)][:8]
+        kinds = [str(k) for k in (n.get("kinds") or []) if k in ("taint", "tabless", "private", "hub", "dns")]
+        count = n.get("count") if isinstance(n.get("count"), int) else 0
+        where = f"tab {tab}" if tab >= 0 else "an agent script (requests with no tab)"
+        line = f"Talaria blocked {count} requests from {where} to {', '.join(hosts) or 'unknown hosts'} ({', '.join(kinds)})"
+        lift = [k for k in kinds if k != "dns"]
+        result = "not lifted"
+        if lift and _IN_HANDLER.get():
+            person = any(k in ("private", "hub") for k in lift)
+            text = f"{line}; allow? Allow lifts that limit for {where}."
+            ok = False
+            if not no_user():
+                if person:
+                    ok = _confirm(text)
+                else:
+                    rule = _rule("lift-" + "-".join(sorted(lift)), "tab")
+                    try:
+                        from tools.approval import request_tool_approval
+                        ans = request_tool_approval("browser_lift", text, rule_key=rule)
+                        ok = isinstance(ans, dict) and bool(ans.get("approved"))
+                    except Exception:
+                        _core().logger.warning("device-browser: could not ask to lift a limit", exc_info=True)
+            if ok:
+                try:
+                    _core().hub().browser_call(conn.device_id, "lift_limits", {"tab_id": tab, "kinds": lift,
+                                                                               "hosts": hosts}, 30)
+                    result = "lifted after the user allowed it; the page may need browser_navigate to load again"
+                except _core().BrowserError as exc:
+                    result = f"could not be lifted: {exc}"
+            elif no_user():
+                result = "not lifted: no user is present to allow it"
+            else:
+                result = "not lifted: the user did not allow it"
+        notes_now = _BLOCKED_NOTES.get()
+        if notes_now is not None and len(notes_now) < 10:
+            notes_now.append(f"{line}; {result}.")
 
 
 def _hook_timeout() -> float:
@@ -962,6 +1103,15 @@ def _put_grant(key: str, grant: dict) -> None:
         _GRANTS[key] = (now, grant)
 
 
+def _peek_grant(key: str) -> dict:
+    """The grant the hook left for ``key``, without taking it."""
+    with _GRANTS_LOCK:
+        entry = _GRANTS.get(key)
+    if entry is None or time.monotonic() - entry[0] > GRANT_TTL_S:
+        return {}
+    return entry[1]
+
+
 def _take_grant(key: str) -> dict:
     with _GRANTS_LOCK:
         entry = _GRANTS.pop(key, None)
@@ -1106,24 +1256,38 @@ def _decide_eval(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dict
     site = site_of(host)
     if not site:
         return {}, None
-    if info.get("autologin"):
-        return {}, {"action": "block", "message": f"browser_eval: scripts are never allowed on a host in the device's "
-                                                  f"browser.autologin-hosts ({host}), where Firefox fills a saved "
-                                                  f"password."}
     writes = bool(args.get("allow_writes"))
-    if writes and (info.get("protected") or protected(host) or protected(str(info.get("top_host") or ""))):
-        return {}, {"action": "block", "message": f"browser_eval: scripts that change data are never allowed on "
-                                                  f"Salesforce or the device's browser.confirm-hosts ({site}). Run "
-                                                  f"the script without allow_writes; it may only read there."}
     grant: dict = {"script_hosts": [host], "write_hosts": [host] if writes else []}
     shown = script.strip()
     shown = shown if len(shown) <= 400 else shown[:400] + " ..."
     if source:
         shown = f"{source[:600]}\n{shown}"
     sensitive = [s for s in (info.get("sensitive") or []) if isinstance(s, str)]
+    top = str(info.get("top_host") or "")
+    person: list[str] = []  # checks only a person may let pass (section 7.5); each asks every time
+    if info.get("autologin"):
+        login_host = top if info.get("top_autologin") else host
+        grant["allow"] = [f"login_script {login_host}"]
+        person.append(f"{login_host} is a sign-in host where Firefox fills your saved password, so the script could "
+                      f"read it")
+    if writes and (info.get("protected") or protected(host) or protected(top)):
+        prot = top if protected(top) else host
+        grant.setdefault("allow", []).append(f"protected_write {prot}")
+        person.append(f"it can change data on {site} (Salesforce or a site in browser.confirm-hosts)")
     if sensitive and writes:
-        return {}, {"action": "block", "message": f"browser_eval: scripts that change data are not allowed on a page "
-                                                  f"with {', '.join(sensitive)} fields ({site})."}
+        grant.setdefault("allow", []).append(f"sensitive_write {host}")
+        person.append(f"it can change data on a page with {', '.join(s.replace('_', '-') for s in sensitive)} fields")
+    if person:
+        grant["confirm"] = sensitive or ["script"]
+        grant["confirm_text"] = (f"Allow running a script{' that can change data' if writes else ''} on {site} in {where}? "
+                                 + "; ".join(person) + f". Only you can allow this, each time. Script:\n{shown}")
+        if writes:
+            return grant, {"action": "approve", "rule_key": _rule("script-write", site),
+                           "message": f"Run a script that can change data on {site} in {where} with the user's logins. "
+                                      f"Script:\n{shown}"}
+        return grant, None if approved(_rule("script", site)) or approved(_rule("script-write", site)) else {
+            "action": "approve", "rule_key": _rule("script", site),
+            "message": f"Run a read-only script on {site} in {where} with the user's logins. Script:\n{shown}"}
     if sensitive:
         grant["confirm"] = sensitive
         grant["confirm_text"] = (f"Allow running a read-only script on {site} in {where}. The page has "
@@ -1224,7 +1388,7 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
         grant["login_page"] = True
         grant["confirm_text"] = (
             f"Allow {how} {('the element' + what_el_of(t)) if what_el_of(t) else 'an element'} on the sign-in page "
-            f"{login_host} in {where}? Firefox has a saved login there; "
+            f"{login_host} in {where}? Firefox has a saved login there. "
             + ("the text goes into a password field. " if t.get("field") == "password" else "")
             + "Every action on this page needs your OK.")
         return grant, None
@@ -1306,8 +1470,14 @@ def pre_tool_call(tool_name: str = "", args: Optional[dict] = None, task_id: str
         return _pre_tool_call(tool_name, args, session_id)
     except Exception as exc:
         _core().logger.warning("device-browser: pre_tool_call failed for %s", tool_name, exc_info=True)
-        return {"action": "block", "message": f"talaria: {tool_name} refused because the browser check failed: "
-                                              f"{exc}"}
+        # The extension still checks the call with an empty guard, so allowing it lets nothing
+        # past the extension's own refusals; those ask again when they fire.
+        if no_user() or tool_name not in GATED:
+            return {"action": "block", "message": f"talaria: {tool_name} refused because the browser check failed: "
+                                                  f"{exc}"}
+        return {"action": "approve", "rule_key": f"browser:check-failed:{tool_name.removeprefix('browser_')}",
+                "message": f"The browser check before {tool_name} failed ({str(exc)[:200]}). Run it anyway? Firefox "
+                           f"still refuses anything that needs your OK and asks you then."}
 
 
 def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Optional[dict]:
@@ -1352,7 +1522,11 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
                 f"retry it; report that this step needs the user.")}
         if approval and approval.get("login_grant"):
             _take_grant(key)
-            return _login_grant_unattended(session_id, approval["login_grant"], tool_name)
+            out = _login_grant_unattended(session_id, approval["login_grant"], tool_name)
+            if out and "job_wait" in out:
+                _put_grant(key, dict(grant, **out))
+                return None
+            return out
         if approval and not approved(approval.get("rule_key") or "") and not grant.get("device_grant"):
             _take_grant(key)
             try:
@@ -1360,6 +1534,11 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
             except Exception:
                 _core().logger.warning("device-browser: could not tell the job's chat", exc_info=True)
                 told = ""
+            if told and cron_job_id(_session(session_id)):
+                # A scheduled run: the job's chat was told now and can allow it there. The handler waits
+                # for that answer (JOB_WAIT_S), then fails with a plain message (section 7.5).
+                _put_grant(key, dict(grant, job_wait={"rule": str(approval.get("rule_key") or "")}))
+                return None
             return {"action": "block", "message": (
                 f"{tool_name} was not run: it needs the user's approval (rule {approval.get('rule_key')}), and no "
                 f"user is present in this run (a scheduled job or a one-shot query). Only approvals the user gave "
@@ -1368,14 +1547,52 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
     return approval
 
 
-def _login_grant_unattended(session_id: str, card: dict, tool_name: str) -> dict:
-    """No user can answer the sign-in card in this run (a scheduled job, a one-shot query)."""
+# How long a scheduled run waits for the user to allow, in the job's chat, what the run needs.
+JOB_WAIT_S = 600
+JOB_WAIT_POLL_S = 5
+
+
+def job_wait(grant: dict, conn: Any) -> str:
+    """In a scheduled run, wait up to JOB_WAIT_S for the user to allow what ``grant["job_wait"]``
+    names (an approval rule given as "always", or a sign-in grant on the computer), which the job's
+    chat was asked for. Returns "" once it is allowed, else the refusal."""
+    want = grant.get("job_wait") if isinstance(grant.get("job_wait"), dict) else {}
+    rule, host = str(want.get("rule") or ""), str(want.get("login_host") or "")
+    deadline = time.monotonic() + JOB_WAIT_S
+    while True:
+        if rule:
+            try:
+                from tools.approval import load_permanent_allowlist
+                load_permanent_allowlist()  # the answer is saved by the chat's process
+            except Exception:
+                pass
+            if approved(rule):
+                return ""
+        if host:
+            status = _status(conn, host, in_hook=False) or {}
+            if status.get("grant"):
+                return ""
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(JOB_WAIT_POLL_S)
+    name = str(conn.name or conn.device_id)
+    what = (f"it needs the user's approval (rule {rule}, given as \"always\")" if rule else
+            f"signing in on {host} with Firefox's saved login on {name} needs the user's sign-in grant")
+    return _err(f"not run: {what}, and this scheduled run waited {JOB_WAIT_S // 60} minutes for the user to allow it "
+                f"in the job's chat, and nobody did. Report that the job needs the user to allow it there.", "approval")
+
+
+def _login_grant_unattended(session_id: str, card: dict, tool_name: str) -> Optional[dict]:
+    """No user can answer the sign-in card in this run (a scheduled job, a one-shot query). A
+    scheduled run whose chat was told now waits for the grant in the handler (job_wait)."""
     host, name = card.get("host"), card.get("device_name")
     try:
         told = _jobs().ask_chat(_session(session_id), _rule("login", str(host)), tool_name)
     except Exception:
         _core().logger.warning("device-browser: could not tell the job's chat", exc_info=True)
         told = ""
+    if told and cron_job_id(_session(session_id)):
+        return {"job_wait": {"login_host": str(host)}}
     return {"action": "block", "message": (
         f"{tool_name} was not run: signing in on {host} with Firefox's saved login on {name} has not been allowed by "
         f"the user, only the user can allow it, and no user is present in this run (a scheduled job or a one-shot "
@@ -1785,6 +2002,19 @@ def _record_tabs(name: str, args: dict, out: Optional[dict], sid: str, device: s
 TARGET_TOOLS = frozenset({"browser_click", "browser_type", "browser_press", "browser_hover", "browser_scroll"})
 
 
+def _with_notes(result: Any) -> Any:
+    """``result`` (a JSON string) with ``blocked_requests_note``: what the extension blocked
+    while no tool call was running, and whether the user lifted it."""
+    notes = _BLOCKED_NOTES.get()
+    if not notes or not isinstance(result, str):
+        return result
+    out = _parsed(result)
+    if out is None:
+        return result
+    out["blocked_requests_note"] = list(notes)
+    return json.dumps(out, ensure_ascii=False)
+
+
 def _with_target(result: Any, who: Optional[dict]) -> Any:
     """``result`` (a JSON string) with ``target``: ``{"role", "name"}``, the element's label from
     the snapshot that gave its ref. The hub's cards read it instead of the ref; it never holds
@@ -1807,11 +2037,19 @@ def _tool(fn: Callable[[dict, Any, str], Any], name: str) -> Callable[..., Any]:
         counted = False
         who: Optional[dict] = None
         in_handler = _IN_HANDLER.set(True)
+        notes_token = _BLOCKED_NOTES.set([])
         try:
             _, conn = target(session_id)
             device = conn.device_id
             args = with_default_tab(name, args, session_id, conn)
             tab = _tab_id(args)
+            waiting = _peek_grant(_grant_key(sid, name, args))
+            if waiting.get("job_wait"):
+                refused = job_wait(waiting, conn)
+                if refused:
+                    _take_grant(_grant_key(sid, name, args))
+                    return refused
+                _put_grant(_grant_key(sid, name, args), {k: v for k, v in waiting.items() if k != "job_wait"})
             if name in TARGET_TOOLS:
                 who = _batch().ref_target(device, tab, args.get("ref"))
             if cleanup_enabled():
@@ -1833,7 +2071,7 @@ def _tool(fn: Callable[[dict, Any, str], Any], name: str) -> Callable[..., Any]:
                     start_reaper()
             if name in _CHANGES_PAGE and tab is not None:
                 forget_snapshot(conn.device_id, tab)
-            return _with_target(result, who)
+            return _with_notes(_with_target(result, who))
         except _Refused as exc:
             return str(exc)
         except Started as exc:
@@ -1846,6 +2084,7 @@ def _tool(fn: Callable[[dict, Any, str], Any], name: str) -> Callable[..., Any]:
             return _with_target(_fail(name, str(exc), "bad_arguments", tab), who)
         finally:
             _IN_HANDLER.reset(in_handler)
+            _BLOCKED_NOTES.reset(notes_token)
             if counted:
                 ledger().end_call(sid, device, tab)
     handler.__name__ = fn.__name__
@@ -2479,6 +2718,8 @@ def guard_of(grant: dict) -> dict:
            "sensitive": bool(grant.get("confirm")), "confirmed": bool(grant.get("protected_ok"))}
     if grant.get("login_page") and grant.get("confirm"):
         out["login_page"] = True  # the user allowed this one action on a sign-in page of an autologin host
+    if grant.get("allow") and grant.get("confirm"):
+        out["allow"] = list(grant["allow"])  # checks the user let pass for this one action (section 7.5)
     return out
 
 
@@ -2608,6 +2849,8 @@ def _eval(args: dict, conn: Any, sid: str) -> Any:
                  "max_chars": int(_int(args, "max_chars", 100000, 1, 1000000)),
                  "guard": {"script_hosts": grant.get("script_hosts") or [], "write_hosts": grant.get("write_hosts") or [],
                            "sensitive": bool(grant.get("confirm"))}}
+    if grant.get("allow") and grant.get("confirm"):
+        req["guard"]["allow"] = list(grant["allow"])  # checks the user let pass for this script (section 7.5)
     frame = str(args.get("frame") or "").strip()
     if frame:
         if not re.fullmatch(r"f\d{1,6}", frame):

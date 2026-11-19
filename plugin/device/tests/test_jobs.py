@@ -248,9 +248,11 @@ class JobDeviceTests(tb.BrowserDeviceTests):
         with mock.patch.object(agents.BUS, "call", call), mock.patch.object(agents.BUS, "connected", lambda: True), \
                 mock.patch.object(browser, "no_user", lambda: True):
             out = self.run_tool("browser_navigate", url="https://chosozo.com/")
+            # The run waits for the user in the job's chat (JOB_WAIT_S, 0 here), then fails plainly.
             self.assertIn("rule browser:visit:chosozo.com", out["error"])
-            self.assertIn("The job's chat was told once", out["error"])
+            self.assertIn("waited 0 minutes", out["error"])
             self.assertTrue(done.wait(5))
+            self.assertIn("is waiting up to", sent[0][2]["text"])
             out = self.run_tool("browser_navigate", url="https://chosozo.com/")
             self.assertNotIn("told once", out["error"])
         self.assertEqual(len(sent), 1)
@@ -385,7 +387,7 @@ class JobDeviceTests(tb.BrowserDeviceTests):
             self.assertTrue(done.wait(5))
         self.assertIn("portal.example.com", out["error"])
         self.assertIn("pc", out["error"])
-        self.assertIn("job's chat was told once", out["error"])
+        self.assertIn("in the job's chat", out["error"])
         self.assertFalse([r for r in self.fake.requests if r["op"] == "login"])
         self.assertIn('browser_allow_site with rule "browser:login:portal.example.com" and job_id "job1"', sent[0]["text"])
         self.assertIn("sign-in card", sent[0]["text"])
