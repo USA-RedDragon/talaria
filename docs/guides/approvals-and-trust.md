@@ -56,7 +56,7 @@ Under Settings, Agent, "Before risky commands" has three settings, for everyone 
 - **Approve only when a command looks risky** (`smart`): smart approval chooses, see below.
 - **Never require approval** (`off`): nothing needs approval, for every chat of the profile.
 
-Anyone can turn approvals off for their own chat only ("No approvals in this chat", what `/yolo` does). The hub does not deliver an agent message to a chat in that mode, because what the message leads to would run with no approval you see. The keys that the install owns (`agent.locked_keys`, which the Helm chart fills from `hermes.config`) show read-only as "Set in the deployment config", `approvals.mode` can be one of them.
+Anyone can turn approvals off for their own chat only ("No approvals in this chat", what `/yolo` does). The hub does not deliver an agent message to a chat in that mode, because what the message leads to would run with no approval you see. A message from one of the chat's own subagents is the exception: the subagent runs under that chat's approvals already, and its report reaches the chat anyway. The keys that the install owns (`agent.locked_keys`, which the Helm chart fills from `hermes.config`) show read-only as "Set in the deployment config", `approvals.mode` can be one of them.
 
 ## Smart approval with provenance review
 

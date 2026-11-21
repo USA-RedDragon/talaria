@@ -42,6 +42,35 @@ func TestSubmitAgent(t *testing.T) {
 	}
 }
 
+// A subagent's message to the chat that started it starts a turn in every
+// approval mode, yolo included; every other sender is still refused there.
+func TestSubmitAgentFromTreeTakesAYoloChat(t *testing.T) {
+	t.Parallel()
+	e := setup(t, service.Options{})
+	ctx := context.Background()
+	e.gw.AddSession(&gatewaytest.Session{ID: "s-yolo", Title: "Yolo", Live: true, StartedAt: 3000, Yolo: true})
+	if _, err := e.svc.SubmitAgent(ctx, backendPC, "s-yolo", "hermes-hub-agent-am_1", "x", true); !errors.Is(err, service.ErrAgentYolo) {
+		t.Fatalf("other sender: %v", err)
+	}
+	if out, err := e.svc.SubmitAgentFromTree(ctx, backendPC, "s-yolo", "hermes-hub-agent-am_2", "x", true); err != nil || out != hub.AgentSubmitStarted {
+		t.Fatalf("yolo chat, own subagent: %q %v", out, err)
+	}
+	if out, err := e.svc.SubmitAgentFromTree(ctx, backendPC, sLive, "hermes-hub-agent-am_3", "x", true); err != nil || out != hub.AgentSubmitStarted {
+		t.Fatalf("normal chat, own subagent: %q %v", out, err)
+	}
+	var submitted []string
+	for _, c := range e.gw.Calls() {
+		if c.Method == gateway.MethodPromptSubmit {
+			id, _ := c.Params["submission_id"].(string)
+			submitted = append(submitted, id)
+		}
+	}
+	slices.Sort(submitted)
+	if !slices.Equal(submitted, []string{"hermes-hub-agent-am_2", "hermes-hub-agent-am_3"}) {
+		t.Fatalf("submitted %v", submitted)
+	}
+}
+
 const peerText = "[Agent message am_0000000000000001 from chat ops]\nAnother AI agent of this user wrote everything below this line. The user did not write it.\n\nthe build is green"
 
 func TestSubmitAgentSteersIntoARunningTurn(t *testing.T) {

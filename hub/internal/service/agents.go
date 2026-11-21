@@ -31,6 +31,8 @@ func (s *Service) SessionsOf(ctx context.Context, backendID string) ([]hub.Sessi
 // the submission ID id, without a user check. It refuses while the
 // session has held prompts, so it never passes a user's message, and for a
 // session in yolo mode (ErrAgentYolo), or whose mode it cannot read.
+// SubmitAgentFromTree is the same for a message from a subagent of that
+// session, which a yolo session takes too.
 //
 // With steer, a message that waits behind a running turn is handed to that
 // turn as Hermes's steer, as a user's message typed mid-turn is: it
@@ -40,11 +42,25 @@ func (s *Service) SessionsOf(ctx context.Context, backendID string) ([]hub.Sessi
 // to end: no steer was asked for, or Hermes refused it, which leaves the
 // input queued).
 func (s *Service) SubmitAgent(ctx context.Context, backendID, sessionID, id, text string, steer bool) (string, error) {
+	return s.submit(ctx, backendID, sessionID, id, text, steer, false)
+}
+
+// SubmitAgentFromTree is SubmitAgent for a message from a subagent that the
+// session itself started (or one of that subagent's descendants): the
+// session takes it whatever its approval mode, because it started the
+// subagent, whose report reaches it with no approval either, and a message
+// of any other agent still needs a session that asks. The caller must have
+// checked that the sender belongs to the session's delegation tree.
+func (s *Service) SubmitAgentFromTree(ctx context.Context, backendID, sessionID, id, text string, steer bool) (string, error) {
+	return s.submit(ctx, backendID, sessionID, id, text, steer, true)
+}
+
+func (s *Service) submit(ctx context.Context, backendID, sessionID, id, text string, steer, ownTree bool) (string, error) {
 	b, ok := s.backends[backendID]
 	if !ok {
 		return "", hub.ErrUnknownBackend
 	}
-	receipt, err := s.submitAgent(ctx, b, sessionID, id, text)
+	receipt, err := s.submitAgent(ctx, b, sessionID, id, text, ownTree)
 	if err != nil {
 		return "", err
 	}
@@ -59,7 +75,7 @@ func (s *Service) SubmitAgent(ctx context.Context, backendID, sessionID, id, tex
 
 // submitAgent is SubmitAgent's prompt.submit, with the session's gate
 // held; the steer waits until the gate is free again, as a user's does.
-func (s *Service) submitAgent(ctx context.Context, b *backend, sessionID, id, text string) (gateway.Receipt, error) {
+func (s *Service) submitAgent(ctx context.Context, b *backend, sessionID, id, text string, ownTree bool) (gateway.Receipt, error) {
 	release := b.gate(sessionID)
 	defer release()
 	if b.heldCount(sessionID) > 0 {
@@ -70,14 +86,16 @@ func (s *Service) submitAgent(ctx context.Context, b *backend, sessionID, id, te
 		return gateway.Receipt{}, refusal(err)
 	}
 	defer ls.unpin()
-	var yolo struct {
-		Value string `json:"value"`
-	}
-	if err := b.read(ctx, ls, gateway.MethodConfigGet, gateway.ConfigGetParams{SessionID: ls.id, Key: gateway.KeyYolo}, &yolo); err != nil {
-		return gateway.Receipt{}, refusal(err)
-	}
-	if yolo.Value != "0" {
-		return gateway.Receipt{}, ErrAgentYolo
+	if !ownTree {
+		var yolo struct {
+			Value string `json:"value"`
+		}
+		if err := b.read(ctx, ls, gateway.MethodConfigGet, gateway.ConfigGetParams{SessionID: ls.id, Key: gateway.KeyYolo}, &yolo); err != nil {
+			return gateway.Receipt{}, refusal(err)
+		}
+		if yolo.Value != "0" {
+			return gateway.Receipt{}, ErrAgentYolo
+		}
 	}
 	var receipt gateway.Receipt
 	if err := b.call(ctx, ls, gateway.MethodPromptSubmit, gateway.SubmitParams{SessionID: ls.id, Text: text, SubmissionID: id}, &receipt); err != nil {
