@@ -16,7 +16,6 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/config"
 	"github.com/USA-RedDragon/talaria/hub/internal/device"
 	"github.com/USA-RedDragon/talaria/hub/internal/hub"
-	"github.com/USA-RedDragon/talaria/hub/internal/service"
 	"github.com/USA-RedDragon/talaria/hub/internal/store"
 )
 
@@ -39,7 +38,6 @@ const (
 	statusDelivered = "delivered"
 	foundIt         = "found it"
 	doneText        = "done"
-	codeYolo        = "yolo"
 )
 
 type submit struct{ session, id, text string }
@@ -53,9 +51,6 @@ type fakeSessions struct {
 	steers  []bool
 	outcome string
 	err     error
-	// yolo is the sessions in yolo mode: SubmitAgent refuses them with
-	// service.ErrAgentYolo, as the real service does.
-	yolo map[string]bool
 }
 
 func (f *fakeSessions) SessionsOf(_ context.Context, backendID string) ([]hub.Session, error) {
@@ -65,22 +60,11 @@ func (f *fakeSessions) SessionsOf(_ context.Context, backendID string) ([]hub.Se
 	return f.sessions, nil
 }
 
-func (f *fakeSessions) SubmitAgentFromTree(_ context.Context, _, sessionID, id, text string, steer bool) (string, error) {
-	return f.submit(sessionID, id, text, steer, true)
-}
-
 func (f *fakeSessions) SubmitAgent(_ context.Context, _, sessionID, id, text string, steer bool) (string, error) {
-	return f.submit(sessionID, id, text, steer, false)
-}
-
-func (f *fakeSessions) submit(sessionID, id, text string, steer, ownTree bool) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return "", f.err
-	}
-	if f.yolo[sessionID] && !ownTree {
-		return "", service.ErrAgentYolo
 	}
 	f.submitted = append(f.submitted, submit{sessionID, id, text})
 	f.steers = append(f.steers, steer)
@@ -533,10 +517,6 @@ func TestDeliveryErrorsStayVague(t *testing.T) {
 	if a.code != "not_delivered" || strings.Contains(a.msg, "10.0.0.5") {
 		t.Fatalf("%s %s", a.code, a.msg)
 	}
-	e.sessions.err = service.ErrAgentYolo
-	if a := e.do("send", chat("s1"), map[string]string{"to": "s3", keyText: "x"}); a.code != codeYolo {
-		t.Fatalf("code %q, want yolo", a.code)
-	}
 }
 
 // sendHop sends text from caller to a chat and returns the stored hop of
@@ -950,41 +930,32 @@ func TestTreeTrafficDoesNotUseCrossTreeBudget(t *testing.T) {
 	}
 }
 
-// A subagent can always message its own chat, whatever the chat's
-// approval mode: the chat started the subagent, and the subagent's report
-// reaches it with no approval either. Only yolo mode used to refuse it,
-// once the chat was idle and the message had to start a turn.
-func TestSubagentMessagesItsParentInEveryApprovalMode(t *testing.T) {
+// A subagent can message its own chat whether or not that chat's turn runs:
+// an idle chat takes the message as its next input. The chat's approval mode
+// (yolo included) never matters.
+func TestSubagentMessagesItsParent(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []struct {
-		name string
-		yolo bool
-	}{{"yolo", true}, {"normal", false}, {"smart", false}} {
-		for _, to := range []string{parent, "s1"} {
-			t.Run(mode.name+"/"+to, func(t *testing.T) {
-				t.Parallel()
-				e := newEnv(t)
-				e.sessions.yolo = map[string]bool{"s1": mode.yolo}
-				// The chat's turn is not running: the message becomes its input.
-				e.plugin.outcome = device.DeliveryNotRunning
-				a := e.do("send", subagentCaller(), map[string]string{"to": to, keyText: foundIt})
-				if a.code != "" {
-					t.Fatalf("refused: %s %s", a.code, a.msg)
-				}
-				if len(e.sessions.submitted) != 1 || e.sessions.submitted[0].session != "s1" {
-					t.Fatalf("submitted %+v", e.sessions.submitted)
-				}
-			})
-		}
+	for _, to := range []string{parent, "s1"} {
+		t.Run(to, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			// The chat's turn is not running: the message becomes its input.
+			e.plugin.outcome = device.DeliveryNotRunning
+			a := e.do("send", subagentCaller(), map[string]string{"to": to, keyText: foundIt})
+			if a.code != "" {
+				t.Fatalf("refused: %s %s", a.code, a.msg)
+			}
+			if len(e.sessions.submitted) != 1 || e.sessions.submitted[0].session != "s1" {
+				t.Fatalf("submitted %+v", e.sessions.submitted)
+			}
+		})
 	}
 }
 
-// A parent chat in yolo mode that is running takes the message with its
-// next tool result, as in every other mode.
-func TestSubagentMessagesARunningYoloParent(t *testing.T) {
+// A parent chat that is running takes the message with its next tool result.
+func TestSubagentMessagesARunningParent(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.sessions.yolo = map[string]bool{"s1": true}
 	if a := e.do("send", subagentCaller(), map[string]string{"to": parent, keyText: foundIt}); a.code != "" {
 		t.Fatalf("refused: %s %s", a.code, a.msg)
 	}
@@ -993,12 +964,11 @@ func TestSubagentMessagesARunningYoloParent(t *testing.T) {
 	}
 }
 
-// A message the yolo parent never read as a tool result still becomes its
-// next input.
-func TestUndeliveredToYoloParentBecomesInput(t *testing.T) {
+// A message the parent never read as a tool result still becomes its next
+// input.
+func TestUndeliveredToParentBecomesInput(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.sessions.yolo = map[string]bool{"s1": true}
 	if a := e.do("send", subagentCaller(), map[string]string{"to": parent, keyText: "late"}); a.code != "" {
 		t.Fatal(a.msg)
 	}
@@ -1034,10 +1004,9 @@ func nestedCaller() device.AgentCaller {
 
 // A nested subagent reaches its parent subagent and the root chat in a
 // yolo chat's tree.
-func TestNestedSubagentMessagesItsParentUnderYolo(t *testing.T) {
+func TestNestedSubagentMessagesItsParent(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.sessions.yolo = map[string]bool{"s1": true}
 	if a := e.do("send", nestedCaller(), map[string]string{"to": parent, keyText: doneText}); a.code != "" {
 		t.Fatalf("parent subagent: %s %s", a.code, a.msg)
 	}
@@ -1053,25 +1022,27 @@ func TestNestedSubagentMessagesItsParentUnderYolo(t *testing.T) {
 	}
 }
 
-// The yolo refusal stays for everyone else: a chat or a subagent of another
-// tree still cannot start a turn in a yolo chat.
-func TestYoloStillRefusesOtherSenders(t *testing.T) {
+// Any of the user's agents may message any of the user's chats, whatever
+// the target's approval mode: a chat, a subagent of another tree, running or
+// not, and an unread message that becomes an input.
+func TestAnyAgentMessagesAnyChat(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	e.sessions.yolo = map[string]bool{"s2": true}
-	if a := e.do("send", chat("s1"), map[string]string{"to": "s2", keyText: "x"}); a.code != codeYolo {
-		t.Fatalf("chat: code %q, want yolo", a.code)
-	}
-	if a := e.do("send", subagentCaller(), map[string]string{"to": "s2", keyText: "x"}); a.code != codeYolo {
-		t.Fatalf("subagent to another chat: code %q, want yolo", a.code)
+	for _, caller := range map[string]device.AgentCaller{"chat": chat("s1"), "subagent": subagentCaller()} {
+		e := newEnv(t)
+		e.plugin.outcome = device.DeliveryNotRunning
+		if a := e.do("send", caller, map[string]string{"to": "s2", keyText: "x"}); a.code != "" {
+			t.Fatalf("refused: %s %s", a.code, a.msg)
+		}
+		if len(e.sessions.submitted) != 1 || e.sessions.submitted[0].session != "s2" {
+			t.Fatalf("submitted %+v", e.sessions.submitted)
+		}
 	}
 }
 
-// The limits hold for a yolo parent: the hop cap still ends a chain.
-func TestSubagentToYoloParentKeepsTheHopLimit(t *testing.T) {
+// The limits hold for a parent: the hop cap still ends a chain.
+func TestSubagentToParentKeepsTheHopLimit(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.sessions.yolo = map[string]bool{"s1": true}
 	e.plugin.outcome = device.DeliveryNotRunning
 	from, dest := subagentCaller(), parent
 	for i := 1; i <= agents.MaxTreeHop; i++ {

@@ -1166,7 +1166,7 @@ Security notes:
 - A sibling's message rides in a tool result, not as a steer, so it never carries the user's authority. A parent's steer does, as any `delegate_task` goal does.
 - Only the hub reaches the routes (dashboard sign-in). A device token reaches neither the routes nor the bus.
 - Hermes keeps the first string that a `transform_tool_result` hook returns. When another plugin's hook wins for a tool call, the inbox texts that the plugin added to that result are lost, though the hub recorded them as delivered.
-- The hub delivers no input to a chat in yolo mode, except a message from a subagent of that chat's own delegation tree, and only the agents of the hub, an editor or the terminal (not conversations of a messaging platform) are peers.
+- The hub delivers an agent message to any chat of the same user in every approval mode, yolo included (the user's own agents may always message each other), and only the agents of the hub, an editor or the terminal (not conversations of a messaging platform) are peers.
 - Without `subagent_lifecycle.list_active()` the plugin uses Hermes internals that are not a public plugin API (`tools.delegate_tool_registry`), so a Hermes release can break subagent messages; chat messages need only `prompt.submit`.
 
 ### 12.1 page_publish

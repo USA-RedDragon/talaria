@@ -25,7 +25,6 @@ import (
 	"github.com/USA-RedDragon/talaria/hub/internal/config"
 	"github.com/USA-RedDragon/talaria/hub/internal/device"
 	"github.com/USA-RedDragon/talaria/hub/internal/hub"
-	"github.com/USA-RedDragon/talaria/hub/internal/service"
 )
 
 // Limits on agent messages.
@@ -95,10 +94,6 @@ const (
 type Sessions interface {
 	SessionsOf(ctx context.Context, backendID string) ([]hub.Session, error)
 	SubmitAgent(ctx context.Context, backendID, sessionID, id, text string, steer bool) (string, error)
-	// SubmitAgentFromTree is SubmitAgent for a message from a subagent of
-	// the session's own delegation tree, which a session takes in every
-	// approval mode, yolo included.
-	SubmitAgentFromTree(ctx context.Context, backendID, sessionID, id, text string, steer bool) (string, error)
 }
 
 // Places says where sessions run. *device.Server is one.
@@ -980,19 +975,10 @@ func (r *Router) deliver(ctx context.Context, b config.Backend, p Plugin, m hub.
 	// result, under the same header as a queued input. Hermes refuses a
 	// steer when the turn is ending or has no agent yet; the message then
 	// stays the chat's next input.
-	// A subagent's message to the chat that started it (inboxFirst) is not
-	// refused for the chat's approval mode: the subagent already runs under
-	// that chat's approvals, and its report reaches the chat anyway.
-	submit := r.opts.Sessions.SubmitAgent
-	if t.inboxFirst {
-		submit = r.opts.Sessions.SubmitAgentFromTree
-	}
-	out, err := submit(ctx, b.ID, t.session, InputPrefix+m.ID, m.Text, true)
+	// The target's approval mode never refuses a message: the user's own
+	// agents may always message each other, yolo chats included.
+	out, err := r.opts.Sessions.SubmitAgent(ctx, b.ID, t.session, InputPrefix+m.ID, m.Text, true)
 	if err != nil {
-		if errors.Is(err, service.ErrAgentYolo) {
-			return hub.AgentModeInput, hub.AgentStatusNotDelivered, "", refuse("yolo", "%s runs without approvals (yolo), "+
-				"so it takes no messages from agents", t.label)
-		}
 		r.log.Warn("deliver an agent message", "backend", b.ID, "id", m.ID, "error", err.Error())
 		return hub.AgentModeInput, hub.AgentStatusNotDelivered, "", refuse("not_delivered", "could not deliver to %s now; "+
 			"try again later", t.label)
@@ -1024,11 +1010,7 @@ func (r *Router) undelivered(ctx context.Context, b config.Backend, raw json.Raw
 	}
 	status, mode := hub.AgentStatusNotDelivered, hub.AgentModeInbox
 	if m.ToSubagent == "" {
-		submit := r.opts.Sessions.SubmitAgent
-		if m.InTree && m.FromSubagent != "" {
-			submit = r.opts.Sessions.SubmitAgentFromTree
-		}
-		if _, err := submit(ctx, b.ID, m.ToSession, InputPrefix+m.ID, m.Text, false); err != nil {
+		if _, err := r.opts.Sessions.SubmitAgent(ctx, b.ID, m.ToSession, InputPrefix+m.ID, m.Text, false); err != nil {
 			r.log.Warn("deliver an unread agent message as an input", "backend", b.ID, "id", m.ID, "error", err.Error())
 		} else {
 			status, mode = hub.AgentStatusDelivered, hub.AgentModeInput
