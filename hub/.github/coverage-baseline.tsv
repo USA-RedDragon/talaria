@@ -4,7 +4,7 @@ cmd/telegram.go	132	7
 internal/agentcfg/agentcfg.go	442	259
 internal/agentcfg/agentcfgtest/agentcfgtest.go	125	109
 internal/agentcfg/plain.go	28	28
-internal/agents/agents.go	485	400
+internal/agents/agents.go	477	392
 internal/agents/format.go	29	29
 internal/auth/limit.go	45	40
 internal/auth/names.go	17	16
@@ -48,7 +48,7 @@ internal/device/views.go	17	17
 internal/gateway/client.go	276	238
 internal/gateway/gatewaytest/activity.go	109	91
 internal/gateway/gatewaytest/compose.go	209	184
-internal/gateway/gatewaytest/fake.go	843	772
+internal/gateway/gatewaytest/fake.go	843	771
 internal/gateway/gatewaytest/files.go	59	54
 internal/gateway/gatewaytest/mutate.go	151	134
 internal/gateway/gatewaytest/runtime.go	22	19
@@ -105,12 +105,12 @@ internal/scheduled/service.go	480	418
 internal/secretbox/secretbox.go	37	31
 internal/server/server.go	40	0
 internal/service/activity.go	176	150
-internal/service/agents.go	34	29
+internal/service/agents.go	26	21
 internal/service/attach.go	100	85
 internal/service/claude.go	41	34
 internal/service/compose.go	257	215
 internal/service/files.go	118	90
-internal/service/handover.go	158	129
+internal/service/handover.go	158	126
 internal/service/hold.go	233	202
 internal/service/live.go	464	407
 internal/service/logingrant.go	80	67
@@ -124,7 +124,7 @@ internal/service/rows.go	22	21
 internal/service/seenimages.go	29	21
 internal/service/service.go	1007	930
 internal/service/stopsend.go	93	77
-internal/service/subagentlog.go	208	177
+internal/service/subagentlog.go	208	178
 internal/service/toolout.go	39	32
 internal/service/turn.go	79	72
 internal/service/views.go	145	127
@@ -139,7 +139,7 @@ internal/store/lock.go	55	48
 internal/store/migrate.go	33	24
 internal/store/notify.go	161	138
 internal/store/prompts.go	58	49
-internal/store/questions.go	32	24
+internal/store/questions.go	32	25
 internal/store/relay.go	37	25
 internal/store/settings.go	27	14
 internal/store/store.go	87	72
