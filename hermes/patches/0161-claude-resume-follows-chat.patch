@@ -1,0 +1,250 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 21:55:00 -0600
+Subject: [PATCH] fix(delegation): a resumed Claude subagent follows its chat
+ onto an API-key provider
+
+0147 keeps a resumed subagent on the provider it ran on, so a subagent recorded on claude-pool kept billing the pool after the user moved the chat to an Anthropic API-key provider. A recorded claude-pool route now moves to the chat's API-key provider when the chat runs on one now. A resume the chat asks for (action=resume) moves the route against the live chat and records that answer; a unit a gateway restart carried asks the chat's row for what its last turn ran on, since the record holds the answer from the spawn. A route on any other provider, a route that carried a credential (reask) and a chat on the pool keep what they had.
+---
+ tests/tools/test_delegation_claude_resume.py | 113 +++++++++++++++++++
+ tools/delegate_tool_claude.py                |  57 ++++++++++
+ tools/delegate_tool_handoff.py               |   7 ++
+ tools/delegate_tool_resume.py                |   5 +-
+ 4 files changed, 180 insertions(+), 2 deletions(-)
+ create mode 100644 tests/tools/test_delegation_claude_resume.py
+
+diff --git a/tests/tools/test_delegation_claude_resume.py b/tests/tools/test_delegation_claude_resume.py
+new file mode 100644
+index 00000000..1b4c22bf
+--- /dev/null
++++ b/tests/tools/test_delegation_claude_resume.py
+@@ -0,0 +1,113 @@
++"""A resumed subagent whose stored provider is the Claude account pool follows its chat onto an Anthropic API-key
++provider when the chat has moved to one since the subagent was spawned. The account is the user's pick, so a subagent
++that comes back after the pick must not go on billing the pool. Real route resolution; the runtime provider answers for
++the providers named here."""
++
++import json
++from types import SimpleNamespace
++from unittest.mock import patch
++
++from tests.tools.test_delegation_claude_family import API, CFG, POOL_URL, _Backend, _parent, _runtime
++
++POOL_ROUTE = {"backend": "route-family", "label": "sonnet", "route": {"provider": "claude-pool", "model": "claude-sonnet-5-5"}}
++
++
++class _Db:
++    """The state of one chat row: the runtime its last turn recorded, as the gateway syncs it."""
++
++    def __init__(self, runtime=None, tip=None):
++        self.row = {"model_config": json.dumps({"gateway_runtime": runtime} if runtime else {})}
++        self.tip = tip
++
++    def get_session(self, session_id):
++        return self.row
++
++    def get_compression_tip(self, session_id):
++        return self.tip
++
++
++def _on(provider):
++    base_url = POOL_URL if provider == "claude-pool" else API
++    return {"provider": provider, "base_url": base_url,
++            "api_mode": "chat_completions" if provider == "claude-pool" else "anthropic_messages"}
++
++
++def _resume(snapshot_parent, db, saved=POOL_ROUTE, *, now=False):
++    from tools.delegate_tool_handoff import _ResumedUnit, _ResumeParent, _parent_snapshot
++
++    snap = json.loads(json.dumps(_parent_snapshot(snapshot_parent), default=str))
++    snap["session_id"] = "chat"
++    if now:
++        snap["claude_now"] = True
++    parent = _ResumeParent(snap, db)
++    with (patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=_runtime),
++          patch("tools.delegate_tool_routes._active_provider", return_value=_Backend())):
++        return _ResumedUnit._route(SimpleNamespace(), 0, {"route": saved}, parent, CFG), parent
++
++
++def test_a_carried_pool_subagent_resumes_on_the_provider_its_chat_moved_to():
++    spawned_on_pool = _parent("claude-pool", base_url=POOL_URL)
++    route, parent = _resume(spawned_on_pool, _Db(_on("claude-api-caam")))
++    assert route.creds["provider"] == "claude-api-caam" and route.creds["model"] == "claude-sonnet-5-5"
++    assert route.creds["api_key"] == "key-claude-api-caam" and parent._delegate_claude_account == "claude-api-caam"
++
++
++def test_a_carried_pool_subagent_stays_on_the_pool_while_its_chat_is_on_it():
++    route, _ = _resume(_parent("claude-pool", base_url=POOL_URL), _Db(_on("claude-pool")))
++    assert route.creds["provider"] == "claude-pool"
++
++
++def test_a_chat_that_moved_back_to_the_pool_is_not_followed_to_its_old_account():
++    spawned_on_account = _parent("claude-api-jaam")
++    route, _ = _resume(spawned_on_account, _Db(_on("claude-pool")))
++    assert route.creds["provider"] == "claude-pool"
++
++
++def test_the_chats_row_is_read_at_its_compression_tip():
++    class _Tip(_Db):
++        def get_session(self, session_id):
++            return self.row if session_id == "tip" else {"model_config": "{}"}
++
++    route, _ = _resume(_parent("claude-pool", base_url=POOL_URL), _Tip(_on("claude-api-jaam"), tip="tip"))
++    assert route.creds["provider"] == "claude-api-jaam"
++
++
++def test_a_row_that_cannot_be_read_leaves_the_recorded_answer_in_force():
++    route, _ = _resume(_parent("claude-pool", base_url=POOL_URL), _Db(None))
++    assert route.creds["provider"] == "claude-pool"
++
++
++def test_a_resume_the_chat_asked_for_follows_the_live_chat_and_ignores_the_row():
++    from tools.delegate_tool_claude import stamp_chat_account
++
++    def resumed_on(live, row):
++        spec = {"parent": {}, "children": {"0": {"route": POOL_ROUTE}}}
++        stamped = stamp_chat_account(spec, live)
++        saved = stamped["children"]["0"]["route"]
++        route, _ = _resume(live, _Db(_on(row)), saved, now=True)
++        return saved["route"]["provider"], route.creds["provider"]
++
++    assert resumed_on(_parent("claude-api-caam"), "claude-pool") == ("claude-api-caam", "claude-api-caam")
++    assert resumed_on(_parent("claude-pool", base_url=POOL_URL), "claude-api-caam") == ("claude-pool", "claude-pool")
++
++
++def test_a_stored_api_route_keeps_its_account_when_the_chat_is_on_another():
++    saved = {**POOL_ROUTE, "route": {"provider": "claude-api-jaam", "model": "claude-sonnet-5-5"}}
++    route, _ = _resume(_parent("claude-pool", base_url=POOL_URL), _Db(_on("claude-api-caam")), saved)
++    assert route.creds["provider"] == "claude-api-jaam"
++
++
++def test_the_resume_action_stamps_what_the_live_chat_runs_on_and_moves_only_pool_routes():
++    from tools.delegate_tool_claude import stamp_chat_account
++
++    api_route = {**POOL_ROUTE, "route": {"provider": "claude-api-jaam", "model": "m"}}
++    reask = {**POOL_ROUTE, "reask": True}
++    spec = {"parent": {"claude_account": "", "model": "m"},
++            "children": {"0": {"route": POOL_ROUTE}, "1": {"route": api_route}, "2": {"route": reask}}}
++    out = stamp_chat_account(spec, _parent("claude-api-caam"))
++    assert out["parent"] == {"claude_account": "claude-api-caam", "claude_now": True, "model": "m"}
++    assert [out["children"][k]["route"]["route"]["provider"] for k in "01"] == ["claude-api-caam", "claude-api-jaam"]
++    assert out["children"]["2"]["route"] == reask
++    pool = stamp_chat_account(spec, _parent("claude-pool", base_url=POOL_URL))
++    assert pool["parent"]["claude_account"] == "" and pool["children"]["0"]["route"] == POOL_ROUTE
++    assert spec["parent"] == {"claude_account": "", "model": "m"} and spec["children"]["0"]["route"] == POOL_ROUTE
+diff --git a/tools/delegate_tool_claude.py b/tools/delegate_tool_claude.py
+index 15019137..4608b8a4 100644
+--- a/tools/delegate_tool_claude.py
++++ b/tools/delegate_tool_claude.py
+@@ -9,6 +9,8 @@ falls back from one side to the other: a route that fails keeps its error.
+ 
+ from __future__ import annotations
+ 
++import json
++from types import SimpleNamespace
+ from typing import Any, Mapping, Optional
+ 
+ from utils import base_url_hostname
+@@ -65,3 +67,58 @@ def follow_parent_claude(route: dict[str, Any], backend: str, config: Mapping[st
+     if not account:
+         return route
+     return {**{k: v for k, v in route.items() if k not in _POOL_ROUTE_KEYS}, "provider": account}
++
++
++def _runtime_account(runtime: Any) -> Optional[str]:
++    """The API-key provider a chat's last turn recorded in its row (``gateway_runtime``), or None for the pool or
++    any other chat."""
++    if not isinstance(runtime, Mapping):
++        return None
++    provider = _name(runtime.get("provider"))
++    return parent_claude_account(SimpleNamespace(
++        provider=provider, requested_provider=provider, api_mode=runtime.get("api_mode"), base_url=runtime.get("base_url")))
++
++
++def _chat_row_runtime(db: Any, session_id: Any) -> Optional[Mapping[str, Any]]:
++    """The runtime the chat's row records for its latest turn, read at its compression tip; None when unreadable."""
++    if db is None or not isinstance(session_id, str) or not session_id:
++        return None
++    try:
++        tip = db.get_compression_tip(session_id)
++        row = db.get_session(tip if isinstance(tip, str) and tip else session_id) or {}
++        runtime = (json.loads(row.get("model_config") or "{}") or {}).get("gateway_runtime")
++    except Exception:
++        return None
++    return runtime if isinstance(runtime, Mapping) and _name(runtime.get("provider")) else None
++
++
++def resumed_claude_account(parent: Any) -> Optional[str]:
++    """The provider a carried subagent's chat runs its Claude routes on *now*. The record a restart carried holds the
++    answer from the spawn, so the chat's row (what its last turn ran on) is asked instead; the recorded answer stands
++    only when the row says nothing."""
++    runtime = _chat_row_runtime(getattr(parent, "_session_db", None), getattr(parent, "session_id", None))
++    return _runtime_account(runtime) if runtime is not None else parent_claude_account(parent)
++
++
++def follow_chat_on_resume(route: Mapping[str, Any], account: Optional[str]) -> dict[str, Any]:
++    """A route recorded on the account pool, on the chat's API-key provider when the chat moved to one after the
++    subagent was spawned: the user picked the account, so what comes back after the pick does not bill the pool. A
++    route on any other provider keeps it."""
++    if not account or route.get("profile") or _name(route.get("provider")) != CLAUDE_POOL:
++        return dict(route)
++    return {**{k: v for k, v in route.items() if k not in _POOL_ROUTE_KEYS}, "provider": account}
++
++
++def stamp_chat_account(spec: Mapping[str, Any], parent_agent: Any) -> dict[str, Any]:
++    """``spec`` for a resume the live chat asked for: each recorded pool route moved to the account the chat runs on,
++    and the parent record holding that answer (``claude_now``), so the later resume of the record does not ask the
++    chat's row again."""
++    account = parent_claude_account(parent_agent)
++    children = {}
++    for key, child in (spec.get("children") or {}).items():
++        saved = child.get("route") if isinstance(child, Mapping) else None
++        if isinstance(saved, Mapping) and isinstance(saved.get("route"), Mapping) and not saved.get("reask"):
++            child = {**child, "route": {**saved, "route": follow_chat_on_resume(saved["route"], account)}}
++        children[key] = child
++    parent = {**(spec.get("parent") or {}), "claude_account": account or "", "claude_now": True}
++    return {**spec, "parent": parent, "children": children}
+diff --git a/tools/delegate_tool_handoff.py b/tools/delegate_tool_handoff.py
+index cd7fa3a1..6be63ebe 100644
+--- a/tools/delegate_tool_handoff.py
++++ b/tools/delegate_tool_handoff.py
+@@ -421,6 +421,7 @@ class _ResumeParent:
+         self.request_overrides = dict(snap.get("request_overrides") or {})
+         self._fallback_chain = snap.get("fallback_chain")
+         self._delegate_claude_account = snap.get("claude_account") if isinstance(snap.get("claude_account"), str) else None
++        self._delegate_claude_now = snap.get("claude_now") is True
+         self.api_key, self._client_kwargs, self.client, self._credential_pool = None, {}, None, None
+         self.prefill_messages, self._print_fn, self.tool_progress_callback = None, None, None
+         self._session_db, self._memory_manager = session_db, None
+@@ -639,6 +640,12 @@ class _ResumedUnit:
+         route = dict(saved.get("route") or {})
+         if saved.get("reask"):
+             route = _ask_again(index, spec, route, backend, cfg)
++        elif not getattr(parent, "_delegate_claude_now", False):  # a resume the chat asked for was moved when it was
++            from tools.delegate_tool_claude import follow_chat_on_resume, resumed_claude_account
++            account = resumed_claude_account(parent)
++            followed = follow_chat_on_resume(route, account)
++            if followed != route:
++                route, parent._delegate_claude_account = followed, account  # its own helpers follow the chat too
+         if not route.get("profile"):
+             parent.inherit_endpoint(required=not route.get("provider") and not route.get("base_url"))
+         if label:
+diff --git a/tools/delegate_tool_resume.py b/tools/delegate_tool_resume.py
+index 5b7b8a4e..cf27e86a 100644
+--- a/tools/delegate_tool_resume.py
++++ b/tools/delegate_tool_resume.py
+@@ -250,8 +250,9 @@ def _dispatch(parent_agent: Any, sid: str, session_id: str, spec: dict[str, Any]
+     # The record a restart handoff would rebuild the child from, moved to where the child ended.
+     resume_child = {**child, **{k: v for k, v in state.items() if v is not None}, "session_id": session_id}
+     unit_id = _new_delegation_id()
+-    record = {**spec, "children": {index_key: resume_child}, "task_count": count, "resumed": True,
+-              "slot_key": unit_id}
++    from tools.delegate_tool_claude import stamp_chat_account
++    record = {**stamp_chat_account({**spec, "children": {index_key: resume_child}}, parent_agent),
++              "task_count": count, "resumed": True, "slot_key": unit_id}
+     resumed = _ResumedUnit({
+         "delegation_id": unit_id, "handoff": record, "kept": {}, "goals": goals, "task_indexes": [index],
+         "parent_session_id": str(getattr(parent_agent, "session_id", "") or ""), "origin_ui_session_id": origin_ui,
+-- 
+2.56.0
+
