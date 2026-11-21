@@ -30,6 +30,10 @@ const (
 	aliceEmail  = "alice@example.com"
 	provider1   = "claude-account1"
 	currentWeek = "Current week"
+	keys1       = "claude-api-account1"
+	caam        = "caam"
+	keysCaam    = "claude-api-caam"
+	opus        = "claude-opus-5-5"
 )
 
 // access lets alice and bob use backendMain, and only bob use other.
@@ -484,7 +488,7 @@ func TestAccountsCredits(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	e.plugin.Lock()
-	e.plugin.Credits[account] = &claude.Credits{Provider: "claude-api-account1", MonthlyUSD: pct(100), SpentUSD: pct(27.4),
+	e.plugin.Credits[account] = &claude.Credits{Provider: keys1, MonthlyUSD: pct(100), SpentUSD: pct(27.4),
 		LeftUSD: pct(72.6), Since: time.Date(2026, 11, 1, 5, 0, 0, 0, time.UTC), ResetsAt: time.Date(2026, 12, 1, 6, 0, 0, 0, time.UTC),
 		UnpricedCalls: 2}
 	e.plugin.Unlock()
@@ -494,7 +498,7 @@ func TestAccountsCredits(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := got.Accounts[0].Credits
-	if c == nil || *c.LeftUSD != 72.6 || *c.MonthlyUSD != 100 || c.ResetsText != "Dec 1" || c.Unpriced != 2 || c.Provider != "claude-api-account1" {
+	if c == nil || *c.LeftUSD != 72.6 || *c.MonthlyUSD != 100 || c.ResetsText != "Dec 1" || c.Unpriced != 2 || c.Provider != keys1 {
 		t.Fatalf("credits = %+v", c)
 	}
 	if got.Accounts[1].Credits != nil {
@@ -519,7 +523,7 @@ func TestAccountsPooledCredits(t *testing.T) {
 	e.plugin.Lock()
 	e.plugin.Pooled = &claude.PooledCredits{Provider: hub.ClaudeCreditsProvider, Keys: 2, TotalLeftUSD: pct(62.5), TotalMonthlyUSD: pct(200),
 		TotalSpentUSD: pct(137.5), PooledSpentUSD: pct(40), Next: account}
-	e.plugin.Credits[account] = &claude.Credits{Provider: "claude-api-account1", MonthlyUSD: pct(100), SpentUSD: pct(27.4), LeftUSD: pct(72.6),
+	e.plugin.Credits[account] = &claude.Credits{Provider: keys1, MonthlyUSD: pct(100), SpentUSD: pct(27.4), LeftUSD: pct(72.6),
 		PooledSpentUSD: pct(12), HeldUntil: until, HeldReason: "rate_limit", Available: &no}
 	e.plugin.Credits["account2"] = &claude.Credits{Provider: "claude-api-account2", Available: &yes}
 	e.plugin.Unlock()
@@ -559,22 +563,22 @@ func TestClaudePoolCredits(t *testing.T) {
 	e := newEnv(t)
 	at := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
 	e.plugin.Lock()
-	e.plugin.Pools["fall"] = claude.Pool{Fallback: &claude.Fallback{Provider: hub.ClaudeCreditsProvider, Account: "caam", Label: "caam",
-		APIProvider: "claude-api-caam", LeftUSD: pct(62), Message: "All accounts are at their limit."}}
-	e.plugin.Pools["ran"] = claude.Pool{Account: account, RanOnCredits: &claude.RanOnCredits{Account: "caam", Label: "caam",
-		APIProvider: "claude-api-caam", At: at, Model: "claude-opus-5-5", LeftUSD: pct(62)}}
+	e.plugin.Pools["fall"] = claude.Pool{Fallback: &claude.Fallback{Provider: hub.ClaudeCreditsProvider, Account: caam, Label: caam,
+		APIProvider: keysCaam, LeftUSD: pct(62), Message: "All accounts are at their limit."}}
+	e.plugin.Pools["ran"] = claude.Pool{Account: account, RanOnCredits: &claude.RanOnCredits{Account: caam, Label: caam,
+		APIProvider: keysCaam, At: at, Model: opus, LeftUSD: pct(62)}}
 	e.plugin.Unlock()
 
 	got, err := e.svc.ClaudePool(ctx, bob, backendMain, "fall", "")
 	f := got.Fallback
-	if err != nil || got.Account != "" || got.Message != "" || f == nil || f.Account != "caam" || f.APIProvider != "claude-api-caam" ||
+	if err != nil || got.Account != "" || got.Message != "" || f == nil || f.Account != caam || f.APIProvider != keysCaam ||
 		*f.LeftUSD != 62 || f.Message == "" {
 		t.Fatalf("fallback pool = %+v, %v", got, err)
 	}
 	got, err = e.svc.ClaudePool(ctx, bob, backendMain, "ran", "")
 	r := got.RanOnCredits
-	if err != nil || got.Account != account || got.Fallback != nil || r == nil || r.Account != "caam" || !r.At.Equal(at) ||
-		r.Model != "claude-opus-5-5" || *r.LeftUSD != 62 {
+	if err != nil || got.Account != account || got.Fallback != nil || r == nil || r.Account != caam || !r.At.Equal(at) ||
+		r.Model != opus || *r.LeftUSD != 62 {
 		t.Fatalf("ran pool = %+v, %v", got, err)
 	}
 	// An old plugin's empty answer keeps the default line.
@@ -592,8 +596,8 @@ func TestNewChatModels(t *testing.T) {
 	e.chatgpt.Lock()
 	e.chatgpt.Model, e.chatgpt.Provider, e.chatgpt.ContextLength = sonnet, hub.ClaudePoolProvider, 1000000
 	e.chatgpt.Rows = []claude.ProviderRow{
-		{Slug: hub.ClaudePoolProvider, Name: "Claude", Authenticated: &yes, Models: []string{sonnet, "claude-opus-5-5", "gone"},
-			UnavailableModels: []string{"gone"}, Capabilities: map[string]claude.ModelCapabilities{"claude-opus-5-5": {Reasoning: true}}},
+		{Slug: hub.ClaudePoolProvider, Name: "Claude", Authenticated: &yes, Models: []string{sonnet, opus, "gone"},
+			UnavailableModels: []string{"gone"}, Capabilities: map[string]claude.ModelCapabilities{opus: {Reasoning: true}}},
 		{Slug: "cloud", Authenticated: &no, Models: []string{"remote"}},
 	}
 	e.chatgpt.Unlock()
