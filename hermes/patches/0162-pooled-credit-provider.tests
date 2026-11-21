@@ -1,0 +1,11 @@
+# Neighbors
+tests/agent/test_provider_user_message.py
+tests/agent/test_primary_runtime_restore.py
+tests/agent/test_restore_primary_pool_reselect.py
+tests/agent/test_reset_aware_primary_restore.py
+tests/agent/test_conversation_fallback_state.py
+tests/agent/test_anthropic_adapter.py
+tests/agent/test_anthropic_request_client_reuse.py
+tests/agent/test_fallback_dynamic_credential.py
+tests/agent/test_switch_model_fallback_prune.py
+tests/tools/test_delegation_claude_family.py

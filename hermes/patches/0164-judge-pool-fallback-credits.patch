@@ -1,0 +1,181 @@
+From 75524536d0cee4a394995507980beec6349a3044 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 00:19:24 -0600
+Subject: [PATCH] feat(approval): the judge falls back from the pool to the
+ pooled API credits
+
+0163 moves a smart approval review of a pool chat whose accounts are all out to the API account with the most credit left, read from the hub's per-account estimate. When the claude-accounts plugin has the pooled API credit provider (claude-credits, 0162), the review moves there instead: the judge asks for no key of its own, the provider picks one for each call by the same most-credit-left rule every other call of it uses, and the card says "Reviewed on API credits". A chat on claude-credits is a chat on an API-key provider (0147), so both stages already run on it. A plugin without the pooled provider keeps the per-account estimate.
+---
+ .../tools/test_smart_judge_pooled_credits.py  | 94 +++++++++++++++++++
+ tools/approval_judge_route.py                 | 30 +++++-
+ 2 files changed, 122 insertions(+), 2 deletions(-)
+ create mode 100644 tests/tools/test_smart_judge_pooled_credits.py
+
+diff --git a/tests/tools/test_smart_judge_pooled_credits.py b/tests/tools/test_smart_judge_pooled_credits.py
+new file mode 100644
+index 00000000..e40563da
+--- /dev/null
++++ b/tests/tools/test_smart_judge_pooled_credits.py
+@@ -0,0 +1,94 @@
++"""Smart approval's judge, for a pool chat whose accounts are all out, moves to the pooled API credit provider
++(``claude-credits``) when the plugin has it, and so uses the one key selection every call of that provider uses; a
++plugin without it keeps the per-account estimate. A chat on ``claude-credits`` is a chat on an API-key provider:
++both stages run on it. The model call and the plugin's credit module are faked; routing and card text are real."""
++
++from __future__ import annotations
++
++import sys
++from types import SimpleNamespace
++
++import pytest
++
++from tests.tools.test_smart_provenance_judge_account import (  # noqa: F401  (fixtures and helpers)
++    API, POOL_CHAT, PoolExhausted, _chat, _credit, _credits, _review, models,
++)
++from tools import approval_judge_route as R
++
++CREDITS_CHAT = _chat("claude-credits")
++
++
++class _PooledCredits:
++    """The claude-accounts credits module as far as the judge reads it: keys() and pick()."""
++
++    def __init__(self, *rows):
++        self.rows = [SimpleNamespace(acct=SimpleNamespace(id=i), left=left, available=left != 0) for i, left in rows]
++        self.picked: list = []
++
++    def keys(self):
++        return list(self.rows)
++
++    def pick(self, rows, session_id, skip=()):
++        self.picked.append(session_id)
++        return next((r for r in rows if r.available), None)
++
++
++@pytest.fixture()
++def pooled(models, monkeypatch):
++    def install(*rows):
++        module = _PooledCredits(*rows)
++        monkeypatch.setitem(sys.modules, R.ACCOUNTS_CREDITS, module)
++        return module
++    yield install
++    sys.modules.pop(R.ACCOUNTS_CREDITS, None)
++
++
++def test_pool_exhausted_moves_both_stages_to_the_pooled_credits(models, pooled):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit. The first frees up at 10:09 PM.")
++    credits = pooled(("jaam", 12.5), ("caam", 71.25))
++    v = _review(POOL_CHAT)
++    assert models.providers() == [(1, "claude-pool"), (1, "claude-credits"), (2, "claude-credits")]
++    assert v.decision == "block" and v.detail["judge_account"] == "claude-credits"
++    assert v.card_text.endswith("Reviewed on API credits.")
++    assert credits.picked == [None]  # asked once: the provider chooses the key for each call by itself
++
++
++def test_the_choice_is_the_total_credit_left(pooled):
++    pooled(("jaam", 12.5), ("caam", 71.25), ("maam", None))
++    assert R.claude_api_credit_choice() == ("claude-credits", 83.75)
++
++
++def test_no_key_that_can_serve_asks_the_user_with_the_pool_words(models, pooled):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit. The first frees up at 10:09 PM.")
++    pooled(("jaam", 0), ("caam", 0))
++    v = _review(POOL_CHAT)
++    assert {p for _s, p in models.providers()} == {"claude-pool"}
++    assert v.decision == "unsure" and v.detail["unavailable"] == "pool" and "API credits" not in v.card_text
++
++
++def test_a_plugin_without_the_pooled_provider_keeps_the_per_account_estimate(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    _credits(jaam=_credit("jaam", 12.5), caam=_credit("caam", 71.25))
++    v = _review(POOL_CHAT)
++    assert v.detail["judge_account"] == "claude-api-caam"
++
++
++def test_a_broken_credits_module_does_not_stop_the_review_from_asking(models, monkeypatch):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    monkeypatch.setitem(sys.modules, R.ACCOUNTS_CREDITS, SimpleNamespace(keys=lambda: 1 / 0, pick=lambda *a: None))
++    v = _review(POOL_CHAT)
++    assert v.decision == "unsure" and {p for _s, p in models.providers()} == {"claude-pool"}
++
++
++def test_a_chat_on_the_pooled_credits_runs_both_judge_stages_on_them(models):
++    v = _review(CREDITS_CHAT)
++    assert models.providers() == [(1, "claude-credits"), (2, "claude-credits")]
++    assert v.detail["judge_account"] == "claude-credits" and v.card_text.endswith("Reviewed on API credits.")
++
++
++def test_the_chosen_credits_failing_is_named_on_the_card(models, pooled):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    models.down["claude-credits"] = RuntimeError("API Error: 429 rate limit")
++    pooled(("caam", 5.0))
++    v = _review(POOL_CHAT)
++    assert v.decision == "unsure" and "all Claude accounts are at their limit; API credits: it is at its usage limit" in v.card_text
+diff --git a/tools/approval_judge_route.py b/tools/approval_judge_route.py
+index e1c4ccb3..8155d5cb 100644
+--- a/tools/approval_judge_route.py
++++ b/tools/approval_judge_route.py
+@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
+ API_PREFIX = "claude-api-"
+ # The module the claude-accounts plugin loads its shared state as (talaria-claude-pool core.py).
+ ACCOUNTS_CORE = "hermes_claude_accounts_core"
++# The pooled API credit provider (claude-credits) and the module of the plugin that chooses its key per call.
++CREDITS_PROVIDER = "claude-credits"
++ACCOUNTS_CREDITS = "hermes_claude_accounts_credits"
+ _DROP = ("base_url", "api_key", "api_mode")
+ 
+ 
+@@ -100,6 +103,24 @@ def note_used(route: dict) -> None:
+         chat.used.append(provider)
+ 
+ 
++def _pooled_credit_choice() -> Optional[tuple[str, float]]:
++    """``("claude-credits", USD left in total)`` when the plugin has the pooled API credit provider and one of its
++    keys can serve now, else None. The provider picks the key for each call by the most credit left, the same
++    selection the chats on it use, so the judge needs no choice of its own. A plugin without the pooled provider
++    leaves the per-account estimate below in charge."""
++    credits = sys.modules.get(ACCOUNTS_CREDITS)
++    if credits is None:
++        return None
++    try:
++        rows = credits.keys()
++        if credits.pick(rows, None) is None:
++            return None
++        return CREDITS_PROVIDER, float(sum(r.left for r in rows if r.available and r.left is not None))
++    except Exception as exc:
++        logger.warning("Smart approval (provenance): pooled API credits unreadable (%s)", type(exc).__name__)
++        return None
++
++
+ def claude_api_credit_choice() -> Optional[tuple[str, float]]:
+     """``(provider, USD left)`` of the Anthropic API-key account with the most credit left, or None.
+ 
+@@ -107,6 +128,9 @@ def claude_api_credit_choice() -> Optional[tuple[str, float]]:
+     key since the cycle started), from the claude-accounts plugin loaded in this process. An account without a
+     key, without a readable estimate, or with no credit left is not a choice; the first account in the plugin's
+     order wins a tie. None when the plugin is not loaded or no account qualifies, so the user is asked."""
++    pooled = _pooled_credit_choice()
++    if pooled is not None:
++        return pooled
+     core = sys.modules.get(ACCOUNTS_CORE)
+     if core is None:
+         logger.info("Smart approval (provenance): the claude-accounts plugin is not loaded; no API credit estimate")
+@@ -150,11 +174,13 @@ def fall_back_from_pool() -> Optional[str]:
+ 
+ 
+ def account_label(provider: str) -> str:
+-    """\"API account caam\" for ``claude-api-caam``, as the hub names it."""
++    """\"API account caam\" for ``claude-api-caam``, as the hub names it; \"API credits\" for the pooled provider."""
++    if provider == CREDITS_PROVIDER:
++        return "API credits"
+     return "API account " + (provider[len(API_PREFIX):] if provider.startswith(API_PREFIX) else provider)
+ 
+ 
+ def used_api_account() -> Optional[str]:
+     """The API-key provider a judge call of this review was answered on, or None."""
+     chat = _current.get()
+-    return next((p for p in (chat.used if chat else []) if p.startswith(API_PREFIX)), None)
++    return next((p for p in (chat.used if chat else []) if p.startswith(API_PREFIX) or p == CREDITS_PROVIDER), None)
+-- 
+2.56.0
+

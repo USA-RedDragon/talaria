@@ -1,0 +1,755 @@
+From e6bff25137ab9e3867af67fc3d0c1384806e7a1b Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 00:18:04 -0600
+Subject: [PATCH] feat(providers): a pooled-credential provider and a
+ provider-owned fallback route
+
+Two seams in the provider profile, used by the Claude plugin for the pooled API credit provider (claude-credits) and the account pool (claude-pool).
+
+anthropic_transport(session_id, timeout): a provider whose API key is chosen per request returns the httpx transport its Anthropic client sends through. The provider's key is the placeholder "hermes-pooled-key/<profile name>"; build_anthropic_client builds the SDK client over the profile's transport when it sees that key, so the agent, a fallback swap, the primary restore, a model switch and auxiliary calls all pool the same way and no real key sits in a client. The chat's session id rides on the key ("#<session>") so the transport keeps its books per chat.
+
+fallback_route(model) and primary_ready(model): a provider names where its calls go when it has nothing left to try (the pool: the same model on the pooled API credits), and says when it can serve again. The route goes first in the agent's fallback chain while the agent runs on the provider; an error that carries hermes_user_message (0099, a pool with no account left) tries it before ending the turn with the line. The agent goes back to the provider before the next model call as soon as primary_ready says so, whatever cooldown the fallback armed, and a new turn does the same. A provider that overrides none of the hooks changes nothing. Subagents, scheduled jobs and chats run the same loop.
+---
+ agent/agent_init.py                           |   4 +-
+ agent/agent_runtime_helpers.py                |  10 +-
+ agent/anthropic_adapter.py                    |  37 ++++
+ agent/chat_completion_helpers.py              |   2 +
+ agent/client_lifecycle.py                     |  10 +-
+ agent/profile_fallback.py                     |  82 +++++++
+ agent/turn_api_error.py                       |  11 +-
+ agent/turn_iteration_prep.py                  |   3 +
+ providers/base.py                             |  22 ++
+ tests/agent/test_pooled_anthropic_client.py   | 124 +++++++++++
+ tests/agent/test_profile_fallback.py          | 208 ++++++++++++++++++
+ tests/tools/test_delegation_claude_credits.py |  51 +++++
+ 12 files changed, 555 insertions(+), 9 deletions(-)
+ create mode 100644 agent/profile_fallback.py
+ create mode 100644 tests/agent/test_pooled_anthropic_client.py
+ create mode 100644 tests/agent/test_profile_fallback.py
+ create mode 100644 tests/tools/test_delegation_claude_credits.py
+
+diff --git a/agent/agent_init.py b/agent/agent_init.py
+index 4f7d39e3..fcf00084 100644
+--- a/agent/agent_init.py
++++ b/agent/agent_init.py
+@@ -685,7 +685,9 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
+     # cause 401/403 on their endpoints. See #1739.
+     from agent.anthropic_credentials import anthropic_route_is_oauth
+     agent._is_anthropic_oauth = anthropic_route_is_oauth(base_url, effective_key, provider=agent.provider)
+-    agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
++    from agent.anthropic_adapter import pooled_key_for_session
++    agent._anthropic_client = build_anthropic_client(
++        pooled_key_for_session(effective_key, getattr(agent, "session_id", None)), base_url, timeout=_provider_timeout)
+     if not agent.quiet_mode:
+         print(f"🤖 AI Agent initialized with model: {agent.model} (Anthropic native)")
+         _print_key_banner(effective_key, "token")
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index 2ae92f05..5749ef01 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -1115,11 +1115,11 @@ def _apply_primary_runtime_fields(agent, rt: dict[str, Any]) -> None:
+ 
+ def _build_anthropic_client_from_runtime(agent, rt: dict[str, Any]) -> None:
+     """Rebuild the native Anthropic client from a ``_primary_runtime`` snapshot."""
+-    from agent.anthropic_adapter import build_anthropic_client
++    from agent.anthropic_adapter import build_anthropic_client, pooled_key_for_session
+     agent._anthropic_api_key = rt["anthropic_api_key"]
+     agent._anthropic_base_url = rt["anthropic_base_url"]
+     agent._anthropic_client = build_anthropic_client(
+-        rt["anthropic_api_key"], rt["anthropic_base_url"],
++        pooled_key_for_session(rt["anthropic_api_key"], getattr(agent, "session_id", None)), rt["anthropic_base_url"],
+         timeout=get_provider_request_timeout(agent.provider, agent.model),
+     )
+     agent._is_anthropic_oauth = rt["is_anthropic_oauth"]
+@@ -1421,6 +1421,9 @@ def restore_primary_runtime(agent) -> bool:
+         return loaded if loaded is not None and _matches_primary(loaded) else None
+     if _primary_quota_reopened_early(agent, primary_provider, primary_model, _matches_primary, _load_primary_pool):
+         agent._rate_limited_until = 0
++    from agent.profile_fallback import primary_ready
++    if primary_ready(agent):  # the provider itself says it can serve again: no cooldown holds it back
++        agent._rate_limited_until = 0
+     if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
+         return False  # primary still in rate-limit cooldown, stay on fallback
+     blocked, prefetched_pool, prefetched = _primary_reset_gate_blocks(
+@@ -2190,8 +2193,9 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
+                 )
+         agent.api_key = agent._anthropic_api_key = effective_key
+         agent._anthropic_base_url = base_url or getattr(agent, "_anthropic_base_url", None)
++        from agent.anthropic_adapter import pooled_key_for_session
+         agent._anthropic_client = build_anthropic_client(
+-            effective_key, agent._anthropic_base_url,
++            pooled_key_for_session(effective_key, getattr(agent, "session_id", None)), agent._anthropic_base_url,
+             timeout=get_provider_request_timeout(agent.provider, agent.model),
+         )
+         agent._is_anthropic_oauth = anthropic_route_is_oauth(agent._anthropic_base_url, effective_key, provider=new_provider)
+diff --git a/agent/anthropic_adapter.py b/agent/anthropic_adapter.py
+index 0477632e..a20deac6 100644
+--- a/agent/anthropic_adapter.py
++++ b/agent/anthropic_adapter.py
+@@ -487,6 +487,41 @@ def _auth_style(api_key, base_url, normalized_base_url) -> str:
+     return "api_key"
+ 
+ 
++POOLED_KEY_PREFIX = "hermes-pooled-key/"
++
++
++def pooled_key_for_session(api_key: Any, session_id: Any) -> Any:
++    """``api_key`` with the chat's session id on it when it is a pooled provider's key, so that provider's
++    transport can keep its books per chat. Any other key, and a pooled key that already names a session, stay."""
++    if isinstance(api_key, str) and api_key.startswith(POOLED_KEY_PREFIX) and "#" not in api_key \
++            and isinstance(session_id, str) and session_id:
++        return f"{api_key}#{session_id}"
++    return api_key
++
++
++def _build_pooled_anthropic_client(api_key: str, base_url: str | None, timeout: float | None, *,
++                                   drop_context_1m_beta: bool = False):
++    """Client of a pooled-credential provider. ``api_key`` is ``POOLED_KEY_PREFIX`` + the provider's name, and
++    ``#<session id>`` after it when the client belongs to a chat. The provider's profile supplies the httpx
++    transport (``ProviderProfile.anthropic_transport``) that picks the real key for each request, so the key
++    never sits in the SDK client and every path that builds a client from the provider's key (the agent, a
++    fallback, auxiliary calls) is pooled the same way. The SDK's own key is the placeholder."""
++    sdk = _require_sdk("a pooled Anthropic API provider")
++    name, _, session_id = api_key[len(POOLED_KEY_PREFIX):].partition("#")
++    from providers import get_provider_profile
++    profile = get_provider_profile(name)
++    transport = profile.anthropic_transport(session_id=session_id or None, timeout=timeout) if profile else None
++    if transport is None:
++        raise ValueError(f"provider {name!r} has no pooled credential transport")
++    import httpx
++    normalize_proxy_env_vars()
++    normalized_base_url, kwargs = _base_client_kwargs(base_url, timeout)
++    kwargs["api_key"] = POOLED_KEY_PREFIX + name
++    kwargs["http_client"] = httpx.Client(transport=transport, timeout=kwargs["timeout"])
++    headers = _beta_header(_common_betas_for_base_url(normalized_base_url, drop_context_1m_beta=drop_context_1m_beta))
++    return _new_sdk_client(sdk, kwargs, headers, route=base_url)
++
++
+ def build_anthropic_client(api_key, base_url: str | None = None, timeout: float | None = None, *, drop_context_1m_beta: bool = False):
+     """Create an Anthropic client, auto-detecting setup-tokens vs API keys. ``api_key`` is a static
+     ``str`` or a ``Callable[[], str]`` Entra ID bearer provider (routed through
+@@ -495,6 +530,8 @@ def build_anthropic_client(api_key, base_url: str | None = None, timeout: float
+     client-level beta header — the reactive OAuth retry in run_agent uses it after a subscription
+     rejects it; fresh clients keep the default so 1M-capable subscriptions keep the capability."""
+     sdk = _require_sdk("the Anthropic provider")
++    if isinstance(api_key, str) and api_key.startswith(POOLED_KEY_PREFIX):
++        return _build_pooled_anthropic_client(api_key, base_url, timeout, drop_context_1m_beta=drop_context_1m_beta)
+     if callable(api_key) and not isinstance(api_key, str):
+         return _build_anthropic_client_with_bearer_hook(
+             api_key, base_url, timeout, drop_context_1m_beta=drop_context_1m_beta
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+index e6112380..b16997d1 100644
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -2047,6 +2047,8 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
+     from agent.fallback_cooldown import _arm_rate_limit_cooldown, switch_deferred_by_reset
+     if switch_deferred_by_reset(agent, reason, reset_at):
+         return False
++    from agent.profile_fallback import sync_profile_fallback
++    sync_profile_fallback(agent)  # the running provider's own route (the pool's API credits) goes first
+     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason, reset_at=reset_at)
+     while True:
+         if agent._fallback_index >= len(agent._fallback_chain):
+diff --git a/agent/client_lifecycle.py b/agent/client_lifecycle.py
+index eef318a0..b2b5300c 100644
+--- a/agent/client_lifecycle.py
++++ b/agent/client_lifecycle.py
+@@ -75,13 +75,14 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
+     key_provider = vars(fb_client).get("_api_key_provider")
+     credential = key_provider if callable(key_provider) else fb_client.api_key
+     if fb_api_mode == "anthropic_messages":
+-        from agent.anthropic_adapter import build_anthropic_client
++        from agent.anthropic_adapter import build_anthropic_client, pooled_key_for_session
+         from agent.anthropic_credentials import resolve_anthropic_token, anthropic_route_is_oauth
+         is_anthropic = fb_provider == "anthropic"
+         effective_key = credential or (resolve_anthropic_token(model=getattr(agent, "model", None)) if is_anthropic else None) or ""
+         agent.api_key = agent._anthropic_api_key = effective_key
+         agent._anthropic_base_url = fb_base_url
+-        agent._anthropic_client = build_anthropic_client(effective_key, fb_base_url, timeout=timeout)
++        agent._anthropic_client = build_anthropic_client(
++            pooled_key_for_session(effective_key, getattr(agent, "session_id", None)), fb_base_url, timeout=timeout)
+         agent._is_anthropic_oauth = anthropic_route_is_oauth(fb_base_url, effective_key, provider=fb_provider)
+         agent.client, agent._client_kwargs = None, {}
+         return
+@@ -508,10 +509,11 @@ class ClientLifecycleMixin:
+         return anthropic_route_is_oauth(getattr(self, "_anthropic_base_url", None), token, provider=self.provider)
+ 
+     def _build_anthropic_client_for_key(self, key: tuple) -> Any:
+-        from agent.anthropic_adapter import build_anthropic_bedrock_client, build_anthropic_client
++        from agent.anthropic_adapter import build_anthropic_bedrock_client, build_anthropic_client, pooled_key_for_session
+         if key[0] == "bedrock":
+             return build_anthropic_bedrock_client(key[1], timeout=key[2])
+-        return build_anthropic_client(key[1], key[2], timeout=key[3], drop_context_1m_beta=key[4])
++        return build_anthropic_client(pooled_key_for_session(key[1], getattr(self, "session_id", None)), key[2], timeout=key[3],
++                                      drop_context_1m_beta=key[4])
+ 
+     def _create_request_anthropic_client(self, *, reason: str) -> Any:
+         """Build (or reuse) a request-local Anthropic client for one in-flight call.
+diff --git a/agent/profile_fallback.py b/agent/profile_fallback.py
+new file mode 100644
+index 00000000..4bf3f8b1
+--- /dev/null
++++ b/agent/profile_fallback.py
+@@ -0,0 +1,82 @@
++"""A provider's own fallback route, and the way back to the provider.
++
++A provider profile can name where its calls go when it has nothing left to try (``fallback_route``: the
++Claude account pool names the pooled API credits, same model) and say when it can serve again
++(``primary_ready``). The route is put first in the agent's fallback chain while the agent runs on the
++provider, so the usual fallback walk, notice and primary cooldown apply; and the agent goes back to the
++provider before the next model call as soon as the provider says it is ready, not only at the next turn.
++A provider that does not override the two hooks changes nothing.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Any, Optional
++
++logger = logging.getLogger(__name__)
++
++ROUTE_FLAG = "_profile_route"
++
++
++def _profile(provider: Any) -> Any:
++    name = str(provider or "").strip()
++    if not name:
++        return None
++    try:
++        from providers import get_provider_profile
++        return get_provider_profile(name)
++    except Exception:
++        return None
++
++
++def _route_of(agent: Any) -> Optional[dict[str, Any]]:
++    profile = _profile(getattr(agent, "provider", ""))
++    ask = getattr(profile, "fallback_route", None)
++    if not callable(ask):
++        return None
++    try:
++        route = ask(model=str(getattr(agent, "model", "") or ""))
++    except Exception:
++        logger.debug("fallback_route failed for %s", getattr(agent, "provider", ""), exc_info=True)
++        return None
++    if not isinstance(route, dict) or not str(route.get("provider") or "").strip() or not str(route.get("model") or "").strip():
++        return None
++    return {"provider": str(route["provider"]).strip(), "model": str(route["model"]).strip()}
++
++
++def sync_profile_fallback(agent: Any) -> bool:
++    """Put the running provider's own fallback route first in ``agent._fallback_chain`` (and drop the one it
++    put there before). True when the provider names a route now. Only while the agent is on its primary route."""
++    chain = [e for e in (getattr(agent, "_fallback_chain", None) or []) if not (isinstance(e, dict) and e.get(ROUTE_FLAG))]
++    route = None if getattr(agent, "_fallback_activated", False) else _route_of(agent)
++    if route is not None:
++        chain.insert(0, {**route, ROUTE_FLAG: True})
++        agent._fallback_index = 0
++    if chain != list(getattr(agent, "_fallback_chain", None) or []):
++        agent._fallback_chain = chain
++    return route is not None
++
++
++def primary_ready(agent: Any) -> bool:
++    """Whether the primary provider of an agent that fell back says it can serve its model again."""
++    if not getattr(agent, "_fallback_activated", False):
++        return False
++    rt = getattr(agent, "_primary_runtime", None) or {}
++    profile = _profile(rt.get("provider"))
++    ask = getattr(profile, "primary_ready", None)
++    if not callable(ask):
++        return False
++    try:
++        return bool(ask(model=str(rt.get("model") or "")))
++    except Exception:
++        logger.debug("primary_ready failed for %s", rt.get("provider"), exc_info=True)
++        return False
++
++
++def restore_when_ready(agent: Any) -> bool:
++    """Before a model call: go back to the primary provider if it says it is ready, whatever the cooldown a
++    fallback armed. True when the agent moved back."""
++    if not primary_ready(agent):
++        return False
++    agent._rate_limited_until = 0
++    return bool(agent._restore_primary_runtime())
+diff --git a/agent/turn_api_error.py b/agent/turn_api_error.py
+index 4060cda8..ec80e74d 100644
+--- a/agent/turn_api_error.py
++++ b/agent/turn_api_error.py
+@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
+ 
+ from agent.api_error_summary import is_provider_stream_parse_error
+ from agent.error_classifier import RETRYABLE_CLIENT_REASONS, FailoverReason, classify_api_error
+-from agent.provider_user_message import plain_provider_failure_result, provider_user_message
++from agent.provider_user_message import plain_provider_failure_result, provider_resets_at, provider_user_message
+ from agent.route_verdicts import route_visit
+ from agent.turn_overflow import recover_from_overflow
+ from agent.turn_recovery import (
+@@ -148,6 +148,15 @@ def handle_api_error(
+     # limit) says so in one line meant for the user. Retrying, falling back or wrapping it in the
+     # generic "rate-limited after N attempts ... Provider said:" copy would only bury that line.
+     if (_plain := provider_user_message(api_error)) is not None:
++        # A provider with a route of its own for this case (the account pool, whose route is the pooled API
++        # credits) sends the call there first; the line is the whole reply only when that route is not there or fails.
++        from agent.conversation_loop import _arm_fallback_restart
++        from agent.profile_fallback import sync_profile_fallback
++        if sync_profile_fallback(agent) and agent._try_activate_fallback(
++                reason=classified.reason, reset_at=provider_resets_at(api_error)):
++            active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
++            retry_count = compression_attempts = 0
++            return _verdict("break")
+         return _verdict("return", plain_provider_failure_result(
+             agent, api_error, classified, _plain, messages=messages,
+             conversation_history=conversation_history, api_call_count=api_call_count,
+diff --git a/agent/turn_iteration_prep.py b/agent/turn_iteration_prep.py
+index 313cee0d..bf1ec955 100644
+--- a/agent/turn_iteration_prep.py
++++ b/agent/turn_iteration_prep.py
+@@ -466,6 +466,9 @@ def begin_iteration(
+             )
+         return _verdict("break")
+ 
++    from agent.profile_fallback import restore_when_ready
++    restore_when_ready(agent)  # a provider that fell back to its own route is used again as soon as it can serve
++
+     api_call_count += 1
+     agent._api_call_count = api_call_count
+     agent._touch_activity(f"starting API call #{api_call_count}")
+diff --git a/providers/base.py b/providers/base.py
+index 474f3c75..d4ef070b 100644
+--- a/providers/base.py
++++ b/providers/base.py
+@@ -513,6 +513,28 @@ class ProviderProfile:
+         """
+         return None
+ 
++    def anthropic_transport(self, *, session_id: str | None = None, timeout: float | None = None) -> Any | None:
++        """An ``httpx.BaseTransport`` for a provider whose API key is chosen per request.
++
++        A pooled-credential provider (several keys behind one provider name) returns the transport its
++        Anthropic client sends through: it picks the key for each request, moves to another key when one
++        fails, and keeps its own books. ``session_id`` is the chat the client belongs to, or None (auxiliary
++        calls). The client is built when the provider's key is ``agent.anthropic_adapter.POOLED_KEY_PREFIX``
++        plus this provider's name. None (the default) means the provider has no such transport.
++        """
++        return None
++
++    def fallback_route(self, *, model: str) -> dict[str, Any] | None:
++        """Where a call of this provider goes when it has nothing left to try: ``{"provider": ..., "model": ...}``
++        for a fallback-chain-shaped entry (same model on another provider), or None for no route of its own.
++        Asked before the configured fallback chain, only while the agent runs on this provider."""
++        return None
++
++    def primary_ready(self, *, model: str) -> bool:
++        """Whether this provider can serve ``model`` again now. Asked before each model call while the agent
++        runs on the route ``fallback_route`` gave, so the agent goes back at once instead of at the next turn."""
++        return False
++
+     def setup_status(self, **kwargs: Any) -> dict[str, Any] | None:
+         """External-process providers: ``{available, logged_in, plan, detail, login_command}`` from the
+         CLI itself so setup can gate on login. ``None`` = nothing to report beyond executable presence."""
+diff --git a/tests/agent/test_pooled_anthropic_client.py b/tests/agent/test_pooled_anthropic_client.py
+new file mode 100644
+index 00000000..751fc318
+--- /dev/null
++++ b/tests/agent/test_pooled_anthropic_client.py
+@@ -0,0 +1,124 @@
++"""A pooled-credential provider's Anthropic client sends through the transport its profile supplies.
++
++The provider's key is ``POOLED_KEY_PREFIX`` plus its name (and ``#<session>`` for a chat's client); the SDK
++client is built over the profile's httpx transport, so the transport picks the real key for each request and
++the placeholder never leaves the process. Real SDK client and real httpx; the upstream is a mock transport.
++"""
++from __future__ import annotations
++
++import json
++
++import httpx
++import pytest
++
++from agent.anthropic_adapter import POOLED_KEY_PREFIX, build_anthropic_client
++from providers import register_provider
++from providers.base import ProviderProfile
++
++
++class Recorder(httpx.BaseTransport):
++    def __init__(self, session_id, timeout):
++        self.session_id, self.timeout, self.seen = session_id, timeout, []
++
++    def handle_request(self, request):
++        self.seen.append(request)
++        body = {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5",
++                "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn", "stop_sequence": None,
++                "usage": {"input_tokens": 3, "output_tokens": 1}}
++        return httpx.Response(200, json=body, request=request)
++
++
++class Pooled(ProviderProfile):
++    made = []
++
++    def anthropic_transport(self, *, session_id=None, timeout=None):
++        transport = Recorder(session_id, timeout)
++        self.made.append(transport)
++        return transport
++
++
++@pytest.fixture()
++def pooled():
++    Pooled.made = []
++    register_provider(Pooled(name="fake-pooled", api_mode="anthropic_messages", base_url="https://api.anthropic.com"))
++    register_provider(ProviderProfile(name="fake-plain", api_mode="anthropic_messages"))
++    return Pooled
++
++
++def _call(client):
++    return client.messages.create(model="claude-sonnet-5-5", max_tokens=8, messages=[{"role": "user", "content": "x"}])
++
++
++def test_the_client_sends_through_the_profiles_transport_and_the_sdk_holds_only_the_placeholder(pooled):
++    client = build_anthropic_client(POOLED_KEY_PREFIX + "fake-pooled", "https://api.anthropic.com", timeout=120)
++    reply = _call(client)
++    (transport,) = pooled.made
++    assert reply.content[0].text == "hi" and len(transport.seen) == 1
++    request = transport.seen[0]
++    assert str(request.url) == "https://api.anthropic.com/v1/messages" and json.loads(request.content)["model"]
++    assert request.headers["x-api-key"] == POOLED_KEY_PREFIX + "fake-pooled"
++    assert "authorization" not in request.headers
++    assert transport.session_id is None and transport.timeout == 120
++
++
++def test_a_chats_client_names_its_session_to_the_transport(pooled):
++    build_anthropic_client(POOLED_KEY_PREFIX + "fake-pooled#20261121_abc", "https://api.anthropic.com")
++    assert pooled.made[0].session_id == "20261121_abc"
++
++
++def test_the_sdk_does_not_retry_on_its_own(pooled):
++    client = build_anthropic_client(POOLED_KEY_PREFIX + "fake-pooled", "https://api.anthropic.com")
++    assert client.max_retries == 0
++
++
++@pytest.mark.parametrize("name", ["fake-plain", "no-such-provider"])
++def test_a_provider_without_a_transport_is_refused(pooled, name):
++    with pytest.raises(ValueError, match="no pooled credential transport"):
++        build_anthropic_client(POOLED_KEY_PREFIX + name, "https://api.anthropic.com")
++
++
++def test_an_ordinary_key_builds_the_ordinary_client(pooled):
++    client = build_anthropic_client("sk-ant-api03-plain", "https://api.anthropic.com")
++    assert client.api_key == "sk-ant-api03-plain" and pooled.made == []
++
++
++def test_the_chat_session_rides_on_the_key_the_agent_builds_its_request_client_from(pooled):
++    from unittest.mock import patch
++
++    from agent.client_lifecycle import ClientLifecycleMixin
++
++    class Stub:
++        session_id = "sess-1"
++
++    key = ("direct", POOLED_KEY_PREFIX + "fake-pooled", "https://api.anthropic.com", None, False)
++    with patch("agent.anthropic_adapter.build_anthropic_client") as build:
++        ClientLifecycleMixin._build_anthropic_client_for_key(Stub(), key)
++        assert build.call_args.args[0] == POOLED_KEY_PREFIX + "fake-pooled#sess-1"
++        Stub.session_id = ""
++        ClientLifecycleMixin._build_anthropic_client_for_key(Stub(), key)
++        assert build.call_args.args[0] == POOLED_KEY_PREFIX + "fake-pooled"
++        ClientLifecycleMixin._build_anthropic_client_for_key(Stub(), ("direct", "sk-ant-api03-x", None, None, False))
++        assert build.call_args.args[0] == "sk-ant-api03-x"
++
++
++def test_every_client_the_agent_builds_for_a_pooled_key_names_its_chat(pooled):
++    """Init, a fallback swap, the primary restore and a model switch all build from the provider's one key."""
++    from unittest.mock import MagicMock, patch
++
++    from agent.agent_runtime_helpers import _build_anthropic_client_from_runtime
++    from agent.client_lifecycle import _swap_fallback_clients
++
++    key = POOLED_KEY_PREFIX + "fake-pooled"
++    agent = MagicMock(session_id="sess-9", provider="custom", model="claude-sonnet-5-5")
++    with patch("agent.anthropic_adapter.build_anthropic_client") as build, \
++            patch("agent.client_lifecycle.get_provider_request_timeout", return_value=None), \
++            patch("agent.agent_runtime_helpers.get_provider_request_timeout", return_value=None):
++        fb_client = MagicMock(api_key=key)
++        fb_client.__dict__.pop("_api_key_provider", None)
++        _swap_fallback_clients(agent, fb_client, "fake-pooled", "claude-sonnet-5-5", "https://api.anthropic.com",
++                               "anthropic_messages")
++        assert build.call_args.args[0] == key + "#sess-9"
++        assert agent._anthropic_api_key == key  # the agent keeps the plain key; only the client's copy names the chat
++        _build_anthropic_client_from_runtime(agent, {"anthropic_api_key": key, "anthropic_base_url": "https://api.anthropic.com",
++                                                     "is_anthropic_oauth": False})
++        assert build.call_args.args[0] == key + "#sess-9"
+diff --git a/tests/agent/test_profile_fallback.py b/tests/agent/test_profile_fallback.py
+new file mode 100644
+index 00000000..2cd27b42
+--- /dev/null
++++ b/tests/agent/test_profile_fallback.py
+@@ -0,0 +1,208 @@
++"""A provider's own fallback route, and the way back to it.
++
++A provider profile can name where its calls go when it has nothing left to try (``fallback_route``) and say
++when it can serve again (``primary_ready``). The Claude account pool uses both: with every subscription
++account at its limit the call goes to the pooled API credits, same model, and the agent is back on the pool
++before the next model call as soon as an account frees up. Real ``AIAgent`` conversations; the route swap
++(client construction) is the only stubbed part.
++"""
++from __future__ import annotations
++
++import time
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from providers import register_provider
++from providers.base import ProviderProfile
++
++LINE = "All Claude accounts are at their limit. The first frees up at 10:09 PM CST."
++BOTH = "No API credit is left and all Claude accounts are at their limit. The first frees up at 10:09 PM CST."
++
++
++class Exhausted(RuntimeError):
++    status_code = 429
++
++    def __init__(self, line=LINE):
++        super().__init__("raw upstream text")
++        self.hermes_user_message = line
++        self.hermes_resets_at = time.time() + 3600
++
++
++class Pool(ProviderProfile):
++    """Stands for claude-pool: a route only while it is exhausted, ready again once it is not."""
++
++    exhausted = True
++    route_model = "claude-sonnet-5-5"
++
++    def fallback_route(self, *, model):
++        return {"provider": "fake-credits", "model": self.route_model} if self.exhausted else None
++
++    def primary_ready(self, *, model):
++        return not self.exhausted
++
++
++@pytest.fixture()
++def pool():
++    profile = Pool(name="fake-pool")
++    register_provider(profile)
++    register_provider(ProviderProfile(name="fake-credits"))
++    profile.exhausted = True
++    return profile
++
++
++def _reply(text="from the other side"):
++    msg = SimpleNamespace(content=text, tool_calls=None)
++    return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], model="m", usage=None)
++
++
++@pytest.fixture()
++def agent(pool):
++    from run_agent import AIAgent
++
++    with (
++        patch("model_tools.get_tool_definitions", return_value=[]),
++        patch("model_tools.check_toolset_requirements", return_value={}),
++        patch("agent.process_bootstrap.OpenAI"),
++    ):
++        agent = AIAgent(api_key="test-key-1234567890", base_url="https://openrouter.ai/api/v1", quiet_mode=True,
++                        skip_context_files=True, skip_memory=True)
++    agent.provider = agent.requested_provider = "fake-pool"
++    agent.model = "claude-sonnet-5-5[1m]"
++    agent._primary_runtime = {**(agent._primary_runtime or {}), "provider": "fake-pool", "requested_provider": "fake-pool",
++                              "model": agent.model}
++    agent.client = MagicMock()
++    agent._cached_system_prompt = "You are helpful."
++    agent._use_prompt_caching = False
++    agent.tool_delay = 0
++    agent.compression_enabled = False
++    agent.save_trajectories = False
++    agent._fallback_chain = []
++    agent.statuses = []
++    agent._emit_diagnostic_status = lambda message, *a, **k: agent.statuses.append(str(message))
++    agent.binds = []
++    agent.on_credits = MagicMock()
++    agent.on_credits.chat.completions.create.return_value = _reply()
++    return agent
++
++
++def _bind(agent):
++    """The route swap with its client construction stubbed: the agent now speaks to ``on_credits``."""
++    def bind(ag, entry, provider, model):
++        agent.binds.append((provider, model))
++        old = (ag.model, ag.provider)
++        ag.model, ag.provider, ag.requested_provider = model, provider, provider
++        ag.client = agent.on_credits
++        ag._fallback_activated = True
++        return old
++    return patch("agent.route_binding.bind_route_entry", side_effect=bind)
++
++
++def _run(agent, text="hello"):
++    with patch("agent.turn_recovery.interruptible_backoff_sleep", return_value=False), patch("time.sleep", return_value=None):
++        return agent.run_conversation(text)
++
++
++def test_an_exhausted_pool_falls_back_to_its_route_with_the_same_model_instead_of_ending_the_turn(agent):
++    agent.client.chat.completions.create.side_effect = Exhausted()
++    with _bind(agent):
++        result = _run(agent)
++    assert agent.binds == [("fake-credits", "claude-sonnet-5-5")]
++    assert result["final_response"] == "from the other side" and not result.get("failed")
++    assert agent.client.chat.completions.create.call_count == 1  # no retries on the exhausted pool first
++    assert agent.provider == "fake-credits" and agent._provider_fallback_active
++
++
++@pytest.mark.parametrize("kind", ["chat", "cron job", "subagent"])
++def test_a_scheduled_job_and_a_subagent_fall_back_the_same_way(agent, kind):
++    """The loop is the same for every agent that runs on the provider; only who owns the agent differs."""
++    if kind == "cron job":
++        agent.platform = "cron"
++        agent._session_db = None
++    if kind == "subagent":
++        agent._delegate_depth = 1
++        agent.platform = "delegate"
++        agent._fallback_chain = []  # a child starts with no chain of its own
++    agent.client.chat.completions.create.side_effect = Exhausted()
++    with _bind(agent):
++        result = _run(agent)
++    assert agent.binds == [("fake-credits", "claude-sonnet-5-5")]
++    assert result["final_response"] == "from the other side" and not result.get("failed")
++
++
++def test_without_a_route_the_line_still_ends_the_turn(agent, pool):
++    pool.exhausted = False  # nothing named: the 0099 behavior
++    agent.client.chat.completions.create.side_effect = Exhausted()
++    with _bind(agent):
++        result = _run(agent)
++    assert agent.binds == [] and result["failed"] is True and result["final_response"] == LINE
++
++
++def test_the_route_failing_with_its_own_line_ends_the_turn_with_that_line(agent):
++    agent.client.chat.completions.create.side_effect = Exhausted()
++    agent.on_credits.chat.completions.create.side_effect = Exhausted(BOTH)
++    with _bind(agent):
++        result = _run(agent)
++    assert agent.binds == [("fake-credits", "claude-sonnet-5-5")]  # tried once, not looped
++    assert result["failed"] is True and result["final_response"] == BOTH
++
++
++def test_a_provider_that_names_no_route_is_not_touched(agent):
++    agent.provider = "openrouter"
++    agent._fallback_chain = [{"provider": "other", "model": "m"}]
++    from agent.profile_fallback import sync_profile_fallback
++
++    assert sync_profile_fallback(agent) is False
++    assert agent._fallback_chain == [{"provider": "other", "model": "m"}]
++
++
++def test_the_route_goes_first_in_the_chain_once_and_leaves_with_the_exhaustion(agent, pool):
++    from agent.profile_fallback import ROUTE_FLAG, sync_profile_fallback
++
++    agent._fallback_chain = [{"provider": "other", "model": "m"}]
++    assert sync_profile_fallback(agent) and sync_profile_fallback(agent)
++    assert agent._fallback_chain == [{"provider": "fake-credits", "model": "claude-sonnet-5-5", ROUTE_FLAG: True},
++                                     {"provider": "other", "model": "m"}]
++    pool.exhausted = False
++    assert sync_profile_fallback(agent) is False
++    assert agent._fallback_chain == [{"provider": "other", "model": "m"}]
++
++
++def test_the_agent_goes_back_to_the_pool_before_the_next_call_once_it_can_serve(agent, pool):
++    agent.client.chat.completions.create.side_effect = Exhausted()
++    with _bind(agent):
++        _run(agent)
++    assert agent.provider == "fake-credits"
++    primary = agent._primary_runtime
++    assert primary["provider"] == "fake-pool"
++    from agent.profile_fallback import restore_when_ready
++
++    with patch.object(type(agent), "_restore_primary_runtime", autospec=True) as restore:
++        assert restore_when_ready(agent) is False and restore.call_count == 0  # still exhausted
++        pool.exhausted = False
++        agent._rate_limited_until = 10 ** 12  # the cooldown the fallback armed does not hold it back
++        restore.return_value = True
++        assert restore_when_ready(agent) is True and restore.call_count == 1
++        assert agent._rate_limited_until == 0
++
++
++def test_a_cooldown_does_not_hold_back_a_ready_pool_at_the_next_turn(agent, pool):
++    from agent.agent_runtime_helpers import restore_primary_runtime
++
++    agent.client.chat.completions.create.side_effect = Exhausted()
++    with _bind(agent):
++        _run(agent)
++    assert agent._rate_limited_until > 0  # armed until the pool's own reset time
++    assert restore_primary_runtime(agent) is False  # still exhausted: the cooldown holds
++    pool.exhausted = False
++    with patch("agent.route_binding.reinstall_primary_runtime") as reinstall:
++        assert restore_primary_runtime(agent) is True
++    assert reinstall.call_count == 1 and agent._provider_fallback_active is False
++
++
++def test_a_ready_pool_with_no_fallback_in_force_changes_nothing(agent, pool):
++    pool.exhausted = False
++    from agent.profile_fallback import primary_ready, restore_when_ready
++
++    assert primary_ready(agent) is False and restore_when_ready(agent) is False
+diff --git a/tests/tools/test_delegation_claude_credits.py b/tests/tools/test_delegation_claude_credits.py
+new file mode 100644
+index 00000000..622c8efb
+--- /dev/null
++++ b/tests/tools/test_delegation_claude_credits.py
+@@ -0,0 +1,51 @@
++"""A chat on the pooled API credit provider (``claude-credits``) is a chat on an Anthropic API-key provider: its
++``family: claude`` subagents run on ``claude-credits`` with their route's model, resumed ones follow it, and a chat
++on the account pool keeps its routes on the pool (which falls back to the credits by itself, not by routing)."""
++
++from unittest.mock import patch
++
++from tests.tools import test_delegation_claude_family as family
++from tests.tools.test_delegation_claude_family import API, POOL_URL, _parent, _spawn
++
++CREDITS = "claude-credits"
++_FAMILY_RUNTIME = family._runtime
++
++
++def _runtime(requested=None, target_model=None, **kw):
++    if requested == CREDITS:
++        return {"provider": requested, "base_url": API, "api_key": "hermes-pooled-key/claude-credits-keys",
++                "api_mode": "anthropic_messages"}
++    return _FAMILY_RUNTIME(requested=requested, target_model=target_model, **kw)
++
++
++def _spawn_credits(parent, options):
++    # _spawn patches the runtime provider with the family file's own answer; this one also knows claude-credits
++    with patch.object(family, "_runtime", _runtime):
++        return _spawn(parent, options)
++
++
++def test_a_chat_on_the_pooled_credits_runs_its_claude_routes_on_them_with_the_routes_model():
++    built, _ = _spawn_credits(_parent(CREDITS), ["sonnet", "opus", "plain"])
++    assert built == [(CREDITS, "claude-sonnet-5-5"), (CREDITS, "claude-opus-5-5"), ("claude-pool", "claude-haiku-5-5")]
++
++
++def test_a_chat_on_the_pool_keeps_its_routes_on_the_pool():
++    built, _ = _spawn_credits(_parent("claude-pool", base_url=POOL_URL), ["sonnet", "opus"])
++    assert built == [("claude-pool", "claude-sonnet-5-5"), ("claude-pool", "claude-opus-5-5")]
++
++
++def test_a_helper_on_another_route_hands_its_own_helpers_the_credits_choice():
++    from tools.delegate_tool_claude import parent_claude_account
++
++    assert parent_claude_account(_parent(CREDITS)) == CREDITS
++    under_kimi = _parent("deepinfra", "chat_completions", "https://api.deepinfra.com/v1/openai", account=CREDITS)
++    assert parent_claude_account(under_kimi) == CREDITS
++
++
++def test_a_subagent_resumed_after_the_chat_moved_to_the_credits_follows_it():
++    from tools.delegate_tool_claude import follow_chat_on_resume, stamp_chat_account
++
++    pool_route = {"provider": "claude-pool", "model": "claude-sonnet-5-5", "base_url": POOL_URL, "api_key": "k", "api_mode": "x"}
++    assert follow_chat_on_resume(pool_route, CREDITS) == {"provider": CREDITS, "model": "claude-sonnet-5-5"}
++    out = stamp_chat_account({"children": {"0": {"route": {"route": pool_route}}}}, _parent(CREDITS))
++    assert out["children"]["0"]["route"]["route"]["provider"] == CREDITS and out["parent"]["claude_account"] == CREDITS
+-- 
+2.56.0
+
