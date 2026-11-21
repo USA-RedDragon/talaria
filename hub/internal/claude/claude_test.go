@@ -502,6 +502,88 @@ func TestAccountsCredits(t *testing.T) {
 	}
 }
 
+// TestAccountsPooledCredits: the pooled credits summary and the per-key hold
+// and pooled spend reach the Usage JSON; a plugin that sends none of it
+// gives none.
+func TestAccountsPooledCredits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	old, err := newEnv(t).svc.ClaudeAccounts(ctx, bob, backendMain, true)
+	if err != nil || old.Credits != nil {
+		t.Fatalf("old plugin: credits = %+v, %v", old.Credits, err)
+	}
+	e := newEnv(t)
+
+	until := time.Date(2026, 11, 20, 21, 40, 0, 0, time.UTC)
+	yes, no := true, false
+	e.plugin.Lock()
+	e.plugin.Pooled = &claude.PooledCredits{Provider: hub.ClaudeCreditsProvider, Keys: 2, TotalLeftUSD: pct(62.5), TotalMonthlyUSD: pct(200),
+		TotalSpentUSD: pct(137.5), PooledSpentUSD: pct(40), Next: account}
+	e.plugin.Credits[account] = &claude.Credits{Provider: "claude-api-account1", MonthlyUSD: pct(100), SpentUSD: pct(27.4), LeftUSD: pct(72.6),
+		PooledSpentUSD: pct(12), HeldUntil: until, HeldReason: "rate_limit", Available: &no}
+	e.plugin.Credits["account2"] = &claude.Credits{Provider: "claude-api-account2", Available: &yes}
+	e.plugin.Unlock()
+	got, err := e.svc.ClaudeAccounts(ctx, bob, backendMain, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := got.Credits
+	if c == nil || c.Provider != hub.ClaudeCreditsProvider || c.Keys != 2 || *c.TotalLeftUSD != 62.5 || *c.TotalMonthlyUSD != 200 ||
+		*c.TotalSpentUSD != 137.5 || *c.PooledSpentUSD != 40 || c.Next != account || c.NextLabel != "Claude (account1)" {
+		t.Fatalf("pooled credits = %+v", c)
+	}
+	a := got.Accounts[0].Credits
+	if a == nil || *a.PooledSpentUSD != 12 || !a.HeldUntil.Equal(until) || a.HeldReason != "rate_limit" || a.HeldText == "" ||
+		a.Available == nil || *a.Available {
+		t.Fatalf("held key = %+v", a)
+	}
+	b := got.Accounts[1].Credits
+	if b == nil || !b.HeldUntil.IsZero() || b.HeldReason != "" || b.HeldText != "" || b.PooledSpentUSD != nil || b.Available == nil || !*b.Available {
+		t.Fatalf("free key = %+v", b)
+	}
+	// Without usage the summary is not shown.
+	e2 := newEnv(t)
+	e2.plugin.Lock()
+	e2.plugin.Pooled = e.plugin.Pooled
+	e2.plugin.Unlock()
+	if got, err = e2.svc.ClaudeAccounts(ctx, bob, backendMain, false); err != nil || got.Credits != nil {
+		t.Fatalf("no usage: credits = %+v, %v", got.Credits, err)
+	}
+}
+
+// TestClaudePoolCredits: fallback and ran_on_credits pass through, and a
+// fallback keeps the empty account without the default message.
+func TestClaudePoolCredits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e := newEnv(t)
+	at := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
+	e.plugin.Lock()
+	e.plugin.Pools["fall"] = claude.Pool{Fallback: &claude.Fallback{Provider: hub.ClaudeCreditsProvider, Account: "caam", Label: "caam",
+		APIProvider: "claude-api-caam", LeftUSD: pct(62), Message: "All accounts are at their limit."}}
+	e.plugin.Pools["ran"] = claude.Pool{Account: account, RanOnCredits: &claude.RanOnCredits{Account: "caam", Label: "caam",
+		APIProvider: "claude-api-caam", At: at, Model: "claude-opus-5-5", LeftUSD: pct(62)}}
+	e.plugin.Unlock()
+
+	got, err := e.svc.ClaudePool(ctx, bob, backendMain, "fall", "")
+	f := got.Fallback
+	if err != nil || got.Account != "" || got.Message != "" || f == nil || f.Account != "caam" || f.APIProvider != "claude-api-caam" ||
+		*f.LeftUSD != 62 || f.Message == "" {
+		t.Fatalf("fallback pool = %+v, %v", got, err)
+	}
+	got, err = e.svc.ClaudePool(ctx, bob, backendMain, "ran", "")
+	r := got.RanOnCredits
+	if err != nil || got.Account != account || got.Fallback != nil || r == nil || r.Account != "caam" || !r.At.Equal(at) ||
+		r.Model != "claude-opus-5-5" || *r.LeftUSD != 62 {
+		t.Fatalf("ran pool = %+v, %v", got, err)
+	}
+	// An old plugin's empty answer keeps the default line.
+	got, err = e.svc.ClaudePool(ctx, bob, backendMain, "none", "")
+	if err != nil || got.Fallback != nil || got.RanOnCredits != nil || got.Message == "" {
+		t.Fatalf("plain pool = %+v, %v", got, err)
+	}
+}
+
 func TestNewChatModels(t *testing.T) {
 	const sonnet = "claude-sonnet-5-5[1m]"
 	t.Parallel()

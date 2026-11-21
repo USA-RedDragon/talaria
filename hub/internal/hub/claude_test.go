@@ -55,6 +55,45 @@ func TestArrangeModels(t *testing.T) {
 	}
 }
 
+func TestArrangeModelsCreditsPool(t *testing.T) {
+	t.Parallel()
+	ids := []string{"claude-opus-4-8", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-2", "claude-fable-5-1"}
+	pooled := hub.ModelProvider{ID: hub.ClaudeCreditsProvider, Name: "Claude API credits"}
+	for _, id := range ids {
+		pooled.Models = append(pooled.Models, hub.ModelChoice{ID: id})
+	}
+	ps := []hub.ModelProvider{
+		{ID: "custom:local", Name: "local", Models: []hub.ModelChoice{{ID: "qwen"}}},
+		{ID: "claude-api-caam", Name: "Claude API (caam)", Models: []hub.ModelChoice{{ID: "claude-opus-5-5"}}},
+		pooled,
+		{ID: hub.ClaudePoolProvider, Name: "Claude", Models: []hub.ModelChoice{{ID: "claude-sonnet-5-5[1m]"}}},
+		{ID: "claude-api-jaam", Name: "Claude API (jaam)", Models: []hub.ModelChoice{{ID: "claude-haiku-5-5"}}},
+	}
+	hub.ArrangeModels(ps)
+	var order []string
+	for _, p := range ps {
+		order = append(order, p.ID)
+	}
+	if want := "claude-pool,claude-credits,claude-api-caam,claude-api-jaam,custom:local"; strings.Join(order, ",") != want {
+		t.Fatalf("order = %v, want %s", order, want)
+	}
+	if ps[1].Group != hub.ClaudeKeysGroup || ps[2].Group != hub.ClaudeKeysGroup {
+		t.Errorf("groups = %q, %q, want %q", ps[1].Group, ps[2].Group, hub.ClaudeKeysGroup)
+	}
+	var got []string
+	for _, m := range ps[1].Models {
+		got = append(got, m.ID+"="+m.Label)
+	}
+	want := []string{"claude-opus-5-5=Opus 5.5 (API credits)", "claude-sonnet-5-5=Sonnet 5.5 (API credits)",
+		"claude-fable-5-2=Fable 5.2 (API credits)", "claude-haiku-5-5=Haiku 5.5 (API credits)"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("credits models = %v, want %v", got, want)
+	}
+	if l := ps[2].Models[0].Label; l != "Opus 5.5 (caam credits)" {
+		t.Errorf("per-account label = %q", l)
+	}
+}
+
 func TestArrangeModelsNewestPerFamily(t *testing.T) {
 	t.Parallel()
 	ids := []string{"claude-sonnet-5-5[1m]", "claude-opus-5-5[1m]", "claude-fable-5-1[1m]", "claude-haiku-5-5[1m]",

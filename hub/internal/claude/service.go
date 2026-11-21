@@ -406,6 +406,7 @@ func (s *Service) ClaudeAccounts(ctx context.Context, user, backendID string, us
 	}
 	if usage {
 		out.Pool = PoolUsage(out.Accounts)
+		out.Credits = s.convertPooledCredits(a.Credits, out.Accounts)
 	}
 	if cg.present {
 		out.Accounts = append(out.Accounts, s.chatGPTAccount(cg, usage))
@@ -566,10 +567,18 @@ func (s *Service) ClaudePool(ctx context.Context, user, backendID, sessionID, mo
 	}
 	out := hub.ClaudePool{Account: p.Account, Label: p.Label, Provider: p.Provider, Pinned: p.Pinned,
 		ResetsAt: p.WeeklyResetsAt, Message: p.Message}
+	if f := p.Fallback; f != nil {
+		out.Fallback = &hub.ClaudeFallback{Provider: f.Provider, Account: f.Account, Label: f.Label,
+			APIProvider: f.APIProvider, LeftUSD: f.LeftUSD, Message: f.Message}
+	}
+	if r := p.RanOnCredits; r != nil {
+		out.RanOnCredits = &hub.ClaudeRanOnCredits{Account: r.Account, Label: r.Label, APIProvider: r.APIProvider,
+			At: r.At, Model: r.Model, LeftUSD: r.LeftUSD}
+	}
 	if !p.WeeklyResetsAt.IsZero() {
 		out.ResetsText = ResetText(p.WeeklyResetsAt, s.o.Now(), s.o.Location)
 	}
-	if out.Account == "" && out.Message == "" {
+	if out.Account == "" && out.Message == "" && out.Fallback == nil {
 		out.Message = "No Claude account can run this chat now."
 	}
 	return out, nil
@@ -582,6 +591,30 @@ func (s *Service) convertCredits(x Credits) *hub.ClaudeCredits {
 		Since: x.Since, ResetsAt: x.ResetsAt, Unpriced: x.UnpricedCalls, Error: x.Error}
 	if !x.ResetsAt.IsZero() {
 		out.ResetsText = x.ResetsAt.In(s.o.Location).Format("Jan 2")
+	}
+	out.PooledSpentUSD, out.Available = x.PooledSpentUSD, x.Available
+	// A hold without a reason or an end is not shown as one.
+	if x.HeldReason != "" && !x.HeldUntil.IsZero() {
+		out.HeldUntil, out.HeldReason = x.HeldUntil, x.HeldReason
+		out.HeldText = x.HeldUntil.In(s.o.Location).Format("3:04 PM MST")
+	}
+	return out
+}
+
+// convertPooledCredits copies the plugin's pooled API credits summary and
+// names the account the next call would use by its label. It returns nil
+// for a plugin that sends none.
+func (s *Service) convertPooledCredits(x *PooledCredits, accounts []hub.ClaudeAccount) *hub.ClaudePooledCredits {
+	if x == nil {
+		return nil
+	}
+	out := &hub.ClaudePooledCredits{Provider: x.Provider, Keys: x.Keys, TotalLeftUSD: x.TotalLeftUSD,
+		TotalMonthlyUSD: x.TotalMonthlyUSD, TotalSpentUSD: x.TotalSpentUSD, PooledSpentUSD: x.PooledSpentUSD,
+		Next: x.Next, Message: x.Message}
+	for _, a := range accounts {
+		if x.Next != "" && a.ID == x.Next {
+			out.NextLabel = a.Label
+		}
 	}
 	return out
 }

@@ -32,6 +32,12 @@ const (
 	ClaudeKeysGroup  = "Claude API credits"
 )
 
+// ClaudeCreditsProvider is the Claude plugin's provider that runs each
+// call on the API key of whichever account has the most API credit left.
+// The pickers list its models first under ClaudeKeysGroup, as "Opus 5.5
+// (API credits)", before the per-account providers.
+const ClaudeCreditsProvider = "claude-credits"
+
 // ClaudeModelName names a Claude model as Anthropic does: "Opus 5.5" for
 // claude-opus-5-5 and claude-opus-5-5[1m]. A snapshot date is not part of
 // the name. ok is false for an ID that is not a versioned Claude model.
@@ -68,12 +74,14 @@ func isDigits(s string) bool {
 
 // ArrangeModels sets each provider's Group and each model's Label as the
 // pickers show them, and puts the Claude groups first: the Claude provider's
-// models by name under "Claude", then every account's API key models under
-// "Claude API credits" as "Opus 5.5 (caam credits)". Other providers keep
+// models by name under "Claude", then the pooled API credits provider's
+// models under "Claude API credits" as "Opus 5.5 (API credits)", then every
+// account's API key models in that group as "Opus 5.5 (caam credits)".
+// Other providers keep
 // their name, IDs and order.
 func ArrangeModels(providers []ModelProvider) {
 	for i := range providers {
-		if providers[i].ID == ClaudePoolProvider {
+		if providers[i].ID == ClaudePoolProvider || providers[i].ID == ClaudeCreditsProvider {
 			providers[i].Models = newestPerFamily(providers[i].Models)
 		}
 	}
@@ -85,9 +93,12 @@ func ArrangeModels(providers []ModelProvider) {
 				return 0
 			}
 		case ClaudeKeysGroup:
-			return 1
+			if p.ID == ClaudeCreditsProvider {
+				return 1
+			}
+			return 2
 		}
-		return 2
+		return 3
 	}
 	slices.SortStableFunc(providers, func(a, b ModelProvider) int { return rank(a) - rank(b) })
 }
@@ -160,6 +171,8 @@ func labelModels(providers []ModelProvider) {
 		switch {
 		case p.ID == ClaudePoolProvider:
 			p.Group = ClaudePoolGroup
+		case p.ID == ClaudeCreditsProvider:
+			p.Group = ClaudeKeysGroup
 		case credits && account != "":
 			p.Group = ClaudeKeysGroup
 		default:
@@ -173,6 +186,8 @@ func labelModels(providers []ModelProvider) {
 			case !ok:
 			case p.ID == ClaudePoolProvider:
 				m.Label = name
+			case p.ID == ClaudeCreditsProvider:
+				m.Label = name + " (API credits)"
 			case credits && account != "":
 				m.Label = name + " (" + account + " credits)"
 			}
@@ -247,6 +262,57 @@ type ClaudeCredits struct {
 	// Unpriced counts calls whose cost is unknown, left out of SpentUSD.
 	Unpriced int    `json:"unpriced,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// PooledSpentUSD is what calls that the pooled credits provider routed
+	// to this account's key spent this cycle.
+	PooledSpentUSD *float64 `json:"pooled_spent_usd,omitempty"`
+	// HeldUntil is when the pool stops skipping the key, with HeldReason
+	// ("rate_limit", "credit" or "auth"). Both are empty when it is not held.
+	HeldUntil  time.Time `json:"held_until,omitzero"`
+	HeldReason string    `json:"held_reason,omitempty"`
+	// HeldText is HeldUntil in the backend's time zone, "3:40 PM CST".
+	HeldText string `json:"held_text,omitempty"`
+	// Available is nil when the plugin did not say whether the pool may use
+	// the key now.
+	Available *bool `json:"available,omitempty"`
+}
+
+// ClaudePooledCredits is the pooled API credits provider's summary: the
+// credit left across the accounts' API keys. Fields the plugin did not send
+// are nil or zero. Next is the account ID the next call would use; Message
+// is a plain line when no key has credit.
+type ClaudePooledCredits struct {
+	Provider        string   `json:"provider"`
+	Keys            int      `json:"keys"`
+	TotalLeftUSD    *float64 `json:"total_left_usd"`
+	TotalMonthlyUSD *float64 `json:"total_monthly_usd"`
+	TotalSpentUSD   *float64 `json:"total_spent_usd"`
+	PooledSpentUSD  *float64 `json:"pooled_spent_usd"`
+	Next            string   `json:"next,omitempty"`
+	// NextLabel is the label of the account Next names, when the hub knows it.
+	NextLabel string `json:"next_label,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+// ClaudeFallback says that every subscription account is held and the next
+// turn falls back to API credits of Account.
+type ClaudeFallback struct {
+	Provider    string   `json:"provider"`
+	Account     string   `json:"account"`
+	Label       string   `json:"label,omitempty"`
+	APIProvider string   `json:"api_provider,omitempty"`
+	LeftUSD     *float64 `json:"left_usd"`
+	Message     string   `json:"message,omitempty"`
+}
+
+// ClaudeRanOnCredits says that a chat's most recent call ran on the API
+// credits of Account.
+type ClaudeRanOnCredits struct {
+	Account     string    `json:"account"`
+	Label       string    `json:"label,omitempty"`
+	APIProvider string    `json:"api_provider,omitempty"`
+	At          time.Time `json:"at,omitzero"`
+	Model       string    `json:"model,omitempty"`
+	LeftUSD     *float64  `json:"left_usd"`
 }
 
 // ClaudePool says which account the Claude provider runs a chat's next turn
@@ -262,6 +328,12 @@ type ClaudePool struct {
 	ResetsAt   time.Time `json:"resets_at,omitzero"`
 	ResetsText string    `json:"resets_text,omitempty"`
 	Message    string    `json:"message,omitempty"`
+	// Fallback is set when every subscription account is held and the next
+	// turn runs on API credits.
+	Fallback *ClaudeFallback `json:"fallback,omitempty"`
+	// RanOnCredits is set when the chat's most recent call ran on API
+	// credits.
+	RanOnCredits *ClaudeRanOnCredits `json:"ran_on_credits,omitempty"`
 }
 
 // ClaudePoolUsage is the Claude provider's weekly use as one number: the
@@ -292,6 +364,9 @@ type ClaudeAccounts struct {
 	// Pool is the Claude weekly use, set when usage was asked for and the
 	// backend has provider accounts.
 	Pool *ClaudePoolUsage `json:"pool,omitempty"`
+	// Credits is the pooled API credits provider, set when usage was asked
+	// for and the plugin reports it.
+	Credits *ClaudePooledCredits `json:"credits,omitempty"`
 }
 
 // Claude sign-in states.

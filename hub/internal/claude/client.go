@@ -83,6 +83,50 @@ type Credits struct {
 	ResetsAt      time.Time `json:"resets_at"`
 	UnpricedCalls int       `json:"unpriced_calls"`
 	Error         string    `json:"error"`
+	// PooledSpentUSD is what calls the credits pool routed to this key spent
+	// this cycle. HeldUntil and HeldReason say why the pool skips the key
+	// ("rate_limit", "credit" or "auth"); Available is whether it may use
+	// the key now. Old plugins send none of them.
+	PooledSpentUSD *float64  `json:"pooled_spent_usd"`
+	HeldUntil      time.Time `json:"held_until"`
+	HeldReason     string    `json:"held_reason"`
+	Available      *bool     `json:"available"`
+}
+
+// PooledCredits is the plugin's summary of the pooled API credits provider:
+// the credit left across the accounts' API keys. Next is the account ID the
+// next call would use; Message is a plain line when no key has credit.
+type PooledCredits struct {
+	Provider        string   `json:"provider"`
+	Keys            int      `json:"keys"`
+	TotalLeftUSD    *float64 `json:"total_left_usd"`
+	TotalMonthlyUSD *float64 `json:"total_monthly_usd"`
+	TotalSpentUSD   *float64 `json:"total_spent_usd"`
+	PooledSpentUSD  *float64 `json:"pooled_spent_usd"`
+	Next            string   `json:"next"`
+	Message         string   `json:"message"`
+}
+
+// Fallback says every subscription account is held and the next turn falls
+// back to the API credits of Account.
+type Fallback struct {
+	Provider    string   `json:"provider"`
+	Account     string   `json:"account"`
+	Label       string   `json:"label"`
+	APIProvider string   `json:"api_provider"`
+	LeftUSD     *float64 `json:"left_usd"`
+	Message     string   `json:"message"`
+}
+
+// RanOnCredits says a chat's most recent call ran on the API credits of
+// Account.
+type RanOnCredits struct {
+	Account     string    `json:"account"`
+	Label       string    `json:"label"`
+	APIProvider string    `json:"api_provider"`
+	At          time.Time `json:"at"`
+	Model       string    `json:"model"`
+	LeftUSD     *float64  `json:"left_usd"`
 }
 
 // Account is one Claude account slot of the plugin.
@@ -107,12 +151,19 @@ type Pool struct {
 	Pinned         bool      `json:"pinned"`
 	WeeklyResetsAt time.Time `json:"weekly_resets_at"`
 	Message        string    `json:"message"`
+	// Fallback and RanOnCredits are nil from plugins without the credits
+	// pool.
+	Fallback     *Fallback     `json:"fallback"`
+	RanOnCredits *RanOnCredits `json:"ran_on_credits"`
 }
 
 // Accounts is the plugin's GET /accounts answer.
 type Accounts struct {
 	CLIVersion string    `json:"cli_version"`
 	Accounts   []Account `json:"accounts"`
+	// Credits is the pooled API credits summary, with usage; nil from
+	// plugins without the credits pool.
+	Credits *PooledCredits `json:"credits"`
 }
 
 // Error is an error answer of the plugin, or of the dashboard in front of

@@ -26,6 +26,9 @@ type Plugin struct {
 	Usages map[string]claude.Usage
 	// Credits are the API credit estimates by account, sent with usage.
 	Credits map[string]*claude.Credits
+	// Pooled is the pooled API credits summary, sent with usage; nil sends
+	// none, as an old plugin does.
+	Pooled *claude.PooledCredits
 	// Pools are the answers by session; a session without one gets
 	// Pool.
 	Pools map[string]claude.Pool
@@ -120,6 +123,9 @@ func (p *Plugin) list(w http.ResponseWriter, r *http.Request) {
 	defer p.Unlock()
 	p.Calls = append(p.Calls, "GET /accounts?"+r.URL.RawQuery)
 	out := claude.Accounts{CLIVersion: "2.1.322", Accounts: []claude.Account{}}
+	if r.URL.Query().Get("usage") == "1" {
+		out.Credits = p.Pooled
+	}
 	for _, a := range p.Accounts {
 		a.SignIn = p.SignIns[a.ID]
 		if r.URL.Query().Get("usage") == "1" {
