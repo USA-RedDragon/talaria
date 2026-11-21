@@ -40,6 +40,8 @@ An account is a **slot** in the agent's settings. Add the slot there, then sign 
 
 An account's **API credits** are billed through a provider named `claude-api-<slot>`. Its models show in the model list under "Claude API credits", such as "Opus 5.5 (main credits)". These providers are separate from the subscription pool and are never part of its totals.
 
+The provider `claude-credits` pools the API credits: each call goes to the API key of whichever account has the most credit left. Its models come first under "Claude API credits", labeled such as "Opus 5.5 (API credits)", and the line under the model list reads "Bills the API credits of whichever account has the most left."
+
 ## Choose who signs accounts in
 
 Signing in sets which Claude login the agent uses, so the hub keeps it to named people. Set `claude.admins` in the hub's settings (environment variable `HUB_CLAUDE_ADMINS`) as `user=backend` pairs:
@@ -82,6 +84,7 @@ The pick happens in the agent's plugin, for each turn. What the hub shows about 
 
 - **A chat stays on its account.** The pool answer says whether the chat is already pinned to an account. The line under the model picker reads "Runs on *account*" and, with the account's weekly reset time, when there is one.
 - **A new chat gets the soonest reset with room.** For a chat that is not pinned yet, the line reads "Runs on *account*, the soonest reset with room."
+- **Every account at its limit.** When the plugin says the next turn falls back to API credits, the line reads "All accounts at their limit: the next turn runs on API credits (*account*, about $62 left)." After a call that ran on API credits, the line and the chat's info line say "Ran on API credits (*account*, about $62 left)".
 - **Nothing to run on.** When the plugin names no account, the line shows its reason, or "No Claude account can run this chat now."
 
 Both the 5-hour session window and the weekly window are reported per account. The hub's pool totals use the weekly window.
@@ -98,7 +101,8 @@ How accounts take turns is the plugin's rule, and the plugin is not part of this
 
 - **A Claude card on top**: the pool as one number. "Week: 42% used" is the average of the weekly share used over the signed-in accounts whose usage could be read, each capped at 100%. "About 1.4 accounts of room left" adds up the room left on each. "Next room back" names the full account whose week resets first, and when. If some accounts could not be read, it says so, such as "2 of 3 accounts read".
 - **Accounts behind "Show accounts"**: each with its name, email, plan, whether it is signed in, and every window it reports, with the share used and the reset time. Some plans have no 5-hour window; it is left out, not shown empty.
-- **API credits**, for an account that has an API key: an estimate such as "about $73 of $100 left, resets Dec 1". It is the plan's monthly credit less what the agent spent through the key since the month started. Use of the key outside Talaria is not counted, and calls with no known price are left out.
+- **API credits**, for an account that has an API key: an estimate such as "about $73 of $100 left, resets Dec 1". It is the plan's monthly credit less what the agent spent through the key since the month started. Use of the key outside Talaria is not counted, and calls with no known price are left out. The line also shows what the credits pool spent through the key and, while the pool skips the key, "Held until *time* (*reason*)".
+- **Pooled API credits**, above the cards when the plugin reports them: about how much is left across all keys, what was spent this month, the key the next call uses, and a plain line when no key has credit.
 - **ChatGPT**, when the agent also runs a ChatGPT plan, listed after Claude with no sign-in button. Sign in to ChatGPT in the agent.
 
 Under a chat's title, a chat on the pooled Claude provider shows "Claude" and the pool's week meter. A chat on one account shows that account's name with its 5-hour and weekly meters, such as "5h 12% (resets 3:40 PM CST)". A meter turns to a warning at 80%.

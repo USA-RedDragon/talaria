@@ -17,6 +17,7 @@ window.HubClaude = (ctx) => {
   const poolProvider = "claude-pool";
   const chatgptProvider = "openai-codex";
   const creditsPrefix = "claude-api-";
+  const creditsPoolProvider = "claude-credits";
   // cache maps a backend ID to { at, data } (data null: no plugin) while
   // a load runs or after it ended.
   const cache = new Map();
@@ -97,17 +98,38 @@ window.HubClaude = (ctx) => {
     return entry.loading;
   }
 
+  // spelled is "caam, about $62 left" for an API credit account: its short
+  // name, and the credit left when the plugin says it.
+  function spelled(x) {
+    const name = shortName(x.label || x.account || "");
+    return name + (typeof x.left_usd === "number" ? (name ? ", " : "") + "about " + money(x.left_usd) + " left" : "");
+  }
+
+  // ranOn is "Ran on API credits (caam, about $62 left)" when the chat's most
+  // recent call ran on API credits, else "". The hub sends it only for a chat
+  // on the pool.
+  function ranOn(backend, session) {
+    const p = pools.get(backend + "\n" + session);
+    const r = p && p.data && p.data.ran_on_credits;
+    return r ? "Ran on API credits (" + spelled(r) + ")" : "";
+  }
+
   // route is the line under the model picker: the account a chat on the
   // provider runs on, or what an API credit provider bills. Null for others.
   async function route(backend, session, provider, model) {
     if (provider === poolProvider) {
       const p = await pool(backend, session, model);
       if (!p) return null;
+      if (p.fallback && !p.account) {
+        return { parts: ["All accounts at their limit: the next turn runs on API credits (" + spelled(p.fallback) + ")."] };
+      }
       if (!p.account) return { bad: true, parts: [p.message || "No Claude account can run this chat now."] };
       const tag = el("span", "tag", resetOf(p) ? "resets " + resetOf(p) : "");
-      return { parts: ["Runs on ", el("b", "", p.account), " ", ...(resetOf(p) ? [tag] : []),
-        p.pinned ? "" : ", the soonest reset with room."] };
+      const ran = p.ran_on_credits ? ". " + ranOn(backend, session) + "." : "";
+      return { parts: ["Runs on ", el("b", "", p.account), ...(resetOf(p) ? [" ", tag] : []),
+        p.pinned ? "" : ", the soonest reset with room.", ran] };
     }
+    if (provider === creditsPoolProvider) return { parts: ["Bills the API credits of whichever account has the most left."] };
     if (provider && provider.startsWith(creditsPrefix)) return { parts: ["Bills that account's monthly API credits."] };
     return null;
   }
@@ -124,16 +146,30 @@ window.HubClaude = (ctx) => {
   // money is a dollar amount as the credits line shows it: whole dollars
   // from $10 up, cents below.
   const money = (v) => "$" + (v >= 10 ? Math.round(v).toString() : v.toFixed(2));
+  const heldReasons = { rate_limit: "rate limit", credit: "out of credit", auth: "sign-in problem" };
 
-  // creditsLine is an account's API credit estimate for the Usage page.
+  // creditsLine is an account's API credit estimate for the Usage page, with
+  // what the credits pool spent through its key and, while the pool skips the
+  // key, until when and why.
   function creditsLine(c) {
-    if (c.error || typeof c.spent_usd !== "number") return "API credits: no estimate" + (c.error ? " (" + c.error + ")" : "") + ".";
-    const when = at(c.resets_at, c.resets_text, true);
-    const resets = when ? ", resets " + when : "";
-    if (typeof c.left_usd === "number" && typeof c.monthly_usd === "number") {
-      return "API credits: about " + money(c.left_usd) + " of " + money(c.monthly_usd) + " left" + resets + ".";
+    let line;
+    if (c.error || typeof c.spent_usd !== "number") {
+      line = "API credits: no estimate" + (c.error ? " (" + c.error + ")" : "") + ".";
+    } else {
+      const when = at(c.resets_at, c.resets_text, true);
+      const resets = when ? ", resets " + when : "";
+      line = typeof c.left_usd === "number" && typeof c.monthly_usd === "number" ?
+        "API credits: about " + money(c.left_usd) + " of " + money(c.monthly_usd) + " left" + resets + "." :
+        "API credits: about " + money(c.spent_usd) + " spent this month" + resets + ".";
     }
-    return "API credits: about " + money(c.spent_usd) + " spent this month" + resets + ".";
+    if (typeof c.pooled_spent_usd === "number" && c.pooled_spent_usd > 0) {
+      line += " " + money(c.pooled_spent_usd) + " of it spent through the credits pool.";
+    }
+    const until = c.held_until ? Date.parse(c.held_until) : NaN;
+    if (window.HubTimes.valid(until) && until > Date.now()) {
+      line += " Held until " + at(c.held_until, c.held_text) + (heldReasons[c.held_reason] ? " (" + heldReasons[c.held_reason] + ")" : "") + ".";
+    }
+    return line;
   }
 
   const pct = (w) => Math.round(w.used_percent) + "%";
@@ -358,6 +394,7 @@ window.HubClaude = (ctx) => {
     const poolCard = data.pool ? poolSummary(data.pool, cards) : null;
     if (poolCard) s.append(poolCard, cards);
     else s.append(cards);
+    if (data.credits) s.insertBefore(creditsSummary(data.credits, data.accounts || []), cards);
     for (const a of data.accounts || []) {
       const box = el("div", "claude-account");
       const top = el("div", "claude-top");
@@ -403,7 +440,33 @@ window.HubClaude = (ctx) => {
   const accountsShown = () => { try { return localStorage.getItem(storeKey) === "open"; } catch (_) { return false; } };
 
   // shortName is an account's own name, "caam" for "Claude (caam)".
-  const shortName = (label) => (/^Claude \((.+)\)$/.exec(label || "") || [])[1] || label;
+  function shortName(label) { return (/^Claude \((.+)\)$/.exec(label || "") || [])[1] || label; }
+
+  // creditsSummary is the "Pooled API credits" block: the credit left across
+  // the accounts' API keys, what was spent this month, and the key the next
+  // call uses. An old plugin sends none of it and the block is not drawn.
+  function creditsSummary(c, accounts) {
+    const box = el("div", "claude-account claude-credits");
+    const top = el("div", "claude-top");
+    top.append(el("strong", "", "Pooled API credits"));
+    if (typeof c.keys === "number") top.append(el("span", "claude-meta", "(" + c.keys + (c.keys === 1 ? " key)" : " keys)")));
+    box.append(top);
+    const keys = typeof c.keys === "number" ? " across " + c.keys + (c.keys === 1 ? " key" : " keys") : "";
+    if (typeof c.total_left_usd === "number") {
+      box.append(el("p", "claude-meta", "About " + money(c.total_left_usd) +
+        (typeof c.total_monthly_usd === "number" ? " of " + money(c.total_monthly_usd) : "") + " left" + keys + "."));
+    }
+    if (typeof c.total_spent_usd === "number") {
+      const pooled = typeof c.pooled_spent_usd === "number" && c.pooled_spent_usd > 0 ? " (" + money(c.pooled_spent_usd) + " through the pool)" : "";
+      box.append(el("p", "claude-meta", "Spent this month: " + money(c.total_spent_usd) + pooled + "."));
+    }
+    if (c.next) {
+      const a = accounts.find((x) => x.id === c.next);
+      box.append(el("p", "claude-meta", "The next call uses " + shortName((a && a.label) || c.next_label || c.next) + "."));
+    }
+    if (c.message) box.append(el("p", "hint", c.message));
+    return box;
+  }
 
   // poolSummary is the card at the top of the section: the provider's week as
   // one number, with the per-account cards behind "Show accounts".
@@ -447,7 +510,7 @@ window.HubClaude = (ctx) => {
     return box;
   }
 
-  return { reset: resetOf, parts, note, afterReply, chatNotice, signIn, panel, apiName, apiProvider, chatgptProvider, route,
+  return { reset: resetOf, ranOn, parts, note, afterReply, chatNotice, signIn, panel, apiName, apiProvider, chatgptProvider, route,
     account: (backend, provider, session, model) => {
       parts(backend, { provider });
       if (provider === poolProvider && session && me().claude) {

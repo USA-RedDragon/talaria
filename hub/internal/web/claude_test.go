@@ -140,6 +140,39 @@ func TestClaudePoolAPI(t *testing.T) {
 	}
 }
 
+// TestClaudePooledCreditsAPI: the Usage JSON carries the pooled credits and
+// the pool answer its fallback, and an old plugin's pool answer neither.
+func TestClaudePooledCreditsAPI(t *testing.T) {
+	t.Parallel()
+	var e *hubEnv
+	e = setupWith(t, func(cfg *config.Config, opts *web.Options, _ *store.Store) {
+		cfg.Backends[0].Users = []string{userAlice}
+		d := gateway.NewDialer(gateway.Credentials{BaseURL: cfg.Backends[0].URL, Provider: providerBasic, Username: clientID, Password: "pw"})
+		opts.Claude = claude.New(claude.Options{Access: lateAccess{&e}, Requesters: map[string]device.Requester{"pc": d}})
+	})
+	plugin := claudetest.New(e.gw)
+	alice := client(t)
+	login(t, e, alice)
+	usage, pool := e.url+"/api/claude/pc/accounts?usage=1", e.url+"/api/claude/pc/pool?session=s1&model=m"
+	if _, body := get(t, alice, pool); strings.Contains(body, `"fallback"`) || strings.Contains(body, `"ran_on_credits"`) {
+		t.Fatalf("old plugin pool = %s", body)
+	}
+	left := 62.5
+	plugin.Lock()
+	plugin.Pooled = &claude.PooledCredits{Provider: "claude-credits", Keys: 2, TotalLeftUSD: &left, Next: "account1"}
+	plugin.Pools["s2"] = claude.Pool{Fallback: &claude.Fallback{Provider: "claude-credits", Account: "caam", APIProvider: "claude-api-caam", LeftUSD: &left, Message: "All limits."}}
+	plugin.Unlock()
+	if _, body := get(t, alice, usage); !strings.Contains(body, `"credits":{"provider":"claude-credits","keys":2,"total_left_usd":62.5`) ||
+		!strings.Contains(body, `"next":"account1"`) {
+		t.Fatalf("usage = %s", body)
+	}
+	pool = strings.Replace(pool, "session=s1", "session=s2", 1)
+	if _, body := get(t, alice, pool); !strings.Contains(body, `"fallback":{"provider":"claude-credits","account":"caam"`) ||
+		!strings.Contains(body, `"left_usd":62.5`) {
+		t.Fatalf("pool = %s", body)
+	}
+}
+
 func TestNewChatModelsAPI(t *testing.T) {
 	t.Parallel()
 	var e *hubEnv

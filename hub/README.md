@@ -311,9 +311,10 @@ A backend's Hermes can offer Claude models to a chat, which picks one in the mod
 
 - **Claude models.** Models of the Claude provider show by name ("Opus 5.5") under "Claude", first in the model list.
 - **API credits.** One provider per API key, `claude-api-<slot>` (such as `claude-api-account1`), from Hermes's `providers:` config. The model list shows their models under "Claude API credits" as "Opus 5.5 (account1 credits)".
+- **Pooled API credits.** The provider `claude-credits` bills each call to the API key of whichever account has the most credit left. Its models come first under "Claude API credits", as "Opus 5.5 (API credits)", before the per-account ones.
 - **API key.** Hermes's built-in provider `anthropic`. The hub shows it as "Claude API" in the model list and on the line under the chat title.
 
-Under the model list, a chat on an API credit provider shows that it bills that account's monthly API credits.
+Under the model list, a chat on an API credit provider shows that it bills that account's monthly API credits, and a chat on `claude-credits` shows that it bills the API credits of whichever account has the most left. For a chat on the Claude provider, the line says so when every subscription account is at its limit and the next turn runs on API credits, such as "All accounts at their limit: the next turn runs on API credits (caam, about $62 left)." After a call that did, the chat's info line and this line say "Ran on API credits (caam, about $62 left)". Both come from the claude-accounts plugin; one that does not send them gets today's lines.
 
 **Line under the chat title.** For a chat on a Claude account, the line shows the account's name, the share of the 5-hour session and of the week that it used, and when each resets (only the windows the backend reports; some plans have no 5-hour window, and then the line leaves it out), in `claude.time_zone` (default `ui.time_zone`): for example "5h 12% (resets 3:40 PM CST)". The page reads the usage at most once a minute, and again after each reply. The hub keeps what it read for a minute, or 15 seconds when a reply asks again. An account that is not signed in shows "not signed in", with a note under the title.
 
@@ -323,7 +324,7 @@ Under the model list, a chat on an API credit provider shows that it bills that 
 
 **Signed-out account.** When a chat's Claude account turns out to be signed out, the chat gets a note that names the account and why, with Sign in for Claude admins. Each Claude admin of the backend also gets a "Claude sign-ins" notice on Telegram and Web Push (see [Notifications](#notifications)), at most one per account in 30 minutes. On Telegram the hub sends the admin the sign-in link, in the General topic of their linked group or else in their private chat, and asks for a reply with the code; only that admin may answer. The bot deletes the message with the code when it may, and edits the sign-in message to show the result. The Web Push notice never carries the sign-in link.
 
-**API credits.** An account whose API key Hermes has also shows an estimate of its API credits left, such as "API credits: about $73 of $100 left, resets Dec 1". It is only an estimate: the plan's monthly credit less what Hermes spent through the key since the cycle started, at list prices. Use of the key outside Hermes is not counted.
+**API credits.** An account whose API key Hermes has also shows an estimate of its API credits left, such as "API credits: about $73 of $100 left, resets Dec 1". It is only an estimate: the plan's monthly credit less what Hermes spent through the key since the cycle started, at list prices. Use of the key outside Hermes is not counted. With the pooled provider, the Usage page also shows a "Pooled API credits" block: about how much is left across the keys, what was spent this month (and how much of it through the pool), the key the next call uses, and a plain line when no key has credit. An account's credits line adds what the pool spent through its key and, while the pool skips the key, "Held until <time> (<reason>)".
 
 **Security.**
 

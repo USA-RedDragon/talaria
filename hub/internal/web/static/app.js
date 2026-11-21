@@ -2698,6 +2698,12 @@
       line.append(m);
     }
     if (lim.name && !lim.name.signed_in) line.append(el("span", "claude-off", "not signed in"));
+    const ran = view && info.provider === "claude-pool" ? claude.ranOn(view.backend, view.session) : "";
+    if (ran) {
+      const r = el("span", "claude-use full", ran);
+      r.title = "The chat's last call used the API credits of an account because every subscription account was at its limit";
+      line.append(r);
+    }
     const ctx = contextPart(info);
     if (ctx) line.append(ctx);
     const subs = el("span", "subs");
