@@ -1,0 +1,617 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 23:58:52 -0600
+Subject: [PATCH] feat(approval): the smart approval judge runs on the chat's
+ API-key account
+
+Both judge stages were configured on claude-pool, so a chat on an Anthropic API-key provider (claude-api-<account>) had its calls reviewed on the pool and got "all Claude accounts are at their limit" cards while it ran fine on its own key. A judge route that names claude-pool now runs on the reviewed chat's API-key provider with the configured judge model, using the rule 0147 gives subagents (a subagent follows its root chat; a scheduled run uses the job's own provider). A chat on the pool keeps the pool, and only when every pool account is at its limit or on hold do both stages move, for that review, to the API account with the most credit left: the estimate the hub shows (the plan's monthly credit less what Hermes spent through the key this cycle), read from the claude-accounts plugin loaded in the process. An account without credit or without a readable estimate is never chosen; with none, the user is asked as before. Any other chat and any judge route that does not name the pool are unchanged. The approval card names the API account that did the review, or that failed it.
+---
+ .../test_smart_provenance_judge_account.py    | 278 ++++++++++++++++++
+ tools/approval.py                             |   4 +-
+ tools/approval_automode.py                    |  57 +++-
+ tools/approval_judge_route.py                 | 160 ++++++++++
+ 4 files changed, 492 insertions(+), 7 deletions(-)
+ create mode 100644 tests/tools/test_smart_provenance_judge_account.py
+ create mode 100644 tools/approval_judge_route.py
+
+diff --git a/tests/tools/test_smart_provenance_judge_account.py b/tests/tools/test_smart_provenance_judge_account.py
+new file mode 100644
+index 00000000..851aafa8
+--- /dev/null
++++ b/tests/tools/test_smart_provenance_judge_account.py
+@@ -0,0 +1,278 @@
++"""Smart approval's judge runs on the account the reviewed chat runs on.
++
++A judge configured on the account pool (``claude-pool``) runs, for a chat on an Anthropic API-key provider
++(``claude-api-<account>``), on that provider with the configured judge model; the pool is not touched. A chat on
++the pool keeps the pool, and only when every pool account is at its limit or on hold do both stages move, for that
++review, to the API account with the most credit left (the estimate the hub shows). With no account that has credit,
++or no readable estimate, the user is asked as before. A subagent follows its chat; a judge route that does not name
++the pool is left alone. The card names the API account that did the review. Real routing and card text; the model
++call (``call_llm``) and the claude-accounts plugin's credit estimate are faked.
++"""
++
++from __future__ import annotations
++
++import sys
++from types import SimpleNamespace
++
++import pytest
++
++from tools import approval_automode as A
++from tools import approval_judge_route as R
++
++API = "https://api.anthropic.com"
++BLOCK = "<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] it rewrites main</reason>"
++POOL_CFG = {"smart_fast_model": {"provider": "claude-pool", "model": "claude-sonnet-5-5"},
++            "smart_model": {"provider": "claude-pool", "model": "claude-sonnet-5-5"}}
++
++
++class PoolExhausted(RuntimeError):
++    """Same class name as the claude-accounts pool's."""
++
++
++def _chat(provider, api_mode="anthropic_messages", base_url=API, **extra):
++    return SimpleNamespace(provider=provider, requested_provider=provider, api_mode=api_mode, base_url=base_url,
++                           session_id="s1", **extra)
++
++
++POOL_CHAT = _chat("claude-pool", base_url="process://claude-pool")
++CAAM_CHAT = _chat("claude-api-caam")
++
++
++class _Models:
++    """call_llm's stand-in: records every call; a provider in ``down`` raises what that provider would."""
++
++    def __init__(self):
++        self.calls: list[dict] = []
++        self.down: dict[str, BaseException] = {}
++
++    def __call__(self, **kw):
++        stage2 = kw["messages"][0]["content"].endswith(A.STAGE2_SUFFIX)
++        self.calls.append({"provider": kw.get("provider"), "model": kw.get("model"), "stage": 2 if stage2 else 1,
++                           "base_url": kw.get("base_url"), "api_key": kw.get("api_key")})
++        if kw.get("provider") in self.down:
++            raise self.down[kw["provider"]]
++        text = BLOCK if stage2 else "<block>yes</block>"
++        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))], usage=None)
++
++    def providers(self):
++        return [(c["stage"], c["provider"]) for c in self.calls]
++
++
++class _Core:
++    """The claude-accounts plugin's shared module, as far as the judge reads it."""
++
++    def __init__(self, credits):
++        self.rows = credits  # {account id: api_credits dict, None, or an exception}
++        self.read: list[str] = []
++
++    def accounts(self):
++        return [SimpleNamespace(id=i) for i in self.rows]
++
++    def status(self, acct):
++        return {"subscription_type": "max"}
++
++    def api_credits(self, acct, plan):
++        self.read.append(acct.id)
++        row = self.rows[acct.id]
++        if isinstance(row, BaseException):
++            raise row
++        return row
++
++
++def _credit(account, left):
++    return {"provider": f"claude-api-{account}", "monthly_usd": 100.0, "spent_usd": 100.0 - (left or 0), "left_usd": left}
++
++
++@pytest.fixture()
++def models(monkeypatch):
++    fake = _Models()
++    monkeypatch.setattr(A, "_config", lambda: POOL_CFG)
++    monkeypatch.setattr(A, "_served_window", lambda route: None)
++    monkeypatch.setattr("agent.auxiliary_client.call_llm", fake)
++    monkeypatch.setattr("agent.auxiliary_client._get_task_timeout", lambda task: 30)
++    monkeypatch.delitem(sys.modules, R.ACCOUNTS_CORE, raising=False)
++    A.set_complete_override(None)
++    yield fake
++    sys.modules.pop(R.ACCOUNTS_CORE, None)
++
++
++def _credits(**by_account):
++    core = _Core(by_account)
++    sys.modules[R.ACCOUNTS_CORE] = core
++    return core
++
++
++def _review(agent, root=None):
++    chat = R.chat_of(agent, root)
++    with R.review_chat(chat):
++        verdict = A.review_input(A.ReviewInput(lines=["User: push my branch"], action="{}"))
++        account = R.used_api_account()
++    if account:
++        verdict.detail["judge_account"] = account
++    return verdict
++
++
++def test_chat_on_an_api_account_runs_both_judge_stages_on_it(models):
++    v = _review(CAAM_CHAT)
++    assert models.providers() == [(1, "claude-api-caam"), (2, "claude-api-caam")]
++    assert {c["model"] for c in models.calls} == {"claude-sonnet-5-5"}
++    assert v.decision == "block" and v.rule == "Git Destructive"
++    assert v.detail["judge_account"] == "claude-api-caam"
++    assert v.card_text.endswith("Reviewed on API account caam.")
++    assert v.card_parts["reason"].endswith("Reviewed on API account caam.")
++
++
++def test_the_pool_address_and_key_do_not_follow_the_route_to_the_api_account(models, monkeypatch):
++    cfg = {"smart_model": {"provider": "claude-pool", "model": "claude-sonnet-5-5", "base_url": "process://claude-pool",
++                           "api_key": "pool-key"}}
++    monkeypatch.setattr(A, "_config", lambda: {**POOL_CFG, **cfg})
++    _review(CAAM_CHAT)
++    stage2 = next(c for c in models.calls if c["stage"] == 2)
++    assert stage2["provider"] == "claude-api-caam" and not stage2["base_url"] and not stage2["api_key"]
++
++
++def test_pool_exhausted_and_chat_on_an_api_account_still_reviews(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    v = _review(CAAM_CHAT)
++    assert v.decision == "block" and "claude-pool" not in {p for _s, p in models.providers()}
++
++
++def test_chat_on_the_pool_keeps_the_pool_and_reads_no_credit(models):
++    core = _credits(caam=_credit("caam", 50.0))
++    v = _review(POOL_CHAT)
++    assert models.providers() == [(1, "claude-pool"), (2, "claude-pool")]
++    assert core.read == [] and "judge_account" not in v.detail
++    assert "Reviewed on" not in v.card_text
++
++
++def test_pool_exhausted_moves_both_stages_to_the_account_with_the_most_credit(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit. The first frees up at 10:09 PM.")
++    _credits(jaam=_credit("jaam", 12.5), caam=_credit("caam", 71.25), maam=_credit("maam", 40.0))
++    v = _review(POOL_CHAT)
++    # Stage 1 tries the pool once, then both stages run on caam; the pool is not asked again.
++    assert models.providers() == [(1, "claude-pool"), (1, "claude-api-caam"), (2, "claude-api-caam")]
++    assert v.decision == "block" and v.detail["judge_account"] == "claude-api-caam"
++    assert v.card_text.endswith("Reviewed on API account caam.")
++
++
++def test_a_tie_goes_to_the_first_account(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    _credits(jaam=_credit("jaam", 30.0), caam=_credit("caam", 30.0))
++    v = _review(POOL_CHAT)
++    assert v.detail["judge_account"] == "claude-api-jaam"
++
++
++def test_an_account_with_no_credit_left_is_not_chosen(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    _credits(jaam=_credit("jaam", 0.0), caam=_credit("caam", 0.01))
++    assert _review(POOL_CHAT).detail["judge_account"] == "claude-api-caam"
++
++
++def test_no_account_with_credit_asks_the_user_with_the_pool_words(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit. The first frees up at 10:09 PM.")
++    _credits(jaam=_credit("jaam", 0.0), caam=_credit("caam", 0.0))
++    v = _review(POOL_CHAT)
++    assert {p for _s, p in models.providers()} == {"claude-pool"}
++    assert v.decision == "unsure" and v.detail["unavailable"] == "pool"
++    assert v.card_text.startswith("Smart approval could not review this: the review model was unavailable (all Claude "
++                                  "accounts are at their limit; the first frees up at 10:09 PM)")
++    assert "API account" not in v.card_text
++
++
++@pytest.mark.parametrize("rows", [
++    {"jaam": _credit("jaam", None), "caam": _credit("caam", None)},  # the plan's credit is unknown
++    {"jaam": None},  # no key for the account
++    {"jaam": RuntimeError("state.db is locked"), "caam": {"provider": "claude-api-caam", "left_usd": "n/a"}},
++    {},
++])
++def test_an_unreadable_estimate_keeps_todays_ask(models, rows):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    _credits(**rows)
++    v = _review(POOL_CHAT)
++    assert {p for _s, p in models.providers()} == {"claude-pool"}
++    assert v.decision == "unsure" and v.detail["unavailable"] == "pool"
++
++
++def test_the_plugin_not_loaded_keeps_todays_ask(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    v = _review(POOL_CHAT)
++    assert v.decision == "unsure" and "claude-api" not in " ".join(p for _s, p in models.providers())
++
++
++def test_a_good_account_is_chosen_past_one_whose_estimate_fails(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    _credits(jaam=RuntimeError("boom"), caam=_credit("caam", 5.0))
++    assert _review(POOL_CHAT).detail["judge_account"] == "claude-api-caam"
++
++
++def test_the_chosen_account_failing_is_named_on_the_card(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    models.down["claude-api-caam"] = RuntimeError("API Error: 429 rate limit")
++    _credits(caam=_credit("caam", 5.0))
++    v = _review(POOL_CHAT)
++    assert v.decision == "unsure"
++    assert "all Claude accounts are at their limit; API account caam: it is at its usage limit" in v.card_text
++    assert "429" not in v.card_text
++
++
++def test_a_chat_on_an_api_account_failing_is_named_on_the_card(models):
++    models.down["claude-api-caam"] = RuntimeError("API Error: 429 rate limit")
++    v = _review(CAAM_CHAT)
++    assert v.decision == "unsure"
++    assert "(API account caam: it is at its usage limit)" in v.card_text
++
++
++def test_no_fallback_for_a_chat_on_another_provider(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    core = _credits(caam=_credit("caam", 50.0))
++    v = _review(_chat("deepinfra", api_mode="chat_completions", base_url="https://api.deepinfra.com/v1"))
++    assert v.decision == "unsure" and core.read == []
++
++
++def test_a_judge_route_that_does_not_name_the_pool_is_left_alone(models, monkeypatch):
++    cfg = {"smart_fast_model": {"provider": "deepinfra", "model": "m"}, "smart_model": "claude-sonnet-5-5"}
++    monkeypatch.setattr(A, "_config", lambda: cfg)
++    _review(CAAM_CHAT)
++    assert models.providers() == [(1, "deepinfra"), (2, None)]
++
++
++def test_a_subagent_follows_its_chats_account(models):
++    # The subagent runs on another route; its root chat is on caam.
++    sub = _chat("deepinfra", api_mode="chat_completions", base_url="https://api.deepinfra.com/v1",
++                _delegate_claude_account="claude-api-caam", _delegate_depth=1)
++    assert _review(sub, root=CAAM_CHAT).detail["judge_account"] == "claude-api-caam"
++    assert {p for _s, p in models.providers()} == {"claude-api-caam"}
++
++
++def test_a_subagent_that_carries_the_chats_answer_follows_it_without_a_root(models):
++    sub = _chat("claude-pool", base_url="process://claude-pool", _delegate_claude_account="claude-api-jaam")
++    assert _review(sub).detail["judge_account"] == "claude-api-jaam"
++
++
++def test_a_subagent_of_a_pool_chat_falls_back_through_its_root(models):
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    _credits(caam=_credit("caam", 9.0))
++    sub = _chat("deepinfra", api_mode="chat_completions", base_url="https://api.deepinfra.com/v1",
++                _delegate_claude_account="", _delegate_depth=1)
++    assert _review(sub, root=POOL_CHAT).detail["judge_account"] == "claude-api-caam"
++
++
++def test_the_chat_account_comes_from_the_chats_provider_not_the_base_url(models):
++    odd = _chat("claude-api-caam", base_url="http://localhost:1234")  # not api.anthropic.com
++    assert R.chat_of(odd).account is None
++
++
++def test_review_names_the_account_on_the_whole_path(models, monkeypatch):
++    """``review`` itself: the agent's chat decides the route, and the verdict's card names the account."""
++    models.down["claude-pool"] = PoolExhausted("All Claude accounts are at their limit.")
++    v = A.review("terminal", {"command": "git push --force origin main"}, agent=CAAM_CHAT,
++                 messages=[{"role": "user", "content": "push my branch"}])
++    assert v.detail.get("judge_account") == "claude-api-caam"
++    assert "claude-pool" not in {p for _s, p in models.providers()}
++    assert v.card_text.endswith("Reviewed on API account caam.")
++
++
++def test_the_review_state_does_not_leak_between_reviews(models):
++    _review(CAAM_CHAT)
++    assert R.current() is None
++    assert _review(POOL_CHAT).detail.get("judge_account") is None
+diff --git a/tools/approval.py b/tools/approval.py
+index 658b63c9..c82b3b26 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -1159,8 +1159,10 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+                else _automode.review(tool_name, args, agent=agent, cwd=cwd))
+     if verdict.decision == "allow":
+         _reset_denials(session_key)
++        via = verdict.detail.get("judge_account")
+         return {"approved": True, "message": None, "smart_approved": True,
+-                "description": "smart approval (provenance review)"}
++                "description": "smart approval (provenance review"
++                               + (f" on {_automode.approval_judge_route.account_label(via)})" if via else ")")}
+     rule_fields = {"smart_denied": True, "smart_rule": verdict.rule, "smart_reason": verdict.reason,
+                    "smart_tier": verdict.tier or None}
+     if verdict.decision == "block":
+diff --git a/tools/approval_automode.py b/tools/approval_automode.py
+index 67dff52f..81c0475f 100644
+--- a/tools/approval_automode.py
++++ b/tools/approval_automode.py
+@@ -47,6 +47,7 @@ from typing import Any, Callable, Optional
+ from urllib.parse import urlsplit
+ 
+ from tools import approval_automode_rules as _rules
++from tools import approval_judge_route
+ 
+ logger = logging.getLogger("tools.approval")
+ 
+@@ -1299,9 +1300,17 @@ class Verdict:
+             return (f"Smart approval could not review this: the review model was unavailable ({self.reason}). "
+                     "Approve or deny it yourself.")
+         if self.decision == "unsure":
+-            return f"Smart approval could not decide ({self.reason or 'no valid answer from the review model'})"
++            return (f"Smart approval could not decide ({self.reason or 'no valid answer from the review model'})"
++                    + self.reviewed_on)
+         reason = plain_reason(self.reason)
+-        return f"Smart approval rule \"{self.rule}\": {reason}" if reason else f"Smart approval rule \"{self.rule}\""
++        text = f"Smart approval rule \"{self.rule}\": {reason}" if reason else f"Smart approval rule \"{self.rule}\""
++        return text + self.reviewed_on
++
++    @property
++    def reviewed_on(self) -> str:
++        """The note that an Anthropic API account (not the pool) did the review; empty otherwise."""
++        account = self.detail.get("judge_account")
++        return f" Reviewed on {approval_judge_route.account_label(account)}." if account else ""
+ 
+     @property
+     def card_parts(self) -> dict:
+@@ -1312,6 +1321,8 @@ class Verdict:
+             why = why[len("Smart approval "):] if why.startswith("Smart approval ") else why
+             return {"reason": why[:1].upper() + why[1:]}
+         reason = plain_reason(self.reason)
++        if self.reviewed_on:
++            reason = f"{reason}{self.reviewed_on}" if reason else self.reviewed_on.strip()
+         return {"rule": self.rule, **({"reason": reason} if reason else {})}
+ 
+ 
+@@ -1392,7 +1403,7 @@ def set_complete_override(fn: Optional[Complete]) -> None:
+     _complete_override = fn
+ 
+ 
+-def _stage_route(stage: int) -> dict:
++def _configured_route(stage: int) -> dict:
+     key = "smart_fast_model" if stage == 1 else "smart_model"
+     value = _config().get(key)
+     if isinstance(value, str) and value.strip():
+@@ -1402,6 +1413,12 @@ def _stage_route(stage: int) -> dict:
+     return {}
+ 
+ 
++def _stage_route(stage: int) -> dict:
++    """The stage's configured route, on the chat's Anthropic API-key provider when the route names the account pool
++    and the reviewed chat runs on one (or the review moved there after the pool ran out); see approval_judge_route."""
++    return approval_judge_route.route_for(_configured_route(stage))
++
++
+ class JudgeWindowError(RuntimeError):
+     """The review prompt does not fit the window the judge model is served with."""
+ 
+@@ -1482,6 +1499,7 @@ def _complete(stage: int, system: str, user: str, max_tokens: int) -> str:
+     )
+     if served is not None:  # hosted providers report cached prompt tokens apart, so only self-hosted is checked
+         _check_not_truncated(stage, response, system, user)
++    approval_judge_route.note_used(route)
+     return response.choices[0].message.content or ""
+ 
+ 
+@@ -1571,6 +1589,23 @@ def _routes_differ() -> bool:
+     return _stage_route(1) != _stage_route(2)
+ 
+ 
++def _routes_on_pool() -> bool:
++    """True when the judge is configured on the account pool, so an API account in its place is what failed."""
++    return any(approval_judge_route.is_pool(_configured_route(stage).get("provider")) for stage in (1, 2))
++
++
++def _complete_or_move(stage: int, system: str, user: str, max_tokens: int) -> str:
++    """``_complete``, and when every pool account is at its limit or on hold for a chat that runs on the pool, the
++    same call once more on the API account with the most credit left (both stages stay there for this review).
++    A chat on an API account never reaches the pool, so only a pool chat gets here."""
++    try:
++        return _complete(stage, system, user, max_tokens)
++    except Exception as exc:
++        if _unavailable_kind(exc) != "pool" or approval_judge_route.fall_back_from_pool() is None:
++            raise
++    return _complete(stage, system, user, max_tokens)
++
++
+ def _judge(stage: int, system: str, user: str, max_tokens: int, down: dict, *,
+            fixed: int | None = None) -> tuple[str, int]:
+     """(reply, route) of one judge call that the provider failing does not end at once: the same route once more
+@@ -1583,7 +1618,7 @@ def _judge(stage: int, system: str, user: str, max_tokens: int, down: dict, *,
+ 
+     def attempt(route: int) -> str | None:
+         try:
+-            return _complete(route, system, user, max_tokens)
++            return _complete_or_move(route, system, user, max_tokens)
+         except Exception as exc:
+             kind = _unavailable_kind(exc)
+             if not kind:
+@@ -1605,7 +1640,13 @@ def _judge(stage: int, system: str, user: str, max_tokens: int, down: dict, *,
+     if reply is not None:
+         return reply, own
+     kind, exc = min(failures, key=lambda f: _UNAVAILABLE_RANK.index(f[0]))
+-    raise JudgeUnavailable(kind, _unavailable_words(kind, exc))
++    words = _unavailable_words(kind, exc)
++    chat = approval_judge_route.current()
++    if chat is not None and chat.provider and _routes_on_pool():  # the card names the API account that failed
++        label = approval_judge_route.account_label(chat.provider)
++        words = (f"all Claude accounts are at their limit; {label}: {words}" if chat.fallback
++                 else f"{label}: {words}")
++    raise JudgeUnavailable(kind, words)
+ 
+ 
+ def _window_verdict(exc: JudgeWindowError, stage1_ms: int = 0, stage2_ms: int = 0) -> Verdict:
+@@ -2228,7 +2269,11 @@ def review(tool_name: str, args: dict, *, agent=None, messages: list | None = No
+                        root_messages=root_messages, delegated_goal=goal, cwd=cwd if cwd is not None else _cwd(),
+                        facts={**write_facts(tool_name, args), **({"job": job.fact} if job is not None else {})},
+                        grants=grants)
+-    verdict = review_input(data)
++    with approval_judge_route.review_chat(approval_judge_route.chat_of(agent, root)):
++        verdict = review_input(data)
++        account = approval_judge_route.used_api_account()
++    if account:  # the card and the log name the API account that did the review
++        verdict.detail["judge_account"] = account
+     bare = verdict.detail.pop("judge_source_bare", "") if verdict.detail else ""
+     if bare and not verdict.detail.get("judge_source") and tool_name == "terminal":
+         from tools.approval_chat_grants import bare_repo_source
+diff --git a/tools/approval_judge_route.py b/tools/approval_judge_route.py
+new file mode 100644
+index 00000000..e1c4ccb3
+--- /dev/null
++++ b/tools/approval_judge_route.py
+@@ -0,0 +1,160 @@
++"""Which Claude account the smart approval judge runs on.
++
++The judge is configured on the account pool (``approvals.smart_model`` and ``smart_fast_model`` name
++``claude-pool``). The account the user picked for the chat decides who pays for the review of its calls:
++
++* A chat on an Anthropic API-key provider (``claude-api-<account>``, the rule subagents follow in
++  ``delegate_tool_claude``) has both judge stages run on that provider, with the configured judge model. The pool
++  is not used, so a pool at its limit does not stop the review.
++* A chat on the pool keeps the pool. Only when every pool account is at its limit or on hold (``PoolExhausted``)
++  do both stages move, for the rest of that review, to the API-key provider with the most API credit left
++  (``claude_api_credit_choice``). With no API account that has credit, or no readable estimate, nothing moves and
++  the user is asked, as before.
++* Any other chat, and a judge route that does not name the pool, are left as configured.
++
++``claude_api_credit_choice`` is the one seam to change when the fallback policy changes.
++
++The state of one review lives in a context variable that ``approval_automode.review`` sets, so the judge calls
++(and the card text) know the chat without the call chain carrying it.
++"""
++
++from __future__ import annotations
++
++import contextvars
++import logging
++import sys
++from contextlib import contextmanager
++from dataclasses import dataclass, field
++from typing import Any, Iterator, Optional
++
++from tools.delegate_tool_claude import CLAUDE_POOL, _name, parent_claude_account
++
++logger = logging.getLogger(__name__)
++
++API_PREFIX = "claude-api-"
++# The module the claude-accounts plugin loads its shared state as (talaria-claude-pool core.py).
++ACCOUNTS_CORE = "hermes_claude_accounts_core"
++_DROP = ("base_url", "api_key", "api_mode")
++
++
++@dataclass
++class ReviewChat:
++    """The chat whose call is being reviewed, as far as the judge route cares."""
++
++    account: Optional[str] = None  # the chat's Anthropic API-key provider, or None
++    on_pool: bool = False  # the chat runs on the account pool
++    fallback: Optional[str] = None  # the API-key provider the judge moved to after the pool ran out
++    used: list[str] = field(default_factory=list)  # providers a judge call was answered on
++
++    @property
++    def provider(self) -> Optional[str]:
++        """The API-key provider the judge runs on in place of the pool, if any."""
++        return self.account or self.fallback
++
++
++_current: contextvars.ContextVar[Optional[ReviewChat]] = contextvars.ContextVar("approval_judge_chat", default=None)
++
++
++def is_pool(provider: Any) -> bool:
++    return _name(provider).lower() == CLAUDE_POOL
++
++
++def chat_of(agent: Any, root: Any = None) -> ReviewChat:
++    """The ReviewChat of a reviewed agent: its root chat for a subagent, the agent itself otherwise."""
++    chat = root if root is not None else agent
++    if chat is None:
++        return ReviewChat()
++    account = parent_claude_account(chat)
++    on_pool = account is None and any(is_pool(getattr(chat, key, None)) for key in ("requested_provider", "provider"))
++    return ReviewChat(account=account, on_pool=on_pool)
++
++
++@contextmanager
++def review_chat(chat: ReviewChat) -> Iterator[ReviewChat]:
++    token = _current.set(chat)
++    try:
++        yield chat
++    finally:
++        _current.reset(token)
++
++
++def current() -> Optional[ReviewChat]:
++    return _current.get()
++
++
++def route_for(route: dict) -> dict:
++    """``route`` (one stage's configured judge route) on the chat's API-key provider when it names the pool and the
++    review has one; the pool's own address and key never carry over. Any other route is returned as it is."""
++    chat = _current.get()
++    provider = chat.provider if chat is not None else None
++    if not provider or not is_pool(route.get("provider")):
++        return route
++    return {**{k: v for k, v in route.items() if k not in _DROP}, "provider": provider}
++
++
++def note_used(route: dict) -> None:
++    """Record the provider a judge call was answered on."""
++    chat = _current.get()
++    provider = _name(route.get("provider"))
++    if chat is not None and provider and provider not in chat.used:
++        chat.used.append(provider)
++
++
++def claude_api_credit_choice() -> Optional[tuple[str, float]]:
++    """``(provider, USD left)`` of the Anthropic API-key account with the most credit left, or None.
++
++    Reads the estimate the hub shows per account (the plan's monthly credit less what Hermes spent through the
++    key since the cycle started), from the claude-accounts plugin loaded in this process. An account without a
++    key, without a readable estimate, or with no credit left is not a choice; the first account in the plugin's
++    order wins a tie. None when the plugin is not loaded or no account qualifies, so the user is asked."""
++    core = sys.modules.get(ACCOUNTS_CORE)
++    if core is None:
++        logger.info("Smart approval (provenance): the claude-accounts plugin is not loaded; no API credit estimate")
++        return None
++    best: Optional[tuple[str, float]] = None
++    try:
++        accounts = list(core.accounts())
++    except Exception as exc:
++        logger.warning("Smart approval (provenance): API accounts unreadable (%s)", type(exc).__name__)
++        return None
++    for acct in accounts:
++        try:
++            plan = (core.status(acct) or {}).get("subscription_type")
++            credits = core.api_credits(acct, plan)
++        except Exception as exc:  # one account's estimate failing must not hide the others
++            logger.warning("Smart approval (provenance): API credit estimate of %s failed (%s)", acct.id,
++                           type(exc).__name__)
++            continue
++        left = credits.get("left_usd") if isinstance(credits, dict) else None
++        provider = _name(credits.get("provider")) if isinstance(credits, dict) else ""
++        if not provider.startswith(API_PREFIX) or isinstance(left, bool) or not isinstance(left, (int, float)):
++            continue
++        if left > 0 and (best is None or left > best[1]):
++            best = (provider, float(left))
++    return best
++
++
++def fall_back_from_pool() -> Optional[str]:
++    """After the pool ran out: move the rest of this review to the API account with the most credit. Returns the
++    provider, or None when the chat is not on the pool, the review already moved, or no account has credit."""
++    chat = _current.get()
++    if chat is None or not chat.on_pool or chat.provider:
++        return None
++    choice = claude_api_credit_choice()
++    if choice is None:
++        return None
++    chat.fallback = choice[0]
++    logger.info("Smart approval (provenance): every pool account is at its limit; the review moves to %s "
++                "(about $%.2f of credit left)", choice[0], choice[1])
++    return choice[0]
++
++
++def account_label(provider: str) -> str:
++    """\"API account caam\" for ``claude-api-caam``, as the hub names it."""
++    return "API account " + (provider[len(API_PREFIX):] if provider.startswith(API_PREFIX) else provider)
++
++
++def used_api_account() -> Optional[str]:
++    """The API-key provider a judge call of this review was answered on, or None."""
++    chat = _current.get()
++    return next((p for p in (chat.used if chat else []) if p.startswith(API_PREFIX)), None)
+-- 
+2.56.0
+

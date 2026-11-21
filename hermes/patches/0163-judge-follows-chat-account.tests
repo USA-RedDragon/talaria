@@ -1,0 +1,11 @@
+# The judge's account routing and its card, and the judge retry it extends
+tests/tools/test_smart_provenance_judge_account.py
+tests/tools/test_smart_provenance_judge_retry.py
+# The provenance review and the approval paths that show its card
+tests/tools/test_smart_provenance.py
+tests/tools/test_smart_provenance_local_judge.py
+tests/tools/test_smart_provenance_live_root.py
+tests/tools/test_approval_provenance.py
+tests/tools/test_approval.py
+# The rule it reuses
+tests/tools/test_delegation_claude_family.py
