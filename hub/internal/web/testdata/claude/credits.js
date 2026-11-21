@@ -109,5 +109,17 @@ async function routeFor(pool, provider) {
   assert.strictEqual(flat(r.parts), "Bills the API credits of whichever account has the most left.");
   ({ r } = await routeFor({}, "claude-api-caam"));
   assert.strictEqual(flat(r.parts), "Bills that account's monthly API credits.");
+
+  // The status line names the account the pool runs the chat's next turn on.
+  {
+    const data = { admin: false, accounts: [account("caam"), account("jaam")] };
+    const api = async (method, path) => (path.includes("/pool?") ? { account: "jaam", pinned: true } : data);
+    const P = sandbox.window.HubClaude({ api, el, me: () => ({ claude: true }), redraw() {} });
+    assert.strictEqual(P.poolNext("main", "s1"), null, "unknown before the pool answers");
+    await P.panel("main");
+    await P.route("main", "s1", "claude-pool", "claude-opus-5-5");
+    assert.strictEqual(P.poolNext("main", "s1").label, "Claude (jaam)");
+    assert.strictEqual(P.poolNext("main", "s2"), null, "another chat has its own answer");
+  }
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

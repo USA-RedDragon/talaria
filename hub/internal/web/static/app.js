@@ -2683,6 +2683,8 @@
     if (lim.name) {
       if (lim.name.provider !== claude.chatgptProvider && !/^Claude\b/.test(lim.name.label)) who.append(el("span", "long", "Claude "));
       who.append(lim.name.label);
+      const next = info.provider === "claude-pool" && view ? claude.poolNext(view.backend, view.session) : null;
+      if (next) who.append(" \u00b7 " + next.label.replace(/^Claude \((.+)\)$/, "$1"));
       who.title = (lim.name.email ? lim.name.label + ": " + lim.name.email : lim.name.label) + (model ? ", " + model : "");
     } else if (apiKey) {
       who.append(claude.apiName);
@@ -2693,7 +2695,7 @@
     }
     line.append(who);
     if ((lim.name || apiKey) && model) {
-      const m = el("span", "long model", model);
+      const m = el("span", "model", model);
       m.title = "Model";
       line.append(m);
     }

@@ -1203,7 +1203,8 @@ dialog.rewind { width: min(30rem, calc(100vw - 1.5rem)); }
   .info summary .mtok { min-width: 2.5rem; }
   .info summary .long, .info summary .who2, .info summary .grow { display: none; }
   .info summary .who1 { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .info summary .mtok:not([hidden]) { display: inline; margin-left: auto; order: 9; }
+  .info summary .model { flex: 0 1 auto; min-width: 2rem; }
+  .info summary .mtok:not([hidden]) { display: inline; margin-left: auto; order: 9; flex: 0 50 auto; min-width: 0; }
   .info summary::after { display: none; }
   .info summary .metric .lbl, .info summary .metric.ctx .lbl { display: inline; }
   .info summary .metric .meter { width: 1.05rem; height: 1.05rem; border-radius: 50%; background: conic-gradient(var(--muted) calc(var(--p) * 1%), var(--line) 0);

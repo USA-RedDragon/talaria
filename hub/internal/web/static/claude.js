@@ -511,6 +511,7 @@ window.HubClaude = (ctx) => {
   }
 
   return { reset: resetOf, ranOn, parts, note, afterReply, chatNotice, signIn, panel, apiName, apiProvider, chatgptProvider, route,
+    poolNext: (backend, session) => accountFor(backend, poolProvider, session),
     account: (backend, provider, session, model) => {
       parts(backend, { provider });
       if (provider === poolProvider && session && me().claude) {
