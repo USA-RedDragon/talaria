@@ -138,6 +138,51 @@ class InsightsTests(unittest.TestCase):
             insights.changes("missing", db=self.db)
         self.assertEqual(ctx.exception.status, 404)
 
+    def test_rewound_lists_only_rows_a_rewind_hid(self):
+        self.chat("s1", "Rewind")
+        ids = [self.db.append_message("s1", role, text) for role, text in (
+            ("user", "one"), ("assistant", "a1"), ("user", "two"), ("assistant", "a2"))]
+        self.assertEqual(insights.rewound("s1", db=self.db)["groups"], [])
+        self.db.rewind_to_message("s1", ids[2])
+        out = insights.rewound("s1", db=self.db)
+        self.assertEqual(len(out["groups"]), 1)
+        g = out["groups"][0]
+        self.assertEqual((g["count"], g["first_row_id"], g["last_row_id"]), (2, ids[2], ids[3]))
+        self.assertEqual([(r["row_id"], r["role"], r["text"], r["row_kind"]) for r in g["rows"]],
+                         [(ids[2], "user", "two", "message"), (ids[3], "assistant", "a2", "message")])
+        self.assertGreater(g["rows"][0]["timestamp"], 0)
+        later = self.db.append_message("s1", "user", "three")
+        self.db.append_message("s1", "assistant", "a3")
+        self.db.rewind_to_message("s1", later)
+        out = insights.rewound("s1", db=self.db)
+        self.assertEqual([[r["text"] for r in g["rows"]] for g in out["groups"]], [["two", "a2", "three", "a3"]])
+        self.db.rewind_to_message("s1", ids[0])
+        out = insights.rewound("s1", db=self.db)
+        self.assertEqual([[r["text"] for r in g["rows"]] for g in out["groups"]], [["one", "a1", "two", "a2", "three", "a3"]])
+        with self.assertRaises(insights.Refused) as ctx:
+            insights.rewound("missing", db=self.db)
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_rewound_splits_groups_at_a_live_row(self):
+        self.chat("s1", "Split")
+        ids = [self.db.append_message("s1", role, text) for role, text in (
+            ("user", "a"), ("assistant", "b"), ("user", "c"), ("assistant", "d"), ("user", "e"))]
+        self.db._execute_write(lambda conn: conn.execute(
+            "UPDATE messages SET active = 0 WHERE id IN (?, ?, ?)", (ids[0], ids[1], ids[4])))
+        out = insights.rewound("s1", db=self.db)
+        self.assertEqual([[r["text"] for r in g["rows"]] for g in out["groups"]], [["a", "b"], ["e"]])
+        self.assertEqual([(g["first_row_id"], g["last_row_id"]) for g in out["groups"]], [(ids[0], ids[1]), (ids[4], ids[4])])
+
+    def test_rewound_skips_tool_rows_and_empty_groups(self):
+        self.chat("s1", "Tools")
+        first = self.db.append_message("s1", "user", "run it")
+        self.db.append_message("s1", "assistant", "", tool_calls=[_call("c1", "terminal", {"command": "ls"})])
+        self.db.append_message("s1", "tool", "file.txt", tool_call_id="c1", tool_name="terminal")
+        self.db.rewind_to_message("s1", first)
+        out = insights.rewound("s1", db=self.db)
+        self.assertEqual([[r["text"] for r in g["rows"]] for g in out["groups"]], [["run it"]])
+        self.assertEqual(out["groups"][0]["last_row_id"], first + 2)
+
 
 class InsightRouteTests(unittest.TestCase):
     def setUp(self):
@@ -164,3 +209,7 @@ class InsightRouteTests(unittest.TestCase):
         with mock.patch.object(insights, "READS", busy):
             r = self.client.get("/api/plugins/device/usage")
             self.assertEqual((r.status_code, r.json()["error"]), (429, "busy"))
+
+    def test_rewound_route(self):
+        r = self.client.get("/api/plugins/device/sessions/missing/rewound")
+        self.assertEqual((r.status_code, r.json()["error"]), (404, "unknown_session"))

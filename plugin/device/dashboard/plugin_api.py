@@ -538,6 +538,11 @@ async def usage(days: int = 30):
 async def changes(session_id: str):
     return await _insights_call(_insights().changes, session_id)
 
+
+@router.get("/sessions/{session_id}/rewound")
+async def rewound(session_id: str):
+    return await _insights_call(_insights().rewound, session_id)
+
 # --- exec leg (section 4) ---------------------------------------------------------------------
 
 def _header(ws: WebSocket, name: str) -> Optional[bytes]:

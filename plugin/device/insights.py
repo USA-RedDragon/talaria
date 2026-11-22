@@ -27,6 +27,8 @@ MAX_SNIPPET = 400
 MAX_USAGE_DAYS = 90
 MAX_USAGE_ROWS = 5000
 MAX_CHANGED_FILES = 500
+MAX_REWOUND_ROWS = 2000
+MAX_REWOUND_TEXT = 20000
 MAX_PATH = 4096
 WRITE_TOOLS = ("write_file", "patch")
 _V4A_FILE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$", re.MULTILINE)
@@ -327,3 +329,68 @@ def changes(session_id: str, db=None) -> dict:
                         files[p] = f
     out = list(reversed(files.values()))
     return {"session_id": tip, "files": out[:MAX_CHANGED_FILES], "truncated": len(out) > MAX_CHANGED_FILES}
+
+
+def _display_meta(raw: Any) -> Any:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    return raw if isinstance(raw, dict) else None
+
+
+def rewound(session_id: str, db=None) -> dict:
+    """The messages a rewind hid from the chat's tip session, which only Hermes' ``include_inactive``
+    read returns: ``{"session_id", "groups": [{"count", "first_row_id", "last_row_id", "rows": [Row]}],
+    "truncated"}``, oldest first. A group is a run of rewound rows with no live row between them.
+    Row is the display row of a user or assistant message with text, ``{"row_kind": "message",
+    "row_id", "role", "text", "timestamp", "display_kind", "display_metadata"}``; tool rows are in
+    no group's ``rows``, and ``count`` is the number of ``rows``. Rows that a compaction archived
+    (``compacted``) are not rewound rows and never listed."""
+    if not isinstance(session_id, str) or not session_id or len(session_id) > 200:
+        raise Refused(400, "bad_session", "bad session id")
+    db = db or _db()
+    if db.get_session(session_id) is None:
+        raise Refused(404, "unknown_session", f"session {session_id} does not exist")
+    tip = _Tips(db)(session_id)
+    with db._read_ctx() as conn:
+        hidden = conn.execute(
+            "SELECT id, role, content, timestamp, display_kind, display_metadata FROM messages "
+            "WHERE session_id = ? AND active = 0 AND compacted = 0 ORDER BY id", (tip,)).fetchall()
+        live = [r[0] for r in conn.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id",
+            (tip, hidden[0][0])).fetchall()] if hidden else []
+    groups: list[dict] = []
+    run = None
+    seen = 0
+    truncated = False
+    at = 0
+    for row_id, role, raw, ts, kind, meta in hidden:
+        while at < len(live) and live[at] < row_id:
+            at += 1
+            run = None
+        if run is None:
+            run = {"count": 0, "first_row_id": row_id, "last_row_id": row_id, "rows": []}
+            groups.append(run)
+        run["last_row_id"] = row_id
+        if role not in ("user", "assistant"):
+            continue
+        text = _row_text(db, raw)
+        if not text.strip():
+            continue
+        if seen >= MAX_REWOUND_ROWS:
+            truncated = True
+            continue
+        seen += 1
+        row = {"row_kind": "message", "row_id": row_id, "role": role, "text": _text(text, MAX_REWOUND_TEXT),
+               "timestamp": _num(ts)}
+        if kind:
+            row["display_kind"] = _text(kind, 40)
+        parsed = _display_meta(meta)
+        if parsed is not None:
+            row["display_metadata"] = parsed
+        run["rows"].append(row)
+        run["count"] += 1
+    groups = [g for g in groups if g["rows"]]
+    return {"session_id": tip, "groups": groups, "truncated": truncated}
