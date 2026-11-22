@@ -8,7 +8,7 @@ window.HubIcons = (() => {
     plus: "M12 5v14M5 12h14", menu: "M3 6h18M3 12h18M3 18h18", download: "M12 3v12M7 10l5 5 5-5M5 21h14",
     stop: "M6 6h12v12H6z", send: "M12 19V5M5 12l7-7 7 7",
     copy: "M9 9h11v11H9zM5 15H4V4h11v1", edit: "M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z",
-    retry: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5",
+    retry: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5", rewind: "M11 17l-5-5 5-5M18 17l-5-5 5-5",
     branch: "M6 3v12M18 9a3 3 0 1 0 0-.01M6 21a3 3 0 1 0 0-.01M18 9c0 6-12 3-12 9",
     more: "M5 12h.01M12 12h.01M19 12h.01", chev: "M6 9l6 6 6-6",
     box: "M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8",

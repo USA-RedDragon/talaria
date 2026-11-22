@@ -1,11 +1,16 @@
 "use strict";
 // HubMsgActions adds the actions of each message in the open chat: Copy and
-// Branch on every message, Edit on the user's last message and Retry on
-// the last reply. Edit and Retry go through the hub's rewind, which drops
-// the user's last turn and sends it again; Branch starts a new chat from a
-// message. It also exports a chat as Markdown.
+// Branch on every message, Rewind to here on each message of the user,
+// Edit on the user's last message and Retry on the last reply. Edit and
+// Retry go through the hub's rewind, which drops the user's last turn and
+// sends it again; Rewind to here drops a chosen message and what follows,
+// sends nothing and puts the message in the box; Branch starts a new chat
+// from a message. Where a rewind hid messages the log shows a line with
+// their count and a Show button that lists them. It also exports a chat as
+// Markdown.
 // ctx: api, el, chat(), running(), stop(), reopen(chat), toast(text),
-// banner(text, bad), open(backend, session).
+// banner(text, bad), open(backend, session), stays() (what keeps running
+// beside the chat: { subagents, commands, prompts, todos }).
 window.HubMsgActions = (ctx) => {
   const { api, el } = ctx;
   const $ = (id) => document.getElementById(id);
@@ -53,9 +58,11 @@ window.HubMsgActions = (ctx) => {
       if (state.includes("u")) add("edit", "Edit and resend (↑)", () => edit(b));
       if (state.includes("r")) add("retry", "Run the last message again", () => retry(b));
       add("branch", "Start a new chat from here", (x) => branch(b, x));
+      if (isUser(b)) add("rewind", "Rewind to here", () => rewindTo(b));
     }
     const shown = new Set(all);
     for (const a of log.querySelectorAll(":scope > .acts, :scope > .older > .part > .acts")) if (!a.owner || !a.owner.isConnected || !shown.has(a.owner)) { if (a.owner !== editing) a.remove(); }
+    placeRewound();
   }
 
   // One listener on the log serves every message: a tap on a bubble shows
@@ -87,7 +94,7 @@ window.HubMsgActions = (ctx) => {
   // Only a change of the messages themselves needs a pass: a tool card, a
   // status line or the actions this very code adds do not, and a streamed
   // reply adds none of its own after the first.
-  const mine = (n) => n.nodeType !== 1 || n.classList.contains("acts") || !(n.classList.contains("msg") || n.classList.contains("older") || n.classList.contains("part") || n.classList.contains("queued") || n.classList.contains("lost"));
+  const mine = (n) => n.nodeType !== 1 || n.classList.contains("acts") || n.classList.contains("rewound") || !(n.classList.contains("msg") || n.classList.contains("older") || n.classList.contains("part") || n.classList.contains("queued") || n.classList.contains("lost"));
   new MutationObserver((list) => {
     for (const m of list) {
       for (const n of m.addedNodes) if (!mine(n)) { soon(); return; }
@@ -176,7 +183,6 @@ window.HubMsgActions = (ctx) => {
     const sel = el("select");
     sel.setAttribute("aria-label", "Model for the retry");
     const cur = (chat.info && chat.info.model) || "";
-    const curP = (chat.info && chat.info.provider) || "";
     const o = el("option", "", cur || "The current model");
     o.value = "";
     sel.append(o);
@@ -196,6 +202,14 @@ window.HubMsgActions = (ctx) => {
     const acts = b.nextElementSibling && b.nextElementSibling.classList.contains("acts") ? b.nextElementSibling : b;
     acts.after(box);
     retrying = box;
+    await fillModels(chat, sel);
+  }
+
+  // fillModels adds the models the chat can switch to after the option for
+  // its current one.
+  async function fillModels(chat, sel) {
+    const cur = (chat.info && chat.info.model) || "";
+    const curP = (chat.info && chat.info.provider) || "";
     try {
       const m = await api("GET", chat.base + "/models");
       if (ctx.chat() !== chat) return;
@@ -234,6 +248,250 @@ window.HubMsgActions = (ctx) => {
     } catch (e) {
       ctx.banner((body.retry ? "Could not retry: " : "Could not resend: ") + e.message, true);
       return false;
+    }
+  }
+
+
+  const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
+  const snip = (t) => {
+    const s = String(t).replace(/\s+/g, " ").trim();
+    return s.length > 40 ? s.slice(0, 39).trimEnd() + "…" : s;
+  };
+
+  // staysLine says what a rewind leaves alone, counting only what the page
+  // knows: the live subagents, background commands and prompts, the to-do
+  // list and where the chat runs. It is "" when there is nothing to name.
+  function staysLine(chat) {
+    const st = ctx.stays ? ctx.stays() : null;
+    const parts = [];
+    if (st) {
+      if (st.subagents) parts.push(plural(st.subagents, "running subagent", "running subagents") + " (their results still arrive here)");
+      if (st.commands) parts.push(plural(st.commands, "background command", "background commands"));
+      if (st.prompts) parts.push(plural(st.prompts, "background prompt", "background prompts"));
+      if (st.todos) parts.push("the todo list (" + (st.todos.open ? st.todos.open + " open of " + st.todos.total : "all " + st.todos.total + " done") + ")");
+    }
+    const p = chat.place;
+    if (p && p.kind === "computer") {
+      parts.push("the folder and computer (" + (p.mine ? p.name : "another computer") + (p.dir ? ", " + p.dir : "") + ")");
+    } else if (p && p.kind === "sandbox") {
+      parts.push("the sandbox and its folder");
+    }
+    if (!parts.length) return "";
+    return parts.length === 1 ? parts[0] : parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1];
+  }
+
+  // rewindTo asks for the user's word, then takes the chat back to the
+  // message b: the hub hides b and everything after it from the model and
+  // sends nothing, and b's text goes back in the box.
+  async function rewindTo(b) {
+    const chat = ctx.chat();
+    if (!chat || document.querySelector("dialog.rewind")) return;
+    closeEdit();
+    closeRetry();
+    const all = bubbles();
+    const after = all.length - 1 - all.indexOf(b);
+    const text = textOf(b);
+    const box = $("input");
+    const d = el("dialog", "picker rewind");
+    d.setAttribute("aria-labelledby", "rewind-title");
+    const h = el("h2", "", "Rewind to “" + snip(text) + "”?");
+    h.id = "rewind-title";
+    const body = el("div", "pbody");
+    const lead = el("p", "");
+    if (after > 0) {
+      lead.append("This message and the ", el("b", "", plural(after, "message", "messages") + " after it"),
+        " leave what the model sees. They are hidden, not deleted.");
+    } else {
+      lead.append("This message leaves what the model sees. It is hidden, not deleted.");
+    }
+    const list = el("ul", "rewind-facts");
+    const stays = staysLine(chat);
+    if (stays) {
+      const li = el("li");
+      li.append(el("b", "", "Stays:"), " " + stays + ".");
+      list.append(li);
+    }
+    const back = el("li");
+    back.append(el("b", "", "Your message"), " goes back in the box to edit before sending." +
+      (box.value.trim() ? " It replaces what is in the box now." : ""));
+    list.append(back);
+    const row = el("div", "rewind-model");
+    const label = el("label", "", "Model");
+    const sel = el("select");
+    label.htmlFor = sel.id = "rewind-model";
+    const cur = (chat.info && chat.info.model) || "";
+    const o = el("option", "", cur ? cur + " (unchanged)" : "The current model");
+    o.value = "";
+    sel.append(o);
+    row.append(label, sel);
+    const err = el("div", "err");
+    err.setAttribute("role", "alert");
+    body.append(lead, list, row, err);
+    const foot = el("div", "pfoot");
+    const cancel = el("button", "", "Cancel");
+    cancel.type = "button";
+    const go = el("button", "primary", "Rewind");
+    go.type = "button";
+    foot.append(cancel, go);
+    d.append(h, body, foot);
+    d.addEventListener("close", () => d.remove());
+    cancel.onclick = () => d.close();
+    go.onclick = async () => {
+      const [provider, model] = sel.value ? sel.value.split("\n") : ["", ""];
+      go.disabled = cancel.disabled = true;
+      err.textContent = "";
+      try {
+        if (await rewindDone(chat, b, text, after + 1, provider, model, err)) d.close();
+      } finally {
+        go.disabled = cancel.disabled = false;
+      }
+    };
+    document.body.append(d);
+    d.showModal();
+    go.focus();
+    fillModels(chat, sel);
+  }
+
+  // rewindDone makes the hub take the chat back to the message b. A running
+  // turn stops first, since Hermes rewinds only an idle chat. It returns
+  // false, with the reason in err, when the chat did not change.
+  async function rewindDone(chat, b, text, count, provider, model, err) {
+    try {
+      const rows = ((await transcript(chat)) || {}).messages || [];
+      const i = rowOf(rows, b);
+      const id = i >= 0 && rows[i].role === "user" ? rowID(rows[i]) : null;
+      if (id === null) throw new Error("could not find this message in the chat's history");
+      if (ctx.running()) {
+        await ctx.stop();
+        for (let n = 0; n < 40 && ctx.running() && ctx.chat() === chat; n++) await new Promise((r) => setTimeout(r, 250));
+      }
+      const r = await api("POST", chat.base + "/rewind", { row_id: id, no_send: true, provider, model });
+      if (r && r.status === "confirm") {
+        err.textContent = (r.message || "That model needs a confirmation.") + " Pick it in the model settings under the title first.";
+        return false;
+      }
+      const at = r && Date.parse(r.at) > 0 ? Date.parse(r.at) : Date.now();
+      remember(chat, id, at);
+      const box = $("input");
+      box.value = (r && r.text) || text;
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      box.focus();
+      ctx.toast("Rewound " + plural(count, "message", "messages") + ". Your message is in the box");
+      loadRewound(chat);
+      return true;
+    } catch (e) {
+      err.textContent = "Could not rewind: " + e.message;
+      return false;
+    }
+  }
+
+  // The rewinds of the open chat: the groups of hidden messages that the
+  // plugin lists, and when this browser rewound each (the hub's clock,
+  // kept per message so it survives a reload; another browser has none).
+  const rw = { chat: null, groups: [], shown: new Set() };
+  const stamps = (chat) => {
+    try { return JSON.parse(localStorage.getItem("rewound:" + chat.backend + "/" + chat.session) || "{}") || {}; } catch (_) { return {}; }
+  };
+  function remember(chat, rowId, at) {
+    const all = stamps(chat);
+    all[rowId] = at;
+    const keep = Object.keys(all).slice(-50);
+    try {
+      localStorage.setItem("rewound:" + chat.backend + "/" + chat.session, JSON.stringify(Object.fromEntries(keep.map((k) => [k, all[k]]))));
+    } catch (_) { /* no storage: no time shown after a reload */ }
+  }
+  const groupTime = (chat, g) => {
+    const all = stamps(chat);
+    let at = 0;
+    for (const [k, v] of Object.entries(all)) if (Number(k) >= g.first_row_id && Number(k) <= g.last_row_id && v > at) at = v;
+    return at;
+  };
+  const zoneOf = (ms) => {
+    const p = new Intl.DateTimeFormat("en-US", { timeZoneName: "short" }).formatToParts(ms).find((x) => x.type === "timeZoneName");
+    return p ? p.value : "";
+  };
+
+  async function loadRewound(chat) {
+    try {
+      const got = await api("GET", chat.base + "/rewound");
+      if (ctx.chat() !== chat || rw.chat !== chat) return;
+      rw.groups = (got && got.groups) || [];
+      for (const d of log.querySelectorAll(":scope .rewound")) d.remove();
+      soon();
+    } catch (_) { /* a server that cannot list them shows no line */ }
+  }
+
+  function dividerFor(chat, g) {
+    const div = el("div", "rewound");
+    div.dataset.first = g.first_row_id;
+    div.dataset.last = g.last_row_id;
+    div.setAttribute("role", "separator");
+    const line = el("div", "rewound-line");
+    const at = groupTime(chat, g);
+    const said = plural(g.count, "message", "messages") + " rewound" + (at ? " at " + window.HubTimes.clock(at) + " " + zoneOf(at) : "") + " · ";
+    const show = el("button", "link", "Show");
+    show.type = "button";
+    line.append(said, show);
+    const rows = el("div", "rewound-list");
+    rows.hidden = true;
+    show.setAttribute("aria-expanded", "false");
+    show.onclick = () => {
+      const open = rows.hidden;
+      rows.hidden = !open;
+      show.textContent = open ? "Hide" : "Show";
+      show.setAttribute("aria-expanded", String(open));
+      if (open) rw.shown.add(g.first_row_id);
+      else rw.shown.delete(g.first_row_id);
+      if (open && !rows.firstChild) rows.append(...(g.rows || []).map(hiddenRow));
+    };
+    div.append(line, rows);
+    if (rw.shown.has(g.first_row_id)) show.click();
+    return div;
+  }
+
+  // hiddenRow draws one hidden message, read only.
+  function hiddenRow(m) {
+    const text = m.text != null ? m.text : "";
+    if (m.role === "assistant") {
+      const x = el("div", "hmsg hmsg-assistant");
+      if (window.hubMarkdown) window.hubMarkdown.render(x, text);
+      else x.textContent = text;
+      return x;
+    }
+    const v = window.HubOrigin.classify(m);
+    if (v.show !== "user") return el("div", "note", v.notice ? window.HubOrigin.line(v.notice) : text);
+    const x = el("div", "hmsg hmsg-user");
+    if (window.hubMarkdown && window.hubMarkdown.renderUser) window.hubMarkdown.renderUser(x, v.text);
+    else x.textContent = v.text;
+    return x;
+  }
+
+  // placeRewound keeps one line in the log for each group of hidden
+  // messages, after the last message before it and before the first one
+  // that came later (by row id), wherever the log was drawn again or older
+  // messages were added above.
+  function placeRewound() {
+    const chat = ctx.chat();
+    if (!chat) return;
+    if (rw.chat !== chat) {
+      rw.chat = chat;
+      rw.groups = [];
+      loadRewound(chat);
+      return;
+    }
+    const rowed = Array.from(log.querySelectorAll("[data-row]")).filter((n) => n.classList.contains("msg"));
+    for (const g of rw.groups) {
+      let div = log.querySelector('.rewound[data-first="' + g.first_row_id + '"]');
+      const ok = div && rowed.every((n) => {
+        const before = !!(div.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_PRECEDING);
+        return before === (Number(n.dataset.row) <= g.last_row_id);
+      });
+      if (ok) continue;
+      if (!div) div = dividerFor(chat, g);
+      const next = rowed.find((n) => Number(n.dataset.row) > g.last_row_id);
+      if (next) next.before(div);
+      else if (!rowed.length && log.firstChild) log.firstChild.before(div);
+      else log.append(div);
     }
   }
 

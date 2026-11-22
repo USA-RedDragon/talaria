@@ -626,6 +626,24 @@ window.HubActivity = (ctx) => {
     return n;
   }
 
+  // stays counts what a rewind of the open chat leaves running: its live
+  // subagents, background commands and prompts, and the open items of its to-do
+  // list (null when the chat has none or the list was not read).
+  function stays() {
+    let subagents = 0;
+    let commands = 0;
+    let prompts = 0;
+    for (const r of S.subs.values()) if (live.has(r.state)) subagents++;
+    for (const r of S.bgs.values()) {
+      if (!live.has(r.state)) continue;
+      if (r.kind === "command") commands++;
+      else prompts++;
+    }
+    const items = S.plan ? S.plan.items : [];
+    const open = items.filter((x) => x.status !== "completed" && x.status !== "cancelled").length;
+    return { subagents, commands, prompts, todos: items.length ? { open, total: items.length } : null };
+  }
+
   function setOpen(open, remember) {
     $("app").classList.toggle("act-closed", !open);
     $("actbtn").setAttribute("aria-expanded", String(open));
@@ -1286,6 +1304,6 @@ window.HubActivity = (ctx) => {
     return [...S.subs.values()].filter((r) => r.kind === "sub" && r.goal).map((r) => r.id);
   }
 
-  return { revealPlan, goalOf, goalIds, view, restore, show, event: (kind, p) => { if (S.chat && event(kind, p)) draw(); }, opens, fromTool, background, liveModels,
+  return { stays, revealPlan, goalOf, goalIds, view, restore, show, event: (kind, p) => { if (S.chat && event(kind, p)) draw(); }, opens, fromTool, background, liveModels,
     running: (on) => { S.running = !!on; draw(); }, usage: (u) => { if (u) { S.usage = u; draw(); } } };
 };

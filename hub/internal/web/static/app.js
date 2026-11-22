@@ -4053,7 +4053,7 @@
     } });
   window.HubTimes.press(document.body, toast);
   const msgActs = window.HubMsgActions({ api, el, chat: () => view, running: () => !!(view && view.running), stop: () => stopTurn(),
-    reopen: (chat) => { if (chat === view) showChat(chat.backend, chat.session); }, toast, banner,
+    reopen: (chat) => { if (chat === view) showChat(chat.backend, chat.session); }, toast, banner, stays: () => activity.stays(),
     open: (b, s) => { openSide(false); location.hash = chatHash(b, s); } });
   const chats = window.HubChatList({ api, el, toast, banner, refresh: () => refreshList(),
     exportChat: (b, s, title) => msgActs.exportChat(b, s, title), computers: () => computers,
