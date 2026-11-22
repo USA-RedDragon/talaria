@@ -93,12 +93,15 @@ type Call struct {
 
 // Session is a fake gateway session.
 type Session struct {
-	ID            string
-	Title         string
-	Live          bool
-	Running       bool
-	StartedAt     float64
-	Messages      []map[string]any
+	ID        string
+	Title     string
+	Live      bool
+	Running   bool
+	StartedAt float64
+	Messages  []map[string]any
+	// Rewound are the rows a rewind took back, in the order they had, with
+	// the row id each had: Hermes keeps them with active = 0.
+	Rewound       []map[string]any
 	Generation    int64
 	ShowReasoning bool
 	// Yolo is the session's approval bypass, as config.get yolo reads it.

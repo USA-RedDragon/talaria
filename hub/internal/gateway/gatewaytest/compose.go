@@ -1,6 +1,7 @@
 package gatewaytest
 
 import (
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -281,9 +282,26 @@ func (g *Gateway) rewind(s *Session, payload, result map[string]any) string {
 	}
 	result["rewound_count"] = len(s.Messages) - i
 	result["target_message"] = map[string]any{kRole: roleUser, "content": s.Messages[i][kText]}
+	for j, m := range s.Messages[i:] {
+		row := maps.Clone(m)
+		row[kRowID] = rowID(m, i+j)
+		s.Rewound = append(s.Rewound, row)
+	}
 	s.Messages = slices.Clone(s.Messages[:i])
 	s.Generation++
 	return ""
+}
+
+// RewoundRows are the rows a rewind took back from session id, oldest
+// first, each with its row id.
+func (g *Gateway) RewoundRows(id string) []map[string]any {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.sessions[id]
+	if s == nil {
+		return nil
+	}
+	return slices.Clone(s.Rewound)
 }
 
 // branch follows hermes_state_mutation_branch.py: the new session records

@@ -360,6 +360,38 @@ func TestRewindEditAndRetry(t *testing.T) {
 	}
 }
 
+func TestRewindToAnEarlierMessageSendsNothing(t *testing.T) {
+	t.Parallel()
+	e := setup(t, service.Options{})
+	ctx := context.Background()
+	e.gw.AddSession(&gatewaytest.Session{ID: sessionNew, Live: true, StartedAt: 10, Messages: []map[string]any{
+		{kRole: roleUser, kText: "alpha"}, {kRole: roleAsst, kText: "beta"},
+		{kRole: roleUser, kText: textOrig}, {kRole: roleAsst, kText: "gamma"},
+		{kRole: roleUser, kText: "delta"}, {kRole: roleAsst, kText: "epsilon"}}})
+	before := time.Now()
+	res, err := e.svc.Rewind(ctx, userAlice, backendPC, sessionNew, hub.Rewind{RowID: 3, NoSend: true})
+	if err != nil || res.Removed != 4 || res.Text != textOrig || res.Prompt.ID != "" || res.At.Before(before) {
+		t.Fatalf("rewind to row 3 = %+v %v", res, err)
+	}
+	if got := userRows(t, e, sessionNew); !slices.Equal(got, []string{"user:alpha", "assistant:beta"}) {
+		t.Fatalf("rows after the rewind = %q", got)
+	}
+	hidden := e.gw.RewoundRows(sessionNew)
+	if len(hidden) != 4 || hidden[0]["row_id"] != int64(3) || hidden[0][kText] != textOrig {
+		t.Fatalf("rewound rows = %v", hidden)
+	}
+	if _, err := e.svc.Rewind(ctx, userAlice, backendPC, sessionNew, hub.Rewind{RowID: 2, NoSend: true}); !errors.Is(err, hub.ErrNoUserMessage) {
+		t.Fatalf("rewind to a reply = %v", err)
+	}
+	if _, err := e.svc.Rewind(ctx, userAlice, backendPC, sessionNew, hub.Rewind{RowID: 99, NoSend: true}); !errors.Is(err, hub.ErrNoUserMessage) {
+		t.Fatalf("rewind to a row that is not there = %v", err)
+	}
+	res, err = e.svc.Rewind(ctx, userAlice, backendPC, sessionNew, hub.Rewind{RowID: 1, NoSend: true})
+	if err != nil || res.Removed != 2 || res.Text != "alpha" {
+		t.Fatalf("rewind to the first message = %+v %v", res, err)
+	}
+}
+
 func TestRewindRefusals(t *testing.T) {
 	t.Parallel()
 	e := setup(t, service.Options{})

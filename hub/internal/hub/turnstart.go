@@ -168,26 +168,45 @@ type UserMessage struct {
 	Images int
 }
 
+// typedRow reads a transcript row as a message the user typed: a user row
+// with a row id that is not hidden and not a note Hermes wrote.
+func typedRow(raw json.RawMessage) (UserMessage, bool) {
+	var r transcriptRow
+	if json.Unmarshal(raw, &r) != nil || r.Role != "user" || r.RowID <= 0 ||
+		(r.RowKind != "" && r.RowKind != "message") || r.DisplayKind == "hidden" || noteKind(r.DisplayKind) {
+		return UserMessage{}, false
+	}
+	m := UserMessage{RowID: r.RowID}
+	text, images := rowContent(r.Content)
+	m.Text, m.Images = text, images
+	if r.Text != nil {
+		m.Text = *r.Text
+	}
+	if _, _, ok := CompactionSummary(m.Text); ok {
+		return UserMessage{}, false
+	}
+	return m, true
+}
+
 // LastUserMessage finds the last row of rows (oldest first) that the user
 // typed: a user row with a row id that is not hidden and not a note Hermes
 // wrote.
 func LastUserMessage(rows []json.RawMessage) (UserMessage, bool) {
 	for i := len(rows) - 1; i >= 0; i-- {
-		var r transcriptRow
-		if json.Unmarshal(rows[i], &r) != nil || r.Role != "user" || r.RowID <= 0 ||
-			(r.RowKind != "" && r.RowKind != "message") || r.DisplayKind == "hidden" || noteKind(r.DisplayKind) {
-			continue
+		if m, ok := typedRow(rows[i]); ok {
+			return m, true
 		}
-		m := UserMessage{RowID: r.RowID}
-		text, images := rowContent(r.Content)
-		m.Text, m.Images = text, images
-		if r.Text != nil {
-			m.Text = *r.Text
+	}
+	return UserMessage{}, false
+}
+
+// UserMessageAt finds the row of rows with the row id rowID if it is a
+// message the user typed, as LastUserMessage reads one.
+func UserMessageAt(rows []json.RawMessage, rowID int64) (UserMessage, bool) {
+	for _, raw := range rows {
+		if m, ok := typedRow(raw); ok && m.RowID == rowID {
+			return m, true
 		}
-		if _, _, ok := CompactionSummary(m.Text); ok {
-			continue
-		}
-		return m, true
 	}
 	return UserMessage{}, false
 }

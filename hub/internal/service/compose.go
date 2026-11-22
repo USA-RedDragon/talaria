@@ -152,17 +152,28 @@ func (ls *live) busy() bool {
 }
 
 // lastUserMessage finds the session's last message from its user in its
-// stored transcript, newest pages first.
-func (b *backend) lastUserMessage(ctx context.Context, sessionID string) (hub.UserMessage, bool, error) {
+// stored transcript, newest pages first. With rowID it finds that
+// message, a user message at any depth.
+func (b *backend) lastUserMessage(ctx context.Context, sessionID string, rowID int64) (hub.UserMessage, bool, error) {
 	cursor := ""
-	for range maxRewindPages {
+	pages := maxRewindPages
+	if rowID > 0 {
+		pages = maxRowPages
+	}
+	for range pages {
 		var r gateway.TranscriptResult
 		err := b.readConn(ctx, gateway.MethodTranscript, gateway.TranscriptParams{SessionID: sessionID, Cursor: cursor,
 			Limit: rewindPage, Order: gateway.OrderLatest}, &r)
 		if err != nil {
 			return hub.UserMessage{}, false, refusal(err)
 		}
-		if m, ok := hub.LastUserMessage(r.Rows); ok {
+		find := func() (hub.UserMessage, bool) {
+			if rowID > 0 {
+				return hub.UserMessageAt(r.Rows, rowID)
+			}
+			return hub.LastUserMessage(r.Rows)
+		}
+		if m, ok := find(); ok {
 			return m, true, nil
 		}
 		if r.NextCursor == nil || len(r.Rows) == 0 {
@@ -177,12 +188,15 @@ func (b *backend) lastUserMessage(ctx context.Context, sessionID string) (hub.Us
 const (
 	rewindPage     = 100
 	maxRewindPages = 10
+	// maxRowPages is how far back a rewind to a named message looks.
+	maxRowPages = 200
 )
 
-// Rewind takes back the session's last user message and what followed it
-// (session.mutate rewind, as Hermes' /undo and /retry), then sends r's text.
+// Rewind takes back a user message of the session, the last one unless
+// r.RowID names another, and what followed it (session.mutate rewind, as
+// Hermes' /undo and /retry), then sends r's text unless r.NoSend.
 func (s *Service) Rewind(ctx context.Context, user, backendID, sessionID string, r hub.Rewind) (hub.RewindResult, error) {
-	if strings.TrimSpace(r.Text) == "" && !r.Retry {
+	if strings.TrimSpace(r.Text) == "" && !r.Retry && !r.NoSend {
 		return hub.RewindResult{}, fmt.Errorf("%w: the message is empty", hub.ErrBadValue)
 	}
 	if _, _, ok := hub.SlashCommand(r.Text); ok {
@@ -212,7 +226,7 @@ func (s *Service) Rewind(ctx context.Context, user, backendID, sessionID string,
 	if ls.busy() {
 		return hub.RewindResult{}, fmt.Errorf("%w: the chat runs", hub.ErrBusy)
 	}
-	m, ok, err := b.lastUserMessage(ctx, ls.id)
+	m, ok, err := b.lastUserMessage(ctx, ls.id, r.RowID)
 	if err != nil {
 		return hub.RewindResult{}, err
 	}
@@ -220,7 +234,7 @@ func (s *Service) Rewind(ctx context.Context, user, backendID, sessionID string,
 		return hub.RewindResult{}, hub.ErrNoUserMessage
 	}
 	text := r.Text
-	if strings.TrimSpace(text) == "" && strings.TrimSpace(m.Text) == "" {
+	if !r.NoSend && strings.TrimSpace(text) == "" && strings.TrimSpace(m.Text) == "" {
 		return hub.RewindResult{}, fmt.Errorf("%w: your last message has no text to send again", hub.ErrBadValue)
 	}
 	var out hub.RewindResult
@@ -241,14 +255,20 @@ func (s *Service) Rewind(ctx context.Context, user, backendID, sessionID string,
 	var res gateway.RewindResult
 	_ = json.Unmarshal(raw, &res)
 	out.Removed = res.RewoundCount
+	out.At = time.Now()
 	ls.mu.Lock()
 	ls.resnapshotLocked()
 	ls.mu.Unlock()
+	was := m.Text
+	if t, _ := hub.MessageText(res.TargetMessage.Content); strings.TrimSpace(t) != "" {
+		was = t
+	}
+	out.Text = was
+	if r.NoSend {
+		return out, nil
+	}
 	if strings.TrimSpace(text) == "" {
-		text = m.Text
-		if t, _ := hub.MessageText(res.TargetMessage.Content); strings.TrimSpace(t) != "" {
-			text = t
-		}
+		text = was
 	}
 	out.Prompt, _, err = s.promptLocked(ctx, b, user, sessionID, id, text, nil)
 	if err == nil && r.Text == "" && m.Images > 0 {

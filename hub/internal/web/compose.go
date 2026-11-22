@@ -352,8 +352,10 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		RowID    int64  `json:"row_id"`
 		Text     string `json:"text"`
 		Retry    bool   `json:"retry"`
+		NoSend   bool   `json:"no_send"`
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		Confirm  string `json:"confirm"`
@@ -362,7 +364,8 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := a.Rewind(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("session"),
-		hub.Rewind{Text: body.Text, Retry: body.Retry, Provider: body.Provider, Model: body.Model, Confirm: body.Confirm})
+		hub.Rewind{RowID: body.RowID, Text: body.Text, Retry: body.Retry, NoSend: body.NoSend, Provider: body.Provider,
+			Model: body.Model, Confirm: body.Confirm})
 	switch {
 	case errors.Is(err, hub.ErrNoUserMessage):
 		errorJSON(w, http.StatusConflict, "This chat has no message of yours to go back to")
@@ -374,7 +377,20 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, res.Model)
 		return
 	}
+	if body.NoSend {
+		writeJSON(w, http.StatusOK, rewoundJSON{Removed: res.Removed, Text: res.Text, At: res.At, Model: res.Model})
+		return
+	}
 	writeJSON(w, http.StatusAccepted, rewindJSON{promptJSON: toPromptJSON(res.Prompt), Removed: res.Removed, Model: res.Model})
+}
+
+// rewoundJSON answers a rewind that sends nothing: how many rows Hermes
+// took back, the message that goes back in the box and when.
+type rewoundJSON struct {
+	Removed int              `json:"removed"`
+	Text    string           `json:"text"`
+	At      time.Time        `json:"at"`
+	Model   *hub.ModelChange `json:"model,omitempty"`
 }
 
 type branchJSON struct {

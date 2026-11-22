@@ -21,6 +21,8 @@ import (
 const (
 	pathS1     = "/api/sessions/pc/s1"
 	keyText    = "text"
+	keyRowID   = "row_id"
+	keyNoSend  = "no_send"
 	keyStatus  = "status"
 	keyModel   = "model"
 	statusSent = "sent"
@@ -218,7 +220,7 @@ func TestRewindBranchAndTranscriptAPI(t *testing.T) {
 		t.Fatalf("transcript = %d %+v", s, tr)
 	}
 	var br map[string]any
-	if s := apiJSON(t, c, http.MethodPost, e.url+"/api/sessions/pc/s2/branch", m.CSRF, map[string]any{"row_id": 1, "title": "Fork"}, &br); s != http.StatusCreated ||
+	if s := apiJSON(t, c, http.MethodPost, e.url+"/api/sessions/pc/s2/branch", m.CSRF, map[string]any{keyRowID: 1, "title": "Fork"}, &br); s != http.StatusCreated ||
 		br["backend_id"] != "pc" || br["session_id"] == "" {
 		t.Fatalf("branch = %d %v", s, br)
 	}
@@ -240,6 +242,48 @@ func TestRewindBranchAndTranscriptAPI(t *testing.T) {
 		}
 		if s != http.StatusConflict || time.Now().After(deadline) {
 			t.Fatalf("rewind with a model to confirm = %d %v", s, rw)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestRewindToAMessageSendsNothing(t *testing.T) {
+	t.Parallel()
+	e := setup(t)
+	e.gw.AddSession(&gatewaytest.Session{ID: "s2", Title: titleSecond, Live: true, StartedAt: 50, Messages: []map[string]any{
+		{kRole: roleUser, keyText: "alpha"}, {kRole: roleAssistant, keyText: "beta"},
+		{kRole: roleUser, keyText: "gamma"}, {kRole: roleAssistant, keyText: "delta"}}})
+	c := client(t)
+	m := login(t, e, c)
+	var out map[string]any
+	if s := apiJSON(t, c, http.MethodPost, e.url+"/api/sessions/pc/s2/rewind", m.CSRF, map[string]any{keyRowID: 3, keyNoSend: true}, &out); s != http.StatusOK ||
+		out["removed"] != float64(2) || out[keyText] != "gamma" || out["at"] == "" || out["id"] != nil {
+		t.Fatalf("rewind to row 3 = %d %v", s, out)
+	}
+	if rows := e.gw.RewoundRows("s2"); len(rows) != 2 || rows[0][keyRowID] != int64(3) {
+		t.Fatalf("rewound rows = %v", rows)
+	}
+	var tr struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if s := apiJSON(t, c, http.MethodGet, e.url+"/api/sessions/pc/s2/transcript", "", nil, &tr); s != http.StatusOK || len(tr.Messages) != 2 {
+		t.Fatalf("transcript after the rewind = %d %d rows", s, len(tr.Messages))
+	}
+	if s := apiJSON(t, c, http.MethodPost, e.url+"/api/sessions/pc/s2/rewind", m.CSRF, map[string]any{keyRowID: 2, keyNoSend: true}, &out); s != http.StatusConflict {
+		t.Fatalf("rewind to a reply = %d %v", s, out)
+	}
+	e.gw.HoldTurns = true
+	if s := apiJSON(t, c, http.MethodPost, e.url+"/api/sessions/pc/s2/prompt", m.CSRF, map[string]any{keyText: "work"}, nil); s != http.StatusAccepted {
+		t.Fatalf("prompt = %d", s)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s := apiJSON(t, c, http.MethodPost, e.url+"/api/sessions/pc/s2/rewind", m.CSRF, map[string]any{keyRowID: 1, keyNoSend: true}, &out)
+		if s == http.StatusConflict && strings.Contains(errText(out), "still working") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rewind while the chat runs = %d %v", s, out)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

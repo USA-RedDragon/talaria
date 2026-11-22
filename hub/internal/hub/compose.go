@@ -39,13 +39,20 @@ var ErrNoUserMessage = errors.New("the chat has no message of yours to go back t
 // hub. Hermes' hint, when it gave one, follows it after ": ".
 var ErrUnknownCommand = errors.New("unknown command")
 
-// Rewind is a request to take back the last user message of a session and
-// send a new one in its place.
+// Rewind is a request to take back a user message of a session, the last
+// one unless RowID names another, and the messages after it, and to send a
+// new one in its place.
 type Rewind struct {
+	// RowID names the user message to go back to, any of the chat's, by
+	// its row id. 0 is the last one.
+	RowID int64
 	// Text replaces the message. With Retry and no Text, the message is
 	// sent again as it was.
 	Text  string
 	Retry bool
+	// NoSend takes the messages back and sends nothing: the result's Text
+	// is the message, for the user to edit and send.
+	NoSend bool
 	// Provider and Model, when Model is set, pick the session's model
 	// first; Confirm is the Confirm of an earlier result that asked for
 	// confirmation.
@@ -58,6 +65,10 @@ type RewindResult struct {
 	Prompt  PromptResult
 	Removed int
 	Model   *ModelChange
+	// Text is the message that was taken back, as the user wrote it.
+	Text string
+	// At is when Hermes took the messages back.
+	At time.Time
 }
 
 // Transcript is a session's stored transcript: the gateway's display rows,
@@ -82,10 +93,10 @@ type Command struct {
 // ChatActions is the optional part of a Service that edits a session's
 // history and reads it.
 type ChatActions interface {
-	// Rewind drops the session's last user message and everything after
-	// it, then sends r's text. It fails with ErrBusy while a turn runs or
-	// inputs wait, and with ErrNoUserMessage when there is nothing to take
-	// back.
+	// Rewind drops a user message of the session, the last unless r.RowID
+	// names another, and everything after it, then sends r's text unless
+	// r.NoSend. It fails with ErrBusy while a turn runs or inputs wait, and
+	// with ErrNoUserMessage when there is nothing to take back.
 	Rewind(ctx context.Context, user, backendID, sessionID string, r Rewind) (RewindResult, error)
 	// Branch copies a session into a new one, through the row rowID (0 for
 	// all of it). It fails with ErrBusy while a turn runs.
