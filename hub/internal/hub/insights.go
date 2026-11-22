@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -140,6 +141,27 @@ type Insights interface {
 	Search(ctx context.Context, user, query string) (SearchReport, error)
 	// Usage reports one backend's token use over the last days days.
 	Usage(ctx context.Context, user, backendID string, days int) (UsageReport, error)
+	// Rewound lists the messages that rewinds hid in a chat, which no
+	// other read of the chat returns. It fails with ErrUnknownSession for
+	// a chat the backend does not have and with ErrFilesTooOld when the
+	// backend's plugin cannot list them.
+	Rewound(ctx context.Context, user, backendID, sessionID string) (Rewound, error)
+}
+
+// RewoundGroup is a run of messages a rewind hid, oldest first: Rows are
+// their display rows, the user's and the agent's messages with text.
+type RewoundGroup struct {
+	Count      int               `json:"count"`
+	FirstRowID int64             `json:"first_row_id"`
+	LastRowID  int64             `json:"last_row_id"`
+	Rows       []json.RawMessage `json:"rows"`
+}
+
+// Rewound are the messages that rewinds hid in a chat. Truncated is true
+// when the list stops short.
+type Rewound struct {
+	Groups    []RewoundGroup `json:"groups"`
+	Truncated bool           `json:"truncated,omitempty"`
 }
 
 // ErrBadQuery is a search the backend refused, wrapping why.

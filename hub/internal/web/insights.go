@@ -19,6 +19,24 @@ func (s *Server) insightRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/sessions/{backend}/{session}/file", s.api(s.handleFile))
 	mux.Handle("GET /api/sessions/{backend}/{session}/diff", s.api(s.handleDiff))
 	mux.Handle("GET /api/sessions/{backend}/{session}/changes", s.api(s.handleChanges))
+	mux.Handle("GET /api/sessions/{backend}/{session}/rewound", s.api(s.handleRewound))
+}
+
+// handleRewound lists the messages that rewinds hid in a chat.
+func (s *Server) handleRewound(w http.ResponseWriter, r *http.Request) {
+	if s.insights == nil {
+		errorJSON(w, http.StatusNotFound, "the hidden messages are not available")
+		return
+	}
+	out, err := s.insights.Rewound(r.Context(), userFrom(r), r.PathValue("backend"), r.PathValue("session"))
+	if err != nil {
+		s.filesFail(w, err)
+		return
+	}
+	if out.Groups == nil {
+		out.Groups = []hub.RewoundGroup{}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {

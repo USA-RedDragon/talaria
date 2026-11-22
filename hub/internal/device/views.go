@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -51,6 +52,22 @@ type Changes struct {
 		RowID  int64    `json:"row_id"`
 	} `json:"files"`
 	Truncated bool `json:"truncated"`
+}
+
+// RewoundGroup is a run of messages a rewind hid, with their display
+// rows as the plugin sent them (docs/protocol.md section 9.2).
+type RewoundGroup struct {
+	Count      int               `json:"count"`
+	FirstRowID int64             `json:"first_row_id"`
+	LastRowID  int64             `json:"last_row_id"`
+	Rows       []json.RawMessage `json:"rows"`
+}
+
+// Rewound are the messages that rewinds hid in a session.
+type Rewound struct {
+	SessionID string         `json:"session_id"`
+	Groups    []RewoundGroup `json:"groups"`
+	Truncated bool           `json:"truncated"`
 }
 
 // SearchHit is one matching message of a search (docs/protocol.md
@@ -136,6 +153,12 @@ func (p *Plugin) Diff(ctx context.Context, sessionID string) (Diff, error) {
 func (p *Plugin) Changes(ctx context.Context, sessionID string) (Changes, error) {
 	var out Changes
 	return out, p.call(ctx, http.MethodGet, "/sessions/"+url.PathEscape(sessionID)+"/changes", nil, &out)
+}
+
+// Rewound lists the messages that rewinds hid in a session.
+func (p *Plugin) Rewound(ctx context.Context, sessionID string) (Rewound, error) {
+	var out Rewound
+	return out, p.call(ctx, http.MethodGet, "/sessions/"+url.PathEscape(sessionID)+"/rewound", nil, &out)
 }
 
 // Search searches the messages of every chat of the backend.

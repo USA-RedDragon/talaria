@@ -183,6 +183,35 @@ func (s *Service) Search(ctx context.Context, user, query string) (hub.SearchRep
 	return out, nil
 }
 
+// Rewound lists the messages that rewinds hid in a chat, from the
+// backend's plugin. See hub.Insights.
+func (s *Service) Rewound(ctx context.Context, user, backendID, sessionID string) (hub.Rewound, error) {
+	if err := s.opts.Access.Allowed(ctx, user, backendID); err != nil {
+		return hub.Rewound{}, err
+	}
+	p := s.plugins[backendID]
+	if p == nil {
+		return hub.Rewound{}, hub.ErrFilesTooOld
+	}
+	cctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
+	defer cancel()
+	r, err := p.Rewound(cctx, sessionID)
+	var pe *device.PluginError
+	switch {
+	case errors.As(err, &pe) && pe.Code == "unknown_session":
+		return hub.Rewound{}, hub.ErrUnknownSession
+	case errors.As(err, &pe) && (pe.Status == http.StatusNotFound || pe.Status == http.StatusMethodNotAllowed):
+		return hub.Rewound{}, hub.ErrFilesTooOld
+	case err != nil:
+		return hub.Rewound{}, errors.New(pluginReason(err))
+	}
+	out := hub.Rewound{Groups: make([]hub.RewoundGroup, 0, len(r.Groups)), Truncated: r.Truncated}
+	for _, g := range r.Groups {
+		out.Groups = append(out.Groups, hub.RewoundGroup{Count: g.Count, FirstRowID: g.FirstRowID, LastRowID: g.LastRowID, Rows: g.Rows})
+	}
+	return out, nil
+}
+
 // Usage reports one backend's token use over the last days days, with
 // what the hub saw in its usage events and the local
 // GPU's time. See hub.Insights.

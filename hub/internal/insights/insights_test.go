@@ -107,6 +107,42 @@ func newService(t *testing.T, prom http.Handler) *insights.Service {
 	return insights.New(opts)
 }
 
+func TestRewound(t *testing.T) {
+	t.Parallel()
+	pc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/plugins/device/sessions/s1/rewound":
+			_, _ = w.Write([]byte(`{"session_id":"s1","groups":[{"count":2,"first_row_id":3,"last_row_id":4,"rows":[` +
+				`{"row_kind":"message","row_id":3,"role":"user","text":"two"},{"row_kind":"message","row_id":4,"role":"assistant","text":"a2"}]}],"truncated":false}`))
+		case "/api/plugins/device/sessions/gone/rewound":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unknown_session","message":"session gone does not exist"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":"Not Found"}`))
+		}
+	})
+	s := insights.New(insights.Options{Access: access{}, Requesters: map[string]device.Requester{"pc": requester{pc}}})
+	ctx := context.Background()
+	r, err := s.Rewound(ctx, alice, "pc", "s1")
+	if err != nil || len(r.Groups) != 1 || r.Groups[0].Count != 2 || r.Groups[0].FirstRowID != 3 || len(r.Groups[0].Rows) != 2 ||
+		!strings.Contains(string(r.Groups[0].Rows[0]), `"text":"two"`) {
+		t.Fatalf("rewound = %+v, %v", r, err)
+	}
+	if _, err := s.Rewound(ctx, bob, "pc", "s1"); !errors.Is(err, hub.ErrForbidden) {
+		t.Fatalf("bob on pc = %v", err)
+	}
+	if _, err := s.Rewound(ctx, alice, "pc", "gone"); !errors.Is(err, hub.ErrUnknownSession) {
+		t.Fatalf("a chat the backend does not have = %v", err)
+	}
+	if _, err := s.Rewound(ctx, alice, "pc", "other/route"); !errors.Is(err, hub.ErrFilesTooOld) {
+		t.Fatalf("a plugin without the route = %v", err)
+	}
+	if _, err := insights.New(insights.Options{Access: access{}}).Rewound(ctx, alice, "pc", "s1"); !errors.Is(err, hub.ErrFilesTooOld) {
+		t.Fatalf("a backend with no plugin = %v", err)
+	}
+}
+
 func TestSearch(t *testing.T) {
 	t.Parallel()
 	s := newService(t, nil)

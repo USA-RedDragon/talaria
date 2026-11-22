@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,17 @@ func (fakeInsights) Usage(_ context.Context, user, backendID string, days int) (
 		return hub.UsageReport{}, hub.ErrForbidden
 	}
 	return hub.UsageReport{BackendID: backendID, Days: days}, nil
+}
+
+func (fakeInsights) Rewound(_ context.Context, user, _, sid string) (hub.Rewound, error) {
+	switch {
+	case user != userAlice:
+		return hub.Rewound{}, hub.ErrForbidden
+	case sid != "s1":
+		return hub.Rewound{}, hub.ErrUnknownSession
+	}
+	return hub.Rewound{Groups: []hub.RewoundGroup{{Count: 1, FirstRowID: 3, LastRowID: 3,
+		Rows: []json.RawMessage{json.RawMessage(`{"row_kind":"message","row_id":3,"role":"user","text":"two"}`)}}}}, nil
 }
 
 // fakeFiles shows alice's chat s1 and refuses everything else.
@@ -100,6 +112,13 @@ func TestInsightsAPI(t *testing.T) {
 	}
 	if resp, _ := get(t, c, e.url+"/api/usage/pc?days=7"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("usage = %d", resp.StatusCode)
+	}
+	if resp, body := get(t, c, e.url+"/api/sessions/pc/s1/rewound"); resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "application/json" ||
+		!strings.Contains(body, `"groups":[{"count":1,"first_row_id":3,"last_row_id":3,"rows":[{"row_kind":"message","row_id":3,"role":"user","text":"two"}]}]`) {
+		t.Fatalf("rewound = %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := get(t, c, e.url+"/api/sessions/pc/other/rewound"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("rewound of an unknown chat = %d", resp.StatusCode)
 	}
 	if resp, _ := get(t, c, e.url+"/api/usage/home"); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("usage of another backend = %d", resp.StatusCode)
