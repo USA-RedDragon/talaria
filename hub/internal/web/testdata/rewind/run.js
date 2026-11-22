@@ -93,7 +93,7 @@ const { connect } = open;
   const q = await dlg();
   assert.strictEqual(q.title, "Rewind to “Now also check the shadow cascades”?");
   assert.match(q.text, /This message and the 3 messages after it leave what the model sees\. They are hidden, not deleted\./);
-  assert.match(q.text, /Stays: 1 running subagent \(their results still arrive here\), 1 background command and the todo list \(\d+ open of \d+\)\./);
+  assert.match(q.text, /Stays: 1 running subagent \(its result still arrives here\), 1 background command and the todo list \(\d+ open of \d+\)\./);
   assert.match(q.text, /Your message goes back in the box to edit before sending\./);
   assert.ok(!/undefined|NaN|null/.test(q.text), "no placeholder: " + q.text);
   assert.strictEqual(q.models[0], "opus-5.5 (unchanged)");

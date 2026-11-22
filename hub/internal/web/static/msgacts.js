@@ -265,7 +265,7 @@ window.HubMsgActions = (ctx) => {
     const st = ctx.stays ? ctx.stays() : null;
     const parts = [];
     if (st) {
-      if (st.subagents) parts.push(plural(st.subagents, "running subagent", "running subagents") + " (their results still arrive here)");
+      if (st.subagents) parts.push(plural(st.subagents, "running subagent", "running subagents") + (st.subagents === 1 ? " (its result still arrives here)" : " (their results still arrive here)"));
       if (st.commands) parts.push(plural(st.commands, "background command", "background commands"));
       if (st.prompts) parts.push(plural(st.prompts, "background prompt", "background prompts"));
       if (st.todos) parts.push("the todo list (" + (st.todos.open ? st.todos.open + " open of " + st.todos.total : "all " + st.todos.total + " done") + ")");

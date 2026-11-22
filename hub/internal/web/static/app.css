@@ -1160,8 +1160,9 @@ dialog.rewind { width: min(30rem, calc(100vw - 1.5rem)); }
 .log > .rewound, .log > .older > .part > .rewound { align-self: stretch; max-width: min(100%, var(--read)); border-top: 1px dashed var(--line); padding-top: .4rem; margin: .5rem 0; }
 .rewound-line { text-align: center; font-size: .85rem; color: var(--muted); }
 .rewound-line button.link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font-size: inherit; }
-.rewound-list { display: flex; flex-direction: column; gap: .45rem; margin-top: .6rem; opacity: .75; }
-.rewound-list .hmsg { padding: .55rem .75rem; border-radius: 12px; overflow-wrap: anywhere; max-width: min(88%, var(--read)); }
+.rewound-list { display: flex; flex-direction: column; gap: .45rem; margin-top: .6rem; padding: .6rem .7rem; border-left: 3px solid var(--line); border-radius: 0 10px 10px 0; background: color-mix(in srgb, var(--line) 30%, transparent); font-size: .92rem; }
+.rewound-list:not([hidden])::before { content: "Hidden from the model, read only"; font-size: .8rem; color: var(--muted); }
+.rewound-list .hmsg { padding: .55rem .75rem; border-radius: 12px; overflow-wrap: anywhere; max-width: min(88%, var(--read)); opacity: .7; }
 .rewound-list .hmsg-user { align-self: flex-end; background: var(--accent); color: #fff; white-space: pre-wrap; }
 .rewound-list .hmsg > :first-child { margin-top: 0; }
 .rewound-list .hmsg > :last-child { margin-bottom: 0; }
