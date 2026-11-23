@@ -1,0 +1,10 @@
+# New cases in tests/agent/test_rule_extractor.py (outbursts never kept as rules, an actionable rule with a
+# complaint still kept, the prompt asks for actionable rules) and tests/agent/test_rule_extractor_project.py
+# (a subagent never gets the plugin note)
+# The extractor, the ledger's rule capture and the per-turn note path this changes
+tests/agent/test_rule_extractor.py
+tests/agent/test_rule_extractor_project.py
+tests/agent/test_ledger_user_facts.py
+tests/agent/test_decision_ledger.py
+tests/agent/test_pinned_rules.py
+tests/agent/test_turn_context.py

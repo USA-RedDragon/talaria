@@ -1,0 +1,194 @@
+From d42ab48a8d2de6c1ebbf64dfe03f882dfc6defe6 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 14:36:48 -0600
+Subject: [PATCH] hermes: 0172 drop outbursts from rules; no notes for
+ subagents
+
+The extractor prompt and check, and the ledger's rule capture, drop reactions and complaints that say nothing actionable on their own. A subagent's turn never takes the plugin notes.
+---
+ agent/decision_ledger.py                   | 23 ++++++++++++++++++-
+ agent/rule_extractor.py                    | 12 ++++++----
+ agent/turn_context.py                      |  2 +-
+ tests/agent/test_rule_extractor.py         | 26 ++++++++++++++++++++++
+ tests/agent/test_rule_extractor_project.py | 21 +++++++++++++----
+ 5 files changed, 74 insertions(+), 10 deletions(-)
+
+diff --git a/agent/decision_ledger.py b/agent/decision_ledger.py
+index a93db02a..968ae14e 100644
+--- a/agent/decision_ledger.py
++++ b/agent/decision_ledger.py
+@@ -101,6 +101,25 @@ _KEEP_RES = (
+         r"(?:one|design|layout|version|mock(?:up)?)|keep (?:that|this|it) (?:design|layout|look|way))\b", re.IGNORECASE)),
+ )
+ _SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*")
++_OUTBURST_RE = re.compile(
++    r"\b(?:unacceptable|unnatural|ridiculous|useless|terrible|awful|garbage|stupid|insane|absurd|gross|wtf|"
++    r"pathetic|not a fix|hate this|sick of|tired of)\b", re.IGNORECASE)
++_NOT_A_RULE_RE = re.compile(
++    r"\bnever mind\b|\bstop (?:doing|saying|telling me|sending|showing|making) (?:this|that|it|these|those)\b",
++    re.IGNORECASE)
++_CONCRETE_RE = re.compile(r"`|[/~]\w|--\w|\w\.\w{1,5}\b|\d")
++
++
++def is_outburst(text: str) -> bool:
++    """A reaction, insult or complaint with nothing to act on once the conversation is gone."""
++    body = (text or "").strip()
++    if _CONCRETE_RE.search(body):
++        return False
++    if _OUTBURST_RE.search(body):
++        return True
++    letters = [c for c in body if c.isalpha()]
++    return len(letters) >= 8 and sum(c.isupper() for c in letters) / len(letters) > 0.7 and not re.search(
++        r"\b(?:always|never|must|from now on|going forward)\b", body, re.IGNORECASE)
+ 
+ 
+ def keep_reason(text: str) -> str:
+@@ -109,7 +128,9 @@ def keep_reason(text: str) -> str:
+     if not body or body.endswith("?") and len(body) < 120:
+         return ""
+     for label, rx in _KEEP_RES:
+-        if rx.search(body):
++        if rx.search(_NOT_A_RULE_RE.sub(" ", body) if label == "rule" else body):
++            if label == "rule" and is_outburst(body):
++                continue
+             return label
+     return ""
+ 
+diff --git a/agent/rule_extractor.py b/agent/rule_extractor.py
+index f60fa4a9..5335a19e 100644
+--- a/agent/rule_extractor.py
++++ b/agent/rule_extractor.py
+@@ -46,9 +46,13 @@ PROMPT = """You read messages a user wrote to an AI agent and list what the agen
+ of the work. Return only JSON: {{"items": [{{"kind": ..., "quote": ..., "scope": ..., "target": ...}}]}}.
+ 
+ kind is one of:
+-- "rule": a standing instruction for how to work from now on (how to run, test, report, what never to do).
++- "rule": a standing instruction for how to work from now on (how to run, test, report, what never to do). \
++It must say what to do or not do, concretely enough that someone reading it months later with no \
++conversation would know how to act. A reaction to something the agent just did or proposed is NOT a rule, \
++however forceful, capitalised or imperative (\"UNACCEPTABLE\", \"that's a hack\", \"stop doing this\", \
++\"this is ridiculous\").
+ - "fact": something true about the work that the agent must not get wrong (a control, a path, what already \
+-happened).
++happened). It must make sense on its own, without the conversation around it.
+ - "approval": the user approving a plan, design or mockup.
+ - "decision": the user choosing between options.
+ - "revocation": the user withdrawing one of the CURRENT ITEMS below; target is its id.
+@@ -57,7 +61,7 @@ quote is the user's exact words, copied character for character from one message
+ one). Never paraphrase, never join words from two places. scope is "project" when it is about the codebase or \
+ project in general (it holds in other chats too), else "chat".
+ 
+-Leave out complaints and venting, questions, one-off requests ("run it again"), and anything said by someone \
++Leave out complaints, insults, venting and reactions, questions, one-off requests ("run it again"), and anything said by someone \
+ other than the user. Return {{"items": []}} when there is nothing.
+ 
+ CURRENT ITEMS:
+@@ -174,7 +178,7 @@ def quote_ok(quote: str, sources: list[str]) -> bool:
+ 
+ 
+ def _complaint(quote: str) -> bool:
+-    return bool(_COMPLAINT_RE.search(quote)) and not dl.keep_reason(quote)
++    return (bool(_COMPLAINT_RE.search(quote)) and not dl.keep_reason(quote)) or dl.is_outburst(quote)
+ 
+ 
+ def check(raw: Any, sources: list[str], pinned_ids: set[str]) -> list[dict[str, Any]]:
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index 714f5c49..44813a2d 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -1003,7 +1003,7 @@ def _merge_gateway_notes(
+         part for part in (consume_gateway_turn_context_notes(agent), pop_plugin_notices(agent),
+                           consume_surface_switch_note(agent),
+                           consume_skills_index_note(agent), recurring_note(agent),
+-                          pop_notices(getattr(agent, "session_id", "") or "")) if part
++                          "" if getattr(agent, "_delegate_depth", 0) else pop_notices(getattr(agent, "session_id", "") or "")) if part
+     )
+     if not _turn_notes:
+         return plugin_user_context
+diff --git a/tests/agent/test_rule_extractor.py b/tests/agent/test_rule_extractor.py
+index 2c66f499..e149bf3a 100644
+--- a/tests/agent/test_rule_extractor.py
++++ b/tests/agent/test_rule_extractor.py
+@@ -223,3 +223,29 @@ def test_a_recurring_rule_gets_a_short_tail_note_while_it_holds():
+     ledger.entries[0].status = "closed"
+     agent._cached_system_prompt = "sys\n\n" + pr.render(ledger)
+     assert pr.recurring_note(agent) == ""
++
++
++OUTBURSTS = [
++    "UNACCEPTABLE. that's a hack and not a fix",
++    "Why do my lanes keep saying this to me!!! It's so unnatural",
++    "STOP DOING THIS!!!",
++    "ugh, never mind this is stupid",
++    "THIS IS RIDICULOUS",
++]
++
++
++@pytest.mark.parametrize("said", OUTBURSTS)
++def test_an_outburst_is_never_a_rule_or_a_ledger_rule(said):
++    ask = MagicMock(return_value=_reply(("rule", said, "project"), ("fact", said, "project")))
++    assert rx.extract("s1", _msgs([said], peer=False), ask=ask, cfg=CFG) == []
++    assert dl.keep_reason(said) != "rule"
++
++
++def test_an_actionable_rule_with_a_complaint_still_counts():
++    said = "Never use /tmp for scratch files, it is ridiculous how often it fills up"
++    assert dl.keep_reason(said) == "rule"
++    assert rx.check(_reply(("rule", said, "project")), [said], set())
++
++
++def test_the_prompt_asks_for_actionable_rules():
++    assert "NOT a rule" in rx.PROMPT and "on its own" in rx.PROMPT
+diff --git a/tests/agent/test_rule_extractor_project.py b/tests/agent/test_rule_extractor_project.py
+index 84e0233f..be7d9d0d 100644
+--- a/tests/agent/test_rule_extractor_project.py
++++ b/tests/agent/test_rule_extractor_project.py
+@@ -34,7 +34,7 @@ def test_only_project_items_go_to_the_plugins_and_their_note_reaches_the_next_tu
+ 
+     def invoke(name, **kw):
+         calls.append((name, kw))
+-        return ["Saved to project memory: x. Say undo to remove it.", None, 3]
++        return ["A plugin note: x.", None, 3]
+ 
+     agent = SimpleNamespace(session_id="s1")
+     with patch("hermes_cli.plugins.has_hook", return_value=True), \
+@@ -42,7 +42,7 @@ def test_only_project_items_go_to_the_plugins_and_their_note_reaches_the_next_tu
+         rx._after(agent, [], FOUND)
+     assert calls == [("on_user_rule_extracted", {"session_id": "s1", "items": [
+         {"kind": "fact", "quote": "hold Plus to skip a cutscene", "at": "2026-11-21", "msg": "700", "id": "L00aa01"}]})]
+-    assert rx.pop_notices("s1") == "Saved to project memory: x. Say undo to remove it."
++    assert rx.pop_notices("s1") == "A plugin note: x."
+     assert rx.pop_notices("s1") == "" and rx.pop_notices("s2") == ""
+ 
+ 
+@@ -57,12 +57,25 @@ def test_no_plugin_no_call_no_note():
+ def test_the_note_rides_the_next_turns_user_message(monkeypatch):
+     from agent import turn_context
+ 
+-    rx._append("s1", [{"notice": "Saved: hold Plus. Say undo to remove it.", "nid": "n1"}])
++    rx._append("s1", [{"notice": "A plugin note: hold Plus.", "nid": "n1"}])
+     agent = SimpleNamespace(session_id="s1")
+     for name in ("consume_gateway_turn_context_notes", "pop_plugin_notices", "consume_surface_switch_note",
+                  "consume_skills_index_note", "forward_lsp_verdicts"):
+         monkeypatch.setattr(turn_context, name, lambda *a, **k: "")
+     msgs = [{"role": "user", "content": "next"}]
+-    assert "Saved: hold Plus." in turn_context._merge_gateway_notes(agent, msgs, 0, "")
++    assert "A plugin note: hold Plus." in turn_context._merge_gateway_notes(agent, msgs, 0, "")
+     assert turn_context._merge_gateway_notes(agent, msgs, 0, "") == ""
+     assert json.loads(rx.store_path("s1").read_text().splitlines()[-1]) == {"delivered": "n1"}
++
++
++def test_a_subagent_never_gets_the_note(monkeypatch):
++    from agent import turn_context
++
++    rx._append("s1", [{"notice": "A plugin note.", "nid": "n1"}])
++    for name in ("consume_gateway_turn_context_notes", "pop_plugin_notices", "consume_surface_switch_note",
++                 "consume_skills_index_note", "forward_lsp_verdicts"):
++        monkeypatch.setattr(turn_context, name, lambda *a, **k: "")
++    msgs = [{"role": "user", "content": "next"}]
++    child = SimpleNamespace(session_id="s1", _delegate_depth=1)
++    assert turn_context._merge_gateway_notes(child, msgs, 0, "") == ""
++    assert "A plugin note." in turn_context._merge_gateway_notes(SimpleNamespace(session_id="s1"), msgs, 0, "")
+-- 
+2.56.0
+
