@@ -1,0 +1,9 @@
+# New cases in tests/agent/test_ledger_user_facts.py (relift fixtures, keep tier, dispatch settlement, clarify pre-check)
+# The ledger, section "All User Messages" and clarify, which this changes
+tests/agent/test_decision_ledger.py
+tests/agent/test_context_compressor.py
+tests/tools/test_clarify_tool.py
+tests/tools/test_smart_provenance_ledger.py
+tests/tools/test_subagent_clarify_routing.py
+tests/tools/test_human_input_hooks.py
+tests/gateway/test_clarify_card_record.py
