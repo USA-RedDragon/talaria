@@ -73,6 +73,9 @@ type Row struct {
 	// DisplayText is display_metadata.display_text: the card text Hermes
 	// keeps for a notice row.
 	DisplayText string `json:"display_text,omitempty"`
+	// SkillText is the skill text Hermes keeps beside the typed command of
+	// a skill_invocation row, whose Text is only the command.
+	SkillText string `json:"skill_text,omitempty"`
 }
 
 // View is how a row shows.
@@ -133,7 +136,14 @@ func kindTitle(kind string) string {
 
 // Classify reads one user message.
 func Classify(r Row) View {
-	return skillFolded(classify(r))
+	v := classify(r)
+	if r.SkillText != "" && strings.TrimSpace(r.DisplayKind) == "skill_invocation" && v.Show == ShowUser {
+		if _, n, ok := skillTurn(hub.CutInjectedNotes(r.SkillText)); ok {
+			v.After = append([]*notice.Notice{n}, v.After...)
+		}
+		return v
+	}
+	return skillFolded(v)
 }
 
 func classify(r Row) View {
@@ -343,12 +353,13 @@ func FromJSON(raw json.RawMessage) Row {
 		Content      json.RawMessage `json:"content"`
 		DisplayKind  string          `json:"display_kind"`
 		SubmissionID string          `json:"submission_id"`
+		SkillText    string          `json:"skill_text"`
 		Meta         json.RawMessage `json:"display_metadata"`
 	}
 	if json.Unmarshal(raw, &m) != nil {
 		return Row{}
 	}
-	r := Row{DisplayKind: m.DisplayKind, SubmissionID: m.SubmissionID}
+	r := Row{DisplayKind: m.DisplayKind, SubmissionID: m.SubmissionID, SkillText: m.SkillText}
 	if m.Text != nil {
 		r.Text = *m.Text
 	} else {

@@ -61,6 +61,7 @@ window.HubOrigin = (() => {
       submission_id: str(m.submission_id) || str(md.submission_id),
       typed_ask: str(m.typed_ask) || str(md.typed_ask),
       display_text: str(m.display_text) || str(md.display_text),
+      skill_text: str(m.skill_text),
     };
   }
 
@@ -194,7 +195,14 @@ window.HubOrigin = (() => {
   }
 
   function classify(m) {
-    return skillFolded(classify1(m));
+    const v = classify1(m);
+    const text = str((m || {}).skill_text);
+    if (text && str(m.display_kind).trim() === "skill_invocation" && v.show === "user") {
+      const s = skillTurn(cutNotes(text));
+      if (s) v.after = [{ notice: s.notice, text: s.body }].concat(v.after || []);
+      return v;
+    }
+    return skillFolded(v);
   }
 
   function classify1(m) {
