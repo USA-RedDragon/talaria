@@ -233,5 +233,10 @@
   "name": "trailing blank lines stay without a note",
   "text": "hello\n\n",
   "want": "hello\n\n"
+ },
+ {
+  "name": "windows shell note after text",
+  "text": "list the folder\n\nThis session's computer Desk (desk-pc) runs Windows, and its terminal tool runs Git Bash: write bash commands. Windows paths are /c/Users/x for C:\\Users\\x; Windows programs run by name (git, where.exe, cmd //c), and powershell -Command runs PowerShell when you need it.",
+  "want": "list the folder"
  }
 ]

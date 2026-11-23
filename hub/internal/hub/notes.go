@@ -23,6 +23,7 @@ func injectedNotes() []*regexp.Regexp {
 			`\nNo longer available: [^\n]*)\]$`),
 		regexp.MustCompile(`(?:^|\n)\[System: This conversation is now being answered on a different interface: [^\n]*\]$`),
 		regexp.MustCompile(`(?:^|\n)\[System: These tools stay listed for this conversation [^\n]*\]$`),
+		regexp.MustCompile(`(?:^|\n)This session's computer [^\n]* runs Windows, and its terminal tool runs (?:PowerShell|bash inside WSL|Git Bash): [^\n]*$`),
 	}
 }
 

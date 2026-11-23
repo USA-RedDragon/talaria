@@ -29,8 +29,8 @@ window.HubAttach = (() => {
 
   // The notes Hermes and its plugins append to the end of a user message for
   // the model: recalled memory (agent/memory_context.py), the subagent route
-  // and waiting notes of the subagent-routes plugin, and the skills and
-  // interface notes (agent/skills_index_delta.py, agent/surface_switch.py).
+  // and waiting notes of the subagent-routes plugin, the Windows shell note of
+  // the device plugin, and the skills and interface notes (agent/skills_index_delta.py, agent/surface_switch.py).
   // Each is matched by its exact opening text and its closing bracket or
   // tag at the very end of the message. internal/hub/notes.go has the same
   // list; both run against internal/hub/testdata/notes/cases.json.
@@ -45,6 +45,7 @@ window.HubAttach = (() => {
       "\\nNo longer available: [^\\n]*)\\]$"),
     /(?:^|\n)\[System: This conversation is now being answered on a different interface: [^\n]*\]$/,
     /(?:^|\n)\[System: These tools stay listed for this conversation [^\n]*\]$/,
+    /(?:^|\n)This session's computer [^\n]* runs Windows, and its terminal tool runs (?:PowerShell|bash inside WSL|Git Bash): [^\n]*$/,
   ];
 
   // cutNotes drops those notes and the blank lines before them.

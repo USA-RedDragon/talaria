@@ -32,6 +32,9 @@
 // Attachment lines and the page chat head stay in the text; each surface
 // turns them into its own attachments.
 //
+// A bubble whose text is the expansion of a skill command shows the command
+// the user typed, and the expansion is a card after it (skill.go).
+//
 // internal/web/static/origin.js follows this file; both run against
 // testdata/cases.json.
 package origin
@@ -130,6 +133,10 @@ func kindTitle(kind string) string {
 
 // Classify reads one user message.
 func Classify(r Row) View {
+	return skillFolded(classify(r))
+}
+
+func classify(r Row) View {
 	kind := strings.TrimSpace(r.DisplayKind)
 	switch {
 	case kind == "hidden":

@@ -156,7 +156,48 @@ window.HubOrigin = (() => {
     return n && n.kind === "agent" ? n : null;
   }
 
+  // A slash command of a skill reaches the model as the skill's whole text with the words the user typed in
+  // one marked line (skill.go): the bubble shows the command and those words, the text is a card after it.
+  const skillSingle = /^\[IMPORTANT: The user has invoked the "([^"\n]*)" skill, indicating they want you to follow its instructions\. The full skill content is loaded below\.\]\n/;
+  const skillBundle = /^\[IMPORTANT: The user has invoked the "([^"\n]*)" (?:[^\n]*? )?skill bundle, loading \d+ skills together\. [^\n]*\]\n(?:[^\n]*\n)*?Skills loaded: ([^\n]+)\n/;
+  const skillInstruction = "The user has provided the following instruction alongside the skill invocation: ";
+  const skillRuntimeNote = "\n\n[Runtime note:";
+  const skillBundleInstruction = "\nUser instruction: ";
+  const skillBundleBlock = "\n\n[Loaded as part of the ";
+
+  function skillTurn(text) {
+    const t = String(text == null ? "" : text).trim();
+    let name, title, instruction = "", m;
+    if ((m = skillSingle.exec(t))) {
+      name = m[1];
+      title = "Skill loaded: " + name;
+      const i = t.lastIndexOf(skillInstruction);
+      if (i >= 0) instruction = t.slice(i + skillInstruction.length).split(skillRuntimeNote)[0];
+    } else if ((m = skillBundle.exec(t))) {
+      name = m[1];
+      title = "Skills loaded: " + m[2].trim();
+      const i = t.indexOf(skillBundleInstruction);
+      if (i >= 0) instruction = t.slice(i + skillBundleInstruction.length).split(skillBundleBlock)[0];
+    } else return null;
+    if (!name.startsWith("/")) name = "/" + name;
+    instruction = instruction.trim();
+    return { text: instruction ? name + " " + instruction : name, notice: card(title, t), body: t };
+  }
+
+  function skillFolded(v) {
+    if (v.show !== "user") return v;
+    const s = skillTurn(cutNotes(v.text));
+    if (!s) return v;
+    v.text = s.text;
+    v.after = [{ notice: s.notice, text: s.body }].concat(v.after || []);
+    return v;
+  }
+
   function classify(m) {
+    return skillFolded(classify1(m));
+  }
+
+  function classify1(m) {
     const r = row(m);
     const kind = r.display_kind.trim();
     if (kind === "hidden") return { show: "hidden", why: "kind" };
