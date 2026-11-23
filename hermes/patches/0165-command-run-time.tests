@@ -1,0 +1,9 @@
+# New cases in tests/tools/test_process_run_time.py (foreground ran_for, wait ran_for, gateway notice)
+# The foreground result and the gateway completion event this changes
+tests/tools/test_terminal_environment_recreated_notice.py
+tests/tools/test_file_tools_live.py
+tests/tools/test_terminal_trailing_amp_auto_background.py
+tests/tools/test_terminal_truncation_spill.py
+tests/tools/test_process_wait_clarity.py
+tests/tools/test_completed_process_results.py
+tests/gateway/test_child_notice_profile_admission.py

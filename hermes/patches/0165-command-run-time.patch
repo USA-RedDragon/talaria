@@ -1,0 +1,193 @@
+From aaaf6c537f5cb524093a12e1e6a651403d44b830 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 03:21:43 +0000
+Subject: [PATCH] feat(terminal): every command result says how long it ran
+
+A foreground command's result carries ran_for ("0.4s", "2m 14s"), and so
+does a finished wait. The gateway's completion notice had no end time, so
+its "Ran for" line never showed; it does now. Run times under 10 s keep a
+tenth of a second.
+---
+ gateway/run_notifications.py            |  1 +
+ tests/tools/test_process_run_time.py    | 39 ++++++++++++++++++++++++-
+ tools/process_registry.py               |  5 +++-
+ tools/process_registry_notifications.py |  8 +++--
+ tools/terminal_tool.py                  |  4 ++-
+ tools/terminal_tool_result.py           |  7 ++++-
+ 6 files changed, 58 insertions(+), 6 deletions(-)
+
+diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
+index f09aceed..26ff4892 100644
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -1797,6 +1797,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
+             "task_id": getattr(session, "task_id", "") or "",
+             "message_id": str(watcher.get("message_id") or "").strip() or None,
+             "started_at": getattr(session, "started_at", None),
++            **({"exited_at": session.exited_at} if getattr(session, "exited_at", 0) else {}),
+             "command": _redact_gateway_user_facing_secrets(_command),
+             "exit_code": session.exit_code,
+             "completion_reason": getattr(session, "completion_reason", "exited"),
+diff --git a/tests/tools/test_process_run_time.py b/tests/tools/test_process_run_time.py
+index 3b774cde..d7c48d71 100644
+--- a/tests/tools/test_process_run_time.py
++++ b/tests/tools/test_process_run_time.py
+@@ -61,6 +61,7 @@ def test_wait_log_and_list_carry_the_times():
+     waited = process_registry.wait(session.id, timeout=5)
+     assert waited["status"] == "exited"
+     assert waited["started_at"] == session.started_at and waited["exited_at"] == session.exited_at
++    assert waited["ran_for"] == run_time(session.exited_at - session.started_at)
+     logged = process_registry.read_log(session.id)
+     assert logged["started_at"] == session.started_at
+     listed = [e for e in process_registry.list_sessions(include_retained=True) if e["session_id"] == session.id]
+@@ -72,11 +73,13 @@ def test_wait_timeout_has_the_start():
+     try:
+         waited = process_registry.wait(session.id, timeout=1)
+         assert waited["status"] == "timeout" and waited["started_at"] == session.started_at
++        assert "ran_for" not in waited
+     finally:
+         process_registry.kill_process(session.id)
+ 
+ 
+-@pytest.mark.parametrize("seconds, text", [(0, "0s"), (41, "41s"), (134, "2m 14s"), (120, "2m"), (3900, "1h 5m")])
++@pytest.mark.parametrize("seconds, text", [(0, "0.0s"), (0.04, "0.0s"), (0.43, "0.4s"), (9.94, "9.9s"), (9.96, "10s"),
++                                           (41, "41s"), (134, "2m 14s"), (120, "2m"), (3900, "1h 5m")])
+ def test_run_time_text(seconds, text):
+     assert run_time(seconds) == text
+ 
+@@ -99,3 +102,37 @@ def test_a_failed_finish_notice_says_how_long_it_ran():
+ 
+ def test_a_notice_without_an_end_time_has_no_run_line():
+     assert "Ran for" not in format_process_notification(_event())
++
++
++def _env_config(cwd):
++    return {
++        "env_type": "local", "timeout": 180, "cwd": str(cwd), "host_cwd": None, "modal_mode": "auto",
++        "docker_image": "", "modal_image": "", "daytona_image": "",
++    }
++
++
++@pytest.mark.parametrize("command, low, high", [("true", 0.0, 0.9), ("sleep 1.3", 1.2, 2.4)])
++def test_a_foreground_command_result_says_how_long_it_ran(tmp_path, monkeypatch, command, low, high):
++    from unittest.mock import patch
++
++    from tools.terminal_tool import terminal_tool
++
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
++    with patch("tools.terminal_tool._get_env_config", return_value=_env_config(tmp_path)), \
++         patch("tools.terminal_tool._start_cleanup_thread"), \
++         patch("tools.terminal_tool._check_all_guards", return_value={"approved": True}):
++        result = json.loads(terminal_tool(command=command, task_id="rt-fg"))
++    assert result["exit_code"] == 0
++    assert result["ran_for"].endswith("s") and low <= float(result["ran_for"][:-1]) <= high
++
++
++def test_a_gateway_completion_event_carries_the_end_time():
++    from types import SimpleNamespace
++
++    from gateway.run_notifications import GatewayNotificationsMixin
++
++    proc = SimpleNamespace(command="make build", output_buffer="ok", exit_code=0, completion_reason="exited",
++                           termination_source="", started_at=1000.0, exited_at=1134.4, owner_task_id="", task_id="")
++    evt = GatewayNotificationsMixin._build_process_completion_event({}, proc, "proc_x")
++    assert evt["exited_at"] == 1134.4
++    assert "Ran for 2m 14s." in format_process_notification(evt)
+diff --git a/tools/process_registry.py b/tools/process_registry.py
+index ef69d2dd..f119381a 100644
+--- a/tools/process_registry.py
++++ b/tools/process_registry.py
+@@ -34,7 +34,8 @@ from typing import Any, Callable, Dict, List, Literal, NamedTuple, Optional
+ from hermes_cli.config import get_hermes_home
+ 
+ from tools.process_registry_notifications import (
+-    format_process_notification, heartbeat_output_tail, is_child_process_notification, should_surface_notification)
++    format_process_notification, heartbeat_output_tail, is_child_process_notification, run_time,
++    should_surface_notification)
+ from tools.process_registry_checkpoint import ProcessCheckpointMixin
+ from tools.process_registry_handoff import ProcessHandoffMixin
+ from tools.process_registry_relay import ProcessRelayMixin
+@@ -2247,6 +2248,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
+         return {
+             "status": status, "command": session.command,
+             **({"started_at": session.started_at} if session.started_at else {}),
++            **({"ran_for": run_time(session.exited_at - session.started_at)}
++               if session.started_at and session.exited_at else {}),
+             **ProcessRegistry._exit_fields(session), **_completion_output(session)}
+ 
+     def kill_process(
+diff --git a/tools/process_registry_notifications.py b/tools/process_registry_notifications.py
+index 643ce07c..2bfafd60 100644
+--- a/tools/process_registry_notifications.py
++++ b/tools/process_registry_notifications.py
+@@ -497,8 +497,12 @@ def ran_for(seconds: float) -> str:
+ 
+ 
+ def run_time(seconds: float) -> str:
+-    """'2m 14s', '41s', '3h 5m': how long a job ran, to the second below an hour."""
+-    seconds = int(max(seconds or 0, 0))
++    """'0.4s', '41s', '2m 14s', '3h 5m': how long a job ran, to a tenth of a second below 10s,
++    to the second below an hour."""
++    seconds = max(float(seconds or 0), 0.0)
++    if seconds < 9.95:
++        return f"{seconds:.1f}s"
++    seconds = round(seconds)
+     if seconds < 60:
+         return f"{seconds}s"
+     minutes, rest = divmod(seconds, 60)
+diff --git a/tools/terminal_tool.py b/tools/terminal_tool.py
+index f1aab88a..521b7373 100644
+--- a/tools/terminal_tool.py
++++ b/tools/terminal_tool.py
+@@ -1380,11 +1380,13 @@ def _run_foreground(
+             # bounded_capture: model-facing output keeps a head/tail window
+             # while streaming so a verbose command can't OOM the gateway;
+             # internal env.execute() consumers stay unbounded.
++            started = time.monotonic()
+             result = env.execute(
+                 command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
+                 **_yield_kwargs(command, effective_timeout, env_type=env_type, cwd=command_cwd,
+                                 effective_task_id=eff, task_id=task_id, session_key=session_key),
+             )
++            ran_seconds = time.monotonic() - started
+             break
+         except Exception as e:
+             # A backend exception (e.g. an SSH connect timeout) never reached an exit status, so it
+@@ -1420,7 +1422,7 @@ def _run_foreground(
+     return finalize_foreground_result(
+         command=command, result=result, env=env, env_type=env_type, effective_task_id=eff,
+         task_id=task_id, session_id=session_id, session_key=session_key, workdir=workdir,
+-        command_cwd=command_cwd, approval_note=approval_note,
++        command_cwd=command_cwd, approval_note=approval_note, ran_seconds=ran_seconds,
+     )
+ 
+ 
+diff --git a/tools/terminal_tool_result.py b/tools/terminal_tool_result.py
+index 47c9e7ac..3c35d1cb 100644
+--- a/tools/terminal_tool_result.py
++++ b/tools/terminal_tool_result.py
+@@ -208,8 +208,10 @@ def finalize_foreground_result(
+     *, command: str, result: dict, env: Any, env_type: str, effective_task_id: str,
+     task_id: Optional[str], session_id: Optional[str], session_key: str,
+     workdir: Optional[str], command_cwd: Optional[str], approval_note: Optional[str],
++    ran_seconds: Optional[float] = None,
+ ) -> str:
+-    """Turn a raw ``env.execute`` result into the tool's JSON result string."""
++    """Turn a raw ``env.execute`` result into the tool's JSON result string. ``ran_seconds`` is
++    the command's wall time; the result carries it as ``ran_for``."""
+     from tools.terminal_tool import record_session_cwd
+ 
+     # Record the cwd this command finished in as THIS session's durable cwd —
+@@ -257,6 +259,9 @@ def finalize_foreground_result(
+         approval_note = approval_note.rstrip(".") + ", then interrupted."
+ 
+     result_dict = {"output": output, "exit_code": returncode, "error": None}
++    if ran_seconds is not None:
++        from tools.process_registry_notifications import run_time
++        result_dict["ran_for"] = run_time(ran_seconds)
+     # Optional fields in observable JSON key order; None means "omit". Spill
+     # metadata is present only when output overflowed the capture window.
+     optional_fields: list[tuple[str, Any]] = [
+-- 
+2.56.0
+
