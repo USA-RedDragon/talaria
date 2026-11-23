@@ -1,3 +1,16 @@
+From 0cbec767c9e9bdf2e378fef833b1ca1da39c0f81 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 14:56:04 -0600
+Subject: [PATCH] hermes: 0173 resumed subagents run under their chat's yolo
+
+A subagent the next gateway resumed after a restart handoff re-arms its chat's persisted /yolo, which only the chat's next turn restored before.
+---
+ .../tools/test_delegate_child_session_yolo.py | 231 ++++++++++++++++++
+ tools/approval_yolo.py                        |  20 ++
+ tools/delegate_tool_handoff.py                |   5 +
+ 3 files changed, 256 insertions(+)
+ create mode 100644 tests/tools/test_delegate_child_session_yolo.py
+
 diff --git a/tests/tools/test_delegate_child_session_yolo.py b/tests/tools/test_delegate_child_session_yolo.py
 new file mode 100644
 index 00000000..1672775f
@@ -282,3 +295,6 @@ index 6be63ebe..86bc2524 100644
  
  
  # ── Restart: stop each child at a clean point ───────────────────────────────
+-- 
+2.56.0
+
