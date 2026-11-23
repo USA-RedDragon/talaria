@@ -1,0 +1,162 @@
+From 78af831feae363a42c5690279bead9325534dbd9 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 01:39:31 -0600
+Subject: [PATCH] fix(contracts): session.events.since replay events declare
+ carried_from
+
+A turn carried to a new gateway publishes frames naming the carrier's replay_epoch and seq; the
+canonical result model forbade the key, so every replay of such a frame logged a wire-contract error.
+---
+ apps/shared/src/gateway-contract.generated.ts |  5 ++
+ apps/shared/src/gateway-contract.openrpc.json | 30 ++++++++++++
+ .../test_events_since_carried_from.py         | 47 +++++++++++++++++++
+ tui_gateway/contracts/canonical_sessions.py   |  8 ++++
+ 4 files changed, 90 insertions(+)
+ create mode 100644 tests/tui_gateway/test_events_since_carried_from.py
+
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index 9e496b27..27c0f0c8 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -5365,6 +5365,11 @@ export interface CanonicalReplayEvent {
+   authority_epoch?: number | null
+   execution_generation?: number | null
+   admission_id?: string | null
++  carried_from?: CanonicalCarriedFrom | null
++}
++export interface CanonicalCarriedFrom {
++  replay_epoch: string
++  seq: number
+ }
+ export interface CanonicalSubmitParams {
+   profile?: string | null
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index eaff7087..be3a3738 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -8231,6 +8231,25 @@
+         "title": "CanonicalBotDeliverResult",
+         "type": "object"
+       },
++      "CanonicalCarriedFrom": {
++        "additionalProperties": false,
++        "properties": {
++          "replay_epoch": {
++            "title": "Replay Epoch",
++            "type": "string"
++          },
++          "seq": {
++            "title": "Seq",
++            "type": "integer"
++          }
++        },
++        "required": [
++          "replay_epoch",
++          "seq"
++        ],
++        "title": "CanonicalCarriedFrom",
++        "type": "object"
++      },
+       "CanonicalClientIdentity": {
+         "additionalProperties": false,
+         "description": "A client naming itself: ``name`` matches ``[a-z0-9][a-z0-9._-]{0,63}``, ``version`` is 1-64\nprintable ASCII without spaces. Attribution only (owners advertising ``session-client-v1``).",
+@@ -10014,6 +10033,17 @@
+             ],
+             "default": null,
+             "title": "Admission Id"
++          },
++          "carried_from": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/CanonicalCarriedFrom"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null
+           }
+         },
+         "required": [
+diff --git a/tests/tui_gateway/test_events_since_carried_from.py b/tests/tui_gateway/test_events_since_carried_from.py
+new file mode 100644
+index 00000000..c9fc0088
+--- /dev/null
++++ b/tests/tui_gateway/test_events_since_carried_from.py
+@@ -0,0 +1,47 @@
++"""A replayed event published by a carried turn names its carrier in ``carried_from``; the
++``session.events.since`` result contract must declare it."""
++
++import pytest
++
++from tui_gateway.contracts import registry as contracts
++
++
++def _event(**extra):
++    return {
++        "type": "message.delta",
++        "session_id": "s1",
++        "payload": {"text": "hi"},
++        "replay_epoch": "e1",
++        "seq": 2,
++        **extra,
++    }
++
++
++def _result(event):
++    return {
++        "events": [event],
++        "latest_seq": 2,
++        "last_sequence": 2,
++        "epoch": "e0",
++        "replay_epoch": "e1",
++        "truncated": False,
++        "snapshot_required": False,
++        "count": 1,
++    }
++
++
++def test_events_since_result_accepts_carried_from():
++    contract = contracts.CANONICAL_METHODS["session.events.since"]
++    contracts.check_result(contract, _result(_event(carried_from={"replay_epoch": "199e7ec", "seq": 105427})))
++
++
++def test_events_since_result_still_refuses_other_extra_keys():
++    contract = contracts.CANONICAL_METHODS["session.events.since"]
++    with pytest.raises(contracts.ContractViolation):
++        contracts.check_result(contract, _result(_event(bogus=1)))
++
++
++def test_events_since_result_rejects_malformed_carried_from():
++    contract = contracts.CANONICAL_METHODS["session.events.since"]
++    with pytest.raises(contracts.ContractViolation):
++        contracts.check_result(contract, _result(_event(carried_from={"seq": "x"})))
+diff --git a/tui_gateway/contracts/canonical_sessions.py b/tui_gateway/contracts/canonical_sessions.py
+index 3682edb1..c78485e7 100644
+--- a/tui_gateway/contracts/canonical_sessions.py
++++ b/tui_gateway/contracts/canonical_sessions.py
+@@ -368,6 +368,11 @@ class CanonicalEventsParams(CanonicalSessionParams):
+     replay_epoch: str | None = None
+ 
+ 
++class CanonicalCarriedFrom(Result):
++    replay_epoch: str
++    seq: int
++
++
+ class CanonicalReplayEvent(Result):
+     type: str
+     session_id: str
+@@ -377,6 +382,9 @@ class CanonicalReplayEvent(Result):
+     authority_epoch: int | None = None
+     execution_generation: int | None = None
+     admission_id: str | None = None
++    # Set on a frame a restarted gateway published for a turn it carried over: the carrier's own
++    # ``replay_epoch`` and ``seq`` for that frame, so a client that moved sockets drops the duplicate.
++    carried_from: CanonicalCarriedFrom | None = None
+ 
+ 
+ class CanonicalEventsResult(Result):
+-- 
+2.56.0
+

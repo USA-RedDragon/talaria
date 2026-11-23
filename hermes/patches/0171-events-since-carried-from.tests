@@ -1,0 +1,5 @@
+# New cases in tests/tui_gateway/test_events_since_carried_from.py
+# The generated contract artefacts the model change regenerates
+tests/tui_gateway/contracts/test_generated.py
+tests/tui_gateway/test_legacy_events_since_replay_epoch.py
+tests/gateway/test_session_events_release.py
