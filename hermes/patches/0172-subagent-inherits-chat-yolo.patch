@@ -1,0 +1,284 @@
+diff --git a/tests/tools/test_delegate_child_session_yolo.py b/tests/tools/test_delegate_child_session_yolo.py
+new file mode 100644
+index 00000000..1672775f
+--- /dev/null
++++ b/tests/tools/test_delegate_child_session_yolo.py
+@@ -0,0 +1,231 @@
++"""A gateway chat's ``/yolo`` (hub "No approvals in this chat": ``config.set key=yolo`` ->
++``toggle_session_yolo(route)``, persisted on ``SessionEntry.yolo``) governs every subagent the chat
++delegates to: one run in the turn, one still running in the background after the turn ended, and one
++the next gateway resumed after a restart handoff, before the chat's next turn re-armed the bypass.
++
++The child agent is a fake whose turn reads the approval state the way its tool calls do; everything
++between ``delegate_task`` and ``run_conversation`` is the real dispatch.
++"""
++
++import threading
++from types import SimpleNamespace
++from unittest.mock import MagicMock
++
++import pytest
++
++from tools import approval
++from tools import async_delegation as ad
++from tools import delegate_tool_handoff as handoff
++from tools.approval_yolo import toggle_session_yolo
++from tools.process_registry import process_registry
++
++ROUTE = "agent:main:local:dm:hub-chat-1"
++PARENT = "parent-sid"
++
++
++def _drain(q):
++    while not q.empty():
++        try:
++            q.get_nowait()
++        except Exception:
++            break
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch):
++    import gateway.session_context as sc
++    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
++    monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
++    monkeypatch.setattr(approval, "_YOLO_MODE_FROZEN", False)
++    monkeypatch.setattr("tools.approval_context._get_approval_config", lambda: {"mode": "manual"})
++    approval.clear_session(ROUTE)
++    ad._reset_for_tests()
++    _drain(process_registry.completion_queue)
++    yield
++    approval.clear_session(ROUTE)
++    ad._reset_for_tests()
++    _drain(process_registry.completion_queue)
++    for var in sc._VAR_MAP.values():
++        var.set(sc._UNSET)
++    sc._SESSION_ASYNC_DELIVERY.set(sc._UNSET)
++    sc._SESSION_HISTORY_DELIVERY.set(sc._UNSET)
++
++
++def _probe() -> dict:
++    gate = approval.request_tool_approval("browser_click", "a person-only card")
++    return {"bypass": approval.is_approval_bypass_active(), "yolo": approval._yolo_active(),
++            "approved": bool(gate.get("approved"))}
++
++
++def _child(seen: list, release: threading.Event | None = None):
++    child = MagicMock()
++
++    def run_conversation(**kwargs):
++        if release is not None:
++            assert release.wait(10)
++        seen.append(_probe())
++        return {"final_response": "done", "completed": True, "interrupted": False, "api_calls": 1, "messages": []}
++
++    child.run_conversation.side_effect = run_conversation
++    for name, value in (("_delegate_restart_handoff", False), ("_delegate_live_writer", None),
++                        ("_live_transcript_path", None), ("_delegate_output_schema", None), ("_delegate_images", []),
++                        ("_credential_pool", None), ("_subagent_id", "sa-1-abcd"), ("_delegate_role", "leaf")):
++        setattr(child, name, value)
++    return child
++
++
++def _bind_chat_turn():
++    from gateway.session_context import set_session_vars
++    return set_session_vars(platform="local", chat_id="hub-chat-1", session_key=ROUTE, session_id=PARENT,
++                            async_delivery=True)
++
++
++def _patch_delegate(monkeypatch, child):
++    import tools.delegate_tool as dt
++    monkeypatch.setattr(dt, "_build_child_agent", lambda **kw: child)
++    monkeypatch.setattr(dt, "_resolve_delegation_credentials", lambda *a, **k: {
++        "model": "m", "provider": None, "base_url": None, "api_key": None, "api_mode": None,
++        "command": None, "args": None})
++    return dt
++
++
++def _parent():
++    parent = MagicMock()
++    parent._delegate_depth = 0
++    parent.session_id = PARENT
++    parent._interrupt_requested = False
++    parent._active_children = []
++    parent._active_children_lock = threading.Lock()
++    return parent
++
++
++def test_child_run_in_the_turn_sees_the_chats_yolo(monkeypatch):
++    seen = []
++    dt = _patch_delegate(monkeypatch, _child(seen))
++    _bind_chat_turn()
++    toggle_session_yolo(ROUTE, True)
++    dt.delegate_task(goal="probe", parent_agent=_parent())
++    assert seen == [{"bypass": True, "yolo": True, "approved": True}]
++
++
++def test_child_run_in_the_turn_without_yolo_does_not_bypass(monkeypatch):
++    seen = []
++    dt = _patch_delegate(monkeypatch, _child(seen))
++    _bind_chat_turn()
++    dt.delegate_task(goal="probe", parent_agent=_parent())
++    assert seen == [{"bypass": False, "yolo": False, "approved": False}]
++
++
++def test_child_run_in_the_turn_sees_approvals_mode_off(monkeypatch):
++    seen = []
++    dt = _patch_delegate(monkeypatch, _child(seen))
++    monkeypatch.setattr("tools.approval_context._get_approval_config", lambda: {"mode": "off"})
++    _bind_chat_turn()
++    dt.delegate_task(goal="probe", parent_agent=_parent())
++    assert seen == [{"bypass": True, "yolo": False, "approved": True}]
++
++
++def test_background_child_sees_the_chats_yolo_after_the_turn_ended(monkeypatch):
++    from gateway.session_context import clear_session_vars
++    seen, release = [], threading.Event()
++    dt = _patch_delegate(monkeypatch, _child(seen, release))
++    tokens = _bind_chat_turn()
++    toggle_session_yolo(ROUTE, True)
++    out = dt.delegate_task(goal="probe", background=True, parent_agent=_parent())
++    assert '"dispatched"' in out
++    clear_session_vars(tokens)
++    release.set()
++    from tests.waiting import wait_until
++    wait_until(lambda: seen, timeout=10)
++    assert seen == [{"bypass": True, "yolo": True, "approved": True}]
++
++
++def test_background_child_follows_a_switch_made_while_it_runs(monkeypatch):
++    seen, release = [], threading.Event()
++    dt = _patch_delegate(monkeypatch, _child(seen, release))
++    _bind_chat_turn()
++    dt.delegate_task(goal="probe", background=True, parent_agent=_parent())
++    toggle_session_yolo(ROUTE, True)
++    release.set()
++    from tests.waiting import wait_until
++    wait_until(lambda: seen, timeout=10)
++    assert seen[0]["bypass"] is True
++
++
++def _resume_unit():
++    child = {"goal": "task 0", "context": None, "role": None, "subagent_id": "sa-1-abcd", "session_id": "child-1",
++             "cwd": None, "route": None}
++    spec = {"version": 1, "parent": {"session_id": PARENT, "model": "main", "provider": "custom",
++                                     "base_url": "http://ollama.example.com/v1"},
++            "session": {"HERMES_SESSION_PLATFORM": "local", "HERMES_SESSION_CHAT_ID": "hub-chat-1",
++                        "HERMES_SESSION_KEY": ROUTE, "HERMES_SESSION_ID": PARENT},
++            "children": {"0": child}, "task_count": 1, "live_deleg_id": "deleg_call", "top_role": "leaf"}
++    return {"delegation_id": "deleg_call", "parent_session_id": PARENT, "goals": ["task 0"], "handoff": spec,
++            "kept": {}}
++
++
++@pytest.fixture
++def next_gateway(monkeypatch, tmp_path):
++    """A fresh gateway process: the routing store on disk holds the chat's persisted switch, the in-memory
++    bypass set is empty and the chat has not had a turn yet."""
++    from gateway.config import GatewayConfig
++    from gateway.session import SessionEntry, SessionStore
++    from hermes_state_registry import acquire
++    from datetime import datetime
++
++    def store_with(yolo):
++        store = SessionStore(tmp_path / "sessions", GatewayConfig())
++        with store._lock:
++            store._ensure_loaded_locked()
++            now = datetime.now()
++            store._entries[ROUTE] = SessionEntry(session_key=ROUTE, session_id=PARENT, created_at=now,
++                                                 updated_at=now, yolo=yolo)
++        runner = SimpleNamespace(session_store=store)
++        import gateway.run
++        monkeypatch.setattr(gateway.run, "_gateway_runner_ref", lambda: runner)
++        approval.clear_session(ROUTE)
++        return store
++
++    db = acquire()
++    db.create_session(session_id=PARENT, source="local")
++    db.create_session(session_id="child-1", source="subagent", parent_session_id=PARENT,
++                      model_config={"_delegate_from": PARENT, "_subagent_id": "sa-1-abcd"})
++    db.append_message("child-1", "user", content="task 0")
++    db.end_session("child-1", "agent_close")
++    monkeypatch.setattr("tools.delegate_tool._load_config", lambda: {"restart_handoff": True})
++    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **kw: {
++        "base_url": "http://ollama.example.com/v1", "api_key": "local"})
++    return store_with
++
++
++def _resume(monkeypatch):
++    seen = []
++    monkeypatch.setattr("tools.delegate_tool._build_child_preserving_parent_tools", lambda **kw: _child(seen))
++    result = threading.Thread(target=lambda: handoff._ResumedUnit(_resume_unit()).run())
++    result.start()
++    result.join(20)
++    return seen
++
++
++def test_child_resumed_by_the_next_gateway_sees_the_chats_persisted_yolo(monkeypatch, next_gateway):
++    next_gateway(True)
++    assert _resume(monkeypatch) == [{"bypass": True, "yolo": True, "approved": True}]
++
++
++def test_child_resumed_by_the_next_gateway_sees_approvals_mode_off(monkeypatch, next_gateway):
++    next_gateway(None)
++    monkeypatch.setattr("tools.approval_context._get_approval_config", lambda: {"mode": "off"})
++    assert _resume(monkeypatch) == [{"bypass": True, "yolo": False, "approved": True}]
++
++
++def test_resume_outside_a_gateway_leaves_the_bypass_alone(monkeypatch):
++    import gateway.run
++    from tools.approval_yolo import restore_route_yolo
++    monkeypatch.setattr(gateway.run, "_gateway_runner_ref", lambda: None)
++    restore_route_yolo(ROUTE)
++    assert not approval.is_session_yolo_enabled(ROUTE)
++
++
++def test_child_resumed_by_the_next_gateway_keeps_a_persisted_off(monkeypatch, next_gateway):
++    next_gateway(False)
++    assert _resume(monkeypatch) == [{"bypass": False, "yolo": False, "approved": False}]
+diff --git a/tools/approval_yolo.py b/tools/approval_yolo.py
+index 0059ddc4..14e61e22 100644
+--- a/tools/approval_yolo.py
++++ b/tools/approval_yolo.py
+@@ -90,6 +90,26 @@ def restore_gateway_yolo(session_key: str, persisted: Optional[bool], *, launch:
+         (approval._session_yolo.add if persisted else approval._session_yolo.discard)(session_key)
+ 
+ 
++def restore_route_yolo(session_key: str) -> None:
++    """Re-arm a gateway route's bypass from the running gateway's routing entry, for work that runs under
++    the route before its next turn restored it (a subagent the next gateway resumed after a restart)."""
++    import sys
++    runner_ref = getattr(sys.modules.get("gateway.run"), "_gateway_runner_ref", None)
++    store = getattr(runner_ref() if runner_ref else None, "session_store", None)
++    if not session_key or store is None:
++        return
++    entry = store.lookup_by_session_key(session_key)
++    launch = False
++    if entry is not None and entry.yolo is None:
++        try:
++            from gateway.session_policy import policy_for_source
++            policy = policy_for_source(runner_ref(), entry.origin)
++            launch = bool(policy is not None and policy.yolo)
++        except Exception:
++            logger.debug("no launch policy for %s", session_key, exc_info=True)
++    restore_gateway_yolo(session_key, getattr(entry, "yolo", None), launch=launch)
++
++
+ def transfer_session_yolo(old_key: str, new_key: str) -> None:
+     """Move the live bypass when the conversation continues under a new id (compression rotation, /branch).
+     The new row records it at creation (``with_session_yolo``), so nothing is written here. Every
+diff --git a/tools/delegate_tool_handoff.py b/tools/delegate_tool_handoff.py
+index 6be63ebe..86bc2524 100644
+--- a/tools/delegate_tool_handoff.py
++++ b/tools/delegate_tool_handoff.py
+@@ -230,6 +230,11 @@ def _bind_session(snapshot: dict[str, str]) -> None:
+     for var in _SESSION_VARS:
+         if isinstance(snapshot.get(var.name), str):
+             var.set(snapshot[var.name])
++    from tools.approval_yolo import restore_route_yolo
++    try:
++        restore_route_yolo(snapshot.get("HERMES_SESSION_KEY") or "")
++    except Exception:
++        logger.warning("Could not restore the chat's approval bypass for a resumed subagent", exc_info=True)
+ 
+ 
+ # ── Restart: stop each child at a clean point ───────────────────────────────
