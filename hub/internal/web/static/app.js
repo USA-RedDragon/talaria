@@ -1168,6 +1168,7 @@
         this.when(p.bubble, this.at);
       } else if (v.text) {
         this.userText(v.text);
+        if (id) (this.begun = this.begun || new Set()).add(id);
       }
       this.afterCards(v);
     }
@@ -3643,6 +3644,11 @@
           bubble.classList.remove("command");
           bubble.classList.add("pending");
           chat.pending.push(mine);
+          // The turn can start before this answer: its own bubble is then drawn already.
+          if (r && r.id && chat.begun && chat.begun.delete(r.id)) {
+            chat.pending = chat.pending.filter((x) => x !== mine);
+            bubble.remove();
+          }
         }
       }
       const p = item();

@@ -248,6 +248,7 @@ type Gateway struct {
 	steered           []string
 	orphanBranches    bool
 	commands          []string
+	skills            map[string]func(string) string
 	compressed        []string
 	compressGate      chan struct{}
 	// stalls hold the next call of a method on its connection (StallNext).

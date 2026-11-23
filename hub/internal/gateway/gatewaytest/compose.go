@@ -447,7 +447,22 @@ func (g *Gateway) hSlashExec(_ *conn, p map[string]any) (any, string, func()) {
 	case "export":
 		return nil, gateway.ReasonUnsupportedCommand + "|Run `hermes profile export` in a terminal.", nil
 	}
+	if expand := g.skills[name]; expand != nil {
+		return map[string]any{kType: gateway.SlashSkill, kMessage: expand(arg), kName: name, "display": strings.TrimSpace("/" + name + " " + arg)}, "", nil
+	}
 	return nil, gateway.ReasonUnsupportedCommand, nil
+}
+
+// SetSkill makes slash.exec answer the skill command name as Hermes does
+// (tui_gateway/methods_tools.py _dispatch_skill): the skill's whole text
+// built by expand from the words typed after the command.
+func (g *Gateway) SetSkill(name string, expand func(arg string) string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.skills == nil {
+		g.skills = map[string]func(string) string{}
+	}
+	g.skills[name] = expand
 }
 
 // Commands lists the command lines slash.exec got.

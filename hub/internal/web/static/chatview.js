@@ -173,6 +173,7 @@ window.HubChatView = (() => {
       this.tools = new Map();
       this.wraps = new Map();
       this.pending = [];
+      this.begun = undefined;
       this.failed = [];
       this.at = 0;
       this.status = null;
