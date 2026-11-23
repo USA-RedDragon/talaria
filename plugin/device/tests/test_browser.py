@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import inspect
 import json
 import re
@@ -27,6 +28,11 @@ from test_core import Base, FakeDevice, Store, core  # noqa: E402
 from test_routes import PATH, Signer, plugin_api  # noqa: E402
 
 browser = core._load_sibling("hermes_device_browser", "browser.py")
+
+# The rules of the plugin's own approvals; person-only rules are not among them.
+def NORMAL(rule: str) -> bool:
+    return rule.split(":")[1] in ("visit", "click", "script", "script-write", "submit")
+
 
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
 
@@ -615,11 +621,13 @@ class ToolTests(BrowserBase):
         self.assertIsNone(self.decision)
         self.assertEqual(self.last("eval")["args"]["guard"]["script_hosts"], ["example.com"])
 
-    def test_eval_write_on_salesforce_asks_a_person_each_time(self):
+    def test_eval_write_on_salesforce_asks_a_person(self):
         self.salesforce()
-        with mock.patch.object(browser, "approved", lambda k: True):
+        with mock.patch.object(browser, "approved", NORMAL):
             self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
-        self.assertIn("Only you can allow this, each time", self.confirmed.call_args[0][0])
+        self.assertIsNone(self.decision, "the person card covers the script-write rule too")
+        self.assertIn("Only you can allow this.", self.confirmed.call_args[0][0])
+        self.assertEqual(self.confirmed.call_args.kwargs["rules"], ["browser:protected-write:acme.lightning.force.com"])
         self.assertEqual(self.last("eval")["args"]["guard"]["allow"], ["protected_write acme.lightning.force.com"])
         self.confirmed.return_value = False
         before = len([r for r in self.fake.requests if r["op"] == "eval"])
@@ -680,10 +688,10 @@ class ToolTests(BrowserBase):
     def test_unattended_never_confirms(self):
         self.salesforce()
         self.fake.inspect["sensitive"] = ["password"]
-        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", NORMAL):
             out = self.run_tool("browser_click", tab_id=7, ref="e9")
         self.assertEqual(self.decision["action"], "block")
-        self.assertIn("asks the user every time", out["error"])
+        self.assertIn("Only the user can allow this", out["error"])
         self.assertEqual(self.confirmed.call_count, 0)
         self.assertFalse([r for r in self.fake.requests if r["op"] == "click"])
 
@@ -729,9 +737,9 @@ class ToolTests(BrowserBase):
     def test_salesforce_secret_page_without_hook_inspect_still_confirms(self):
         self.salesforce(label="Save")
         self.fake.inspect["sensitive"] = ["password"]
-        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", NORMAL):
             out = self.hook_misses_inspect(tab_id=7, ref="e9")
-        self.assertIn("asks the user every time", out["error"])
+        self.assertIn("Only the user can allow this", out["error"])
         self.assertFalse([r for r in self.fake.requests if r["op"] == "click"])
 
     def test_salesforce_frame_host_uses_the_page_rule(self):
@@ -1125,7 +1133,7 @@ class ToolTests(BrowserBase):
 
     def test_eval_on_autologin_host_without_a_user_is_blocked(self):
         self.login_page()
-        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", NORMAL):
             out = self.run_tool("browser_eval", tab_id=7, script="return 1")
         self.assertEqual(self.decision["action"], "block")
         self.assertIn("no user is present", out["error"])
@@ -1159,7 +1167,7 @@ class ToolTests(BrowserBase):
 
     def test_actions_on_autologin_login_page_without_a_user_are_blocked(self):
         self.login_page()
-        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", NORMAL):
             out = self.run_tool("browser_click", tab_id=7, ref="e3")
         self.assertEqual(self.decision["action"], "block")
         self.assertIn("no user is present", out["error"])
@@ -1206,7 +1214,7 @@ class ToolTests(BrowserBase):
 
     def test_person_only_refusal_without_a_user_is_not_asked(self):
         self.refuse_once("navigate", "10.0.0.5 is on a loopback or private network [allow:private 10.0.0.5]")
-        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", NORMAL):
             out = self.run_tool("browser_navigate", tab_id=7, url="http://10.0.0.5/")
         self.assertIn("Only a person can allow this", out["error"])
         self.assertEqual(self.confirmed.call_count, 0)
@@ -3046,6 +3054,286 @@ class BatchTool(BrowserBase):
         self.assertIn("PREFER THIS", browser.SCHEMAS["browser_batch"]["description"])
         self.assertIn("browser_batch", browser.SCHEMAS["browser_snapshot"]["description"])
         self.assertIn("browser_batch", browser.GATED)
+
+
+class PersonOnlyCards(BrowserBase):
+    """The person-only cards (docs/browser.md section 7.5) offer Allow once, Allow in this chat and
+    Always allow under a rule of their own; only a click on the card answers. A chat without approvals
+    (its yolo, or approvals.mode off) is not asked, and neither are its subagents."""
+
+    KEY = "agent:main:hub:dm:jacob"
+    SF = "browser:protected-write:acme.lightning.force.com"
+
+    def setUp(self):
+        super().setUp()
+        self.confirm.stop()
+        self.addCleanup(self.confirm.start)
+        from tools import approval
+        from tools.approval_context import reset_current_session_key, set_current_session_key
+        token = set_current_session_key(self.KEY)
+        self.addCleanup(reset_current_session_key, token)
+        self.addCleanup(approval.clear_session, self.KEY)
+        self.addCleanup(approval.clear_session, "agent:main:hub:dm:other")
+        self.asked: list[dict] = []
+        self.choice = "once"
+
+        def consent(message, description, *, surface="", title="", remember_key=None, timeout_seconds=None):
+            self.asked.append({"message": message, "remember_key": remember_key, "surface": surface})
+            if self.choice == "deny":
+                return "decline"
+            if remember_key and self.choice in ("session", "always"):
+                from tools.approval_context import get_current_session_key
+                approval.approve_session(get_current_session_key(), remember_key)
+                if self.choice == "always":
+                    approval.approve_permanent(remember_key)
+                    self.addCleanup(self.forget, remember_key)
+            return "accept"
+
+        def judge(*_a, **_k):
+            raise AssertionError("a person-only check went to the approval gate")
+        for target, fake in (("tools.approval_prompt.request_elicitation_consent", consent),
+                             ("tools.approval.request_tool_approval", judge)):
+            p = mock.patch(target, fake)
+            p.start()
+            self.addCleanup(p.stop)
+
+    @staticmethod
+    def forget(key):
+        from tools import approval
+        with approval._lock:
+            approval._permanent_set().discard(key)
+
+    def salesforce(self):
+        self.fake.inspect = {"url": "https://acme.lightning.force.com/lightning/r/Case/500x/view",
+                             "host": "acme.lightning.force.com", "top_host": "acme.lightning.force.com",
+                             "sensitive": [], "protected": True, "target": {"kind": "other"}}
+
+    def login_page(self):
+        self.fake.inspect = {"url": "https://login.example.com/authsvc", "host": "login.example.com",
+                             "top_host": "login.example.com", "sensitive": ["password"], "autologin": True,
+                             "top_autologin": True, "target": {"kind": "field", "field": "password"}}
+
+    def sf_write(self):
+        return self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+
+    def evals(self):
+        return len([r for r in self.fake.requests if r["op"] == "eval"])
+
+    def yolo(self):
+        from tools import approval
+        approval.enable_session_yolo(self.KEY)
+
+    def in_subagent(self, fn):
+        """fn in a worker thread with a copy of this context, as delegate_task runs a child."""
+        ctx = contextvars.copy_context()
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("r", ctx.run(fn)))
+        t.start()
+        t.join(30)
+        return out.get("r")
+
+    def test_salesforce_write_card_offers_this_chat_and_always(self):
+        self.salesforce()
+        out = self.sf_write()
+        self.assertIsNone(self.decision, "one card: the person card covers the script-write rule")
+        self.assertNotIn("error", out)
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.asked[0]["remember_key"], "plugin_rule:" + self.SF)
+        self.assertEqual(self.asked[0]["surface"], "device-browser")
+        self.assertIn("Allow in this chat (or always) allows scripts that change data on acme.lightning.force.com "
+                      "again without asking.", self.asked[0]["message"])
+        self.assertNotIn("each time", self.asked[0]["message"])
+        self.assertEqual(self.last("eval")["args"]["guard"]["allow"], ["protected_write acme.lightning.force.com"])
+        self.sf_write()
+        self.assertEqual(len(self.asked), 2, "Allow once covers one script")
+
+    def test_this_chat_answer_covers_the_chat_and_its_subagents_only(self):
+        self.salesforce()
+        self.choice = "session"
+        self.sf_write()
+        self.sf_write()
+        self.in_subagent(self.sf_write)
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.evals(), 3)
+        from tools.approval_context import reset_current_session_key, set_current_session_key
+        token = set_current_session_key("agent:main:hub:dm:other")
+        try:
+            self.sf_write()
+        finally:
+            reset_current_session_key(token)
+        self.assertEqual(len(self.asked), 2, "another chat is asked")
+
+    def test_always_answer_holds_in_scheduled_runs(self):
+        self.salesforce()
+        self.choice = "always"
+        self.sf_write()
+        from tools import approval
+        approval.clear_session(self.KEY)
+        with mock.patch.object(browser, "no_user", lambda: True):
+            out = self.sf_write()
+        self.assertNotIn("error", out)
+        self.assertEqual((len(self.asked), self.evals()), (1, 2))
+
+    def test_denied_card_runs_nothing_and_records_nothing(self):
+        self.salesforce()
+        self.choice = "deny"
+        out = self.sf_write()
+        self.assertIn("did not allow", out["error"])
+        self.assertEqual(self.evals(), 0)
+        self.assertFalse(browser.approved(self.SF))
+
+    def test_sign_in_host_script_card_says_what_it_allows(self):
+        self.login_page()
+        self.choice = "session"
+        self.run_tool("browser_eval", tab_id=7, script="return 1")
+        card = self.asked[0]
+        self.assertEqual(card["remember_key"], "plugin_rule:browser:login-script:login.example.com")
+        self.assertIn("Firefox fills your saved password, so the script could read it", card["message"])
+        self.assertIn("allows scripts on the sign-in host login.example.com, where Firefox fills your saved password "
+                      "again without asking", card["message"])
+        self.run_tool("browser_eval", tab_id=7, script="return 2")
+        self.assertEqual((len(self.asked), self.evals()), (1, 2))
+
+    def test_one_card_with_two_checks_records_both(self):
+        self.login_page()
+        self.choice = "session"
+        self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.assertEqual(len(self.asked), 1)
+        self.assertTrue(browser.approved("browser:login-script:login.example.com"))
+        self.assertTrue(browser.approved("browser:sensitive-write:login.example.com"))
+        self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_once_after_an_earlier_grant_does_not_widen_it(self):
+        from tools import approval
+        approval.approve_session(self.KEY, "plugin_rule:browser:login-script:login.example.com")
+        self.login_page()
+        self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.assertEqual(self.asked[0]["remember_key"], "plugin_rule:browser:sensitive-write:login.example.com")
+        self.assertFalse(browser.approved("browser:sensitive-write:login.example.com"))
+
+    def test_sign_in_page_and_secret_field_actions_have_their_rules(self):
+        self.login_page()
+        self.choice = "session"
+        self.run_tool("browser_click", tab_id=7, ref="e3")
+        self.run_tool("browser_click", tab_id=7, ref="e3")
+        self.assertEqual([a["remember_key"] for a in self.asked], ["plugin_rule:browser:login-page:login.example.com"])
+        self.fake.inspect = {"url": "https://pay.example.org/", "host": "pay.example.org", "sensitive": ["payment"],
+                             "target": {"kind": "field"}}
+        self.run_tool("browser_type", tab_id=7, ref="e5", text="4242")
+        self.assertEqual(self.asked[-1]["remember_key"], "plugin_rule:browser:sensitive:pay.example.org")
+        self.salesforce()
+        self.fake.inspect.update(protected=True, sensitive=["password"])
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.assertEqual(self.asked[-1]["remember_key"], "plugin_rule:browser:protected-click:acme.lightning.force.com")
+        self.assertEqual(len(self.asked), 3)
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.assertEqual(len(self.asked), 3, "both rules of the Salesforce secret page were recorded")
+
+    def blocked(self, tab, host="10.0.0.5", kinds=("private",)):
+        real = self.fake.answer
+
+        def answer(msg):
+            out = real(msg)
+            if msg["op"] == "read_text" and out and out.get("ok"):
+                out = dict(out, result=dict(out["result"], blocked_requests=[
+                    {"tab_id": tab, "count": 3, "hosts": [host], "kinds": list(kinds)}]))
+            if msg["op"] == "lift_limits":
+                return {"ok": True, "result": {"lifted": list(kinds)}}
+            return out
+        with mock.patch.object(self.fake, "answer", answer):
+            return self.run_tool("browser_snapshot", tab_id=7, mode="text")
+
+    def lifts(self):
+        return [r["args"] for r in self.fake.requests if r["op"] == "lift_limits"]
+
+    def test_private_lift_rule_is_per_host_not_per_tab(self):
+        self.choice = "session"
+        self.blocked(47)
+        self.assertEqual([a["remember_key"] for a in self.asked], ["plugin_rule:browser:lift-private:10.0.0.5"])
+        out = self.blocked(48)
+        self.assertEqual(len(self.asked), 1, "a new tab id is covered by the host's rule")
+        self.assertIn("lifted (allowed in this chat)", " ".join(out["blocked_requests_note"]))
+        self.assertEqual([x["tab_id"] for x in self.lifts()], [47, 48])
+        self.blocked(49, host="192.168.1.9")
+        self.assertEqual(len(self.asked), 2, "another host is asked")
+
+    def test_private_refusal_card_has_a_host_rule(self):
+        real = self.fake.answer
+        state = {"n": 0}
+
+        def answer(msg):
+            if msg["op"] == "navigate" and state["n"] == 0:
+                state["n"] += 1
+                return {"ok": False, "code": "refused",
+                        "error": "10.0.0.5 is on a loopback or private network [allow:private 10.0.0.5]"}
+            return real(msg)
+        self.choice = "session"
+        with mock.patch.object(self.fake, "answer", answer):
+            self.run_tool("browser_navigate", tab_id=7, url="http://10.0.0.5/")
+        self.assertEqual(self.asked[0]["remember_key"], "plugin_rule:browser:allow-private:10.0.0.5")
+        self.assertTrue(browser.approved("browser:allow-private:10.0.0.5"))
+
+    def assert_no_cards_under(self, enable):
+        enable()
+        self.salesforce()
+        self.assertNotIn("error", self.sf_write())
+        self.assertIsNone(self.decision)
+        self.login_page()
+        self.run_tool("browser_eval", tab_id=7, script="return 1", allow_writes=True)
+        self.run_tool("browser_click", tab_id=7, ref="e3")
+        self.fake.inspect = {"url": "https://pay.example.org/", "host": "pay.example.org", "sensitive": ["payment"],
+                             "target": {"kind": "field"}}
+        self.run_tool("browser_type", tab_id=7, ref="e5", text="4242")
+        self.blocked(47, kinds=("private", "hub"))
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.evals(), 2)
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] in ("click", "type")]), 2)
+        self.assertEqual(len(self.lifts()), 1)
+        self.assertEqual(self.last("eval")["args"]["guard"]["allow"],
+                         ["login_script login.example.com", "sensitive_write login.example.com"])
+
+    def test_a_chat_without_approvals_gets_no_person_cards(self):
+        self.assert_no_cards_under(self.yolo)
+
+    def test_approvals_off_gets_no_person_cards(self):
+        p = mock.patch("tools.approval_context._get_approval_mode", lambda: "off")
+        self.assert_no_cards_under(lambda: (p.start(), self.addCleanup(p.stop)))
+
+    def test_subagent_of_a_chat_without_approvals_gets_no_person_cards(self):
+        self.yolo()
+        self.salesforce()
+        out = self.in_subagent(self.sf_write)
+        self.assertNotIn("error", out)
+        self.assertEqual((self.asked, self.evals()), ([], 1))
+
+    def test_yolo_chat_without_a_user_still_runs(self):
+        self.yolo()
+        self.salesforce()
+        with mock.patch.object(browser, "no_user", lambda: True):
+            self.assertNotIn("error", self.sf_write())
+        self.assertEqual(self.evals(), 1)
+
+    def test_batch_on_a_secret_page_offers_the_rules_and_skips_under_yolo(self):
+        self.fake.outline = FORM_OUTLINE.replace('"Name"', '"Verification code"')
+        self.fake.inspect = dict(self.fake.inspect, host="fit.clearance.fedex.com", sensitive=["one_time_code"],
+                                 target={"kind": "field", "host": "fit.clearance.fedex.com", "form": True,
+                                         "label": "Verification code"})
+        self.run_tool("browser_snapshot", tab_id=7)
+        steps = [{"action": "type", "ref": "e2", "text": "123456"}, {"action": "click", "ref": "e2"}]
+        self.choice = "session"
+        out = self.run_tool("browser_batch", tab_id=7, snapshot="none", steps=steps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual([a["remember_key"] for a in self.asked], ["plugin_rule:browser:sensitive:fit.clearance.fedex.com"])
+        out = self.run_tool("browser_batch", tab_id=7, snapshot="none", steps=steps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(self.asked), 1)
+        from tools import approval
+        approval.clear_session(self.KEY)
+        self.yolo()
+        out = self.run_tool("browser_batch", tab_id=7, snapshot="none", steps=steps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(self.asked), 1)
 
 
 if __name__ == "__main__":

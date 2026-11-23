@@ -455,6 +455,7 @@ def plan(b: Any, args: dict, conn: Any) -> tuple[dict, Optional[dict]]:
     budget = max(5.0, b._hook_timeout() / 2 or 15.0)
     pending: list[tuple[int, str]] = []
     confirms: list[int] = []                 # steps whose page asks for the user's OK on every action
+    rules: list[str] = []                    # the person-only rules of those steps
     folded: list[int] = []                   # ... of which the one card of the batch can cover
     entries: Optional[list] = None
     seen: dict[int, dict] = {}               # step number -> what the plan saw of the page and element
@@ -499,6 +500,7 @@ def plan(b: Any, args: dict, conn: Any) -> tuple[dict, Optional[dict]]:
                        "kinds": [k for k in (info.get("sensitive") or []) if isinstance(k, str)]}
         if grant.get("confirm"):
             confirms.append(i)
+            rules.extend(r for r in grant.get("person_rules") or [] if r not in rules)
             if not grant.get("protected_ok"):
                 folded.append(i)
         if changes_page(step, grant):
@@ -509,7 +511,8 @@ def plan(b: Any, args: dict, conn: Any) -> tuple[dict, Optional[dict]]:
     join = [] if ask_now else [(i, k) for i, k in pending if (i, k) not in keep]
     grant = {"batch_rules": [k for _, k in pending]}
     if not ask_now:
-        grant["batch_confirm"] = _one_card(conn.device_id, steps, where, tab, seen, checked, confirms, join)
+        grant["batch_confirm"] = dict(_one_card(conn.device_id, steps, where, tab, seen, checked, confirms, join),
+                                      rules=rules, needs=[k for _, k in join])
     if not keep:
         return grant, None
     lines = [f"{n}. {step_words(s, _label_of(conn.device_id, tab, s.get('ref', '')))}" for n, s in enumerate(steps, 1)]
@@ -713,6 +716,8 @@ class Runner:
 
     def ask(self, text: str) -> None:
         """Ask the user again, on a step that left the approved card."""
+        if self.b.bypass():
+            return
         if self.b.no_user():
             raise StepError("needs the user's OK on a page with secret fields, and no user is present", "approval")
         if not self.b._confirm(text):
@@ -728,7 +733,7 @@ class Runner:
             key = str(approval.get("rule_key") or "")
             if key in self.covered:
                 self.covered_used = True
-            if key not in self.covered and not b.approved(key):
+            if key not in self.covered and not b.approved(key) and not b.bypass():
                 if self.card and not b.no_user():
                     self.ask("This step is not in the steps you approved. " + str(approval.get("message") or ""))
                 else:
@@ -736,6 +741,8 @@ class Runner:
                                     f"not known when it started ({rule_words(key)}). Run this step with its own tool, "
                                     f"then start a new batch", "approval")
         if grant.get("confirm"):
+            if b.person_cleared(grant.get("person_rules")):
+                return grant
             if b.no_user():
                 raise StepError("needs the user's OK on a page with secret fields, and no user is present", "approval")
             text = grant.get("confirm_text") or "Allow this browser action?"
@@ -744,7 +751,7 @@ class Runner:
                 if not why:
                     return grant
                 text = f"This step is not what you approved: {why}. {text}"
-            if not b._confirm(text):
+            if not b._confirm(text, rules=grant.get("person_rules")):
                 raise StepError("the user did not allow this action", "declined")
         return grant
 
@@ -954,8 +961,10 @@ def run(b: Any, args: dict, conn: Any, sid: str) -> str:
     grant = b._take_grant(b._grant_key(b._session(sid), "browser_batch", args))
     runner = Runner(b, args, conn, sid, steps, grant)
     card = grant.get("batch_confirm")
+    if card and (b.bypass() or (b.person_cleared(card.get("rules")) and all(b.approved(k) for k in card.get("needs") or []))):
+        card = None
     if card and not b.no_user():
-        if not b._confirm(card["text"]):
+        if not b._confirm(card["text"], rules=card.get("rules")):
             return json.dumps({"error": "the user did not allow this batch; nothing was run", "code": "declined"},
                               ensure_ascii=False)
         runner.card = card

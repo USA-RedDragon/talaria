@@ -7,7 +7,8 @@ browser control. It never goes to the sandbox, which has no browser.
 ``pre_tool_call`` asks the user, through Hermes's approval gate, the first time per site and
 session before a form submit, a visit to a new site, a script, a saved-login sign-in or a click on a
 Salesforce host. On a page with password, payment or one-time code fields, and for clicks on the device's
-browser.confirm-hosts, the handler asks every time.
+browser.confirm-hosts, the handler asks on a card only a person can answer, with its own rule for
+Allow in this chat and Always allow. A chat without approvals (yolo, approvals.mode off) is not asked.
 With no user present (a scheduled job), only approvals the user gave before count and anything
 else fails at once. The extension checks the same rules again right before it acts, so a page
 that changed after the check cannot slip an action past the user.
@@ -784,21 +785,24 @@ _ALLOW_WORDS = {
 
 def ask_allow(conn: Any, op: str, kind: str, host: str, why: str) -> str:
     """Ask the user to let one refused check pass. Returns "" after Allow, else the reason to add
-    to the refusal. Person-only checks ask every time on a card only a person can answer (never
-    smart approval, yolo or an allowlist) and are refused with no user present; the others go
-    through the approval gate with the rule ``browser:allow-<kind>:<site>``, so Allow for this chat
-    and Allow always hold."""
+    to the refusal. Person-only checks ask on a card only a person can answer (never smart
+    approval or an agent), with the rule ``browser:allow-<kind>:<host>`` for its session and always
+    answers, and are refused with no user present unless that rule holds; the others go through the
+    approval gate with the rule ``browser:allow-<kind>:<site>``. A chat without approvals (yolo or
+    approvals.mode off) lets both pass."""
     where = f"the Firefox on device {conn.name or conn.device_id}"
     what = _ALLOW_WORDS.get(kind, f"let the check {kind} pass on")
     person = kind in PERSON_ONLY or (kind == "scripted" and op == "login")
     text = f"Allow the agent to {what} {host} in {where}? The check said: {why}."
     if person:
-        if no_user():
+        rules = [_rule("allow-" + kind.replace("_", "-") + ("-login" if kind == "scripted" else ""),
+                       site_of(host) or "unknown")] if host else []
+        if no_user() and not person_cleared(rules):
             return ("Only a person can allow this, and no user is present in this run. Report that this step needs "
                     "the user.")
-        return "" if _confirm(text) else "The user did not allow it."
+        return "" if _confirm(text, rules=rules) else "The user did not allow it."
     rule = _rule(_ALLOW_RULES.get(kind, f"allow-{kind}"), (host if kind == "click" else site_of(host)) or "unknown")
-    if approved(rule):
+    if approved(rule) or bypass():
         return ""
     if no_user():
         return (f"It needs the user's approval (rule {rule}), and no user is present in this run. Only \"always\" "
@@ -835,12 +839,16 @@ def _blocked_requests(conn: Any, notes: Any) -> None:
         lift = [k for k in kinds if k != "dns"]
         result = "not lifted"
         if lift and _IN_HANDLER.get():
-            person = any(k in ("private", "hub") for k in lift)
+            person = [k for k in lift if k in ("private", "hub")]
+            rules = [_rule("lift-" + k, site_of(h)) for k in person for h in hosts if site_of(h)]
+            if person and set(lift) - set(person):
+                rules.append(_rule("lift-" + "-".join(sorted(set(lift) - set(person))), "tab"))
             text = f"{line}; allow? Allow lifts that limit for {where}."
-            ok = False
-            if not no_user():
+            ok = bool(person) and person_cleared(rules)
+            asked = not ok
+            if not ok and not no_user():
                 if person:
-                    ok = _confirm(text)
+                    ok = _confirm(text, rules=rules)
                 else:
                     rule = _rule("lift-" + "-".join(sorted(lift)), "tab")
                     try:
@@ -853,7 +861,8 @@ def _blocked_requests(conn: Any, notes: Any) -> None:
                 try:
                     _core().hub().browser_call(conn.device_id, "lift_limits", {"tab_id": tab, "kinds": lift,
                                                                                "hosts": hosts}, 30)
-                    result = "lifted after the user allowed it; the page may need browser_navigate to load again"
+                    result = ("lifted after the user allowed it" if asked else "lifted (allowed in this chat)") + \
+                        "; the page may need browser_navigate to load again"
                 except _core().BrowserError as exc:
                     result = f"could not be lifted: {exc}"
             elif no_user():
@@ -1264,32 +1273,32 @@ def _decide_eval(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dict
         shown = f"{source[:600]}\n{shown}"
     sensitive = [s for s in (info.get("sensitive") or []) if isinstance(s, str)]
     top = str(info.get("top_host") or "")
-    person: list[str] = []  # checks only a person may let pass (section 7.5); each asks every time
+    person: list[str] = []  # checks only a person may let pass (section 7.5), each with its rule
+    rules: list[str] = []
     if info.get("autologin"):
         login_host = top if info.get("top_autologin") else host
         grant["allow"] = [f"login_script {login_host}"]
         person.append(f"{login_host} is a sign-in host where Firefox fills your saved password, so the script could "
                       f"read it")
+        rules.append(_rule("login-script", site_of(login_host)))
     if writes and (info.get("protected") or protected(host) or protected(top)):
         prot = top if protected(top) else host
         grant.setdefault("allow", []).append(f"protected_write {prot}")
         person.append(f"it can change data on {site} (Salesforce or a site in browser.confirm-hosts)")
+        rules.append(_rule("protected-write", site_of(prot)))
     if sensitive and writes:
         grant.setdefault("allow", []).append(f"sensitive_write {host}")
         person.append(f"it can change data on a page with {', '.join(s.replace('_', '-') for s in sensitive)} fields")
+        rules.append(_rule("sensitive-write", site))
     if person:
         grant["confirm"] = sensitive or ["script"]
+        grant["person_rules"] = rules
         grant["confirm_text"] = (f"Allow running a script{' that can change data' if writes else ''} on {site} in {where}? "
-                                 + "; ".join(person) + f". Only you can allow this, each time. Script:\n{shown}")
-        if writes:
-            return grant, {"action": "approve", "rule_key": _rule("script-write", site),
-                           "message": f"Run a script that can change data on {site} in {where} with the user's logins. "
-                                      f"Script:\n{shown}"}
-        return grant, None if approved(_rule("script", site)) or approved(_rule("script-write", site)) else {
-            "action": "approve", "rule_key": _rule("script", site),
-            "message": f"Run a read-only script on {site} in {where} with the user's logins. Script:\n{shown}"}
+                                 + "; ".join(person) + f". Only you can allow this. Script:\n{shown}")
+        return grant, None
     if sensitive:
         grant["confirm"] = sensitive
+        grant["person_rules"] = [_rule("sensitive-script", site)]
         grant["confirm_text"] = (f"Allow running a read-only script on {site} in {where}. The page has "
                                  f"{', '.join(s.replace('_', '-') for s in sensitive)} fields. Script:\n{shown}")
         return grant, None
@@ -1386,11 +1395,12 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
                "typing into" if tool_name == "browser_type" else "clicking")
         grant["confirm"] = sensitive
         grant["login_page"] = True
+        grant["person_rules"] = [_rule("login-page", site_of(login_host))]
         grant["confirm_text"] = (
             f"Allow {how} {('the element' + what_el_of(t)) if what_el_of(t) else 'an element'} on the sign-in page "
             f"{login_host} in {where}? Firefox has a saved login there. "
             + ("the text goes into a password field. " if t.get("field") == "password" else "")
-            + "Every action on this page needs your OK.")
+            + "Only you can allow actions on this page.")
         return grant, None
     on_salesforce = bool(info.get("protected")) or protected(str(info.get("host") or "")) or protected(
         str(info.get("top_host") or ""))
@@ -1413,14 +1423,16 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
                                       f"press Enter or Space on {page} again without asking; \"always\" also lets "
                                       f"scheduled runs do it."}
         grant["confirm"] = sensitive or ["salesforce"]
+        grant["person_rules"] = [_rule("protected-click", page)] + ([_rule("sensitive", page)] if sensitive else [])
         kind_of = "Salesforce" if salesforce else "a site in this device's browser.confirm-hosts"
         grant["confirm_text"] = (f"Allow {how} the element{what_el} on {page} ({kind_of}) in {where}. "
                                  + (f"The page has {', '.join(x.replace('_', '-') for x in sensitive)} fields. "
-                                    if sensitive else "") + "Every click there needs your OK.")
+                                    if sensitive else "") + "Only you can allow clicks there.")
         return grant, None
     if sensitive:
         what = "submitting a form on" if submits else ("following a link from" if link_away else "acting on")
         grant["confirm"] = sensitive
+        grant["person_rules"] = [_rule("sensitive", page)]
         grant["confirm_text"] = (f"Allow {what} {page} in {where}. The page has "
                                  f"{', '.join(s.replace('_', '-') for s in sensitive)} fields.")
         return grant, None
@@ -1514,11 +1526,11 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
         _take_grant(key)
         return approval
     if no_user():
-        if grant.get("confirm"):
+        if grant.get("confirm") and not person_cleared(grant.get("person_rules")):
             _take_grant(key)
             return {"action": "block", "message": (
-                f"{tool_name} was not run: {grant.get('confirm_text') or 'it needs the user'} This asks the user "
-                f"every time, and no user is present in this run (a scheduled job or a one-shot query). Do not "
+                f"{tool_name} was not run: {grant.get('confirm_text') or 'it needs the user'} Only the user "
+                f"can allow this, and no user is present in this run (a scheduled job or a one-shot query). Do not "
                 f"retry it; report that this step needs the user.")}
         if approval and approval.get("login_grant"):
             _take_grant(key)
@@ -1527,7 +1539,8 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
                 _put_grant(key, dict(grant, **out))
                 return None
             return out
-        if approval and not approved(approval.get("rule_key") or "") and not grant.get("device_grant"):
+        if approval and not approved(approval.get("rule_key") or "") and not grant.get("device_grant") \
+                and not bypass():
             _take_grant(key)
             try:
                 told = _jobs().ask_chat(_session(session_id), str(approval.get("rule_key") or ""), tool_name)
@@ -1599,11 +1612,74 @@ def _login_grant_unattended(session_id: str, card: dict, tool_name: str) -> Opti
         f"query). Do not retry it; report that the user can allow it from the job's chat.{told}")}
 
 
-def _confirm(text: str) -> bool:
+def bypass() -> bool:
+    """The chat runs without approvals: its /yolo (the hub's "No approvals in this chat"), the
+    process's --yolo or approvals.mode off. Subagents check under their chat's session key."""
+    try:
+        from tools.approval import is_approval_bypass_active
+        return bool(is_approval_bypass_active())
+    except Exception:
+        return False
+
+
+def person_cleared(rules: Any) -> bool:
+    """A person-only check needs no card: the chat runs without approvals, or the user allowed
+    every one of its rules in this chat or always."""
+    rules = [r for r in (rules or []) if r]
+    return bypass() or (bool(rules) and all(approved(r) for r in rules))
+
+
+def _confirm(text: str, rules: Any = ()) -> bool:
+    """A person-only card (docs/browser.md section 7.5): only a click on it answers, never smart
+    approval or an agent. With rules it offers Allow in this chat and Always allow, recorded under
+    the first rule not yet allowed and then copied to the others; without rules it covers this
+    action only. A chat without approvals, or rules the user already allowed, need no card."""
+    rules = [r for r in (rules or []) if r]
+    if person_cleared(rules):
+        return True
+    from tools.approval import _approval_scope, _persist_choice
+    from tools.approval_context import get_current_session_key
     from tools.approval_prompt import request_elicitation_consent
-    return request_elicitation_consent(
-        text, "Each action on a page with password, payment or one-time code fields needs your OK.",
-        surface="device-browser", title="Allow this browser action?") == "accept"
+    session_key = get_current_session_key()
+    need = [r for r in rules if not approved(r)]
+    remember = "plugin_rule:" + need[0] if need else None
+    if remember:
+        text += (" Allow in this chat (or always) allows " + "; ".join(rule_words(r) for r in need)
+                 + " again without asking.")
+    ok = request_elicitation_consent(
+        text, "Only you can answer this card; the agent and the approval judge cannot.",
+        surface="device-browser", title="Allow this browser action?", remember_key=remember) == "accept"
+    if ok and remember and len(need) > 1:
+        scope = _approval_scope(session_key, remember)
+        if scope:
+            _persist_choice(session_key, "always" if scope == "permanent" else "session",
+                            ["plugin_rule:" + r for r in need[1:]])
+    return ok
+
+
+_PERSON_RULE_WORDS = {
+    "protected-write": "scripts that change data on {}",
+    "protected-click": "clicks, submits and Enter or Space on {}",
+    "login-script": "scripts on the sign-in host {}, where Firefox fills your saved password",
+    "login-page": "actions on the sign-in page of {}, where Firefox fills your saved password",
+    "sensitive-write": "scripts that change data on pages of {} with password, payment or one-time code fields",
+    "sensitive-script": "read-only scripts on pages of {} with password, payment or one-time code fields",
+    "sensitive": "actions on pages of {} with password, payment or one-time code fields",
+    "lift-private": "requests to the loopback or private network host {}",
+    "lift-hub": "requests to the Talaria hub at {}",
+}
+
+
+def rule_words(rule: str) -> str:
+    """What a person-only rule allows, for its card."""
+    _, kind, site = (rule.split(":", 2) + ["", ""])[:3]
+    if kind in _PERSON_RULE_WORDS:
+        return _PERSON_RULE_WORDS[kind].format(site)
+    if kind.startswith("allow-"):
+        return _ALLOW_WORDS.get(kind[6:].replace("-", "_").removesuffix("_login"), f"the check {kind[6:]} on") + " " + site
+    if kind.startswith("lift-"):
+        return f"the {kind[5:].replace('-', ' and ')} limit in agent tabs"
+    return rule
 
 
 # --- results -----------------------------------------------------------------------------------
@@ -2449,14 +2525,14 @@ def _late_grant(tool: str, args: dict, conn: Any) -> dict:
     key = str((approval or {}).get("rule_key") or "")
     if key == _rule("visit", "unknown"):
         return {}  # the page still cannot be read: the extension decides on its own lists, as before
-    if key and not approved(key):
+    if key and not approved(key) and not bypass():
         raise _Refused(_err(f"{tool} was not run: it needs the user's approval (rule {key}), and the check before it "
                             f"could not read the page, so nobody was asked. Try again; approving once with \"always\" "
                             f"in a chat, or adding plugin_rule:{key} to command_allowlist, lets it run unattended.",
                             "approval"))
-    if grant.get("confirm") and no_user():
-        raise _Refused(_err(f"{tool} was not run: {grant.get('confirm_text') or 'it needs the user'} This asks the user "
-                            f"every time, and no user is present in this run.", "approval"))
+    if grant.get("confirm") and no_user() and not person_cleared(grant.get("person_rules")):
+        raise _Refused(_err(f"{tool} was not run: {grant.get('confirm_text') or 'it needs the user'} Only the user "
+                            f"can allow this, and no user is present in this run.", "approval"))
     return grant
 
 
@@ -2762,14 +2838,14 @@ def _decide_late(tool: str, args: dict, req: dict, conn: Any) -> tuple[dict, Opt
     if approval and approval.get("action") == "block":
         return {}, _err(str(approval.get("message") or "blocked"), "refused")
     key = str((approval or {}).get("rule_key") or "")
-    if key and not approved(key):
+    if key and not approved(key) and not bypass():
         return {}, _err(f"{tool} was not run: it needs the user's approval (rule {key}), and the check before it "
                         f"could not read the page, so nobody was asked. Try again; approving once with \"always\" "
                         f"in a chat, or adding plugin_rule:{key} to command_allowlist, lets it run unattended.",
                         "approval")
-    if grant.get("confirm") and no_user():
-        return {}, _err(f"{tool} was not run: {grant.get('confirm_text') or 'it needs the user'} This asks the user "
-                        f"every time, and no user is present in this run.", "approval")
+    if grant.get("confirm") and no_user() and not person_cleared(grant.get("person_rules")):
+        return {}, _err(f"{tool} was not run: {grant.get('confirm_text') or 'it needs the user'} Only the user "
+                        f"can allow this, and no user is present in this run.", "approval")
     return grant, None
 
 
@@ -2797,7 +2873,8 @@ def _act(op: str) -> Callable[[dict, Any, str], str]:
             grant, refusal = _decide_late(tool, args, req, conn)
             if refusal:
                 return refusal
-        if grant.get("confirm") and not _confirm(grant.get("confirm_text") or "Allow this browser action?"):
+        if grant.get("confirm") and not _confirm(grant.get("confirm_text") or "Allow this browser action?",
+                                                 rules=grant.get("person_rules")):
             return _err("the user did not allow this action", "declined")
         req["guard"] = guard_of(grant)
         if op == "type":
@@ -2856,7 +2933,8 @@ def _eval(args: dict, conn: Any, sid: str) -> Any:
         raise ValueError("give script (the body of an async function that ends with return <value>) or script_ref "
                          "(a script file of a skill)")
     grant = _take_grant(_grant_key(_session(sid), "browser_eval", args)) or _late_grant("browser_eval", args, conn)
-    if grant.get("confirm") and not _confirm(grant.get("confirm_text") or "Allow this script?"):
+    if grant.get("confirm") and not _confirm(grant.get("confirm_text") or "Allow this script?",
+                                             rules=grant.get("person_rules")):
         return _err("the user did not allow this script", "declined")
     waited = _wait(args, conn, tab)
     req: dict = {"tab_id": tab, "script": script, "allow_writes": bool(args.get("allow_writes")),
