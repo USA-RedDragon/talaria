@@ -6,7 +6,7 @@ prompt like that block), a ``transform_tool_result`` hook that adds matching pat
 ``subagent_start`` hook that marks delegate children, which may not write project memory while they may not
 write memory, an ``agent_turn_start`` hook that resets the per-turn cap on failed writes, a ``post_compaction`` hook after which
 path notes load again, an ``on_user_rule_extracted`` hook that saves the user's project-wide rules and facts
-(quote-checked by Hermes) to the index without asking and tells the chat how to undo it, a wrapper on Hermes's memory
+(quote-checked by Hermes) to the index without asking and says nothing in the chat, a wrapper on Hermes's memory
 approval replay that applies staged project writes to their project, and one paragraph in the built-in memory tool's description that sends project facts here.
 core.py has the details; dashboard/plugin_api.py has the routes for hermes-hub.
 """

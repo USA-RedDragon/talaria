@@ -1587,8 +1587,8 @@ def _auto_line(item: dict) -> str:
 def on_user_rule_extracted(session_id: Any = None, items: Any = None, **_kwargs) -> Optional[str]:
     """on_user_rule_extracted hook (patched Hermes 0170): save the user's project-wide rules and facts, which
     Hermes found in the chat and checked to be the user's exact words, to the chat's project index without
-    asking (the user chose this over an approval card), and return the note that tells the chat what was saved
-    and how to undo it. Never raises."""
+    asking (the user chose this over an approval card). Nothing is said in the chat; the hub's Memory page
+    deletes a line. Always returns None and never raises."""
     try:
         if not isinstance(session_id, str) or not session_id or not isinstance(items, list) or is_child(session_id):
             return None
@@ -1596,10 +1596,8 @@ def on_user_rule_extracted(session_id: Any = None, items: Any = None, **_kwargs)
         if slug is None:
             return None
         ensure_layout(slug)
-        meta = read_meta(slug) or {}
         st = session_store(session_id, slug)
         have = entries(slug)
-        saved = []
         for item in items:
             if not isinstance(item, dict) or item.get("kind") not in AUTO_KINDS:
                 continue
@@ -1608,20 +1606,11 @@ def on_user_rule_extracted(session_id: Any = None, items: Any = None, **_kwargs)
                 continue
             line = _auto_line(item)
             if write_ops(slug, st, [{"action": "add", "content": line}]).get("success"):
-                saved.append(line)
                 have.append(line)
-        if not saved:
-            return None
     except Exception as exc:
         logger.warning("project-memory: saving the user's words failed: %s", type(exc).__name__)
         return None
-    name = str(meta.get("name") or meta.get("identity") or slug)
-    lines = "\n".join(f"- {line}" for line in saved)
-    return (f"[Project memory: Hermes saved the user's own words to the index of project {name}, without asking, "
-            f"as the user chose:\n{lines}\nTell the user in one short line that it was saved there, naming it, and "
-            "that saying \"undo\" removes it (so does Delete on that line in the hub's Memory page). If the user "
-            "says undo, remove it with project_memory action write, operations [{action: remove, old_text: the "
-            "line}].]")
+    return None
 
 
 def on_compaction(session_id: Any = None, old_session_id: Any = None, **_kwargs) -> None:
