@@ -1,0 +1,629 @@
+From 71b10631f049873f2a8e8a50ce82d77103af8fc5 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 04:51:03 +0000
+Subject: [PATCH] feat(compaction): restore recent files and every loaded skill
+
+---
+ agent/agent_init.py                           |   2 +
+ agent/compaction_restore.py                   | 112 +++++++++++++++
+ agent/compaction_skill_pin.py                 | 108 ++++++++++-----
+ agent/context_compressor.py                   |  32 ++++-
+ agent/context_compressor_prune.py             |   8 +-
+ gateway/run.py                                |   3 +-
+ hermes_cli/config_defaults.py                 |   5 +
+ tests/agent/test_compaction_restore.py        | 128 ++++++++++++++++++
+ tui_gateway/session_compression.py            |   1 +
+ .../context-compression-and-caching.md        |   2 +
+ website/docs/user-guide/configuration.md      |   1 +
+ 11 files changed, 358 insertions(+), 44 deletions(-)
+ create mode 100644 agent/compaction_restore.py
+ create mode 100644 tests/agent/test_compaction_restore.py
+
+diff --git a/agent/agent_init.py b/agent/agent_init.py
+index fcf00084..aec86734 100644
+--- a/agent/agent_init.py
++++ b/agent/agent_init.py
+@@ -1885,6 +1885,8 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
+     with suppress(Exception):
+         agent.context_compressor.decision_ledger_chars = max(
+             0, _parse_config_int(_comp_section.get("decision_ledger_chars", 0), 0))
++        agent.context_compressor.restore_budget_chars = max(
++            0, _parse_config_int(_comp_section.get("restore_budget_chars", 0), 0))
+     # compression.summary_style (legacy): "structured" writes Claude Code's nine-section summary, validated.
+     _style = str(_comp_section.get("summary_style") or "legacy").strip().lower()
+     with suppress(Exception):
+diff --git a/agent/compaction_restore.py b/agent/compaction_restore.py
+new file mode 100644
+index 00000000..ef157b59
+--- /dev/null
++++ b/agent/compaction_restore.py
+@@ -0,0 +1,112 @@
++"""Opt-in ``compression.restore_budget_chars``: the files the session read or wrote last ride the handoff.
++
++After a compaction the touched-files list names paths only, so the model reads them all again (or works from a
++summary of them). With the budget set, up to five files the compacted rows read or wrote, newest first, come
++back on the handoff as they were last seen: the newest ``read_file`` result or ``write_file`` content of each,
++at most 20,000 chars (about 5K tokens) each and the budget in total, scaled down to a tenth of a small window.
++A file patched after it was last seen is left out (its content would be stale), and so is one still in a kept
++row. A restored file is carried to the next handoff the same way until a newer read or write replaces it.
++The same budget lets every skill the session loaded ride the handoff (``compaction_skill_pin``).
++"""
++
++from __future__ import annotations
++
++import re
++from typing import Any, Optional
++
++RESTORED_HEADING = "## Restored Files"
++FILE_MAX_CHARS = 20_000
++FILES_MAX = 5
++WINDOW_SHARE = 0.4  # chars per window token: about a tenth of the window
++_NOTE = (
++    "(Copied by Hermes: the files this session read or wrote last, newest first, as they were then, so the work "
++    "can go on without reading them again. A file may have changed since; read it again before editing it.)"
++)
++_FILE_RE = re.compile(
++    r'<restored-file path="(?P<path>[^"\n]+)" seen="(?P<seen>[^"\n]*)">\n(?P<body>.*?)\n</restored-file>', re.DOTALL)
++_BLOCK_RE = re.compile(r"\n*" + re.escape(RESTORED_HEADING) + r"\n.*?(?=\n## (?!#)|\Z)", re.DOTALL)
++
++
++def budget(total_chars: int, context_length: int) -> int:
++    """*total_chars* scaled to the window: at most a tenth of it (in tokens, about 4 chars each)."""
++    if total_chars <= 0:
++        return 0
++    return min(total_chars, int(context_length * WINDOW_SHARE)) if context_length else total_chars
++
++
++def restored_files(text: str) -> list[tuple[str, str, str]]:
++    """``(path, seen, body)`` of every restored file in *text*, in order."""
++    return [(m.group("path"), m.group("seen"), m.group("body")) for m in _FILE_RE.finditer(text or "")]
++
++
++def strip_restored(text: str) -> str:
++    """*text* without its restored-files section (what the summarizer sees of a previous handoff)."""
++    return _BLOCK_RE.sub("", text or "")
++
++
++def _numbered(text: str, start: int = 1) -> str:
++    return "\n".join(f"{n}|{line}" for n, line in enumerate(text.removesuffix("\n").split("\n"), start))
++
++
++def _seen(message: dict[str, Any], calls: dict[str, tuple]) -> Optional[tuple[str, str, Optional[str]]]:
++    """``(path, how, body)`` when *message* is a file tool result: *body* is the content it showed or wrote,
++    ``None`` for a patch or a result without content (the file changed or was not shown)."""
++    from agent.context_compressor import _json_dict
++
++    if message.get("role") != "tool":
++        return None
++    tool, raw_args = calls.get(str(message.get("tool_call_id") or ""), ("", ""))
++    if tool not in ("read_file", "write_file", "patch"):
++        return None
++    args = _json_dict(raw_args) if isinstance(raw_args, str) else (raw_args or {})
++    path = args.get("path")
++    if not isinstance(path, str) or not path.strip():
++        return None
++    payload = _json_dict(message.get("content"))
++    if tool == "read_file":
++        body = payload.get("content")
++        if payload.get("dedup") or payload.get("error") or not isinstance(body, str) or not body.strip():
++            return None
++        first = int(args.get("offset") or 1)
++        return path, f"read from line {first}" if first > 1 or payload.get("truncated") else "read", body
++    if tool == "write_file" and isinstance(args.get("content"), str) and not payload.get("error"):
++        return path, "written", _numbered(args["content"])
++    return path, "patched", None
++
++
++def restore_files(
++    summary: str, messages: list[dict[str, Any]], head_end: int, tail_start: int, total_chars: int,
++) -> str:
++    """*summary* with the restored-files section for this compaction (unchanged when *total_chars* <= 0)."""
++    if total_chars <= 0:
++        return summary
++    from agent.context_compressor import (
++        _content_text_for_contains, _redact_compaction_text, _tool_calls_by_id, is_compaction_summary_message,
++    )
++
++    calls = _tool_calls_by_id(messages)
++    newest: dict[str, tuple[int, str, Optional[str]]] = {}
++    for i in range(len(messages) - 1, -1, -1):
++        m = messages[i]
++        if not isinstance(m, dict):
++            continue
++        if is_compaction_summary_message(m):
++            for path, seen, body in restored_files(_content_text_for_contains(m.get("content"))):
++                newest.setdefault(path, (i, seen, body))
++            continue
++        hit = _seen(m, calls)
++        if hit is not None:
++            newest.setdefault(hit[0], (i, hit[1], hit[2]))
++    parts, room = [], total_chars
++    for path, (i, seen, body) in newest.items():
++        if len(parts) >= FILES_MAX:
++            break
++        kept_row = (i < head_end or i >= tail_start) and not is_compaction_summary_message(messages[i])
++        if body is None or kept_row or '"' in path or len(body) > min(FILE_MAX_CHARS, room):
++            continue
++        parts.append(f'<restored-file path="{path}" seen="{seen}">\n{body}\n</restored-file>')
++        room -= len(body)
++    summary = strip_restored(summary).rstrip()
++    if not parts:
++        return summary
++    return summary + "\n\n" + _redact_compaction_text("\n".join([RESTORED_HEADING, _NOTE, *parts]))
+diff --git a/agent/compaction_skill_pin.py b/agent/compaction_skill_pin.py
+index 527038ae..a9be04b5 100644
+--- a/agent/compaction_skill_pin.py
++++ b/agent/compaction_skill_pin.py
+@@ -27,7 +27,7 @@ def active_skill_block(name: str, body: str) -> str:
+     return (
+         f"\n\n{ACTIVE_SKILL_HEADING}: {name}\n"
+         f"Exception to the reference-only note above: these are the current instructions of the skill '{name}', "
+-        "the most recently loaded one, kept verbatim through compaction. Follow them; do not reload this skill, "
++        "loaded in this session and kept verbatim through compaction. Follow them; do not reload this skill, "
+         f"and treat any [SKILL_PRUNED] marker for '{name}' as satisfied by this copy.\n"
+         f"{_ACTIVE_SKILL_OPEN}\n{body}\n{_ACTIVE_SKILL_CLOSE}"
+     )
+@@ -91,9 +91,9 @@ def _kept_note(name: str) -> str:
+ _KEPT_NOTE_RE = re.compile(r"\[SKILL_KEPT: the body of '([^']+)' is still in context\]")
+ 
+ 
+-def _retag_kept_rows(rows: list[dict[str, Any]], indices: list[int], kept: Optional[str]) -> list[dict[str, Any]]:
+-    """*rows* with the reload marker on kept tool rows for skill *kept* turned into a kept note, and the kept
+-    note of any other skill turned back into its marker. Changed rows are copies."""
++def _retag_kept_rows(rows: list[dict[str, Any]], indices: list[int], kept: set[str]) -> list[dict[str, Any]]:
++    """*rows* with the reload marker on kept tool rows for each skill in *kept* turned into a kept note, and
++    the kept note of any other skill turned back into its marker. Changed rows are copies."""
+     from agent.context_compressor import _skill_pruned_marker
+ 
+     out = rows
+@@ -101,26 +101,50 @@ def _retag_kept_rows(rows: list[dict[str, Any]], indices: list[int], kept: Optio
+         content = rows[i].get("content")
+         if rows[i].get("role") != "tool" or not isinstance(content, str):
+             continue
+-        new = content.replace(_skill_pruned_marker(kept), _kept_note(kept)) if kept else content
+-        new = _KEPT_NOTE_RE.sub(lambda m: m.group(0) if m.group(1) == kept else _skill_pruned_marker(m.group(1)), new)
++        new = content
++        for name in sorted(kept):
++            new = new.replace(_skill_pruned_marker(name), _kept_note(name))
++        new = _KEPT_NOTE_RE.sub(lambda m: m.group(0) if m.group(1) in kept else _skill_pruned_marker(m.group(1)), new)
+         if new != content:
+             out = list(out) if out is rows else out
+             out[i] = {**rows[i], "content": new}
+     return out
+ 
+ 
++def _skill_loads(message: dict[str, Any], calls: dict[str, tuple]) -> list[tuple[str, Optional[str]]]:
++    """Every skill load in *message*, oldest first: a handoff can carry several active skills."""
++    from agent.context_compressor import _content_text_for_contains, is_compaction_summary_message
++
++    if is_compaction_summary_message(message):
++        return active_skills(_content_text_for_contains(message.get("content")))
++    load = _skill_load(message, calls)
++    return [load] if load else []
++
++
++def _newest_loads(messages: list[dict[str, Any]], calls: dict[str, tuple], every: bool) -> list[tuple[str, Optional[str]]]:
++    """``(name, body)`` of the newest load of each skill, newest first; only the newest one unless *every*."""
++    found: dict[str, Optional[str]] = {}
++    for m in reversed(messages):
++        for name, body in reversed(_skill_loads(m, calls)):
++            found.setdefault(name, body)
++            if not every:
++                return list(found.items())
++    return list(found.items())
++
++
+ def keep_last_skill(
+     summary: str, messages: list[dict[str, Any]], working: list[dict[str, Any]], head_end: int, tail_start: int,
+-    max_chars: int,
++    max_chars: int, total_chars: int = 0,
+ ) -> tuple[str, list[dict[str, Any]], Optional[str]]:
+     """``(summary, working, pinned_name)`` for one compaction. *messages* is the unpruned transcript, *working*
+     its pruned copy whose rows before *head_end* and from *tail_start* stay around the handoff.
+ 
+     The newest skill load in *messages* is kept when a kept row still holds its body, or else when its body is
+-    at most *max_chars*: then it rides *summary* as an active-skill section (``pinned_name``). A kept skill's
+-    reload markers leave the summary and the kept rows. A skill an earlier compaction kept that is not kept
+-    now gets its markers back, also with ``max_chars <= 0`` (the key turned off); with nothing kept earlier
+-    that returns the input unchanged."""
++    at most *max_chars*: then it rides *summary* as an active-skill section (``pinned_name``, the newest one
++    pinned). With *total_chars* above *max_chars*, every skill loaded in the session is kept the same way,
++    newest first, while the pinned bodies fit *total_chars*. A kept skill's reload markers leave the summary
++    and the kept rows. A skill an earlier compaction kept that is not kept now gets its markers back, also
++    with ``max_chars <= 0`` (the key turned off); with nothing kept earlier that returns the input unchanged."""
+     from agent.context_compressor import (
+         _PRUNED_SKILLS_SECTION_HEADING, _content_text_for_contains, _redact_compaction_text,
+         _reinject_pruned_skill_markers, _skill_pruned_marker, _tool_calls_by_id, is_compaction_summary_message,
+@@ -130,42 +154,54 @@ def keep_last_skill(
+     for m in messages:
+         text = _content_text_for_contains(m.get("content"))
+         carried += _KEPT_NOTE_RE.findall(text)
+-        if is_compaction_summary_message(m) and (found := active_skills(text)):
+-            carried.append(found[-1][0])
++        if is_compaction_summary_message(m):
++            carried += [name for name, _ in active_skills(text)]
+     kept_rows = [*range(min(head_end, len(working))), *range(tail_start, len(working))]
+-    name = body = None
+-    held = False
++    held: set[str] = set()
++    pinned: list[tuple[str, str]] = []
+     if max_chars > 0:
+         calls = _tool_calls_by_id(messages)
+-        name, body = next(filter(None, (_skill_load(m, calls) for m in reversed(messages))), (None, None))
+-        held = name is not None and any(
+-            not is_compaction_summary_message(working[i]) and (load := _skill_load(working[i], calls))
+-            and load[0] == name and load[1] for i in kept_rows
+-        )
+-        if not (held or (body is not None and len(body) <= max_chars)):
+-            name = None
+-    working = _retag_kept_rows(working, kept_rows, name)
+-    carried = list(dict.fromkeys(n for n in carried if n != name))
+-    if name is None:
++        room = max(total_chars, max_chars)
++        for name, body in _newest_loads(messages, calls, every=total_chars > max_chars):
++            if any(
++                not is_compaction_summary_message(working[i]) and (load := _skill_load(working[i], calls))
++                and load[0] == name and load[1] for i in kept_rows
++            ):
++                held.add(name)
++            elif body is not None and len(body) <= min(max_chars, room):
++                pinned.append((name, body))
++                room -= len(body)
++    kept = held | {name for name, _ in pinned}
++    working = _retag_kept_rows(working, kept_rows, kept)
++    carried = list(dict.fromkeys(n for n in carried if n not in kept))
++    if not kept:
+         return _reinject_pruned_skill_markers(summary, carried), working, None
+-    marker = _skill_pruned_marker(name)
+-    summary = summary.replace(marker + "\n", "").replace(marker, "")
++    for name in kept:
++        marker = _skill_pruned_marker(name)
++        summary = summary.replace(marker + "\n", "").replace(marker, "")
+     summary = re.sub(r"\n*" + re.escape(_PRUNED_SKILLS_SECTION_HEADING) + r"\s*(?=\n\n## |\Z)", "", summary)
+     summary = _reinject_pruned_skill_markers(summary, carried)
+-    if held:
+-        return summary, working, None
+-    return summary + _redact_compaction_text(active_skill_block(name, body)), working, name
++    for name, body in reversed(pinned):
++        summary += _redact_compaction_text(active_skill_block(name, body))
++    return summary, working, pinned[0][0] if pinned else None
+ 
+ 
+ def keepable_newest_skill(messages: list[dict[str, Any]], max_chars: int) -> Optional[str]:
+     """Name of the newest skill load in *messages* when its body is whole and at most *max_chars* (the skill
+     ``keep_last_skill`` would carry), else ``None``; always ``None`` with ``max_chars <= 0``."""
++    found = keepable_skills(messages, max_chars)
++    return next(iter(found)) if found else None
++
++
++def keepable_skills(messages: list[dict[str, Any]], max_chars: int, total_chars: int = 0) -> list[str]:
++    """Names of the skills ``keep_last_skill`` would carry from *messages* with these caps, newest first."""
+     if max_chars <= 0:
+-        return None
++        return []
+     from agent.context_compressor import _tool_calls_by_id
+ 
+-    calls = _tool_calls_by_id(messages)
+-    load = next(filter(None, (_skill_load(m, calls) for m in reversed(messages))), None)
+-    if load is None or load[1] is None or len(load[1]) > max_chars:
+-        return None
+-    return load[0]
++    room, out = max(total_chars, max_chars), []
++    for name, body in _newest_loads(messages, _tool_calls_by_id(messages), every=total_chars > max_chars):
++        if body is not None and len(body) <= min(max_chars, room):
++            out.append(name)
++            room -= len(body)
++    return out
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index 7d4a541b..df7d14b4 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -592,9 +592,10 @@ def salvage_grown_transcript(
+             and len(content) > _SALVAGE_SUMMARY_MAX_CHARS
+             and _looks_like_compaction_summary(msg, content)
+         ):
++            from agent.compaction_restore import strip_restored
+             from agent.compaction_skill_pin import active_skills_as_markers
+             msg["content"] = elide_keeping_skill_safety_rule(
+-                active_skills_as_markers(content), _SALVAGE_SUMMARY_MAX_CHARS) + "\n\n" + _SUMMARY_END_MARKER
++                strip_restored(active_skills_as_markers(content)), _SALVAGE_SUMMARY_MAX_CHARS) + "\n\n" + _SUMMARY_END_MARKER
+     _prune_stale_reasoning_replay(out)
+     if estimate_messages_tokens_rough(out) >= budget:
+         _salvage_reduce_todo_snapshot(out)
+@@ -2858,6 +2859,9 @@ class ContextCompressor(
+         self.collapse_agent_messages = False
+         # compression.decision_ledger_chars (set by agent init): the decision ledger rides the handoff. 0 = off.
+         self.decision_ledger_chars = 0
++        # compression.restore_budget_chars (set by agent init): recent files and every loaded skill ride the
++        # handoff up to this many chars each. 0 = off (only the newest skill, per keep_last_skill_chars).
++        self.restore_budget_chars = 0
+         # compression.summary_style (set by agent init): "legacy" (upstream) or "structured" (Claude Code's layout).
+         self.summary_style = "legacy"
+         self._last_structured_summary_path = ""
+@@ -5240,11 +5244,12 @@ Write only the summary body. Do not include any preamble or prefix."""
+ 
+         summary_idx, summary_body = summary_hits[-1]
+         if not self._previous_summary:
++            from agent.compaction_restore import strip_restored
+             from agent.compaction_skill_pin import active_skills_as_markers
+             from agent.decision_ledger import strip_block
+-            # The ledger rides outside the summary: the summarizer never rewrites it.
++            # The ledger and restored files ride outside the summary: the summarizer never rewrites them.
+             self._previous_summary = "\n\n".join(
+-                strip_block(active_skills_as_markers(body)) for _, body in summary_hits if body
++                strip_block(strip_restored(active_skills_as_markers(body))) for _, body in summary_hits if body
+             ) or self._previous_summary
+         # Zero-user provenance (#64650) rides on the newest handoff hit.
+         provenance = messages[summary_idx].get(COMPRESSED_SUMMARY_HAS_USER_TURN_KEY)
+@@ -5651,6 +5656,7 @@ Write only the summary body. Do not include any preamble or prefix."""
+         summary, messages = self._keep_last_skill(
+             summary, canonical_messages, messages, compress_start, max(compress_end, scan.tail_start),
+         )
++        summary = self._restore_files(summary, canonical_messages, compress_start, max(compress_end, scan.tail_start))
+         summary = self._attach_decision_ledger(
+             summary, canonical_messages, compress_start, max(compress_end, scan.tail_start),
+         )
+@@ -5666,12 +5672,30 @@ Write only the summary body. Do not include any preamble or prefix."""
+         from agent.compaction_skill_pin import keep_last_skill
+ 
+         summary, messages, pinned = keep_last_skill(
+-            summary, canonical, messages, head_end, tail_start, self.keep_last_skill_chars,
++            summary, canonical, messages, head_end, tail_start, self.keep_last_skill_chars, self._restore_budget(),
+         )
+         if pinned and not self.quiet_mode:
+             logger.info("Compaction kept the body of skill %r on the handoff", pinned)
+         return summary, messages
+ 
++    def _restore_budget(self) -> int:
++        """``compression.restore_budget_chars`` scaled to this model's window (0 = off)."""
++        from agent.compaction_restore import budget
++
++        return budget(getattr(self, "restore_budget_chars", 0), getattr(self, "context_length", 0) or 0)
++
++    def _restore_files(
++        self, summary: str, canonical: list[dict[str, Any]], head_end: int, tail_start: int,
++    ) -> str:
++        """``compression.restore_budget_chars``: the files read or written last ride the handoff."""
++        from agent.compaction_restore import restore_files
++
++        try:
++            return restore_files(summary, canonical, head_end, tail_start, self._restore_budget())
++        except Exception as exc:  # restoring files must never cost a compaction
++            logger.warning("Restoring files on the handoff failed; the handoff lists their paths only: %s", exc)
++            return summary
++
+     def _attach_decision_ledger(
+         self, summary: str, canonical: list[dict[str, Any]], start: int, end: int,
+     ) -> str:
+diff --git a/agent/context_compressor_prune.py b/agent/context_compressor_prune.py
+index caa3739a..7918fdd1 100644
+--- a/agent/context_compressor_prune.py
++++ b/agent/context_compressor_prune.py
+@@ -74,11 +74,13 @@ class ProactivePruneMixin:
+             return messages, 0
+         # compression.keep_last_skill_chars: the skill the next compaction would keep stays whole here too;
+         # a prune that demoted it first would leave compaction only a reload marker to carry.
+-        from agent.compaction_skill_pin import keepable_newest_skill
+-        _keep = keepable_newest_skill(messages, getattr(self, "keep_last_skill_chars", 0))
++        from agent.compaction_skill_pin import keepable_skills
++        _restore = getattr(self, "_restore_budget", None)
++        _keep = keepable_skills(messages, getattr(self, "keep_last_skill_chars", 0),
++                                _restore() if callable(_restore) else 0)
+         pruned_msgs, pruned_count = self._prune_old_tool_results(
+             messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=None, min_prune_chars=self.proactive_prune_min_result_chars,
+-            keep_skills=frozenset([_keep] if _keep else []),
++            keep_skills=frozenset(_keep),
+         )
+         from agent.context_compressor_tail import with_pruned_row_skill_safety_rule
+         pruned_msgs = with_pruned_row_skill_safety_rule(messages, pruned_msgs)
+diff --git a/gateway/run.py b/gateway/run.py
+index a607d4cd..8b2c10c8 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -4101,7 +4101,8 @@ class GatewayRunner(
+         ("compression", "proactive_prune_min_result_chars"),
+         ("compression", "proactive_prune_min_reclaim_tokens"),
+         ("compression", "min_tail_user_messages"), ("compression", "keep_last_skill_chars"),
+-        ("compression", "decision_ledger_chars"), ("compression", "summary_style"),
++        ("compression", "decision_ledger_chars"), ("compression", "restore_budget_chars"),
++        ("compression", "summary_style"),
+         ("agent", "disabled_toolsets"),
+         ("memory", "provider"), ("context", "collapse_agent_messages"), ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
+         ("checkpoints", "max_total_size_mb"), ("checkpoints", "max_file_size_mb"))
+diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
+index 693688dc..45b6ae20 100644
+--- a/hermes_cli/config_defaults.py
++++ b/hermes_cli/config_defaults.py
+@@ -605,6 +605,11 @@ DEFAULT_CONFIG = {
+         # each compaction and re-attached verbatim on the handoff, bounded to this many chars; older settled
+         # entries move to $HERMES_HOME/decision-ledger/. Also offers the ledger tool. 0 = off.
+         "decision_ledger_chars": 0,
++        # restore_budget_chars: opt-in — after a compaction up to five files the session read or wrote last
++        # (at most 20,000 chars each) and every skill it loaded (each up to keep_last_skill_chars) ride the
++        # handoff, up to this many chars for files and as many for skills, at most a tenth of the window.
++        # 0 = off (paths only, and only the newest skill).
++        "restore_budget_chars": 0,
+         # summary_style: "legacy" = upstream's 13-section summary; "structured" = Claude Code's nine
+         # sections in at most about 2,000 words; "compact" = three short model sections (request, key
+         # facts one per line, current work) for small models. Both new styles copy the user's messages,
+diff --git a/tests/agent/test_compaction_restore.py b/tests/agent/test_compaction_restore.py
+new file mode 100644
+index 00000000..4c28f25a
+--- /dev/null
++++ b/tests/agent/test_compaction_restore.py
+@@ -0,0 +1,128 @@
++"""``compression.restore_budget_chars``: recent files and every loaded skill ride the handoff."""
++
++import json
++from unittest.mock import MagicMock, patch
++
++from agent import compaction_restore as cr
++from agent.compaction_skill_pin import active_skills, keepable_skills
++from agent.context_compressor import ContextCompressor, _skill_pruned_marker
++
++
++def _call(cid, name, args, result):
++    return [
++        {"role": "assistant", "content": "", "tool_calls": [
++            {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]},
++        {"role": "tool", "tool_call_id": cid, "content": json.dumps(result)},
++    ]
++
++
++def _read(cid, path, body):
++    return _call(cid, "read_file", {"path": path}, {"content": body, "total_lines": body.count("\n") + 1})
++
++
++def _skill(cid, name, body):
++    return _call(cid, "skill_view", {"name": name}, {"success": True, "name": name, "content": body})
++
++
++def _session():
++    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "fix the intro"}]
++    msgs += _read("r1", "src/intro.py", "1|def intro():\n2|    skip()")
++    msgs += _read("r2", "src/menu.py", "1|MENU = 1")
++    msgs += _call("p1", "patch", {"path": "src/menu.py", "old_string": "1", "new_string": "2"}, {"success": True})
++    msgs += _call("w1", "write_file", {"path": "docs/progress-ui.md", "content": "# Progress UI\nbar, eta"},
++                  {"bytes_written": 22})
++    msgs += _read("r3", "huge.log", "1|" + "x" * (cr.FILE_MAX_CHARS + 10))
++    msgs += [{"role": "assistant", "content": "Done."}, {"role": "user", "content": "next"},
++             {"role": "assistant", "content": "ok"}]
++    return msgs
++
++
++def test_budget_scales_to_the_window():
++    assert cr.budget(0, 200_000) == 0
++    assert cr.budget(100_000, 1_000_000) == 100_000
++    assert cr.budget(100_000, 64_000) == 25_600
++
++
++def test_recent_files_ride_the_handoff_newest_first():
++    msgs = _session()
++    out = cr.restore_files("## 1. Primary Request and Intent\nWork.", msgs, 2, len(msgs) - 2, 100_000)
++    paths = [p for p, _, _ in cr.restored_files(out)]
++    assert paths == ["docs/progress-ui.md", "src/intro.py"]  # menu.py was patched since; the log is too big
++    assert "1|# Progress UI\n2|bar, eta" in out and "2|    skip()" in out
++    assert cr.strip_restored(out) == "## 1. Primary Request and Intent\nWork."
++    assert cr.restore_files("s", msgs, 2, len(msgs) - 2, 0) == "s"
++
++
++def test_a_file_still_in_a_kept_row_is_not_copied():
++    msgs = _session()
++    out = cr.restore_files("s", msgs, 2, 3, 100_000)
++    assert not cr.restored_files(out)
++
++
++def test_at_most_five_files():
++    msgs = [{"role": "system", "content": "sys"}]
++    for i in range(8):
++        msgs += _read(f"r{i}", f"f{i}.py", f"1|v{i}")
++    msgs += [{"role": "user", "content": "go"}, {"role": "assistant", "content": "ok"}]
++    out = cr.restore_files("s", msgs, 1, len(msgs) - 2, 100_000)
++    assert [p for p, _, _ in cr.restored_files(out)] == [f"f{i}.py" for i in (7, 6, 5, 4, 3)]
++
++
++def _compressor():
++    with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
++        c = ContextCompressor(model="test/model", quiet_mode=True, protect_first_n=1, protect_last_n=2)
++    c.restore_budget_chars = 100_000
++    c.keep_last_skill_chars = 20_000
++    return c
++
++
++def _compress(c, msgs):
++    response = MagicMock()
++    response.choices = [MagicMock()]
++    response.choices[0].message.content = "## Goal\nWork."
++    with (
++        patch.object(c, "_find_tail_cut_by_tokens", return_value=len(msgs) - 2),
++        patch("agent.context_compressor.call_llm", return_value=response) as call,
++    ):
++        return c.compress(msgs, force=True), call
++
++
++def _handoff(result):
++    return next(m["content"] for m in result if ContextCompressor.classify_summary_content(m.get("content")))
++
++
++def test_files_and_skills_survive_two_compactions_and_stay_out_of_the_summarizer():
++    c = _compressor()
++    msgs = _session()
++    msgs[-3:-3] = _skill("s1", "kicad", "# kicad\nRULE: run DRC.") + _skill("s2", "jlc-order", "# jlc\nRULE: BOM first.")
++    out, _ = _compress(c, msgs)
++    first = _handoff(out)
++    assert [p for p, _, _ in cr.restored_files(first)] == ["docs/progress-ui.md", "src/intro.py"]
++    assert sorted(n for n, _ in active_skills(first)) == ["jlc-order", "kicad"]
++    more = out + [{"role": "user", "content": f"step {i}"} for i in range(3)]
++    more += [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}, {"role": "assistant", "content": "ok"}]
++    out2, call = _compress(c, more)
++    second = _handoff(out2)
++    assert [p for p, _, _ in cr.restored_files(second)] == ["docs/progress-ui.md", "src/intro.py"]
++    assert sorted(n for n, _ in active_skills(second)) == ["jlc-order", "kicad"]
++    assert second.count(cr.RESTORED_HEADING) == 1
++    prompt = call.call_args_list[0].kwargs["messages"][0]["content"]
++    assert "2|    skip()" not in prompt and "RULE: run DRC." not in prompt
++
++
++def test_without_the_budget_only_the_newest_skill_is_kept():
++    c = _compressor()
++    c.restore_budget_chars = 0
++    msgs = _session()
++    msgs[-3:-3] = _skill("s1", "kicad", "# kicad\nRULE: run DRC.") + _skill("s2", "jlc-order", "# jlc\nRULE: BOM first.")
++    handoff = _handoff(_compress(c, msgs)[0])
++    assert [n for n, _ in active_skills(handoff)] == ["jlc-order"]
++    assert _skill_pruned_marker("kicad") in handoff and not cr.restored_files(handoff)
++
++
++def test_keepable_skills_follow_the_same_caps():
++    msgs = _skill("s1", "a", "x" * 100) + _skill("s2", "b", "y" * 300) + _skill("s3", "c", "z" * 50)
++    assert keepable_skills(msgs, 400) == ["c"]
++    assert keepable_skills(msgs, 400, 1000) == ["c", "b", "a"]
++    assert keepable_skills(msgs, 200, 1000) == ["c", "a"]
++    assert keepable_skills(msgs, 300, 360) == ["c", "b"]
+diff --git a/tui_gateway/session_compression.py b/tui_gateway/session_compression.py
+index 2b44da12..8abf045f 100644
+--- a/tui_gateway/session_compression.py
++++ b/tui_gateway/session_compression.py
+@@ -82,6 +82,7 @@ _COMPRESSION_INT_KEYS = (
+     ("min_tail_user_messages", 1, 1),
+     ("keep_last_skill_chars", 0, 0),
+     ("decision_ledger_chars", 0, 0),
++    ("restore_budget_chars", 0, 0),
+ )
+ 
+ 
+diff --git a/website/docs/developer-guide/context-compression-and-caching.md b/website/docs/developer-guide/context-compression-and-caching.md
+index 1ca904ea..fca355ef 100644
+--- a/website/docs/developer-guide/context-compression-and-caching.md
++++ b/website/docs/developer-guide/context-compression-and-caching.md
+@@ -294,6 +294,7 @@ compression:
+   keep_last_skill_chars: 0   # Opt-in: keep the newest skill body up to N chars (default: 0 = off)
+   summary_style: legacy      # legacy | structured | compact (validated, with fallbacks)
+   decision_ledger_chars: 0   # Opt-in: decision ledger on every handoff, up to N chars (default: 0 = off)
++  restore_budget_chars: 0    # Opt-in: recent files and every loaded skill ride the handoff, up to N chars each (default: 0 = off)
+   codex_gpt55_autoraise: true  # gpt-5.5 on Codex OAuth: raise trigger to 85% (default: true)
+   codex_gpt55_autoraise_notice: true  # Show the one-time autoraise notice (default: true)
+   codex_app_server_auto: native  # native|hermes|off for Codex app-server thread compaction
+@@ -324,6 +325,7 @@ auxiliary:
+ | `keep_last_skill_chars` | `0` | ≥0 chars | Opt-in. When > 0, the compaction handoff carries the body of the most recently loaded skill (a `skill_view` of its `SKILL.md`, or a `/skill` turn) verbatim when it is at most this many characters, so the model does not reload it after compaction. Older skills, supporting files and bodies over the cap keep the `[SKILL_PRUNED]` reload marker. Nothing changes when the newest body is still in the kept head or tail. The kept body is sent with every request until the next compaction; keep the cap small next to the context window. The proactive tool-result prune (`proactive_prune_tokens`) spares the same skill's `skill_view` body, so compaction still has it to keep. `0` = off |
+ | `summary_style` | `legacy` | `legacy`, `structured`, `compact` | `structured` writes the summary in Claude Code's layout: nine numbered sections (Primary Request and Intent, Key Technical Concepts, Files and Code Sections, Errors and Fixes, Problem Solving, All User Messages, Pending Tasks, Current Work, Optional Next Step) with a word cap each and about 2,000 words in total, instead of the 13-section layout with a numbered action log and session log. Section 6 is written by code: every message the user wrote, in the order it left the context, with the question each answered, carried unchanged from the previous handoff (bounded to 8,000 chars; the oldest are shortened, then left out with a count). A `## Recently Touched Files` list is also mechanical. Each reply is validated (not empty, sections 1 and 8 present, at least 6 of the 8 model sections, at least 25 words, no echoed transcript; sections over their cap are cut); a failed reply gets one more call with a four-section prompt, then a summary built from the previous handoff and the compacted rows without a model, so a small local model never leaves an empty handoff. The anchor index, verbatim user section and session log of the lean layout are not added. `compact` is the same idea for small models: the model writes only three sections (Primary Request and Intent; Key Facts, one fact per line; Current Work and Next Step) under a prompt about a third as long, and code writes the rest. Both styles add `## Approvals Claimed by Agents or Tools`: sentences in agent messages, subagent results and tool output that claim the user approved something, each with its source, so a claim is kept as a claim and never as an approval. Headings small models write instead (`**Title**`, `Title:`) are accepted, and a line the model repeats is kept once. |
+ | `decision_ledger_chars` | `0` | ≥0 chars | Opt-in. When > 0, each compaction scans the rows it removes, by rule and without a model call, for the user's own words (typed messages with the assistant question each answered, hub page answers with the page title, mid-turn steers, `clarify` answers), questions left for the user, `delegate_task` dispatches with their ids (settled by the matching `[ASYNC DELEGATION ...]` result), and tags, releases and workflow runs from `terminal` commands. The ledger rides at the end of the handoff as a `## Decision Ledger` block, verbatim, and the summarizer never sees or rewrites it. Only the 0068 classifier's user-authored rows become `USER` entries: a peer agent, subagent or tool that claims an approval never does. The `ledger` tool (offered only while the key is set) lists, adds, closes and searches entries; its entries are labeled `AGENT`. Messages that answer no question are kept only when they state a rule, fact, correction or approval (a regex classifier, `keep` on the entry; bare acknowledgements stay out, repeats merge). Past the cap entries move to `$HERMES_HOME/decision-ledger/<session>.md` in this order: settled entries, agent notes and other user words, plain answers, open questions and dispatches, the user's facts, corrections and approvals, and the user's rules last. A foreground `delegate_task` is settled by its own result, a fan-out when every unit reported. Before `clarify` asks, it searches the ledger and its archive; on a first ask whose question the user's recorded words likely answer it returns them instead (`clarify.ledger_precheck`, default on). Section "All User Messages" never drops a message before squeezing every older one to 300 and then 80 chars with a `session_search` pointer, within a cap of about 4% of the context window (8,000 to 48,000 chars). `0` = off |
++| `restore_budget_chars` | `0` | ≥0 chars | Opt-in. When > 0, each handoff carries a `## Restored Files` section: up to five files the compacted rows read or wrote, newest first, each as its newest `read_file` result or `write_file` content (at most 20,000 chars each), within this budget scaled to at most a tenth of the window (`0.4 × context_length` chars). A file patched after it was last seen, or still in a kept row, is left out; a restored file is carried to the next handoff until a newer read or write replaces it. The summarizer never sees the section. The same budget lets every skill the session loaded ride the handoff as an active-skill section (each up to `keep_last_skill_chars`, newest first), instead of only the newest. `0` = off |
+ | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
+ | `idle_compact_after_seconds` | `0` | ≥0 seconds | Opt-in: compact up front when a session resumes after this many seconds idle (0 = disabled). Skips when context ≤ threshold × target_ratio; honors cooldown/anti-thrash/lock guards |
+ | `codex_gpt55_autoraise` | `true` | bool | Raise the trigger to 85% for gpt-5.4/5.5/5.6 and gpt-6 Astra on the ChatGPT Codex OAuth route (see below). Set `false` to keep the global `threshold` |
+diff --git a/website/docs/user-guide/configuration.md b/website/docs/user-guide/configuration.md
+index 81b24690..806fe098 100644
+--- a/website/docs/user-guide/configuration.md
++++ b/website/docs/user-guide/configuration.md
+@@ -1104,6 +1104,7 @@ compression:
+   keep_last_skill_chars: 0                          # Opt-in: the handoff keeps the newest skill body up to this many chars instead of a reload marker (0 = off)
+   summary_style: legacy                             # legacy | structured (Claude Code's nine sections) | compact (three sections, for small models); both validated with fallbacks
+   decision_ledger_chars: 0                          # Opt-in: a decision ledger rides every handoff verbatim, bounded to this many chars, plus the ledger tool (0 = off)
++  restore_budget_chars: 0                           # Opt-in: after a compaction the 5 files read or written last and every loaded skill ride the handoff, up to N chars each (at most a tenth of the window; 0 = off)
+ 
+ # The summarization model/provider is configured under auxiliary:
+ auxiliary:
+-- 
+2.56.0
+

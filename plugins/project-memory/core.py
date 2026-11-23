@@ -1576,6 +1576,15 @@ def _forget_path_note(name: str) -> None:
             seen.discard(name)
 
 
+def on_compaction(session_id: Any = None, old_session_id: Any = None, **_kwargs) -> None:
+    """post_compaction hook: the compacted tool results took the path notes with them, so each loads again on
+    the next matching read."""
+    with _LOADED_LOCK:
+        for sid in (session_id, old_session_id):
+            if isinstance(sid, str):
+                _LOADED.pop(sid, None)
+
+
 def _tool_paths(tool_name: str, args: dict) -> list[str]:
     path = args.get("path")
     if isinstance(path, str) and path.strip():

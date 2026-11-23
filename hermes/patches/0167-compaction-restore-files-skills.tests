@@ -1,0 +1,11 @@
+# New cases in tests/agent/test_compaction_restore.py (files and skills across two compactions, caps, window scaling)
+# The skill pin, the proactive prune that spares kept skills, and the compressor and config paths this changes
+tests/agent/test_compaction_skill_pin.py
+tests/agent/test_compaction_skill_pin_prune.py
+tests/agent/test_context_compressor.py
+tests/agent/test_proactive_tool_result_pruning.py
+tests/agent/test_ghost_skill_pruning.py
+tests/agent/test_compression_skill_safety_single_copy.py
+tests/agent/test_proactive_prune_config.py
+tests/tui_gateway/test_compression_config_hot_reload.py
+tests/hermes_cli/test_config.py

@@ -265,6 +265,18 @@ def test_a_rewritten_path_note_loads_again(mem, slug, monkeypatch):
     assert "New rule." in mem.on_tool_result(tool_name="read_file", args=args, result="ok", session_id="s")
 
 
+def test_a_path_note_loads_again_after_a_compaction(mem, slug, monkeypatch):
+    notes_setup(mem, slug, monkeypatch)
+    args = {"path": "/w/demo/src/ppu/a.rs"}
+    assert mem.on_tool_result(tool_name="read_file", args=args, result="ok", session_id="s")
+    assert mem.on_tool_result(tool_name="read_file", args=args, result="ok", session_id="s") is None
+    assert mem.on_tool_result(tool_name="read_file", args=args, result="ok", session_id="t")
+    mem.on_compaction(session_id="s2", old_session_id="s", kind="auto")
+    assert "Keep the dot-accurate loop." in mem.on_tool_result(tool_name="read_file", args=args, result="ok",
+                                                               session_id="s")
+    assert mem.on_tool_result(tool_name="read_file", args=args, result="ok", session_id="t") is None
+
+
 def test_the_probe_records_the_repository_top(mem, monkeypatch):
     slug = project(mem)
     with mem._locked():

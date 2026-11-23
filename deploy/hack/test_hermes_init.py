@@ -226,7 +226,8 @@ class LongChatDefaults(unittest.TestCase):
         got = self.run_init()
         self.assertEqual(got["context"], {"collapse_agent_messages": True})
         self.assertEqual(got["compression"], {"keep_last_skill_chars": 20000, "proactive_prune_tokens": 100000,
-                                              "summary_style": "compact", "decision_ledger_chars": 6000})
+                                              "summary_style": "compact", "decision_ledger_chars": 6000,
+                                              "restore_budget_chars": 100000})
         self.assertIs(got["approvals"]["smart_provenance"], True)
 
     def test_explicit_values_win(self):
@@ -235,7 +236,7 @@ class LongChatDefaults(unittest.TestCase):
         self.assertEqual(got["memory"], {"provider": "builtin"})
         self.assertEqual(got["compression"], {"threshold": 0.7, "proactive_prune_tokens": 0,
                                               "keep_last_skill_chars": 20000, "summary_style": "compact",
-                                              "decision_ledger_chars": 6000})
+                                              "decision_ledger_chars": 6000, "restore_budget_chars": 100000})
         got = self.run_init({"compression": {"summary_style": "legacy", "decision_ledger_chars": 0}})
         self.assertEqual(got["compression"]["summary_style"], "legacy")
         self.assertEqual(got["compression"]["decision_ledger_chars"], 0)
@@ -255,7 +256,7 @@ class StockDefaults(unittest.TestCase):
              "agent": {"max_turns": 90}, "gateway": None}
     TALARIA = {"compression.keep_last_skill_chars": 20000, "compression.proactive_prune_tokens": 100000,
                "compression.summary_style": "compact", "compression.decision_ledger_chars": 6000,
-               "gateway.replay_buffer_events": 0, "vision.resize_mode": "fit", "approvals.smart_provenance": True}
+               "compression.restore_budget_chars": 100000, "gateway.replay_buffer_events": 0, "vision.resize_mode": "fit", "approvals.smart_provenance": True}
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
