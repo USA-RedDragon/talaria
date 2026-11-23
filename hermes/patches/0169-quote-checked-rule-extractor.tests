@@ -1,0 +1,15 @@
+# New cases in tests/agent/test_rule_extractor.py (route order and fallback, exact-quote check, the complaint
+# and a peer agent's words never kept, cancel on a new turn, two compactions into the system prompt, a
+# withdrawal leaving the live prompt, the tail note for a recurring rule)
+# The turn start, turn end and per-turn note paths, the ledger and the pinned block this changes
+tests/agent/test_pinned_rules.py
+tests/agent/test_ledger_user_facts.py
+tests/agent/test_decision_ledger.py
+tests/agent/test_turn_context.py
+tests/agent/test_turn_facade_lease.py
+tests/agent/test_turn_finalizer_cleanup_guard.py
+tests/agent/test_turn_finalizer_final_response_persistence.py
+tests/agent/test_system_prompt_restore.py
+tests/agent/test_skills_index_delta.py
+tests/agent/test_background_review.py
+tests/hermes_cli/test_config.py

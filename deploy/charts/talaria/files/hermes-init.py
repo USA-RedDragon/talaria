@@ -237,9 +237,14 @@ DEFAULTS = {
     # eval this kept recall on models from qwen3.5:2b to Claude Opus through three compactions, with the fewest
     # wrong attributions and about 60% fewer summarizer tokens than upstream's layout. After a compaction the five
     # files read or written last (5K tokens each) and every loaded skill come back on the handoff, up to 25K tokens
-    # each and a tenth of the window, as Claude Code restores them (patched Hermes 0167).
+    # each and a tenth of the window, as Claude Code restores them (patched Hermes 0167). The user's rules, facts,
+    # corrections and approvals ride a "Standing rules from the user" block of the system prompt, about 2K tokens,
+    # rebuilt at each compaction and when one is withdrawn (0168), and after each turn a small model on the haiku
+    # subagent route (the local one when it fails) finds the rules said in plain words, kept only with an exact
+    # quote of the user's own message (0169); a route name the install does not have is skipped.
     "compression": {"keep_last_skill_chars": 20000, "proactive_prune_tokens": 100000,
-                    "summary_style": "compact", "decision_ledger_chars": 6000, "restore_budget_chars": 100000},
+                    "summary_style": "compact", "decision_ledger_chars": 6000, "restore_budget_chars": 100000,
+                    "pin_user_rules_chars": 8000, "rule_extractor_routes": ["haiku", "local"]},
     # Smart approval judges each risky step by who asked for it (patched Hermes 0077): only the user's own words
     # can clear a force push, a deletion or a publish, never a file, page, script output or another agent, and a
     # block names its rule. It takes effect with approvals.mode: smart.
