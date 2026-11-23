@@ -277,6 +277,23 @@ def test_a_path_note_loads_again_after_a_compaction(mem, slug, monkeypatch):
     assert mem.on_tool_result(tool_name="read_file", args=args, result="ok", session_id="t") is None
 
 
+def test_the_users_project_words_are_saved_without_asking_with_an_undo(mem, slug, monkeypatch):
+    monkeypatch.setattr(mem, "_approval_on", lambda: True)  # an approval card is never used for these
+    monkeypatch.setattr(mem, "is_child", lambda sid: sid == "child")
+    items = [{"kind": "fact", "quote": "hold Plus  (the Switch controller button) to skip a cutscene",
+              "at": "2026-11-21", "id": "L00aa01"},
+             {"kind": "approval", "quote": "The mockup looks good, build it."},
+             {"kind": "rule", "quote": ""}]
+    note = mem.on_user_rule_extracted(session_id="s1", items=items)
+    line = 'The user, 2026-11-21 (fact): "hold Plus (the Switch controller button) to skip a cutscene"'
+    assert mem.entries(slug) == [line]
+    assert line in note and '"undo"' in note and "old_text" in note and "demo" in note
+    assert mem.on_user_rule_extracted(session_id="s1", items=items) is None  # saved once
+    assert mem.on_user_rule_extracted(session_id="child", items=items[:1]) is None
+    assert mem.on_user_rule_extracted(session_id="s1", items="x") is None
+    assert write(mem, {"action": "remove", "old_text": line})["success"] and mem.entries(slug) == []
+
+
 def test_the_probe_records_the_repository_top(mem, monkeypatch):
     slug = project(mem)
     with mem._locked():

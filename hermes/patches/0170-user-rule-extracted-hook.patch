@@ -1,0 +1,216 @@
+From d408bb4d6bd60faf40ec1c442a0245110f270ef6 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 05:18:49 +0000
+Subject: [PATCH] feat(plugins): hand project-scope user rules to
+ on_user_rule_extracted
+
+---
+ agent/rule_extractor.py                    | 41 ++++++++++++-
+ agent/turn_context.py                      |  4 +-
+ hermes_cli/plugins.py                      |  4 ++
+ tests/agent/test_rule_extractor_project.py | 68 ++++++++++++++++++++++
+ website/docs/user-guide/features/hooks.md  | 20 +++++++
+ 5 files changed, 134 insertions(+), 3 deletions(-)
+ create mode 100644 tests/agent/test_rule_extractor_project.py
+
+diff --git a/agent/rule_extractor.py b/agent/rule_extractor.py
+index 50a5c93f..f60fa4a9 100644
+--- a/agent/rule_extractor.py
++++ b/agent/rule_extractor.py
+@@ -319,8 +319,45 @@ def schedule(agent: Any, messages: list[dict[str, Any]],
+ 
+ 
+ def _after(agent: Any, snapshot: list[dict[str, Any]], found: list[dict[str, Any]]) -> None:
+-    """A withdrawal takes its rule out of the live system prompt now; new items wait for the next compaction."""
++    """A withdrawal takes its rule out of the live system prompt now; new items wait for the next compaction.
++    Project-scope items go to the ``on_user_rule_extracted`` plugins (project memory), whose notes reach the
++    session's next turn."""
++    session_id = getattr(agent, "session_id", "") or ""
+     if any(r["kind"] == "revocation" for r in found):
+         from agent import pinned_rules
+ 
+-        pinned_rules.refresh(agent, snapshot, session_id=getattr(agent, "session_id", "") or "")
++        pinned_rules.refresh(agent, snapshot, session_id=session_id)
++    project = [{k: r[k] for k in ("kind", "quote", "at", "msg", "id") if r.get(k)}
++               for r in found if r.get("scope") == "project"]
++    if project:
++        publish(session_id, project)
++
++
++def publish(session_id: str, project_items: list[dict[str, Any]]) -> list[str]:
++    """Hand *project_items* to the ``on_user_rule_extracted`` plugins; their notes wait for the next turn."""
++    try:
++        from hermes_cli.plugins import has_hook, invoke_hook
++
++        if not has_hook("on_user_rule_extracted"):
++            return []
++        results = invoke_hook("on_user_rule_extracted", session_id=session_id, items=project_items)
++    except Exception:
++        logger.debug("on_user_rule_extracted failed", exc_info=True)
++        return []
++    notes = [r.strip() for r in results if isinstance(r, str) and r.strip()]
++    if notes:
++        _append(session_id, [{"notice": n, "nid": _digest(n + str(time.time()))} for n in notes])
++    return notes
++
++
++def pop_notices(session_id: str) -> str:
++    """The notes plugins left for this session's next turn, once each."""
++    if not session_id:
++        return ""
++    recs = load(session_id)
++    done = {r.get("delivered") for r in recs if r.get("delivered")}
++    fresh = [r for r in recs if r.get("notice") and r.get("nid") not in done]
++    if not fresh:
++        return ""
++    _append(session_id, [{"delivered": r["nid"]} for r in fresh])
++    return "\n\n".join(str(r["notice"]) for r in fresh)
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index ac8c2e5d..714f5c49 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -997,11 +997,13 @@ def _merge_gateway_notes(
+     string sidecar — append a durable text part instead."""
+     forward_lsp_verdicts(agent)  # late LSP verdicts on last turn's edits ride the plugin-notice queue
+     from agent.pinned_rules import recurring_note
++    from agent.rule_extractor import pop_notices
+ 
+     _turn_notes = "\n\n".join(
+         part for part in (consume_gateway_turn_context_notes(agent), pop_plugin_notices(agent),
+                           consume_surface_switch_note(agent),
+-                          consume_skills_index_note(agent), recurring_note(agent)) if part
++                          consume_skills_index_note(agent), recurring_note(agent),
++                          pop_notices(getattr(agent, "session_id", "") or "")) if part
+     )
+     if not _turn_notes:
+         return plugin_user_context
+diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
+index 5af38535..20769e0c 100644
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -217,6 +217,10 @@ VALID_HOOKS: set[str] = {
+     # post_curator_run: after a curator pass wrote logs/curator/<run>/ (run.json + REPORT.md). Kwargs:
+     # run_dir, run_json_path, report_md_path, dry_run. Observer; returns ignored.
+     "post_curator_run",
++    # on_user_rule_extracted: compression.rule_extractor_routes kept project-scope items (agent/rule_extractor.py).
++    # Kwargs: session_id, items (kind, quote, at, msg, id). A str return is a one-shot note for the session's
++    # next turn.
++    "on_user_rule_extracted",
+ }
+ 
+ # Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as
+diff --git a/tests/agent/test_rule_extractor_project.py b/tests/agent/test_rule_extractor_project.py
+new file mode 100644
+index 00000000..84e0233f
+--- /dev/null
++++ b/tests/agent/test_rule_extractor_project.py
+@@ -0,0 +1,68 @@
++"""Project-scope items from the rule extractor go to ``on_user_rule_extracted`` plugins; their notes reach the
++session's next turn once."""
++
++import json
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import pytest
++
++from agent import decision_ledger as dl
++from agent import rule_extractor as rx
++from hermes_cli.plugins import VALID_HOOKS
++
++
++@pytest.fixture(autouse=True)
++def home(tmp_path, monkeypatch):
++    monkeypatch.setattr(dl, "archive_dir", lambda: tmp_path)
++    return tmp_path
++
++
++FOUND = [
++    {"kind": "fact", "quote": "hold Plus to skip a cutscene", "scope": "project", "id": "L00aa01", "at": "2026-11-21",
++     "msg": "700", "when": 1.0},
++    {"kind": "rule", "quote": "games run headed", "id": "L00aa02"},
++]
++
++
++def test_the_hook_is_known():
++    assert "on_user_rule_extracted" in VALID_HOOKS
++
++
++def test_only_project_items_go_to_the_plugins_and_their_note_reaches_the_next_turn_once():
++    calls = []
++
++    def invoke(name, **kw):
++        calls.append((name, kw))
++        return ["Saved to project memory: x. Say undo to remove it.", None, 3]
++
++    agent = SimpleNamespace(session_id="s1")
++    with patch("hermes_cli.plugins.has_hook", return_value=True), \
++         patch("hermes_cli.plugins.invoke_hook", side_effect=invoke):
++        rx._after(agent, [], FOUND)
++    assert calls == [("on_user_rule_extracted", {"session_id": "s1", "items": [
++        {"kind": "fact", "quote": "hold Plus to skip a cutscene", "at": "2026-11-21", "msg": "700", "id": "L00aa01"}]})]
++    assert rx.pop_notices("s1") == "Saved to project memory: x. Say undo to remove it."
++    assert rx.pop_notices("s1") == "" and rx.pop_notices("s2") == ""
++
++
++def test_no_plugin_no_call_no_note():
++    with patch("hermes_cli.plugins.has_hook", return_value=False), \
++         patch("hermes_cli.plugins.invoke_hook") as invoke:
++        assert rx.publish("s1", FOUND[:1]) == []
++    invoke.assert_not_called()
++    assert rx.pop_notices("s1") == ""
++
++
++def test_the_note_rides_the_next_turns_user_message(monkeypatch):
++    from agent import turn_context
++
++    rx._append("s1", [{"notice": "Saved: hold Plus. Say undo to remove it.", "nid": "n1"}])
++    agent = SimpleNamespace(session_id="s1")
++    for name in ("consume_gateway_turn_context_notes", "pop_plugin_notices", "consume_surface_switch_note",
++                 "consume_skills_index_note", "forward_lsp_verdicts"):
++        monkeypatch.setattr(turn_context, name, lambda *a, **k: "")
++    msgs = [{"role": "user", "content": "next"}]
++    assert "Saved: hold Plus." in turn_context._merge_gateway_notes(agent, msgs, 0, "")
++    assert turn_context._merge_gateway_notes(agent, msgs, 0, "") == ""
++    assert json.loads(rx.store_path("s1").read_text().splitlines()[-1]) == {"delivered": "n1"}
+diff --git a/website/docs/user-guide/features/hooks.md b/website/docs/user-guide/features/hooks.md
+index ea3c8a45..9bb8bf50 100644
+--- a/website/docs/user-guide/features/hooks.md
++++ b/website/docs/user-guide/features/hooks.md
+@@ -481,6 +481,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
+ | `on_session_delete` | Observer | After a session delete or deliberate archive commits (CLI, TUI, Desktop/dashboard, gateway API, sweeps, prune); return ignored. | `session_id`, `reason`, `profile`, optional `deleted_ids` (full set when more than one row went), `sessions_dir` | Session identifiers only; no message content. |
+ | `post_compaction` | Observer | Once per committed compaction, on every path: automatic and manual compaction in the agent loop (CLI, TUI, Desktop, gateway hygiene, overflow recovery), the gateway's `/compress` (`session.mutate compress`), Codex app-server compactions, micro-compaction and proactive tool-result pruning. Not fired for attempts that changed nothing (aborted, blocked, refused). Timeout-bounded; return ignored. | `session_id`, `old_session_id`, `kind`, `reason`, `before_tokens`, `after_tokens`, `messages_removed` | Identifiers and counts only. |
+ | `post_curator_run` | Observer | After a curator pass wrote its per-run report (`logs/curator/<run>/run.json` + `REPORT.md`), in the process that ran the pass. Return ignored. | `run_dir`, `run_json_path`, `report_md_path`, `dry_run` | Local filesystem paths; the report names skills. |
++| `on_user_rule_extracted` | Observer | After the background rule extractor (`compression.rule_extractor_routes`) kept items the user said hold for the project, in the process that ran it, off the user's turn. A `str` return is a one-shot note added to the session's next turn. | `session_id`, `items` | The user's own words (verbatim quotes). |
+ | `agent_loop_stopped` | Observer | Immediately after a real running agent is interrupted — gateway `_interrupt_and_clear_session` or TUI/desktop `session.interrupt`; return ignored. | `session_key`, `platform`, `reason`, `invalidation_reason` | Session/routing identifiers and interruption reasons; no message body. |
+ | `on_skill_lifecycle` | Observer | After an authoritative skill-usage state change; return ignored. | `action`, `skill_name`, `provenance`, `task_id`, `session_id`, `use_count`, `reused`, `reuse_after_patch` | Exposes the local skill name and provenance. |
+ | `subagent_start` | Observer | Child constructed and about to run; return ignored. | `parent_session_id`, `parent_turn_id`, `parent_subagent_id`, `child_session_id`, `child_subagent_id`, `child_role`, `child_goal` | Child goal may contain user/project content. |
+@@ -1221,6 +1222,25 @@ def my_callback(session_id: str, kind: str, reason: str, **kwargs):
+ 
+ **Use cases:** Re-inject session context after compaction, refresh an external index, count compactions.
+ 
++### `on_user_rule_extracted`
++
++Fires after the background rule extractor (`compression.rule_extractor_routes`) kept one or more items whose scope is the project rather than the chat: a rule, fact or decision the user stated that holds in other chats too. Every item's quote was checked to be an exact substring of a message the user wrote. It runs in the extractor's thread, after the turn was delivered, never ahead of a user turn.
++
++**Callback signature:**
++
++```python
++def my_callback(session_id: str, items: list[dict], **kwargs) -> str | None:
++```
++
++| Parameter | Type | Description |
++|-----------|------|-------------|
++| `session_id` | `str` | The session whose user said it. |
++| `items` | `list[dict]` | Each with `kind` (`rule`, `fact` or `decision`), `quote` (the user's exact words), `id` (its decision-ledger id), and `at` (the day) and `msg` (the message id) when known. |
++
++**Return value:** a `str` is a one-shot note for the session's next turn (added to the user's message, like a gateway note), for example to say what was saved and how to undo it. Other returns are ignored. Callbacks are not timeout-bounded.
++
++**Use cases:** Save project facts to a project memory automatically, mirror rules to an external store.
++
+ ### `post_curator_run`
+ 
+ Fires once after a curator pass has written its per-run report directory, so a plugin or shell hook can react to what the curator changed (route new skills to another profile, override an archival, write an audit log) instead of polling `logs/curator/`.
+-- 
+2.56.0
+

@@ -1,0 +1,8 @@
+# New cases in tests/agent/test_rule_extractor_project.py (project items to the hook, its note on the next
+# turn once, no plugin no call)
+# The extractor, the per-turn note path and the hook surface this changes
+tests/agent/test_rule_extractor.py
+tests/agent/test_turn_context.py
+tests/agent/test_turn_lifecycle_events.py
+tests/tools/test_human_input_hooks.py
+tests/gateway/test_gateway_platform_event_hook.py
