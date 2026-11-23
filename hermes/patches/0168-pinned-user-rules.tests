@@ -1,0 +1,14 @@
+# New cases in tests/agent/test_pinned_rules.py (relift rules and facts across two compactions into the
+# system prompt, a withdrawn rule leaving at once, the complaint and a peer agent's quote never stored)
+# The system prompt builder, the restore and boundary rebuild paths, and the ledger this changes
+tests/agent/test_system_prompt.py
+tests/agent/test_system_prompt_restore.py
+tests/agent/test_system_prompt_switch_invalidation.py
+tests/gateway/test_hygiene_compaction_keeps_seeded_prompt.py
+tests/agent/test_ledger_user_facts.py
+tests/agent/test_decision_ledger.py
+tests/agent/test_compaction_events.py
+tests/agent/test_compression_concurrent_fork.py
+tests/agent/test_in_place_compaction.py
+tests/agent/test_conversation_compression_manual.py
+tests/tui_gateway/test_compression_config_hot_reload.py
