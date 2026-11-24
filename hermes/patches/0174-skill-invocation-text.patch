@@ -1,0 +1,180 @@
+From c22f0bda91481b3b53eac8fd6602ac1e76d737f2 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 00:35:18 +0000
+Subject: [PATCH] hermes: 0174 keep a skill turn's body in skill_text on
+ transcript rows
+
+---
+ apps/shared/src/gateway-contract.generated.ts |  4 ++-
+ apps/shared/src/gateway-contract.openrpc.json | 26 ++++++++++++++++++-
+ tests/tui_gateway/test_tui_gateway_server.py  | 23 +++++++++++++++-
+ tui_gateway/contracts/common.py               |  3 +++
+ tui_gateway/session_history.py                |  5 ++--
+ 5 files changed, 56 insertions(+), 5 deletions(-)
+
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index 27c0f0c8..8552f3e8 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -3215,7 +3215,7 @@ export interface SessionCreateResult {
+   messages: TranscriptMessage[]
+   info: SessionLiveInfo
+ }
+-/** One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``): ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id`` rewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``. Assistant detail sidecars (``reasoning``, …) ride as extra keys. */
++/** One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``): ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id`` rewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``. A ``display_kind: "skill_invocation"`` row's ``text`` is the command the user typed and ``skill_text`` the expanded skill message the model got, so a client can show it apart from the user's words. Assistant detail sidecars (``reasoning``, …) ride as extra keys. */
+ export interface TranscriptMessage {
+   role: string
+   text?: string | null
+@@ -3225,6 +3225,7 @@ export interface TranscriptMessage {
+   row_id?: number | null
+   display_kind?: string | null
+   display_metadata?: unknown | null
++  skill_text?: string | null
+   name?: string | null
+   context?: string | null
+   args?: Record<string, unknown> | null
+@@ -5612,6 +5613,7 @@ export interface StoredTranscriptRow {
+   row_id?: number | null
+   display_kind?: string | null
+   display_metadata?: unknown | null
++  skill_text?: string | null
+   name?: string | null
+   context?: string | null
+   args?: Record<string, unknown> | null
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index be3a3738..66993b87 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -44087,6 +44087,18 @@
+             "default": null,
+             "title": "Display Metadata"
+           },
++          "skill_text": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Skill Text"
++          },
+           "name": {
+             "anyOf": [
+               {
+@@ -47054,7 +47066,7 @@
+       },
+       "TranscriptMessage": {
+         "additionalProperties": true,
+-        "description": "One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):\n``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``\nrewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``.\nAssistant detail sidecars (``reasoning``, \u2026) ride as extra keys.",
++        "description": "One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):\n``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``\nrewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``.\nA ``display_kind: \"skill_invocation\"`` row's ``text`` is the command the user typed and ``skill_text`` the\nexpanded skill message the model got, so a client can show it apart from the user's words.\nAssistant detail sidecars (``reasoning``, \u2026) ride as extra keys.",
+         "properties": {
+           "role": {
+             "title": "Role",
+@@ -47140,6 +47152,18 @@
+             "default": null,
+             "title": "Display Metadata"
+           },
++          "skill_text": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Skill Text"
++          },
+           "name": {
+             "anyOf": [
+               {
+diff --git a/tests/tui_gateway/test_tui_gateway_server.py b/tests/tui_gateway/test_tui_gateway_server.py
+index 2ce61623..fbb79c4e 100644
+--- a/tests/tui_gateway/test_tui_gateway_server.py
++++ b/tests/tui_gateway/test_tui_gateway_server.py
+@@ -3009,6 +3009,7 @@ def test_history_to_messages_projects_a_skill_turn_to_its_invocation():
+             "role": "user",
+             "text": "/work fix the title leak",
+             "display_kind": "skill_invocation",
++            "skill_text": scaffolded,
+         },
+         {"role": "assistant", "text": "on it"},
+     ]
+@@ -3022,10 +3023,30 @@ def test_history_to_messages_projects_a_bare_skill_turn_to_the_command():
+     )
+ 
+     assert server._history_to_messages([{"role": "user", "content": scaffolded}]) == [
+-        {"role": "user", "text": "/work", "display_kind": "skill_invocation"}
++        {"role": "user", "text": "/work", "display_kind": "skill_invocation", "skill_text": scaffolded}
+     ]
+ 
+ 
++def test_history_to_messages_keeps_a_stacked_skill_turn_body_in_skill_text():
++    stacked = (
++        '[IMPORTANT: The user has invoked the "/a /b" stacked skill bundle, loading 2 skills together. '
++        "Treat every skill below as active guidance for this turn.]\n\n"
++        "Skills loaded: a, b\n\nUser instruction: compare them\n\n"
++        '[Loaded as part of the stacked skill invocation "a".]\n\n# A\n\n'
++        '[Loaded as part of the stacked skill invocation "b".]\n\n# B'
++    )
++
++    assert server._history_to_messages([{"role": "user", "content": stacked}]) == [
++        {"role": "user", "text": "/a /b compare them", "display_kind": "skill_invocation", "skill_text": stacked}
++    ]
++
++
++def test_history_to_messages_gives_ordinary_user_rows_no_skill_text():
++    rows = server._history_to_messages([{"role": "user", "content": "/work fix it"}])
++
++    assert rows == [{"role": "user", "text": "/work fix it"}]
++
++
+ def test_expand_skill_invocation_for_replay_round_trips_the_projection(
+     tmp_path, monkeypatch
+ ):
+diff --git a/tui_gateway/contracts/common.py b/tui_gateway/contracts/common.py
+index 0be3e070..94aaf540 100644
+--- a/tui_gateway/contracts/common.py
++++ b/tui_gateway/contracts/common.py
+@@ -169,6 +169,8 @@ class TranscriptMessage(OpenModel):
+     """One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):
+     ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``
+     rewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``.
++    A ``display_kind: "skill_invocation"`` row's ``text`` is the command the user typed and ``skill_text`` the
++    expanded skill message the model got, so a client can show it apart from the user's words.
+     Assistant detail sidecars (``reasoning``, …) ride as extra keys."""
+ 
+     role: str
+@@ -179,6 +181,7 @@ class TranscriptMessage(OpenModel):
+     row_id: int | None = None
+     display_kind: str | None = None
+     display_metadata: JsonValue | None = None
++    skill_text: str | None = None
+     name: str | None = None
+     context: str | None = None
+     args: dict[str, JsonValue] | None = None
+diff --git a/tui_gateway/session_history.py b/tui_gateway/session_history.py
+index 5b8c8a25..2aae36c7 100644
+--- a/tui_gateway/session_history.py
++++ b/tui_gateway/session_history.py
+@@ -406,10 +406,11 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls:
+         # Durable row identity (_rows_to_conversation); reactions etc. address persisted messages by it.
+         if m.get("_row_id") is not None:
+             msg["row_id"] = m["_row_id"]
+-        # A user turn shows its skill invocation, never the expanded body (rewind re-sends by ordinal).
++        # A user turn shows its skill invocation, never the expanded body (rewind re-sends by ordinal);
++        # the body rides apart in ``skill_text`` for a client that shows it as its own card.
+         invocation = _skill_scaffold_projection(content_text) if role == "user" else ""
+         if invocation:
+-            msg.update(text=invocation, display_kind="skill_invocation")
++            msg.update(text=invocation, display_kind="skill_invocation", skill_text=content_text)
+         if role == "assistant":
+             msg.update((key, m[key]) for key in _HISTORY_ASSISTANT_DETAIL_KEYS if m.get(key) is not None)
+         # Display-only timeline metadata (model switches, delegation events).
+-- 
+2.56.0
+

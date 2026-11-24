@@ -1,0 +1,4 @@
+# New cases in tests/tui_gateway/test_tui_gateway_server.py
+tests/tui_gateway/contracts/test_generated.py
+tests/gateway/test_canonical_resume_display_projection.py
+tests/gateway/test_resume_display_history.py
