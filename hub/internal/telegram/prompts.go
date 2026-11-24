@@ -100,16 +100,22 @@ func loginGrantSaved(n int) string {
 }
 
 // approvalLabel names an approval choice on its button.
-func approvalLabel(choice string) string {
+func approvalLabel(p hub.PromptInfo, choice string) string {
 	switch choice {
 	case hub.ChoiceOnce:
-		return "Once"
+		return "Allow once"
 	case hub.ChoiceSession:
-		return "This chat"
+		if p.GrantSource != "" {
+			return sourceLabel(p.GrantSource)
+		}
+		return "Allow in this chat"
 	case hub.ChoiceAlways:
-		return "Always"
+		if p.GrantSource != "" {
+			return "Always allow code from " + truncate(p.GrantSource, 36)
+		}
+		return "Always allow"
 	case hub.ChoiceSource:
-		return sourceLabel("")
+		return sourceLabel(p.GrantSource)
 	case hub.ChoiceDevice:
 		return "Allow on this computer"
 	case hub.ChoiceDeny:
@@ -224,6 +230,12 @@ func promptBody(p *hub.PromptInfo) string {
 	if p.Question != "" {
 		parts = append(parts, escapeHTML(truncate(p.Question, 2500)))
 	}
+	if p.Kind != hub.PromptClarify && p.Scope != "" {
+		parts = append(parts, "<b>This chat and Always cover:</b> "+escapeHTML(truncate(oneLine(p.Scope), 200)))
+	}
+	if p.Kind != hub.PromptClarify && p.AlwaysExempt != "" {
+		parts = append(parts, "<b>No Always:</b> "+escapeHTML(truncate(oneLine(p.AlwaysExempt), 200)))
+	}
 	if p.Kind == hub.PromptClarify && len(p.Choices) > maxButtons {
 		for i, c := range p.Choices {
 			parts = append(parts, fmt.Sprintf("%d. %s", i+1, escapeHTML(truncate(c, 300))))
@@ -251,7 +263,7 @@ func approvalParts(p *hub.PromptInfo) string {
 			lines = append(lines, escapeHTML(truncate(l, 600)))
 		}
 	}
-	if p.GrantSource != "" && slices.Contains(p.Choices, hub.ChoiceSource) {
+	if p.GrantSource != "" && (slices.Contains(p.Choices, hub.ChoiceSource) || slices.Contains(p.Choices, hub.ChoiceSession)) {
 		lines = append(lines, "<b>Source:</b> "+escapeHTML(truncate(p.GrantSource, 160)))
 	}
 	return strings.Join(lines, "\n")
@@ -455,23 +467,21 @@ func promptKeyboard(prefix, key string, p hub.PromptInfo, picks []bool) *InlineK
 	if p.Kind != hub.PromptClarify {
 		choices := approvalChoices(p)
 		row := make([]InlineButton, 0, len(choices))
-		var source []InlineButton
+		var named [][]InlineButton
 		for i, c := range choices {
-			if c == hub.ChoiceSource {
-				// It names a source: a row of its own, so the label is not cut.
-				source = []InlineButton{{Text: sourceLabel(p.GrantSource), CallbackData: cb(strconv.Itoa(i))}}
+			btn := InlineButton{Text: approvalLabel(p, c), CallbackData: cb(strconv.Itoa(i))}
+			if p.GrantSource != "" && (c == hub.ChoiceSource || c == hub.ChoiceSession || c == hub.ChoiceAlways) {
+				named = append(named, []InlineButton{btn})
 				continue
 			}
-			row = append(row, InlineButton{Text: approvalLabel(c), CallbackData: cb(strconv.Itoa(i))})
+			row = append(row, btn)
 		}
 		if len(row) > 2 {
 			rows = append(rows, row[:2], row[2:])
 		} else {
 			rows = append(rows, row)
 		}
-		if source != nil {
-			rows = append(rows, source)
-		}
+		rows = append(rows, named...)
 		return &InlineKeyboard{InlineKeyboard: rows}
 	}
 	if len(p.Choices) > maxButtons {
@@ -516,10 +526,12 @@ func loginGrantLabel(g *hub.LoginGrantCard, choice string) string {
 	switch choice {
 	case hub.ChoiceOnce:
 		return "Allow once"
+	case hub.ChoiceSession:
+		return "Allow in this chat"
 	case hub.ChoiceDevice:
 		return "Allow on " + truncate(g.DeviceName, 30)
 	}
-	return approvalLabel(choice)
+	return approvalLabel(hub.PromptInfo{}, choice)
 }
 
 // loginGrantKeyboard is the buttons of a sign-in card: the allowing choices
@@ -534,7 +546,7 @@ func loginGrantKeyboard(cb func(string) string, p hub.PromptInfo) *InlineKeyboar
 	}
 	for i, c := range approvalChoices(p) {
 		if c == hub.ChoiceDeny {
-			rows = append(rows, []InlineButton{{Text: approvalLabel(c), CallbackData: cb(strconv.Itoa(i))}})
+			rows = append(rows, []InlineButton{{Text: approvalLabel(p, c), CallbackData: cb(strconv.Itoa(i))}})
 		}
 	}
 	return &InlineKeyboard{InlineKeyboard: rows}
@@ -621,11 +633,15 @@ func loginGrantErr(err error) string {
 	return ""
 }
 
-// approvalChoices are the choices of an approval, or allow and deny when
-// the event named none.
+// approvalChoices are the choices of an approval, or once, this chat,
+// always and deny (once, this chat, the computer and deny for a sign-in
+// card) when the event named none.
 func approvalChoices(p hub.PromptInfo) []string {
 	if len(p.Choices) == 0 {
-		return []string{hub.ChoiceOnce, hub.ChoiceDeny}
+		if p.LoginGrant != nil {
+			return []string{hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceDevice, hub.ChoiceDeny}
+		}
+		return []string{hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceAlways, hub.ChoiceDeny}
 	}
 	return p.Choices
 }

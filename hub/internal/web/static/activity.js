@@ -1076,8 +1076,9 @@ window.HubActivity = (ctx) => {
     const c = el("div", "confirm");
     const what = firstLine(p.command) || p.description || "this";
     c.append(el("span", "", "Allow " + what + "?"));
-    const names = { once: "Once", session: "This chat", always: "Always", deny: "Deny" };
-    const choices = Array.isArray(p.choices) && p.choices.length ? p.choices : ["once", "deny"];
+    const src = p.grant_source ? String(p.grant_source) : "";
+    const names = { once: "Allow once", session: src ? "Allow code from " + src + " in this chat" : "Allow in this chat", always: src ? "Always allow code from " + src : "Always allow", source: src ? "Allow code from " + src + " in this chat" : "Allow code from this source in this chat", device: "Allow on this computer", deny: "Deny" };
+    const choices = Array.isArray(p.choices) && p.choices.length ? p.choices : ["once", "session", "always", "deny"];
     const btns = [];
     for (const ch of choices) {
       const btn = el("button", ch === "once" ? "primary" : ch === "deny" ? "danger-text" : "", names[ch] || ch);

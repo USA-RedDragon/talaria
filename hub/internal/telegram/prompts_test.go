@@ -78,7 +78,7 @@ func TestApprovalOffersEveryChoice(t *testing.T) {
 	h.hub.emit(t, sid, hub.KindApprovalRequest, map[string]any{kPromptID: "a1", kKind: "approval", kCommand: "ls",
 		kChoices: []string{hub.ChoiceOnce, hub.ChoiceDeny, "session", "always"}})
 	req := h.tg.wait(mSend, "Needs you")
-	if got := labels(req); !slices.Equal(got, []string{lblOnce, lblDeny, "This chat", "Always"}) {
+	if got := labels(req); !slices.Equal(got, []string{lblOnce, lblDeny, "Allow in this chat", "Always allow"}) {
 		t.Fatalf("labels = %v", got)
 	}
 	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(req.buttons()[3]))
@@ -216,7 +216,7 @@ func TestSnapshotShowsPendingPrompts(t *testing.T) {
 		json.RawMessage(`{"kind":"approval","prompt_id":"a9","command":"open example.com","choices":["once","deny","session","always"]}`),
 	}})
 	req := h.tg.wait(mSend, "open example.com")
-	if got := labels(req); !slices.Equal(got, []string{lblOnce, lblDeny, "This chat", "Always"}) {
+	if got := labels(req); !slices.Equal(got, []string{lblOnce, lblDeny, "Allow in this chat", "Always allow"}) {
 		t.Fatalf("labels = %v", got)
 	}
 	time.Sleep(50 * time.Millisecond)

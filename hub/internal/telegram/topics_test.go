@@ -28,7 +28,7 @@ const (
 	kToolID       = "tool_id"
 	envStaging    = "staging"
 	envProd       = "prod"
-	lblOnce       = "Once"
+	lblOnce       = "Allow once"
 	titleFixCI    = "Fix CI"
 	titleTerminal = "Terminal chat"
 	topicTrip     = "Trip"

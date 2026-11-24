@@ -233,7 +233,7 @@ func TestApprovalButtons(t *testing.T) {
 	})
 	req := h.tg.wait(mSend, "Needs you")
 	btns := req.buttons()
-	if len(btns) != 2 || btns[0][kText] != lblOnce || btns[1][kText] != lblDeny {
+	if len(btns) != 4 || btns[0][kText] != lblOnce || btns[1][kText] != "Allow in this chat" || btns[2][kText] != "Always allow" || btns[3][kText] != lblDeny {
 		t.Fatalf("buttons = %+v", btns)
 	}
 	msgID := req.ResultID

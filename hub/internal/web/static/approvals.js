@@ -74,6 +74,21 @@ window.HubApprovals = (() => {
     return out;
   }
 
+  // approvalButtons are the buttons of an approval, one per choice it offers, Deny last. A card that names
+  // a code source says the chat and always grants cover that source.
+  function approvalButtons(choices, p, button) {
+    const src = p.grant_source ? String(p.grant_source) : "";
+    const names = {
+      once: "Allow once",
+      session: src ? "Allow code from " + src + " in this chat" : "Allow in this chat",
+      always: src ? "Always allow code from " + src : "Always allow",
+      source: src ? "Allow code from " + src + " in this chat" : "Allow code from this source in this chat",
+      deny: "Deny",
+    };
+    const ordered = [...choices.filter((x) => x !== "deny"), ...choices.filter((x) => x === "deny")];
+    return ordered.map((c) => button(c === "deny" ? "danger" : c === "once" ? "primary" : "", names[c] || c, { choice: c }));
+  }
+
   // create makes the cards of one chat. deps:
   //   el(tag, cls, text), api(method, path, body), base (the chat's API path),
   //   words(key) for the fixed texts, banner(text, bad), add(node) to put a
@@ -305,8 +320,7 @@ window.HubApprovals = (() => {
         enable(false);
         note(card, "");
         try {
-          if (body.allow !== undefined) await api("POST", base + "/approvals/" + encodeURIComponent(id), body);
-          else await api("POST", base + "/prompts/" + encodeURIComponent(id) + "/answer", body);
+          await api("POST", base + "/prompts/" + encodeURIComponent(id) + "/answer", body);
         } catch (e) {
           if (done(card)) return;
           // 404: the prompt was settled where this page could not see it (another tab, Telegram, a timeout,
@@ -342,24 +356,25 @@ window.HubApprovals = (() => {
         buttons.push(b);
         return b;
       };
-      const choices = Array.isArray(p.choices) ? p.choices : [];
+      const given = Array.isArray(p.choices) ? p.choices : [];
+      const choices = clarify || given.length ? given : lg ? ["once", "session", "device", "deny"] : ["once", "session", "always", "deny"];
       if (lg) {
         // The method goes with the allowing choices only; a denied sign-in has none.
         const allow = (c) => () => (method ? { choice: c, method } : { choice: c });
         const known = !!computer;
         const once = button("primary", "Allow once", allow("once"));
+        const chat = button("", "Allow in this chat", allow("session"));
         const dev = button("", "Allow on " + (computer || "this computer"), allow("device"));
-        if (!known) { locked.add(once); locked.add(dev); once.disabled = dev.disabled = true; }
+        if (!known) { locked.add(once); locked.add(chat); locked.add(dev); once.disabled = chat.disabled = dev.disabled = true; }
         if (!choices.includes("once")) once.hidden = true;
+        if (!choices.includes("session")) chat.hidden = true;
         if (!choices.includes("device")) dev.hidden = true;
-        actions.append(once, dev, button("danger", words("deny"), { choice: "deny" }));
+        actions.append(once, chat, dev, button("danger", words("deny"), { choice: "deny" }));
         if (!known) box.append(el("div", "sendnote bad", "This computer is not one of yours in this hub, so a sign-in cannot be allowed here."));
-      } else if (!clarify && !choices.length) {
-        actions.append(button("primary", words("allow"), { allow: true }), button("danger", words("deny"), { allow: false }));
       } else if (!clarify) {
-        const names = { once: words("allow"), session: "Allow in this chat", always: "Always allow", source: p.grant_source ? "Allow code from " + p.grant_source + " in this chat" : "Allow code from this source in this chat", deny: words("deny") };
-        // Deny stays the last button; the source choice names what it allows.
-        for (const c of [...choices.filter((x) => x !== "deny"), ...choices.filter((x) => x === "deny")]) actions.append(button(c === "deny" ? "danger" : c === "once" ? "primary" : "", names[c] || c, { choice: c }));
+        actions.append(...approvalButtons(choices, p, button));
+        if (p.scope) box.append(el("div", "who", "This chat and Always cover: " + p.scope));
+        if (p.always_exempt) box.append(el("div", "who", "No Always: " + p.always_exempt));
       } else {
         // Every question has an Other row to type an answer in, whatever the
         // agent offered: the only input of a question with no choices and, for
