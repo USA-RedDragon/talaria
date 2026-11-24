@@ -1512,7 +1512,12 @@ class ToolTests(BrowserBase):
             self.assertEqual(self.last("eval")["args"]["script"],
                              'const ARGS = {"id": "42"};\nconst re = /\\d+\\s/g;\nreturn ARGS.id;')
             self.assertEqual(self.last("eval")["args"]["guard"]["script_hosts"], ["example.com"])
+            self.assertIs(self.last("eval")["args"]["guard"]["page_hosts"], True,
+                          "a skill's read-only script leaves the page its own hosts")
             self.assertEqual(out["result"], {"n": 2})
+            self.run_tool("browser_eval", tab_id=7, script_ref={"skill": "report-reader", "file": "scripts/read.js"},
+                          allow_writes=True)
+            self.assertNotIn("page_hosts", self.last("eval")["args"]["guard"], "a script that writes keeps every limit")
             bad = self.run_tool("browser_eval", tab_id=7, script_ref={"skill": "report-reader", "file": "../x.js"})
             self.assertEqual(bad["code"], "bad_arguments")
             self.assertIn("scripts/read.js", bad["error"])
@@ -1522,6 +1527,7 @@ class ToolTests(BrowserBase):
         self.assertEqual(self.run_tool("browser_eval", tab_id=7, script_ref="x.js")["code"], "bad_arguments")
         self.run_tool("browser_eval", tab_id=7, script="return ARGS.n", args={"n": 1})
         self.assertEqual(self.last("eval")["args"]["script"], 'const ARGS = {"n": 1};\nreturn ARGS.n')
+        self.assertNotIn("page_hosts", self.last("eval")["args"]["guard"], "an inline script keeps every limit")
 
     def test_errors_say_what_to_do_next(self):
         self.fake.fail["click"] = (core.BROWSER_FAILED, "unknown or stale ref e9; take a new snapshot")

@@ -2943,6 +2943,9 @@ def _eval(args: dict, conn: Any, sid: str) -> Any:
                            "sensitive": bool(grant.get("confirm"))}}
     if grant.get("allow") and grant.get("confirm"):
         req["guard"]["allow"] = list(grant["allow"])  # checks the user let pass for this script (section 7.5)
+    if args.get("script_ref") and not req["allow_writes"]:
+        # A skill's own read-only script: the page keeps loading from its own hosts (section 7.2).
+        req["guard"]["page_hosts"] = True
     frame = str(args.get("frame") or "").strip()
     if frame:
         if not re.fullmatch(r"f\d{1,6}", frame):

@@ -350,6 +350,12 @@ function taintBlocks(t, d) {
     return true;
   }
   const site = siteOf(host);
+  // A read-only script of an installed skill leaves the page its own
+  // loading: its sites and the hosts it got answers from before the script
+  // ran, with any method. Every other host stays closed.
+  if (t.page && (t.sites.has(site) || t.page.has(host.toLowerCase()))) {
+    return false;
+  }
   if (!t.sites.has(site)) {
     return true;
   }
@@ -892,10 +898,27 @@ const lastRequest = new Map();
 browser.webRequest.onBeforeRequest.addListener((d) => {
   if (d.tabId >= 0) {
     lastRequest.set(d.tabId, Date.now());
+    if (d.type === "main_frame") {
+      pageHosts.set(d.tabId, new Set());
+    }
+  }
+}, { urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"] });
+// pageHosts holds, per tab, the hosts that answered the tab's current page
+// while no script limited it: the page's own hosts (a CDN, a static host).
+const pageHosts = new Map();
+browser.webRequest.onResponseStarted.addListener((d) => {
+  if (d.tabId < 0 || (taints.has(d.tabId) && !taintLifted.has(d.tabId))) {
+    return;
+  }
+  const h = hostOf(d.url);
+  const set = pageHosts.get(d.tabId);
+  if (h && set && set.size < 64) {
+    set.add(h);
   }
 }, { urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"] });
 browser.tabs.onRemoved.addListener((tabId) => {
   lastRequest.delete(tabId);
+  pageHosts.delete(tabId);
   tabPermits.delete(tabId);
   taintLifted.delete(tabId);
   blockedNotes.delete(tabId);
@@ -2514,7 +2537,11 @@ const OPS = {
       sites.set(siteOf(topHost), false);
     }
     sites.set(site, Boolean(allow_writes));
-    taints.set(tab_id, { sites });
+    // g.page_hosts: the plugin runs a skill's script file, read only. A
+    // tab already held to a stricter limit keeps it.
+    const pageOwn = g.page_hosts === true && !allow_writes && (!old || old.page) ?
+      new Set([...(old ? old.page : pageHosts.get(tab_id) || []), topHost]) : null;
+    taints.set(tab_id, pageOwn ? { sites, page: pageOwn } : { sites });
     taintLifted.delete(tab_id); // a new script is a new taint
     scripted.add(tab_id);
     everScripted.add(tab_id);
