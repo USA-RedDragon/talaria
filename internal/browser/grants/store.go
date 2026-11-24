@@ -35,7 +35,7 @@ type Grant struct {
 	Via       string `json:"via"`
 	User      string `json:"user"`
 	LastUsed  int64  `json:"last_used"`
-	// ExpiresAt is set for a once grant only.
+	// ExpiresAt is set for a once grant and a session grant only.
 	ExpiresAt int64 `json:"expires_at,omitempty"`
 	// PostHosts are the other hosts the login form of Host may send the
 	// login to, for as long as the grant lasts.
@@ -45,6 +45,13 @@ type Grant struct {
 	// OncePostExpiresAt.
 	OncePostHosts     []string `json:"once_post_hosts,omitempty"`
 	OncePostExpiresAt int64    `json:"once_post_expires_at,omitempty"`
+}
+
+// For reports whether the grant holds for a call from a chat whose session
+// lineage is sessions: a session grant only for its own chat, any other
+// grant for every caller.
+func (g Grant) For(sessions []string) bool {
+	return g.Scope != logingrant.ScopeSession || slices.Contains(sessions, g.SessionID)
 }
 
 // AllPostHosts returns the grant's post hosts and its once post hosts.
@@ -142,7 +149,7 @@ func OpenStore(path string, now func() time.Time) (*Store, error) {
 func (s *Store) pruneLocked(st *state) {
 	now := s.now().Unix()
 	st.Grants = slices.DeleteFunc(st.Grants, func(g Grant) bool {
-		return g.Scope == logingrant.ScopeOnce && g.ExpiresAt <= now
+		return (g.Scope == logingrant.ScopeOnce || g.Scope == logingrant.ScopeSession) && g.ExpiresAt <= now
 	})
 	for i := range st.Grants {
 		if g := &st.Grants[i]; g.OncePostExpiresAt != 0 && g.OncePostExpiresAt <= now {
@@ -218,13 +225,17 @@ func (s *Store) writeLocked(st state) error {
 // Add stores the grant c describes, which the caller verified, and remembers
 // its nonce. A device grant is never replaced by a once grant; the once
 // grant's post hosts then hold for the device grant's next sign-in only.
-// Post hosts add up: a new grant keeps those the user allowed before.
+// Post hosts add up: a new grant keeps those the user allowed before. A
+// session grant is kept apart from the host's other grants, one per chat.
 func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 	now := s.now()
 	g := Grant{Host: c.Host, Method: c.Method, Scope: c.Scope, GrantedAt: now.Unix(), SessionID: c.SessionID,
 		ChatTitle: c.ChatTitle, Via: c.Via, User: c.Sub, PostHosts: union(c.PostHosts, nil)}
-	if c.Scope == logingrant.ScopeOnce {
+	switch c.Scope {
+	case logingrant.ScopeOnce:
 		g.ExpiresAt = now.Add(logingrant.OnceLifetime).Unix()
+	case logingrant.ScopeSession:
+		g.ExpiresAt = now.Add(logingrant.SessionLifetime).Unix()
 	}
 	var out Grant
 	err := s.mutate(func(st *state) error {
@@ -233,8 +244,13 @@ func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 		}
 		st.Nonces[c.Nonce] = c.Expires + int64(logingrant.ClockSkew/time.Second) + 1
 		out = g
+		if g.Scope == logingrant.ScopeSession {
+			addSession(st, &g)
+			out = g
+			return nil
+		}
 		for i, old := range st.Grants {
-			if old.Host != g.Host {
+			if old.Host != g.Host || old.Scope == logingrant.ScopeSession {
 				continue
 			}
 			switch {
@@ -276,6 +292,24 @@ func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 	return out, err
 }
 
+// addSession stores the session grant g in st, replacing the same chat's
+// grant on the host and keeping the post hosts and method it had.
+func addSession(st *state, g *Grant) {
+	for i, old := range st.Grants {
+		if old.Host != g.Host || old.Scope != logingrant.ScopeSession || old.SessionID != g.SessionID {
+			continue
+		}
+		g.LastUsed = old.LastUsed
+		if g.Method == "" {
+			g.Method = old.Method
+		}
+		g.PostHosts = union(old.PostHosts, g.PostHosts)
+		st.Grants[i] = *g
+		return
+	}
+	st.Grants = append(st.Grants, *g)
+}
+
 // Revoke removes the grant for host and reports whether there was one. With
 // postHost set it removes only that post host from the grant.
 func (s *Store) Revoke(host, postHost string) (bool, error) {
@@ -314,12 +348,13 @@ func (s *Store) Revoke(host, postHost string) (bool, error) {
 
 var errNoChange = errors.New("no change")
 
-// Used records a submitted sign-in on host: it sets last_used and removes a
-// once grant and once post hosts.
-func (s *Store) Used(host string) error {
+// Used records a submitted sign-in on host from the chat whose session
+// lineage is sessions: it sets last_used, removes a once grant and once post
+// hosts, and keeps that chat's session grant for another SessionLifetime.
+func (s *Store) Used(host string, sessions []string) error {
 	err := s.mutate(func(st *state) error {
 		changed := false
-		now := s.now().Unix()
+		now := s.now()
 		st.Grants = slices.DeleteFunc(st.Grants, func(g Grant) bool {
 			if g.Host == host && g.Scope == logingrant.ScopeOnce {
 				changed = true
@@ -328,9 +363,14 @@ func (s *Store) Used(host string) error {
 			return false
 		})
 		for i := range st.Grants {
-			if st.Grants[i].Host == host {
-				st.Grants[i].LastUsed, changed = now, true
-				st.Grants[i].OncePostHosts, st.Grants[i].OncePostExpiresAt = nil, 0
+			g := &st.Grants[i]
+			if g.Host != host || !g.For(sessions) {
+				continue
+			}
+			g.LastUsed, changed = now.Unix(), true
+			g.OncePostHosts, g.OncePostExpiresAt = nil, 0
+			if g.Scope == logingrant.ScopeSession {
+				g.ExpiresAt = now.Add(logingrant.SessionLifetime).Unix()
 			}
 		}
 		if !changed {
@@ -358,14 +398,26 @@ func (s *Store) Grants() []Grant {
 	return out
 }
 
-// Get returns the unexpired grant for host.
-func (s *Store) Get(host string) (Grant, bool) {
+// Get returns the unexpired grant for host that holds for the chat whose
+// session lineage is sessions: a device grant first, then that chat's
+// session grant, then a once grant.
+func (s *Store) Get(host string, sessions []string) (Grant, bool) {
+	var best Grant
+	found := false
+	rank := map[string]int{logingrant.ScopeDevice: 3, logingrant.ScopeSession: 2, logingrant.ScopeOnce: 1}
 	for _, g := range s.Grants() {
-		if g.Host == host {
-			return g, true
+		if g.Host == host && g.For(sessions) && (!found || rank[g.Scope] > rank[best.Scope]) {
+			best, found = g, true
 		}
 	}
-	return Grant{}, false
+	return best, found
+}
+
+// Allows reports whether host has an unexpired grant that holds for the
+// chat whose session lineage is sessions.
+func (s *Store) Allows(host string, sessions []string) bool {
+	_, ok := s.Get(host, sessions)
+	return ok
 }
 
 // NextExpiry returns the earliest expiry of a once grant or of once post

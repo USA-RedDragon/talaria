@@ -184,7 +184,7 @@ func (r *rig) add(t *testing.T, tok string) error {
 }
 
 func (r *rig) login(host string) (json.RawMessage, error) {
-	return r.gate.Call(context.Background(), "login", map[string]any{"tab_id": 1, kGuard: map[string]any{kLogins: []string{host}}})
+	return r.gate.Call(context.Background(), "login", map[string]any{kTab: 1, kGuard: map[string]any{kLogins: []string{host}}})
 }
 
 func wantRefused(t *testing.T, err error, contains string) {
@@ -716,5 +716,156 @@ func TestRevokeOnePostHost(t *testing.T) {
 	}
 	if got := r.inner.lastPostHosts(t); !slices.Equal(got[hostA], []string{apiB}) {
 		t.Errorf("post hosts = %v", got)
+	}
+}
+
+func (r *rig) loginAs(sessions ...string) (json.RawMessage, error) {
+	return r.gate.Call(context.Background(), "login", map[string]any{kTab: 1, kSessions: sessions,
+		kGuard: map[string]any{kLogins: []string{hostA}}})
+}
+
+const (
+	chatA     = "20261124_090000_aaaaaa"
+	chatB     = "20261124_090000_bbbbbb"
+	subOfA    = "20261124_091500_cccccc"
+	scopeSes  = "session"
+	kTab      = "tab_id"
+	kSessions = "session_ids"
+)
+
+func sessionToken(r *rig, t *testing.T, chat string, mod func(*logingrant.Claims)) string {
+	t.Helper()
+	return r.token(t, func(c *logingrant.Claims) {
+		c.Scope, c.SessionID = logingrant.ScopeSession, chat
+		if mod != nil {
+			mod(c)
+		}
+	})
+}
+
+func TestSessionGrantHoldsOnlyForItsChat(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	if err := r.add(t, sessionToken(r, t, chatA, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.loginAs(chatA); err != nil {
+		t.Errorf("same chat refused: %v", err)
+	}
+	if _, err := r.loginAs(subOfA, chatA); err != nil {
+		t.Errorf("subagent of the chat refused: %v", err)
+	}
+	_, err := r.loginAs(chatB)
+	wantRefused(t, err, hostA)
+	_, err = r.loginAs()
+	wantRefused(t, err, hostA)
+	_, err = r.login(hostA)
+	wantRefused(t, err, hostA)
+	if got := r.inner.count("login"); got != 2 {
+		t.Errorf("logins reaching the extension = %d, want 2", got)
+	}
+	r.inner.mu.Lock()
+	sent := r.inner.args[len(r.inner.args)-1]
+	r.inner.mu.Unlock()
+	if strings.Contains(sent, "session_ids") {
+		t.Errorf("session ids reached the extension: %s", sent)
+	}
+	st, _ := r.op(t, map[string]any{kAction: kStatus, kHost: hostA, kSessions: []string{chatA}})
+	if st["session"] != true || st["grant"] == nil {
+		t.Errorf("status for the chat = %v", st)
+	}
+	st, _ = r.op(t, map[string]any{kAction: kStatus, kHost: hostA, kSessions: []string{chatB}})
+	if st["grant"] != nil || st["session"] != false {
+		t.Errorf("status for another chat = %v", st)
+	}
+	if hosts, _ := r.applied.get(); !slices.Contains(hosts, hostA) {
+		t.Errorf("extension does not list the session grant's host: %v", hosts)
+	}
+}
+
+func TestSessionGrantSurvivesUseAndDropsOnRevoke(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	if err := r.add(t, sessionToken(r, t, chatA, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.add(t, sessionToken(r, t, chatB, nil)); err != nil {
+		t.Fatal(err)
+	}
+	r.inner.reply["login"] = submitted
+	for range 2 {
+		if _, err := r.loginAs(chatA); err != nil {
+			t.Fatalf("session grant gone after a sign-in: %v", err)
+		}
+	}
+	out, err := r.op(t, map[string]any{kAction: kRevoke, kHost: hostA})
+	if err != nil || out["revoked"] != true {
+		t.Fatalf("revoke = %v %v", out, err)
+	}
+	for _, chat := range []string{chatA, chatB} {
+		_, err := r.loginAs(chat)
+		wantRefused(t, err, hostA)
+	}
+}
+
+func TestSessionGrantExpiresUnused(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	if err := r.add(t, sessionToken(r, t, chatA, nil)); err != nil {
+		t.Fatal(err)
+	}
+	r.now = r.now.Add(logingrant.SessionLifetime - time.Hour)
+	r.inner.reply["login"] = submitted
+	if _, err := r.loginAs(chatA); err != nil {
+		t.Fatal(err)
+	}
+	r.now = r.now.Add(logingrant.SessionLifetime - time.Hour)
+	if _, err := r.loginAs(chatA); err != nil {
+		t.Fatalf("a used session grant expired early: %v", err)
+	}
+	r.now = r.now.Add(logingrant.SessionLifetime + time.Hour)
+	_, err := r.loginAs(chatA)
+	wantRefused(t, err, hostA)
+}
+
+func TestSessionGrantKeptApartFromDeviceGrant(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	if err := r.add(t, sessionToken(r, t, chatA, func(c *logingrant.Claims) {
+		c.PostHosts = []string{"api.example.com"}
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.add(t, r.token(t, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.loginAs(chatB); err != nil {
+		t.Errorf("device grant refused for another chat: %v", err)
+	}
+	if got := r.inner.lastPostHosts(t)[hostA]; len(got) != 0 {
+		t.Errorf("another chat got the session grant's post hosts: %v", got)
+	}
+	if _, err := r.loginAs(chatA); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.inner.lastPostHosts(t)[hostA]; !slices.Equal(got, []string{"api.example.com"}) {
+		t.Errorf("the chat's post hosts = %v", got)
+	}
+	st, _ := r.op(t, map[string]any{kAction: kStatus, kHost: hostA, kSessions: []string{chatA}})
+	if g, _ := st["grant"].(map[string]any); g == nil || g["scope"] != scopeDev {
+		t.Errorf("status prefers the device grant: %v", st)
+	}
+	list, _ := r.op(t, map[string]any{kAction: kList})
+	scopes := []string{}
+	for _, g := range asList(list["grants"]) {
+		if m, ok := g.(map[string]any); ok {
+			if sc, ok := m["scope"].(string); ok {
+				scopes = append(scopes, sc)
+			}
+		}
+	}
+	slices.Sort(scopes)
+	if !slices.Equal(scopes, []string{scopeDev, scopeSes}) {
+		t.Errorf("stored scopes = %v", scopes)
 	}
 }

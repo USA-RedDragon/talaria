@@ -79,15 +79,36 @@ func (g *Gate) Effective() ([]string, map[string]string) {
 	if methods == nil {
 		methods = map[string]string{}
 	}
-	for _, gr := range g.o.Store.Grants() {
+	all := g.o.Store.Grants()
+	for _, gr := range all {
 		if !slices.Contains(hosts, gr.Host) {
 			hosts = append(hosts, gr.Host)
 		}
-		if gr.Method != "" {
+		if gr.Method != "" && gr.Scope != logingrant.ScopeSession {
+			methods[gr.Host] = gr.Method
+		}
+	}
+	for _, gr := range all {
+		if _, set := methods[gr.Host]; !set && gr.Method != "" {
 			methods[gr.Host] = gr.Method
 		}
 	}
 	return hosts, methods
+}
+
+// MaxSessionIDs is the most session ids of a chat's lineage a call names.
+const MaxSessionIDs = 32
+
+// sessionIDs returns ids cut to MaxSessionIDs non-empty ids of at most 256
+// bytes each.
+func sessionIDs(ids []string) []string {
+	out := make([]string, 0, min(len(ids), MaxSessionIDs))
+	for _, id := range ids {
+		if id != "" && len(id) <= 256 && len(out) < MaxSessionIDs {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // Sync sends the merged lists to the extension and arms the timer for the
@@ -139,18 +160,22 @@ func (g *Gate) Call(ctx context.Context, op string, args any) (json.RawMessage, 
 }
 
 type loginArgs struct {
-	URL   string `json:"url"`
-	Guard struct {
+	URL string `json:"url"`
+	// SessionIDs are the calling chat's session lineage: a session grant
+	// holds only when it names one of them.
+	SessionIDs []string `json:"session_ids"`
+	Guard      struct {
 		LoginHosts []string `json:"login_hosts"`
 	} `json:"guard"`
 }
 
 // PostHosts returns, per host, the other hosts the user allowed its login
-// form to send the login to; only hosts that have any.
-func (g *Gate) PostHosts(hosts []string) map[string][]string {
+// form to send the login to, for the chat whose session lineage is
+// sessions; only hosts that have any.
+func (g *Gate) PostHosts(hosts, sessions []string) map[string][]string {
 	out := map[string][]string{}
 	for _, gr := range g.o.Store.Grants() {
-		if all := gr.AllPostHosts(); len(all) > 0 && slices.Contains(hosts, gr.Host) {
+		if all := gr.AllPostHosts(); len(all) > 0 && slices.Contains(hosts, gr.Host) && gr.For(sessions) {
 			out[gr.Host] = union(out[gr.Host], all)
 		}
 	}
@@ -165,6 +190,7 @@ func withPostHosts(raw []byte, post map[string][]string) (json.RawMessage, error
 	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
 		return nil, refuse("login", "bad arguments")
 	}
+	delete(m, "session_ids")
 	var guard map[string]json.RawMessage
 	if len(m["guard"]) > 0 && string(m["guard"]) != "null" {
 		if err := json.Unmarshal(m["guard"], &guard); err != nil {
@@ -204,13 +230,13 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 	if h := urlHost(a.URL); h != "" {
 		hosts = append(hosts, h)
 	}
-	allowed, _ := g.Effective()
+	sessions := sessionIDs(a.SessionIDs)
 	for _, h := range hosts {
-		if !slices.Contains(allowed, h) {
-			return nil, refuse("login", "browser_login is not allowed on %s: it is not in browser.autologin-hosts and the user has not allowed it for this computer", h)
+		if !slices.Contains(g.o.ConfigHosts, h) && !g.o.Store.Allows(h, sessions) {
+			return nil, refuse("login", "browser_login is not allowed on %s: it is not in browser.autologin-hosts and the user has not allowed it for this computer or this chat", h)
 		}
 	}
-	send, err := withPostHosts(raw, g.PostHosts(hosts))
+	send, err := withPostHosts(raw, g.PostHosts(hosts, sessions))
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +261,7 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 	g.mu.Unlock()
 	if out.Submitted {
 		for _, h := range hosts {
-			if err := g.o.Store.Used(h); err != nil {
+			if err := g.o.Store.Used(h, sessions); err != nil {
 				slog.Warn("Could not record a sign-in grant use", "host", h, "error", err)
 			}
 		}
@@ -292,10 +318,11 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 		return nil, err
 	}
 	var a struct {
-		Action   string `json:"action"`
-		Host     string `json:"host"`
-		PostHost string `json:"post_host"`
-		Token    string `json:"token"`
+		Action     string   `json:"action"`
+		Host       string   `json:"host"`
+		PostHost   string   `json:"post_host"`
+		Token      string   `json:"token"`
+		SessionIDs []string `json:"session_ids"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, refuse(OpName, "bad arguments: %v", err)
@@ -306,7 +333,7 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 	case "list":
 		return json.Marshal(g.list())
 	case "status":
-		return g.status(a.Host)
+		return g.status(a.Host, sessionIDs(a.SessionIDs))
 	case "add":
 		gr, err := g.add(ctx, a.Token)
 		if err != nil {
@@ -329,12 +356,12 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 	return nil, refuse(OpName, "unknown action %q", a.Action)
 }
 
-func (g *Gate) status(host string) (json.RawMessage, error) {
+func (g *Gate) status(host string, sessions []string) (json.RawMessage, error) {
 	if host == "" {
 		return nil, refuse(OpName, "status needs a host")
 	}
 	var grant *Grant
-	if gr, ok := g.o.Store.Get(host); ok {
+	if gr, ok := g.o.Store.Get(host, sessions); ok {
 		grant = &gr
 	}
 	_, methods := g.Effective()
@@ -349,8 +376,9 @@ func (g *Gate) status(host string) (json.RawMessage, error) {
 		seen = []string{}
 	}
 	return json.Marshal(map[string]any{"host": host, "config": slices.Contains(g.o.ConfigHosts, host), "grant": grant,
-		"once": grant != nil && grant.Scope == logingrant.ScopeOnce, "method": methods[host], "saved_logins": saved,
-		"methods_seen": seen, "post_hosts": nonNil(g.PostHosts([]string{host})[host])})
+		"once": grant != nil && grant.Scope == logingrant.ScopeOnce, "session": grant != nil && grant.Scope == logingrant.ScopeSession,
+		"method": methods[host], "saved_logins": saved, "methods_seen": seen,
+		"post_hosts": nonNil(g.PostHosts([]string{host}, sessions)[host])})
 }
 
 // add verifies a grant token and stores it. The grant must verify with a hub
