@@ -217,6 +217,7 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 	res, err := g.o.Inner.Call(ctx, "login", send)
 	var out struct {
 		Submitted   bool     `json:"submitted"`
+		SignedIn    bool     `json:"signed_in"`
 		MethodsSeen []string `json:"methods_seen"`
 	}
 	if err != nil || json.Unmarshal(res, &out) != nil {
@@ -225,7 +226,7 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 	g.mu.Lock()
 	for _, h := range hosts {
 		switch {
-		case out.Submitted:
+		case out.Submitted || out.SignedIn:
 			delete(g.seen, h)
 		case len(out.MethodsSeen) > 0:
 			g.seen[h] = slices.Clone(out.MethodsSeen)

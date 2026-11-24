@@ -13,15 +13,22 @@ const end = src.indexOf("\n}\n", start);
 const refused = /const REFUSED_METHOD = \/(.+)\/i;/.exec(src)[1];
 
 // page builds pageMethod over fake buttons; clicked lists the texts clicked.
-function page(texts) {
+// opts sets the page's title, text, path and whether it has an email field.
+function page(texts, opts = {}) {
   const clicked = [];
   const els = texts.map((text) => ({
     tagName: "BUTTON", innerText: text, disabled: false, form: null,
     getAttribute: () => null, getBoundingClientRect: () => ({ width: 10, height: 10 }),
     contains: () => false, click() { clicked.push(text); },
   }));
-  const document = { querySelectorAll: (sel) => (sel.startsWith("input[type=password]") ? [] : els) };
-  const location = { protocol: "https:", hostname: "login.example.com", href: "https://login.example.com/" };
+  const field = { tagName: "INPUT", getBoundingClientRect: () => ({ width: 10, height: 10 }) };
+  const title = opts.title === undefined ? "Sign in" : opts.title;
+  const document = {
+    title, readyState: "complete", body: { innerText: opts.text === undefined ? title + "\n" + texts.join("\n") : opts.text },
+    querySelectorAll: (sel) => (sel.startsWith("input[type=password]") ? [] : sel.startsWith("input[") ? (opts.email ? [field] : []) : els),
+  };
+  const path = opts.path || "/";
+  const location = { protocol: "https:", hostname: "login.example.com", href: "https://login.example.com" + path, pathname: path };
   const getComputedStyle = () => ({ visibility: "visible", display: "block" });
   const fn = new Function("document", "location", "getComputedStyle", src.slice(start, end + 2) + "\nreturn pageMethod;")(
     document, location, getComputedStyle);
@@ -74,4 +81,33 @@ test("long labels are listed cut at a word break", () => {
   assert.ok(out.labels[0].length <= 80);
   assert.ok(long.startsWith(out.labels[0]));
   assert.ok(!out.labels[0].endsWith(" "));
+});
+
+const methods = new Function(src.slice(src.indexOf("function methodName("), src.indexOf("// SIGNED_IN_MS")) +
+  "\nreturn { methodName, passwordMethod };")();
+
+test("the one password method is chosen; none when two or none name a password", () => {
+  const pick = (labels) => methods.passwordMethod(labels, refused);
+  assert.strictEqual(pick(["Password help", "Passkey", "Password", "Approve on phone"]), "Password");
+  assert.strictEqual(pick(["Passkey Use a passkey on this device", W3ID, "IBM Verify Approve on your phone"]), "w3id Password");
+  assert.strictEqual(pick(["Work password", "Home password", "Passkey"]), "");
+  assert.strictEqual(pick(["Forgot password?", "Reset password", "Password with passkey", "Passkey"]), "");
+  assert.strictEqual(pick(["jacob@example.com acme", "Billing & Usage", "Log Explorer"]), "");
+});
+
+test("an account menu on a page that asks nothing is not a sign-in page", () => {
+  const p = page(["jacob@example.com acme", "Billing & Usage", "Log Explorer", "Contact Support"],
+    { title: "Example Portal", path: "/organizations/acme/billing", text: "Billing & Usage\nCurrent Credit Amount $12.34" });
+  const out = p.run("");
+  assert.strictEqual(out.signin, false);
+  assert.strictEqual(out.ready, "complete");
+  assert.deepStrictEqual(p.clicked, []);
+});
+
+test("a title, text, address or email field that asks to sign in makes a sign-in page", () => {
+  for (const opts of [{ title: "Log in | Example" }, { title: "Example", text: "Choose how to sign in" },
+    { title: "Example", text: "x", path: "/login" }, { title: "Example", text: "x", path: "/oauth2/authorize" },
+    { title: "Example", text: "Next", email: true }, { title: "Example", text: "Pick an account" }]) {
+    assert.strictEqual(page(["Next"], opts).run("").signin, true, JSON.stringify(opts));
+  }
 });

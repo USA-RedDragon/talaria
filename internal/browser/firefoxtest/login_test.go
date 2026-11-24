@@ -73,6 +73,12 @@ type loginResult struct {
 	// NeedsPostHost is the host a login form sent the login to that the
 	// user has not allowed.
 	NeedsPostHost string `json:"needs_post_host"`
+	// ShownBy says how a hidden tab was shown: focus or window.
+	ShownBy string `json:"shown_by"`
+	// SignedIn says the page showed no login and nothing asking to sign in.
+	SignedIn bool `json:"signed_in"`
+	// MethodAuto says browser_login chose the only password method itself.
+	MethodAuto bool `json:"method_auto"`
 }
 
 // loginServer records the posts it gets.
@@ -188,6 +194,21 @@ func (l *loginServer) handler(other string) http.HandlerFunc {
 			_, _ = io.WriteString(w, pickerPage("Passkey Use a passkey on this device", pickerDescLabel))
 		case "/picker-tail":
 			_, _ = io.WriteString(w, pickerPage("Password with passkey", "Password-reset"))
+		case "/picker-two":
+			_, _ = io.WriteString(w, pickerPage("Work password", "Home password", "Passkey"))
+		case "/account":
+			// A signed-in single-page app, as portal.salad.com shows it: an
+			// account button and the site's links, no login, nothing that asks
+			// to sign in. It renders after a moment, as such apps do.
+			_, _ = io.WriteString(w, `<!doctype html><title>Example Portal</title><div id="root"></div><script>
+setTimeout(() => { document.getElementById("root").innerHTML = '<nav><button onclick="fetch(\'/clicked?m=account\', {method: \'POST\'})">' +
+  'alice@example.com acme</button><a href="/logs">Log Explorer</a><a href="/billing">Billing &amp; Usage</a></nav>' +
+  '<main><h1>acme Billing</h1><p>Current Credit Amount: $12.34</p></main>'; }, 600);</script>`)
+		case "/account-then-login":
+			// The same app for a signed-out user: it shows its frame first and
+			// moves to the login form a moment later.
+			_, _ = io.WriteString(w, `<!doctype html><title>Example Portal</title><nav><button>Menu</button>`+
+				`<a href="/logs">Log Explorer</a></nav><script>setTimeout(() => { location.href = "/"; }, 1500);</script>`)
 		case "/picker-dup":
 			_, _ = io.WriteString(w, pickerPage("Password", "Password"))
 		case "/picker-offsite":
@@ -538,17 +559,30 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 		t.Errorf("buttons clicked = %q, want only Password", got)
 	}
 
-	// Nothing configured for this host: the labels come back, nothing is clicked.
-	two := show(rig.twoURL + "/picker")
+	// Nothing configured for this host and two password methods: the labels
+	// come back, nothing is clicked.
+	two := show(rig.twoURL + "/picker-two")
 	res = rig.login(ctx, t, map[string]any{keyTab: two, keyGuard: approve(twoLoginHost), keyTimeout: 3000})
 	t.Logf("picker without a configured method: %+v", res)
 	if res.Filled || res.Submitted || !strings.Contains(res.Reason, "no method is configured") ||
-		!slices.Equal(res.MethodsSeen, []string{"Password help", "Passkey", "Password", "Approve on phone"}) {
+		!slices.Equal(res.MethodsSeen, []string{"Password help", "Work password", "Home password", "Passkey"}) {
 		t.Errorf("picker without a configured method = %+v", res)
 	}
 	if got := rig.two.clicked(); len(got) != 0 {
 		t.Errorf("unconfigured picker clicked %q", got)
 	}
+	// Nothing configured, and one method signs in with a password: that one
+	// is clicked (two logins are saved there, so Firefox then fills none).
+	two = show(rig.twoURL + "/picker")
+	res = rig.login(ctx, t, map[string]any{keyTab: two, keyGuard: approve(twoLoginHost), keyTimeout: 3000})
+	t.Logf("picker with one password method: %+v", res)
+	if res.Submitted || res.Method != pickerMethod || !res.MethodAuto || !strings.Contains(res.Reason, "more than one login") {
+		t.Errorf("picker with one password method = %+v", res)
+	}
+	if got := rig.two.clicked(); !slices.Equal(got, []string{pickerMethod}) {
+		t.Errorf("picker with one password method clicked %q, want only Password", got)
+	}
+	signedInPages(ctx, t, rig, show)
 
 	before := len(rig.main.clicked())
 	for _, page := range []struct{ path, want string }{
@@ -581,6 +615,34 @@ func pickerEdges(ctx context.Context, t *testing.T, rig *loginRig, tabID int) {
 		t.Errorf("buttons clicked = %q, want only %q", got[before:], pickerDescLabel)
 	}
 	loginPageApproved(ctx, t, rig, show)
+}
+
+// signedInPages checks a page of the site that shows no login and asks
+// nothing (the user is signed in already): browser_login says so and
+// clicks nothing. A page that shows the same frame and then the login form
+// signs in.
+func signedInPages(ctx context.Context, t *testing.T, rig *loginRig, show func(string) int) {
+	t.Helper()
+	before := len(rig.main.clicked())
+	tab := show(rig.mainURL + "/account")
+	res := rig.login(ctx, t, map[string]any{keyTab: tab, keyGuard: approve(loginHost), keyTimeout: 15000})
+	t.Logf("login on a signed-in page: %+v", res)
+	if !res.SignedIn || res.Filled || res.Submitted || res.Reason != "" || len(res.MethodsSeen) != 0 {
+		t.Errorf("login on a signed-in page = %+v", res)
+	}
+	if got := rig.main.clicked(); len(got) != before {
+		t.Errorf("login on a signed-in page clicked %q", got[before:])
+	}
+	posts := len(rig.main.got())
+	tab = show(rig.mainURL + "/account-then-login")
+	res = rig.login(ctx, t, map[string]any{keyTab: tab, keyGuard: approve(loginHost), keyTimeout: 15000})
+	t.Logf("login on a page that moves to the login form: %+v", res)
+	if res.SignedIn || !res.Filled || !res.Submitted || res.Reason != "" {
+		t.Errorf("login on a page that moves to the login form = %+v", res)
+	}
+	if got := rig.main.got(); len(got) != posts+1 {
+		t.Errorf("login on a page that moves to the login form posted %d times", len(got)-posts)
+	}
 }
 
 // loginPageApproved checks an action on a login page of an autologin host

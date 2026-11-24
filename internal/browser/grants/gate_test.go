@@ -410,6 +410,26 @@ func TestDeviceGrantLastUsedAndMethodsSeen(t *testing.T) {
 	}
 }
 
+func TestSignedInPageDropsMethodsSeen(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	if err := r.add(t, r.token(t, nil)); err != nil {
+		t.Fatal(err)
+	}
+	r.inner.reply["login"] = `{"filled":false,"submitted":false,"reason":"no method is configured","methods_seen":["jacob@example.com acme"]}`
+	if _, err := r.login(hostA); err != nil {
+		t.Fatal(err)
+	}
+	r.inner.reply["login"] = `{"filled":false,"submitted":false,"signed_in":true}`
+	if _, err := r.login(hostA); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := r.op(t, map[string]any{kAction: kStatus, kHost: hostA})
+	if len(asList(st["methods_seen"])) != 0 {
+		t.Errorf("methods_seen kept after a signed-in page: %v", st["methods_seen"])
+	}
+}
+
 func TestStatusSavedLoginsReadsOnlyHostnames(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)

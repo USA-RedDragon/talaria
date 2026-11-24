@@ -1282,6 +1282,14 @@ function pageMethod(hosts, tabHost, label, click, refusedSource) {
     return { passwords, labels: [], matched: 0, clicked: false };
   }
   const norm = (t) => String(t || "").replace(/\s+/g, " ").trim();
+  // Whether the page asks to sign in at all: its title, text or address
+  // says so, or it shows a username or email field. A page of the site
+  // with none of that (an account menu, a dashboard) is signed in already.
+  const cue = /\b(sign|log)[ -]?(in|on)\b|\b(login|signin|logon)\b|\bauthenticat|\bchoose (how|a way|an account)\b|\bcontinue with\b|\bpick an account\b/i;
+  const body = document.body ? String(document.body.innerText || document.body.textContent || "").slice(0, 20000) : "";
+  const userField = [...document.querySelectorAll("input[type=email], input[autocomplete~=username], input[autocomplete~=email]")].filter(shown).length > 0;
+  const signin = cue.test(norm(document.title)) || cue.test(body) || userField ||
+    /(^|[\/_.-])((log|sign)[-_]?(in|on)|login|signin|auth|sso|oauth\d?|saml|session)([\/_.?-]|$)/i.test(String(location.pathname || ""));
   const textOf = (el) => norm(el.tagName === "INPUT" ? el.value : (el.innerText || el.textContent)) || norm(el.getAttribute("aria-label"));
   const choices = [...document.querySelectorAll(
     "button, a[href], input[type=button], input[type=submit], [role=button], [role=link], [role=radio], [role=option], [role=tab], [role=menuitem]")]
@@ -1293,7 +1301,7 @@ function pageMethod(hosts, tabHost, label, click, refusedSource) {
   // A label is at most 80 characters, cut at a word break.
   const short = (t) => (t.length <= 80 ? t : (t.slice(0, 81).replace(/\s+\S*$/, "") || t.slice(0, 80)));
   const labels = [...new Set(own.map((c) => short(c.text)))].slice(0, 12);
-  const out = { passwords: 0, labels, matched: 0, clicked: false };
+  const out = { passwords: 0, labels, matched: 0, clicked: false, signin, ready: document.readyState, text: body.trim() !== "" };
   if (!click || !label) {
     return out;
   }
@@ -1345,6 +1353,58 @@ function pageMethod(hosts, tabHost, label, click, refusedSource) {
   return Object.assign(out, { clicked: true });
 }
 
+// methodName is the name of a sign-in method button: its label, or, when
+// the label names a passkey or an approval only in a description after the
+// name ("w3id Password Use your w3id and password if you can't use a
+// passkey."), the words before that description. The same rule as
+// method_name in the plugin.
+function methodName(label, refusedSource) {
+  const refused = new RegExp(refusedSource, "i");
+  const text = String(label || "").replace(/\s+/g, " ").trim();
+  const hit = refused.exec(text);
+  if (!hit) {
+    return text;
+  }
+  const words = text.split(" ");
+  let best = "";
+  let end = 0;
+  for (let i = 0; i < words.length - 1; i++) {
+    end += words[i].length + (i ? 1 : 0);
+    if (end >= hit.index) {
+      break;
+    }
+    const rest = words.slice(i + 1);
+    if (/^[A-Z]/.test(rest[0]) && rest.length >= 3 && !refused.test(rest.slice(0, 3).join(" "))) {
+      const name = words.slice(0, i + 1).join(" ");
+      if (!refused.test(name)) {
+        best = name;
+      }
+    }
+  }
+  return best;
+}
+
+// passwordMethod returns the one sign-in method of labels that signs in
+// with a password, which browser_login chooses itself when the user chose
+// none: "" when no label or more than one names a password, so a page that
+// offers two password logins still needs the user's pick.
+function passwordMethod(labels, refusedSource) {
+  const refused = new RegExp(refusedSource, "i");
+  const names = new Set();
+  for (const label of labels || []) {
+    const name = methodName(label, refusedSource);
+    if (name && /\bpassword\b/i.test(name) && !refused.test(name) &&
+      !/\b(forgot|forgotten|reset|change|recover|help|show|hide|new|create|set|setup|manage|update|lost)\b/i.test(name)) {
+      names.add(name);
+    }
+  }
+  return names.size === 1 ? [...names][0] : "";
+}
+
+// SIGNED_IN_MS is how long a page of the site must show no login and
+// nothing that asks to sign in before browser_login reports it signed in.
+const SIGNED_IN_MS = 4000;
+
 // chooseMethod runs the picker step of browser_login on a tab of an
 // autologin host that has no password field. It returns { state, method }
 // once the page shows a password field after the configured button was
@@ -1353,7 +1413,10 @@ function pageMethod(hosts, tabHost, label, click, refusedSource) {
 // page offers), the button is not there or is not one element, or the
 // password form did not come.
 async function chooseMethod(tabId, host, hosts, timeoutMs) {
-  const label = autologinMethods.get(host) || "";
+  let label = autologinMethods.get(host) || "";
+  let auto = false;
+  let quiet = 0;
+  let quietURL = "";
   const limit = Math.max(1000, Math.min(Number(timeoutMs) || LOGIN_FILL_MS, MAX_LOGIN_FILL_MS));
   const start = Date.now();
   const stop = (reason, extra) => ({ result: Object.assign({ tab_id: tabId, filled: false, submitted: false, landed_host: host, reason }, extra) });
@@ -1362,6 +1425,10 @@ async function chooseMethod(tabId, host, hosts, timeoutMs) {
   for (;;) {
     const tab = await browser.tabs.get(tabId);
     const here = hostOf(tab.url);
+    if (!/^https?:/.test(tab.url || "") && Date.now() - start < limit) {
+      await new Promise((r) => setTimeout(r, 250)); // the next page has no address yet
+      continue;
+    }
     if (!/^https:/.test(tab.url || "") || !autologinHost(here)) {
       return stop("the page left the autologin hosts (" + (here || "no page") + ") while browser_login chose a sign-in method");
     }
@@ -1379,13 +1446,27 @@ async function chooseMethod(tabId, host, hosts, timeoutMs) {
       if (state.error) {
         throw new Refused(state.error);
       }
-      return { state, method: clicked ? label : "" };
+      return { state, method: clicked ? label : "", auto: clicked && auto };
+    }
+    if (s && !clicked && !s.signin && s.ready === "complete" && (s.text || s.labels.length)) {
+      if (!quiet || quietURL !== tab.url) {
+        quiet = Date.now();
+        quietURL = tab.url;
+      } else if (Date.now() - quiet >= Math.min(SIGNED_IN_MS, limit / 2)) {
+        return { result: { tab_id: tabId, filled: false, submitted: false, landed_host: here, signed_in: true } };
+      }
+    } else {
+      quiet = 0;
     }
     if (s) {
       seen = s.labels.length ? s.labels : seen;
       if (s.clicked) {
         clicked = true;
-      } else if (!clicked && seen.length) {
+      } else if (!clicked && seen.length && s.signin) {
+        if (!label) {
+          label = passwordMethod(seen, REFUSED_METHOD.source);
+          auto = Boolean(label);
+        }
         if (!label) {
           return stop("the page asks how to sign in (it offers: " + seen.map((l) => JSON.stringify(l)).join(", ") + ") and no " +
             "method is chosen for " + here + " (no method is configured). The user picks one on the sign-in card. " +
@@ -1404,7 +1485,8 @@ async function chooseMethod(tabId, host, hosts, timeoutMs) {
     }
     if (Date.now() - start >= limit) {
       return stop(clicked ? "the password form did not appear after the " + JSON.stringify(label) + " button was clicked" :
-        "the page shows no password field and no sign-in method to choose", seen.length ? { methods_seen: seen } : {});
+        "the page shows no password field and no sign-in method to choose", Object.assign(seen.length && s && s.signin ?
+        { methods_seen: seen } : {}, auto ? { method: label, method_auto: true } : {}));
     }
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -2680,6 +2762,7 @@ const OPS = {
         throw new Refused(state.error);
       }
       let method = "";
+      let methodAuto = false;
       if (state.passwords === 0) {
         // A method picker (such as Passkey, Password and Approve on phone)
         // comes before the password form. The device config or the user's
@@ -2691,6 +2774,7 @@ const OPS = {
           return step.result;
         }
         method = step.method;
+        methodAuto = Boolean(step.auto);
         state = step.state;
         tab = await browser.tabs.get(tabId);
         if (hostOf(tab.url) !== host) {
@@ -2700,7 +2784,8 @@ const OPS = {
           }
         }
       }
-      const noted = (r) => (method ? Object.assign(r, { method }) : r);
+      const noted = (r) => Object.assign(r, method ? { method } : {}, methodAuto ? { method_auto: true } : {},
+        before && before.shown ? { shown_by: before.shown } : {});
       if (state.passwords !== 1 || state.new_password || !state.username_present) {
         const why = !state.passwords ? "no password field" : state.passwords > 1 || state.new_password ?
           "more than one password field, or a new password field" : "no username field next to its password field";
