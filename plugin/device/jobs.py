@@ -405,7 +405,7 @@ def ask_chat(session_id: str, rule: str, tool_name: str) -> str:
                 f"on {site} with Firefox's saved login has "
                 f"not been allowed by the user on its computer, and nobody can answer a card in a run. Tell the user, "
                 f"and if they want it, call {ALLOW_TOOL} with rule \"{rule}\" and job_id \"{job_id}\": it shows the "
-                f"user a sign-in card (allow once, allow on that computer, or deny). This message is sent once.")
+                f"user a sign-in card (allow once, allow for this scheduled job, allow on that computer, or deny). This message is sent once.")
     else:
         text = (f"Scheduled job {job_id} is waiting up to {_br().JOB_WAIT_S // 60} minutes to run {tool_name} because the "
                 f"user has not approved \"{kind}\" on "
@@ -468,7 +468,7 @@ def _login_grant_for_job(job: str, site: str, in_hook: bool) -> Optional[dict]:
         return {"action": "block", "message": (
             f"{ALLOW_TOOL} was not run: the computer {name or device_id} that job {job} runs on is not connected with "
             f"browser control, so the sign-in on {site} cannot be allowed now. Try again when it is.")}
-    status = br._status(conn, site, in_hook=in_hook)
+    status = br._status(conn, site, in_hook=in_hook, job_id=job)
     if status is None or status.get("config") or status.get("grant"):
         return None
     return br.login_grant_card(conn, site, status, job_id=job)
@@ -493,7 +493,7 @@ def allow_site(args: dict, task_id: str = "", session_id: str = "", **_kwargs) -
     if kind == "login" and job:
         device_id, name = _job_device(job)
         conn = _core().hub().device(device_id) if device_id else None
-        status = _br()._status(conn, site, in_hook=False) if conn is not None else None
+        status = _br()._status(conn, site, in_hook=False, job_id=job) if conn is not None else None
         if status is not None:
             granted = bool(status.get("config") or status.get("grant"))
             return json.dumps({"ok": granted, "rule": rule, "granted": granted, "note": (

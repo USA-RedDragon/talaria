@@ -1031,6 +1031,7 @@ def chat_sessions(session_id: str) -> list[str]:
 def login_grant_card(conn: Any, host: str, status: dict, job_id: str = "", existing: str = "") -> dict:
     """The approve request for a sign-in grant: the hub shows its own card from ``login_grant``
     and answers once, this chat, device or deny, after it has given the device the grant."""
+    _remember_chat_card(conn, host)
     saved = status.get("saved_logins")
     saved = saved if isinstance(saved, int) and not isinstance(saved, bool) and saved >= -1 else -1
     methods = grant_methods(status.get("methods_seen")) if existing or status.get("methods_seen") else []
@@ -1044,13 +1045,86 @@ def login_grant_card(conn: Any, host: str, status: dict, job_id: str = "", exist
     }
 
 
-def _status(conn: Any, host: str, in_hook: bool = True) -> Optional[dict]:
-    """The device's grant status of ``host`` for this chat (a session grant of another chat does
-    not count); None when the device cannot tell (an older daemon, not connected, failed): the
-    caller then falls back to the device config alone."""
+def _caller(job_id: str = "") -> dict:
+    """Who asks the device to sign in: this chat's session lineage and, in a run of a scheduled
+    job (or when ``job_id`` names one), the job, whose job grant then holds."""
+    sid = _session("")
+    job = job_id or cron_job_id(sid)
+    return {"session_ids": chat_sessions(sid), **({"job_id": job} if job else {})}
+
+
+_CHAT_GRANTS: dict[tuple[str, str], tuple[str, str, str]] = {}
+_SKIP_REVOKE = threading.local()
+_GRANT_RULE = "plugin_rule:browser:login-grant:"
+
+
+def _remember_chat_card(conn: Any, host: str) -> None:
+    """A sign-in card of a chat: when the chat's session approval ends, so does the computer's grant for
+    that chat. A scheduled job's card is not remembered: its grant outlives the run."""
+    sid = _session("")
+    if not sid or cron_job_id(sid):
+        return
     try:
-        return grants_op(conn.device_id, {"action": "status", "host": host,
-                                          "session_ids": chat_sessions(_session(""))}, in_hook=in_hook)
+        from tools.approval_context import get_current_session_key
+        route = get_current_session_key()
+    except Exception:
+        return
+    chat = chat_sessions(sid)
+    if route and chat:
+        _CHAT_GRANTS[(route, _GRANT_RULE + f"{conn.device_id}:{host}")] = (conn.device_id, host, chat[-1])
+
+
+def _on_approvals_ended(session_key: str, keys: list[str]) -> None:
+    """Hermes ended session approvals (revoked, or the chat ended): take back the computer's chat-scoped
+    sign-in grant of each sign-in key among them."""
+    if getattr(_SKIP_REVOKE, "on", False):
+        return
+    for key in keys:
+        rec = _CHAT_GRANTS.pop((session_key, key), None)
+        if rec is None:
+            continue
+        device_id, host, chat = rec
+        try:
+            grants_op(device_id, {"action": "revoke", "host": host, "session_id": chat})
+        except GrantsUnsupported:
+            pass
+        except Exception as exc:
+            _core().logger.warning("device-browser: could not revoke the chat grant for %s on %s: %s", host, device_id, exc)
+
+
+def register_revoke_listener() -> bool:
+    try:
+        from tools.approval import register_revoke_listener as register
+    except ImportError:
+        return False
+    register(_on_approvals_ended)
+    return True
+
+
+def end_chat_approvals(device_id: str, host: str) -> list[str]:
+    """The computer's grant of ``host`` was revoked in Settings: end every chat's session approval of it, without
+    sending the computer a second revoke."""
+    try:
+        from tools.approval import revoke_approval_in_all_sessions
+    except ImportError:
+        return []
+    key = _GRANT_RULE + f"{device_id}:{host}"
+    _SKIP_REVOKE.on = True
+    try:
+        return revoke_approval_in_all_sessions(key)
+    finally:
+        _SKIP_REVOKE.on = False
+        for k in [k for k in _CHAT_GRANTS if k[1] == key]:
+            _CHAT_GRANTS.pop(k, None)
+
+
+def _status(conn: Any, host: str, in_hook: bool = True, job_id: str = "") -> Optional[dict]:
+    """The device's grant status of ``host`` for this chat or scheduled job (a session grant of
+    another chat, or a job grant of another job, does not count); None when the device cannot
+    tell (an older daemon, not connected, failed): the caller then falls back to the device
+    config alone."""
+    try:
+        return grants_op(conn.device_id, {"action": "status", "host": host, **_caller(job_id)}, in_hook=in_hook)
     except GrantsUnsupported:
         return None
     except _core().BrowserError as exc:
@@ -1208,7 +1282,7 @@ def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dic
             f"{conn.name}, so Firefox's saved login is not used there. Report that this sign-in needs the user.")}
     grant: dict = {"login_hosts": [host]}
     mine = (status or {}).get("grant")
-    if isinstance(mine, dict) and mine.get("scope") in ("device", "session"):
+    if isinstance(mine, dict) and mine.get("scope") in ("device", "session", "job"):
         grant["device_grant"] = True  # the user allowed this host on this computer from a hub card
         # "Allow on <computer>" on the hub card is the user's standing answer for this host there:
         # no second question, in chats and in scheduled runs alike, until the user revokes it.
@@ -3040,7 +3114,7 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     grant = _take_grant(_grant_key(_session(sid), "browser_login", args)) or _late_grant("browser_login", args, conn)
     req: dict = {"guard": {"login_hosts": grant.get("login_hosts") or []},
                  "timeout_ms": int(_int(args, "wait_seconds", 15, 1, 60) * 1000),
-                 "session_ids": chat_sessions(_session(sid))}
+                 **_caller()}
     if tab is not None:
         req["tab_id"] = tab
     else:
@@ -3460,6 +3534,7 @@ def register(ctx: Any, core: Any) -> None:
         if hook in known:
             ctx.register_hook(hook, fn)
     install_cron_hook()
+    register_revoke_listener()
     _jobs().register(ctx, core, sys.modules[__name__])
 
 

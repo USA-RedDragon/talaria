@@ -348,6 +348,45 @@ class JobDeviceTests(tb.BrowserDeviceTests):
             self.assertEqual(browser.pre_tool_call(tool_name="browser_allow_site", args=args, session_id="sess-1")["action"],
                              "block")
 
+    def test_a_run_names_its_job_to_the_daemon_and_a_job_grant_holds_for_it(self):
+        self.job_on_pc()
+        self.fake.inspect = {"url": "https://login.example.com/authsvc", "host": "login.example.com",
+                             "top_host": "login.example.com", "sensitive": ["password"], "autologin": False,
+                             "top_autologin": False, "target": {"kind": "field", "field": "password"}}
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "", "scope": "job",
+                                                 "job_id": "job1", "session_id": "chat"}
+        self.run_of("job1")
+        self.run_tool("browser_login", tab_id=7)
+        self.assertIsNone(self.decision, "the job's own grant is the answer: no card")
+        self.assertEqual(self.last("login")["args"]["job_id"], "job1")
+        statuses = [r["args"] for r in self.fake.requests if r["op"] == "login_grants" and r["args"].get("action") == "status"]
+        self.assertTrue(statuses and all(a.get("job_id") == "job1" for a in statuses), statuses)
+
+    def test_another_jobs_run_and_a_chat_do_not_get_a_job_grant(self):
+        self.job_on_pc()
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "", "scope": "job",
+                                                 "job_id": "job1", "session_id": "chat"}
+        conn = self.device.conn
+        self.run_of("job2")
+        self.assertIsNone(browser._status(conn, "login.example.com")["grant"])
+        self.assertEqual(self.fake.requests[-1]["args"]["job_id"], "job2")
+        self.session = "sess-1"
+        with mock.patch.object(browser, "cron_job_id", lambda sid: ""):
+            self.assertIsNone(browser._status(conn, "login.example.com")["grant"])
+        self.assertNotIn("job_id", self.fake.requests[-1]["args"])
+
+    def test_allow_site_handler_sees_the_jobs_grant(self):
+        self.job_on_pc()
+        self.fake.grants["portal.example.com"] = {"host": "portal.example.com", "method": "", "scope": "job",
+                                                  "job_id": "job1", "session_id": "chat"}
+        args = {"rule": "browser:login:portal.example.com", "job_id": "job1"}
+        out = json.loads(jobs.allow_site(args))
+        self.assertTrue(out["ok"] and out["granted"], out)
+        browser.choices().set_job("job2", {"device_id": "d_pc", "name": "pc", "user": "alice", "session_id": "s", "at": 0})
+        self.assertFalse(json.loads(jobs.allow_site(dict(args, job_id="job2")))["granted"])
+        r = browser.pre_tool_call(tool_name="browser_allow_site", args=args, session_id="sess-1")
+        self.assertEqual(r["rule_key"], "browser:login:portal.example.com", "the job already has its grant: the plain rule")
+
     def test_allow_site_login_with_the_computer_offline_blocks(self):
         self.job_on_pc()
         self.device.conn.browser = dict(self.device.conn.browser, connected=False)
@@ -391,6 +430,7 @@ class JobDeviceTests(tb.BrowserDeviceTests):
         self.assertFalse([r for r in self.fake.requests if r["op"] == "login"])
         self.assertIn('browser_allow_site with rule "browser:login:portal.example.com" and job_id "job1"', sent[0]["text"])
         self.assertIn("sign-in card", sent[0]["text"])
+        self.assertIn("for this scheduled job", sent[0]["text"])
 
 
 # Run only the tests defined here, not the inherited BrowserDeviceTests ones.

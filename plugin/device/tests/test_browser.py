@@ -75,6 +75,8 @@ class FakeBrowser:
             grant = self.grants.get(host)
             if grant and grant["scope"] == "session" and grant.get("session_id") not in (args.get("session_ids") or []):
                 grant = None
+            if grant and grant["scope"] == "job" and grant.get("job_id") != args.get("job_id"):
+                grant = None
             return {"ok": True, "result": {"host": host, "config": host in self.config_hosts, "grant": grant,
                                            "once": bool(grant and grant["scope"] == "once"),
                                            "session": bool(grant and grant["scope"] == "session"),
@@ -93,6 +95,11 @@ class FakeBrowser:
             self.grants[host] = grant
             return {"ok": True, "result": {"grant": grant}}
         if action == "revoke":
+            grant = self.grants.get(host)
+            if args.get("session_id") or args.get("job_id"):
+                mine = grant and ((grant["scope"] == "session" and grant.get("session_id") == args.get("session_id")) or
+                                  (grant["scope"] == "job" and grant.get("job_id") == args.get("job_id")))
+                return {"ok": True, "result": {"revoked": bool(mine and self.grants.pop(host))}}
             return {"ok": True, "result": {"revoked": self.grants.pop(host, None) is not None}}
         return {"ok": False, "code": "refused", "error": "unknown action"}
 
@@ -1038,6 +1045,52 @@ class ToolTests(BrowserBase):
         with mock.patch("tools.approval.request_tool_approval", ask):
             out = self.run_tool("browser_login", tab_id=7)
         return out, asked
+
+    LOGIN_KEY = "plugin_rule:browser:login-grant:d_pc:login.example.com"
+
+    def chat_login_grant(self, chat="chatC", route="agent:main:local:dm:c1"):
+        """The chat is asked for a sign-in grant and answers \"this chat\": the computer holds a session grant and
+        Hermes holds the session approval."""
+        from tools import approval
+        browser.register_revoke_listener()
+        status = {"saved_logins": 1, "methods_seen": []}
+        with mock.patch.object(core, "current_session_id", lambda: chat), \
+                mock.patch("tools.approval_context.get_current_session_key", lambda default="default": route):
+            browser.login_grant_card(self.device.conn, "login.example.com", status)
+        self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "", "scope": "session",
+                                                 "session_id": chat}
+        approval.approve_session(route, self.LOGIN_KEY)
+        self.addCleanup(approval.clear_session, route)
+        return approval, route
+
+    def revokes(self):
+        return [r["args"] for r in self.fake.requests if r["op"] == "login_grants" and r["args"].get("action") == "revoke"]
+
+    def test_revoking_the_chats_approval_revokes_the_computers_chat_grant(self):
+        approval, route = self.chat_login_grant()
+        self.assertTrue(approval.revoke_session_approval(route, self.LOGIN_KEY))
+        self.assertEqual(self.revokes(), [{"action": "revoke", "host": "login.example.com", "session_id": "chatC"}])
+        self.assertNotIn("login.example.com", self.fake.grants)
+
+    def test_ending_the_chat_revokes_the_computers_chat_grant(self):
+        approval, route = self.chat_login_grant()
+        approval.clear_session(route)
+        self.assertEqual(self.revokes(), [{"action": "revoke", "host": "login.example.com", "session_id": "chatC"}])
+        self.assertNotIn("login.example.com", self.fake.grants)
+
+    def test_revoking_another_approval_leaves_the_computers_grant(self):
+        approval, route = self.chat_login_grant()
+        approval.approve_session(route, "plugin_rule:browser:visit:example.com")
+        approval.revoke_session_approval(route, "plugin_rule:browser:visit:example.com")
+        self.assertEqual(self.revokes(), [])
+        self.assertIn("login.example.com", self.fake.grants)
+
+    def test_a_chat_with_no_recorded_card_revokes_nothing_on_the_computer(self):
+        from tools import approval
+        browser.register_revoke_listener()
+        approval.approve_session("agent:x", self.LOGIN_KEY)
+        approval.revoke_session_approval("agent:x", self.LOGIN_KEY)
+        self.assertEqual(self.revokes(), [])
 
     def test_login_post_host_raises_the_card_and_retries_once(self):
         out, asked = self.post_host_card(True)
@@ -2573,6 +2626,25 @@ class LoginGrantRoutes(BrowserBase):
         self.assertEqual((r.status_code, r.json()), (200, {"revoked": True}))
         self.assertEqual(self.last("login_grants")["args"], {"action": "revoke", "host": "portal.example.com"})
         self.assertEqual(self.client.delete(self.url + "/portal.example.com").json(), {"revoked": False})
+
+    def test_revoking_a_host_in_settings_ends_the_chats_approvals_too(self):
+        from tools import approval
+        key = "plugin_rule:browser:login-grant:%s:portal.example.com" % self.device.conn.device_id
+        other = "plugin_rule:browser:login-grant:%s:other.example.com" % self.device.conn.device_id
+        for route in ("agent:a", "agent:b"):
+            approval.approve_session(route, key)
+            self.addCleanup(approval.clear_session, route)
+        approval.approve_session("agent:a", other)
+        self.fake.grants["portal.example.com"] = {"host": "portal.example.com", "method": "", "scope": "session",
+                                                  "session_id": "s", "chat_title": "c"}
+        r = self.client.delete(self.url + "/portal.example.com")
+        self.assertEqual(r.json(), {"revoked": True})
+        self.assertFalse(approval.is_approved("agent:a", key) or approval.is_approved("agent:b", key))
+        self.assertTrue(approval.is_approved("agent:a", other))
+        self.assertEqual(self.revokes(), [{"action": "revoke", "host": "portal.example.com"}])
+
+    def revokes(self):
+        return [r["args"] for r in self.fake.requests if r["op"] == "login_grants" and r["args"].get("action") == "revoke"]
 
     def test_a_refused_token_is_a_400(self):
         r = self.client.post(self.url, json={"token": "bad"})

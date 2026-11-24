@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 05:20:34 -0600
+Subject: [PATCH] hermes: 0176 session approvals tell listeners when they end
+
+A plugin keeps state for a chat's approval, such as a computer's chat-scoped sign-in grant. register_revoke_listener, revoke_session_approval, revoke_approval_in_all_sessions and clear_session now tell it which keys ended.
+---
+ tests/tools/test_approval_revoke_listeners.py | 89 +++++++++++++++++++
+ tools/approval.py                             | 46 +++++++++-
+ 2 files changed, 134 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tools/test_approval_revoke_listeners.py
+
+diff --git a/tests/tools/test_approval_revoke_listeners.py b/tests/tools/test_approval_revoke_listeners.py
+new file mode 100644
+index 00000000..32efc506
+--- /dev/null
++++ b/tests/tools/test_approval_revoke_listeners.py
+@@ -0,0 +1,89 @@
++"""A chat's session approvals can be watched for their end: revoking one approval, and clearing the chat's
++approvals (/new, /stop, the end of the chat), tell every registered listener which keys went, so state a
++plugin keeps for them (a computer's chat-scoped sign-in grant) ends with them."""
++
++import pytest
++
++from tools import approval
++
++KEY = "agent:main:local:dm:hub-chat-1"
++LOGIN = "plugin_rule:browser:login-grant:d_pc:portal.example.com"
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch):
++    monkeypatch.setattr(approval, "_session_approved", {})
++    monkeypatch.setattr(approval, "_revoke_listeners", [])
++
++
++def _record():
++    seen = []
++    approval.register_revoke_listener(lambda session_key, keys: seen.append((session_key, sorted(keys))))
++    return seen
++
++
++def test_revoking_one_session_approval_tells_the_listener():
++    seen = _record()
++    approval.approve_session(KEY, LOGIN)
++    approval.approve_session(KEY, "plugin_rule:browser:visit:example.com")
++    assert approval.revoke_session_approval(KEY, LOGIN) is True
++    assert not approval.is_approved(KEY, LOGIN)
++    assert approval.is_approved(KEY, "plugin_rule:browser:visit:example.com")
++    assert seen == [(KEY, [LOGIN])]
++
++
++def test_revoking_what_was_never_approved_tells_nobody():
++    seen = _record()
++    assert approval.revoke_session_approval(KEY, LOGIN) is False
++    assert seen == []
++
++
++def test_clearing_a_session_tells_the_listener_every_key_it_held():
++    seen = _record()
++    approval.approve_session(KEY, LOGIN)
++    approval.approve_session(KEY, "plugin_rule:browser:visit:example.com")
++    approval.approve_session("other", LOGIN)
++    approval.clear_session(KEY)
++    assert seen == [(KEY, sorted([LOGIN, "plugin_rule:browser:visit:example.com"]))]
++    assert approval.is_approved("other", LOGIN)
++
++
++def test_clearing_a_session_without_approvals_tells_nobody():
++    seen = _record()
++    approval.clear_session(KEY)
++    assert seen == []
++
++
++def test_a_failing_listener_does_not_stop_the_others_or_the_revoke():
++    seen = _record()
++
++    def broken(session_key, keys):
++        raise RuntimeError("boom")
++    approval.register_revoke_listener(broken)
++    approval.approve_session(KEY, LOGIN)
++    assert approval.revoke_session_approval(KEY, LOGIN) is True
++    assert seen == [(KEY, [LOGIN])]
++
++
++def test_a_listener_registers_once():
++    seen = []
++
++    def listener(session_key, keys):
++        seen.append(session_key)
++    approval.register_revoke_listener(listener)
++    approval.register_revoke_listener(listener)
++    approval.approve_session(KEY, LOGIN)
++    approval.revoke_session_approval(KEY, LOGIN)
++    assert seen == [KEY]
++
++
++def test_revoking_one_key_in_every_session_names_each_session():
++    seen = _record()
++    approval.approve_session(KEY, LOGIN)
++    approval.approve_session("other", LOGIN)
++    approval.approve_session("third", "plugin_rule:browser:visit:example.com")
++    assert approval.revoke_approval_in_all_sessions(LOGIN) == sorted([KEY, "other"])
++    assert not approval.is_approved(KEY, LOGIN) and not approval.is_approved("other", LOGIN)
++    assert approval.is_approved("third", "plugin_rule:browser:visit:example.com")
++    assert sorted(seen) == sorted([(KEY, [LOGIN]), ("other", [LOGIN])])
++    assert approval.revoke_approval_in_all_sessions(LOGIN) == []
+diff --git a/tools/approval.py b/tools/approval.py
+index bcc6b63d..445eb0ed 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -354,6 +354,49 @@ def approve_session(session_key: str, pattern_key: str):
+         _session_approved.setdefault(session_key, set()).add(pattern_key)
+ 
+ 
++_revoke_listeners: list = []
++
++
++def register_revoke_listener(listener) -> None:
++    """Call ``listener(session_key, keys)`` whenever session approvals end: one revoked with
++    :func:`revoke_session_approval`, or all of a chat's on :func:`clear_session`. State kept elsewhere
++    for an approval (a plugin's grant for the chat) ends with it."""
++    with _lock:
++        if listener not in _revoke_listeners:
++            _revoke_listeners.append(listener)
++
++
++def _notify_revoked(session_key: str, keys: Iterable[str]) -> None:
++    keys = sorted(keys)
++    if not keys:
++        return
++    with _lock:
++        listeners = list(_revoke_listeners)
++    for listener in listeners:
++        try:
++            listener(session_key, list(keys))
++        except Exception:
++            logger.warning("An approval revoke listener failed", exc_info=True)
++
++
++def revoke_session_approval(session_key: str, pattern_key: str) -> bool:
++    """End a session approval of one key; False when the session held none."""
++    with _lock:
++        held = _session_approved.get(session_key)
++        if not held or pattern_key not in held:
++            return False
++        held.discard(pattern_key)
++    _notify_revoked(session_key, [pattern_key])
++    return True
++
++
++def revoke_approval_in_all_sessions(pattern_key: str) -> list[str]:
++    """End one key's session approval in every session; the sessions that held it, sorted."""
++    with _lock:
++        sessions = sorted(k for k, held in _session_approved.items() if pattern_key in held)
++    return [k for k in sessions if revoke_session_approval(k, pattern_key)]
++
++
+ def _release_permission_mode_dependents(session_key: str) -> None:
+     """Drop resources whose immutable mode derives from Hermes YOLO. Lazy import so approval-only
+     sessions never load computer-use; releasing on BOTH edges makes enabling YOLO replace a
+@@ -389,7 +432,7 @@ def clear_session(session_key: str) -> None:
+     if not session_key:
+         return
+     with _lock:
+-        _session_approved.pop(session_key, None)
++        ended = _session_approved.pop(session_key, None) or set()
+         _session_yolo.discard(session_key)
+         _launch_yolo_applied.discard(session_key)
+         _pending.pop(session_key, None)
+@@ -399,6 +442,7 @@ def clear_session(session_key: str) -> None:
+             entry.cancelled = "the session ended before the prompt was answered"
+             entry.event.set()
+     _release_permission_mode_dependents(session_key)
++    _notify_revoked(session_key, ended)
+     # Session-persistent code kernels (local and remote) share this owner key and die at the same boundary so a
+     # finished conversation cannot leak a live interpreter.
+     for module, shutdown in (("tools.code_kernel", "shutdown_kernels_for_owner"),

@@ -120,7 +120,10 @@ async def login_grants_revoke(device_id: str, host: str, post_host: str = ""):
     req = {"action": "revoke", "host": host.lower()}
     if post_host:
         req["post_host"] = post_host.lower()  # only this extra host of the grant
-    return await _grants_call(device_id, req, "revoked")
+    out = await _grants_call(device_id, req, "revoked")
+    if not post_host and isinstance(out, dict) and out.get("revoked"):
+        await asyncio.to_thread(_browser().end_chat_approvals, device_id, host.lower())
+    return out
 
 
 @router.get("/bindings")
