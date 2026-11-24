@@ -24,6 +24,7 @@ SOCK = os.environ.get("HERMES_BROWSER_E2E_SOCKET", "")
 FORM = os.environ.get("HERMES_BROWSER_E2E_FORM_URL", "")
 ROOT = os.environ.get("HERMES_BROWSER_E2E_ROOT", "")
 PAGES = os.environ.get("HERMES_BROWSER_E2E_PAGES_URL", "")
+LEAK = os.environ.get("HERMES_BROWSER_E2E_LEAK_URL", "")
 
 
 @unittest.skipUnless(SOCK, "run by internal/browser/firefoxtest with HERMES_BROWSER_E2E=1")
@@ -179,6 +180,42 @@ class PluginEndToEnd(unittest.TestCase):
         page = self.tool("browser_navigate", "browser:visit:127.0.0.1", url=FORM + "/two")
         self.batch_flow(page["tab_id"])
         self.tool("browser_tabs", action="close", tab_id=page["tab_id"])
+
+    @unittest.skipUnless(LEAK, "run by TestFirefoxSkillScriptPageLoads, which serves the case page")
+    def test_skill_script_keeps_page_loading(self):
+        """The SEV-1 tracker's case read in a scheduled run: no user, only "always" rules, and a
+        read-only script by script_ref that waits for a feed the page loads after the script
+        started (TestFirefoxSkillScriptPageLoads serves the page and counts the requests)."""
+        for _ in range(100):
+            if self.conn.browser.get("connected"):
+                break
+            threading.Event().wait(0.1)
+        self.assertTrue(self.conn.browser.get("connected"))
+        self.hub.bind("e2e", "d_e2e", ROOT)
+        skill = Path(os.environ["HERMES_HOME"]) / "skills" / "e2e-case"
+        (skill / "scripts").mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text("---\nname: e2e-case\ndescription: \"Use in the e2e test.\"\n---\n\n# e2e\n")
+        (skill / "scripts" / "feed.js").write_text(
+            "let feed = '';\n"
+            "for (const t0 = Date.now(); Date.now() - t0 < 8000; ) {\n"
+            "  feed = document.getElementById('feed').textContent;\n"
+            "  if (feed) break;\n"
+            "  await new Promise((r) => setTimeout(r, 200));\n"
+            "}\n"
+            "let leaked = true;\n"
+            "try { await fetch(ARGS.leak + '/leak', {mode: 'no-cors'}); } catch (e) { leaked = false; }\n"
+            "return { feed, leaked };\n")
+        always = {"browser:visit:127.0.0.1", "browser:script:127.0.0.1"}
+        with mock.patch.object(browser, "no_user", lambda: True), \
+                mock.patch.object(browser, "approved", lambda k: k in always):
+            tab = self.tool("browser_navigate", "browser:visit:127.0.0.1", url=PAGES + "/case")["tab_id"]
+            out = self.tool("browser_eval", "browser:script:127.0.0.1", tab_id=tab, script_ref={"skill": "e2e-case", "file": "scripts/feed.js"},
+                            args={"leak": LEAK})
+            self.tool("browser_tabs", action="close", tab_id=tab)
+        self.assertEqual(out.get("result"), {"feed": "AURA-OK FEED-FROM-STATIC", "leaked": False}, out)
+        notes = " ".join(out.get("blocked_requests_note") or [])
+        self.assertNotIn("127.0.0.1", notes, "the page's own host was blocked")
+        self.assertNotIn("127.0.0.2", notes, "the page's static host was blocked")
 
     def batch_flow(self, tab: int):
         """One browser_batch fills a two-field form, picks an option and presses Enter: one call,
