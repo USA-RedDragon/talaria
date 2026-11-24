@@ -844,13 +844,15 @@ def _blocked_requests(conn: Any, notes: Any) -> None:
             if person and set(lift) - set(person):
                 rules.append(_rule("lift-" + "-".join(sorted(set(lift) - set(person))), "tab"))
             text = f"{line}; allow? Allow lifts that limit for {where}."
-            ok = bool(person) and person_cleared(rules)
+            rule = _rule("lift-" + "-".join(sorted(lift)), "tab")
+            # With no user present only the user's standing answers count: "always" rules, and
+            # person-only rules the user cleared.
+            ok = person_cleared(rules) if person else (approved(rule) or bypass())
             asked = not ok
             if not ok and not no_user():
                 if person:
                     ok = _confirm(text, rules=rules)
                 else:
-                    rule = _rule("lift-" + "-".join(sorted(lift)), "tab")
                     try:
                         from tools.approval import request_tool_approval
                         ans = request_tool_approval("browser_lift", text, rule_key=rule)

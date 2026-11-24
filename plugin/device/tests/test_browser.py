@@ -3253,6 +3253,22 @@ class PersonOnlyCards(BrowserBase):
     def lifts(self):
         return [r["args"] for r in self.fake.requests if r["op"] == "lift_limits"]
 
+    def test_no_user_lift_uses_only_always_rules(self):
+        with mock.patch.object(browser, "no_user", lambda: True):
+            with mock.patch.object(browser, "approved", lambda k: False):
+                out = self.blocked(47, host="cdn.example.com", kinds=("taint",))
+            self.assertIn("not lifted: no user is present", " ".join(out["blocked_requests_note"]))
+            self.assertEqual(self.lifts(), [])
+            with mock.patch.object(browser, "approved", lambda k: k == "browser:lift-taint:tab"):
+                out = self.blocked(47, host="cdn.example.com", kinds=("taint",))
+            self.assertIn("lifted (allowed in this chat)", " ".join(out["blocked_requests_note"]))
+            self.assertEqual([x["kinds"] for x in self.lifts()], [["taint"]])
+            with mock.patch.object(browser, "approved", lambda k: k == "browser:lift-taint:tab"):
+                out = self.blocked(48, host="10.0.0.5", kinds=("private",))
+            self.assertIn("not lifted", " ".join(out["blocked_requests_note"]), "a taint rule lifts nothing else")
+            self.assertEqual(len(self.lifts()), 1)
+        self.assertEqual(self.asked, [], "no card is shown with no user present")
+
     def test_private_lift_rule_is_per_host_not_per_tab(self):
         self.choice = "session"
         self.blocked(47)
