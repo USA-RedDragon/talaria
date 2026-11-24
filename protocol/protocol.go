@@ -404,6 +404,11 @@ type BrowserStatus struct {
 	// that waits when it is "pending".
 	ExtensionUpdate        string `json:"extension_update,omitempty"`
 	ExtensionUpdateVersion string `json:"extension_update_version,omitempty"`
+	// ExtensionBuild is the digest of the connected extension's files and
+	// ExtensionShipped the digest of the extension this daemon ships. They
+	// differ when Firefox runs an older extension than the daemon's.
+	ExtensionBuild   string `json:"extension_build,omitempty"`
+	ExtensionShipped string `json:"extension_shipped,omitempty"`
 	// CanStart: the device can start Firefox on a TypeBrowserStart.
 	CanStart bool `json:"can_start,omitempty"`
 }

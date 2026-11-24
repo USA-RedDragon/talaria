@@ -1510,6 +1510,9 @@ def _pre_tool_call(tool_name: str, args: Optional[dict], session_id: str) -> Opt
         _, conn = target(session_id, start=False, wait=_hook_wait())
     except Unavailable:
         return None
+    stop = "" if tool_name == "browser_tabs" and args.get("action") in ("close", "list") else _stale_stop(conn)
+    if stop:
+        return {"action": "block", "message": f"{tool_name} was not run: {stop}"}
     args = with_default_tab(tool_name, args, session_id, conn)
     key = _grant_key(_session(session_id), tool_name, args)
     _take_grant(key)
@@ -2133,6 +2136,9 @@ def _tool(fn: Callable[[dict, Any, str], Any], name: str) -> Callable[..., Any]:
         try:
             _, conn = target(session_id)
             device = conn.device_id
+            stop = "" if name == "browser_tabs" and args.get("action") in ("close", "list") else _stale_stop(conn)
+            if stop:
+                return _err(stop, "extension_outdated")
             args = with_default_tab(name, args, session_id, conn)
             tab = _tab_id(args)
             waiting = _peek_grant(_grant_key(sid, name, args))
@@ -2271,12 +2277,38 @@ def _older(a: Any, b: Any) -> bool:
     return x + (0,) * (n - len(x)) < y + (0,) * (n - len(y))
 
 
+def extension_stale(conn: Any) -> str:
+    """Plain words when Firefox runs other extension code than the daemon ships, else "".
+
+    The daemon sends the digest of the extension it ships and of the connected one (extension/
+    firefox Build); an extension older than 0.32.11 sends none. A release that carries the
+    earlier signed extension has the same digest, so a lower extension version alone is fine."""
+    info = getattr(conn, "browser", None) or {}
+    shipped = info.get("extension_shipped")
+    if not shipped or not info.get("connected") or info.get("extension_build") == shipped:
+        return ""
+    daemon = getattr(conn, "client_version", "") or "the daemon"
+    return (f"The Talaria Firefox extension on {conn.name or conn.device_id} ({info.get('extension_version') or 'unknown'}) "
+            f"is older than the one talaria {daemon} ships, so the newer extension's fixes are not active there. "
+            f"Firefox installs the signed update by itself at its daily add-on check; to get it now, the user opens "
+            f"about:addons in Firefox, clicks the gear button and then Check for Updates.")
+
+
+def _stale_stop(conn: Any) -> str:
+    """With no user present and a stale extension: the plain message the run stops with, else ""."""
+    stale = extension_stale(conn) if no_user() else ""
+    return (f"{stale} This run has no user, so it stops before any browser work rather than run on the old "
+            f"extension. Do not retry; report this message.") if stale else ""
+
+
 def extension_update_note(conn: Any) -> str:
     """Plain words when the Firefox extension is older than the daemon or the plugin, else "".
 
     The extension version moves only when the extension changes, so older is not always a problem:
     an extension that reports it asked Firefox and heard there is no update says nothing here."""
     info = getattr(conn, "browser", None) or {}
+    if info.get("extension_shipped"):
+        return extension_stale(conn)
     ext = info.get("extension_version")
     state = info.get("extension_update") or ""
     newer = [f"{name} {v}" for name, v in (("the daemon", getattr(conn, "client_version", "")),
@@ -2309,8 +2341,12 @@ def browser_status(args: dict, session_id: str = "", **_kwargs) -> str:
         _, conn = target(session_id, start=False)
     except Unavailable as exc:
         return _ok({"available": False, "reason": str(exc), "devices": _device_list(_known_user(session_id))})
+    stop = _stale_stop(conn)
+    if stop:
+        return _ok({"available": False, "reason": stop, "device": conn.name, "device_id": conn.device_id,
+                    "code": "extension_outdated"})
     out = {"available": True, "device": conn.name, "device_id": conn.device_id, "why": _HOW.get(how, how)}
-    out.update({k: v for k, v in conn.browser.items() if k != "connected"})
+    out.update({k: v for k, v in conn.browser.items() if k not in ("connected", "extension_build", "extension_shipped")})
     note = extension_update_note(conn)
     if note:
         out["extension_update_note"] = note

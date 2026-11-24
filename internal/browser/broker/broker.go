@@ -81,6 +81,9 @@ type Message struct {
 	HostPID          int               `json:"host_pid,omitempty"`
 	Version          string            `json:"version,omitempty"`
 	Browser          string            `json:"browser,omitempty"`
+	// Build is the digest of the extension's files (extension/firefox
+	// Build), in the hello. Empty from an extension older than 0.32.11.
+	Build string `json:"build,omitempty"`
 	// DaemonVersion and PluginVersion are in the config message: the
 	// release versions of the daemon and of the plugin it talks to. An
 	// extension older than either asks Firefox for an update.
@@ -118,6 +121,7 @@ type Hello struct {
 	// Message. Empty from an extension that does not report it.
 	Update        string
 	UpdateVersion string
+	Build         string
 }
 
 // Options configure a Broker.
@@ -263,7 +267,7 @@ func (b *Broker) handshake(c net.Conn) {
 	cn := &conn{
 		c: c,
 		hello: Hello{ExtensionID: hh.ExtensionID, Version: eh.Version, Browser: eh.Browser, HostPID: hh.HostPID,
-			Update: eh.Update, UpdateVersion: eh.UpdateVersion},
+			Update: eh.Update, UpdateVersion: eh.UpdateVersion, Build: eh.Build},
 		pending: map[string]chan Message{},
 		done:    make(chan struct{}),
 	}

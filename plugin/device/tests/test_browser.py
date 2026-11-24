@@ -306,6 +306,31 @@ class ToolTests(BrowserBase):
         browser_conn["extension_version"] = "0.28.1"
         self.assertIn("older than the daemon 0.31.1", self.run_tool("browser_check")["extension_update_note"])
 
+    def test_scheduled_run_stops_on_a_stale_extension(self):
+        conn = self.device.conn
+        conn.browser.update(extension_version="0.32.8", extension_shipped="aaaaaaaaaaaaaaaa")
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+            status = self.run_tool("browser_status")
+            self.assertFalse(status["available"])
+            self.assertEqual(status["code"], "extension_outdated")
+            self.assertIn("(0.32.8) is older than the one talaria", status["reason"])
+            self.assertIn("Check for Updates", status["reason"])
+            self.assertIn("stops before any browser work", status["reason"])
+            before = len(self.fake.requests)
+            out = self.run_tool("browser_navigate", url="https://example.com/")
+            self.assertIn("browser_navigate was not run: The Talaria Firefox extension", out["error"])
+            self.assertEqual([r["op"] for r in self.fake.requests[before:]], [], "nothing reaches the browser")
+            out = json.loads(self.registry.dispatch("browser_snapshot", {"tab_id": 7}, task_id="t", session_id=self.session))
+            self.assertEqual(out["code"], "extension_outdated")
+            self.assertEqual([r["op"] for r in self.fake.requests[before:]], [])
+            conn.browser.update(extension_build="aaaaaaaaaaaaaaaa")
+            self.assertTrue(self.run_tool("browser_status")["available"], "a carried extension with the same build is current")
+        conn.browser.pop("extension_build")
+        status = self.run_tool("browser_status")
+        self.assertTrue(status["available"], "a chat with a user keeps working")
+        self.assertIn("Check for Updates", status["extension_update_note"])
+        self.assertNotIn("extension_shipped", status)
+
     def test_unbound_session_uses_the_only_browser_device(self):
         self.hub.unbind(self.session)
         self.store.rows["fresh"] = None

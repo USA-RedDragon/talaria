@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/USA-RedDragon/talaria/extension/firefox"
 	"github.com/USA-RedDragon/talaria/internal/allowlist"
 	"github.com/USA-RedDragon/talaria/internal/browser/broker"
 	"github.com/USA-RedDragon/talaria/internal/executor"
@@ -1400,6 +1401,7 @@ func (s *session) browserStatus(ctx context.Context) {
 		if h, ok := b.Connected(); ok {
 			st.Connected, st.Browser, st.ExtensionVersion = true, h.Browser, h.Version
 			st.ExtensionUpdate, st.ExtensionUpdateVersion = h.Update, h.UpdateVersion
+			st.ExtensionBuild, st.ExtensionShipped = h.Build, firefox.Build()
 		}
 		st.CanStart = s.c.opts.StartBrowser != nil
 		if st != last {

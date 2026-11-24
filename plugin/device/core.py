@@ -1118,7 +1118,8 @@ class Hub:
             status = {"connected": msg.get("connected") is True}
             if msg.get("can_start") is True:
                 status["can_start"] = True
-            for key in ("browser", "extension_version", "extension_update", "extension_update_version"):
+            for key in ("browser", "extension_version", "extension_update", "extension_update_version",
+                        "extension_build", "extension_shipped"):
                 if isinstance(msg.get(key), str) and msg[key]:
                     status[key] = msg[key][:64]
             conn.browser = status

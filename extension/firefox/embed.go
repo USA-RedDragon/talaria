@@ -3,7 +3,9 @@
 package firefox
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 )
 
 // Files holds the extension's files.
@@ -30,14 +33,49 @@ var (
 	versionFieldRE = regexp.MustCompile(`(?m)^(\s*"version":\s*)"[^"]*"`)
 )
 
+// BuildFile is the file Write adds with the extension's Build.
+const BuildFile = "build.txt"
+
+// Build is a digest of the extension's files with the manifest's version
+// left out. Two builds with the same Build run the same code, whatever their
+// version: a release that carries an earlier signed extension has the same
+// Build as the daemon that ships it.
+func Build() string { return build() }
+
+var build = sync.OnceValue(func() string { //nolint:gochecknoglobals // computed once from the embedded files
+	h := sha256.New()
+	err := fs.WalkDir(Files, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := Files.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if p == "manifest.json" {
+			data = versionFieldRE.ReplaceAll(data, []byte(`${1}""`))
+		}
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00", p, len(data))
+		_, _ = h.Write(data)
+		return nil
+	})
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+})
+
 // Write writes the extension's files to dir, with the manifest version set
-// to version when that is not empty.
+// to version when that is not empty, and BuildFile.
 func Write(dir, version string) error {
 	manifest, err := Manifest(version)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, BuildFile), []byte(Build()+"\n"), 0o600); err != nil {
 		return err
 	}
 	return fs.WalkDir(Files, ".", func(p string, d fs.DirEntry, err error) error {

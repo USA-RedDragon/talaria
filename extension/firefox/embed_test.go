@@ -205,6 +205,29 @@ func TestWriteIncludesIcons(t *testing.T) {
 	}
 }
 
+func TestWriteAddsBuild(t *testing.T) {
+	t.Parallel()
+	a, b := t.TempDir(), t.TempDir()
+	if err := firefox.Write(a, "1.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := firefox.Write(b, "4.5.6"); err != nil {
+		t.Fatal(err)
+	}
+	x, err := os.ReadFile(filepath.Join(a, firefox.BuildFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := os.ReadFile(filepath.Join(b, firefox.BuildFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := firefox.Build()
+	if len(build) != 16 || string(x) != build+"\n" || string(y) != string(x) {
+		t.Errorf("build files %q and %q, Build %q: want the same digest whatever the version", x, y, build)
+	}
+}
+
 // The extension and the config check refuse the same sign-in method labels.
 func TestRefusedMethodPatternMatchesConfig(t *testing.T) {
 	t.Parallel()

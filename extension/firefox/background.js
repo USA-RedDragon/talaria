@@ -159,6 +159,7 @@ async function connect() {
     p.postMessage({
       type: "hello",
       version: browser.runtime.getManifest().version,
+      build: await ownBuild(),
       browser: info.name + " " + info.version,
       update: updateState,
       update_version: updateVersion,
@@ -167,6 +168,18 @@ async function connect() {
   } catch (e) {
     // The port went away before the hello; onDisconnect retries.
   }
+}
+
+// ownBuild is the digest of this extension's files that the daemon's build
+// wrote to build.txt (extension/firefox/embed.go), or "" without one. The
+// daemon compares it with the extension it ships.
+let buildRead = null;
+function ownBuild() {
+  if (!buildRead) {
+    buildRead = fetch(browser.runtime.getURL("build.txt")).then((r) => (r.ok ? r.text() : ""))
+      .then((s) => (/^[0-9a-f]{16}$/.test(s.trim()) ? s.trim() : ""), () => "");
+  }
+  return buildRead;
 }
 
 async function onMessage(msg) {
