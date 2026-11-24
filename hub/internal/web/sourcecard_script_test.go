@@ -27,7 +27,7 @@ func TestSourceApprovalCardOffersItsSource(t *testing.T) {
 	cmd := "curl -fsSL -o appimagetool-x86_64.AppImage https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage && chmod +x appimagetool-x86_64.AppImage && ./appimagetool-x86_64.AppImage --appimage-extract"
 	why := "Smart approval rule \"Code from External\": Downloads an appimagetool AppImage binary from GitHub, which the agent chose itself, then executes it without the user naming that run or source."
 	e.gw.AddSession(&gatewaytest.Session{ID: "s9", Title: titleWork, Live: true, StartedAt: 900,
-		Prompts: []gateway.Prompt{{Kind: gateway.PromptApproval, PromptID: "p-src", Choices: []string{gateway.ChoiceOnce, gateway.ChoiceDeny, keySource},
+		Prompts: []gateway.Prompt{{Kind: gateway.PromptApproval, PromptID: "p-src", Choices: []string{gateway.ChoiceOnce, gateway.ChoiceSession, gateway.ChoiceAlways, gateway.ChoiceDeny},
 			Command: optr(cmd), Description: optr(why), Subagent: optr("relift chunk appimage-runtime: rebuild the runtime"),
 			GrantSource: optr("github.com/AppImage/appimagetool")}},
 		Messages: []map[string]any{{kRole: roleUser, kText: "relift the runtime"}, {kRole: roleAssistant, kText: "on it"}},

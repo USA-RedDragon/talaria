@@ -54,7 +54,7 @@ window.HubApprovals = (() => {
       const why = p.rule ? p.rule + (p.reason ? ": " + line(p.reason) : "") : command ? words : "";
       const dim = [];
       if (why) dim.push(why);
-      if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) dim.push("source " + p.grant_source);
+      if (p.grant_source && Array.isArray(p.choices) && (p.choices.includes("source") || p.choices.includes("session"))) dim.push("source " + p.grant_source);
       // Where it was answered; the time is the message's, not the card's.
       if (rec.where) dim.push(rec.where);
       if (dim.length) out.lines.push({ parts: dim.join(" \u00b7 "), dim: true, closed: true });
@@ -67,7 +67,7 @@ window.HubApprovals = (() => {
     const reason = String(p.reason || "").split("\n").map((t) => t.trim()).filter(Boolean).join(" ");
     if (reason) rows.push({ k: "Why", v: reason });
     else if (words && !p.rule) rows.push({ k: "Action", v: words });
-    if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) rows.push({ k: "Source", v: p.grant_source });
+    if (p.grant_source && Array.isArray(p.choices) && (p.choices.includes("source") || p.choices.includes("session"))) rows.push({ k: "Source", v: p.grant_source });
     if (rec.where) rows.push({ k: "Answered", v: rec.where.charAt(0).toUpperCase() + rec.where.slice(1) });
     if (rows.length) out.blocks.push({ kind: "kv", rows });
     if (shown) out.blocks.push({ label: "Command", text: shown });
@@ -278,7 +278,7 @@ window.HubApprovals = (() => {
           for (const line of why) dd.append(el("div", "", line));
           list.append(el("dt", "", "Why"), dd);
         }
-        if (p.grant_source && Array.isArray(p.choices) && p.choices.includes("source")) list.append(el("dt", "", "Source"), el("dd", "", p.grant_source));
+        if (p.grant_source && Array.isArray(p.choices) && (p.choices.includes("source") || p.choices.includes("session"))) list.append(el("dt", "", "Source"), el("dd", "", p.grant_source));
         box.append(list);
         const tc = toolCall(p.command, deps.proc);
         if (tc) box.append(toolCallNode(el, tc));

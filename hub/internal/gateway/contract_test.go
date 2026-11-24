@@ -79,7 +79,7 @@ func contract() map[string][]string {
 		},
 		"gateway/turn_carry.py": {`origin = {"replay_epoch": params["replay_epoch"], "seq": params["seq"]}`},
 		"gateway/session_pending_controls.py": {
-			"choices = ['" + gateway.ChoiceOnce + "', '" + gateway.ChoiceDeny + "']",
+			"choices = offer({**data, 'pattern_key': data.get('pattern_key') or 'approval'})",
 			"prompt = {'kind': 'approval', 'prompt_id': prompt_id,", "event_type='approval.request'",
 			`prompt = {"kind": "clarify", "prompt_id": entry.clarify_id,`, `"multi_select": entry.multi_select}`,
 			`event_type="clarify.request")`, "event_type=prompt['kind'] + '.settled')", "settled.update(_clarify_record(route, prompt))",

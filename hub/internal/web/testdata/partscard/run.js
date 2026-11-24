@@ -14,12 +14,14 @@ const { proc, connect } = require("../cdp.js").launch(bin, dir);
 const { until } = require("../cdp.js");
 
 const SRC = "Allow code from github.com/AppImage/appimagetool in this chat";
+const SRC_ALWAYS = "Always allow code from github.com/AppImage/appimagetool";
+const FOUR = ["Allow once", "Allow in this chat", "Always allow", "Deny"];
 // title: the session; kind: what the card must look like.
 const CARDS = [
-  { title: "Parts subagent", name: "subagent", who: true, rows: ["Rule", "Why"], rule: "Interfere With Workloads", buttons: ["Allow", "Deny"] },
-  { title: "Parts chat", name: "chat", who: false, rows: ["Rule", "Why"], rule: "Auto-Mode Bypass", buttons: ["Allow", "Deny"] },
-  { title: "Parts source", name: "source", who: true, rows: ["Rule", "Why", "Source"], rule: "Code from External", buttons: ["Allow", SRC, "Deny"] },
-  { title: "Parts older", name: "older", old: true, buttons: ["Allow", "Deny"] },
+  { title: "Parts subagent", name: "subagent", who: true, rows: ["Rule", "Why"], rule: "Interfere With Workloads", buttons: FOUR },
+  { title: "Parts chat", name: "chat", who: false, rows: ["Rule", "Why"], rule: "Auto-Mode Bypass", buttons: FOUR },
+  { title: "Parts source", name: "source", who: true, rows: ["Rule", "Why", "Source"], rule: "Code from External", buttons: ["Allow once", SRC, SRC_ALWAYS, "Deny"] },
+  { title: "Parts older", name: "older", old: true, buttons: FOUR },
 ];
 
 async function open(c, w, touch, dark, title, nbuttons) {
@@ -102,8 +104,8 @@ async function check(c, card, w, touch, dark) {
     }
   }
   // A tap on Allow of the chat's own card sends the choice.
-  await open(c, 412, true, false, "Parts chat", 2);
-  await c.ev(`[...document.querySelectorAll("#log .approval button")].find((b) => b.textContent === "Allow").click()`);
+  await open(c, 412, true, false, "Parts chat", 4);
+  await c.ev(`[...document.querySelectorAll("#log .approval button")].find((b) => b.textContent === "Allow once").click()`);
   await until(c.ev, `document.body.innerText.includes("approved: once")`, "Hermes got the choice");
   c.close();
   await new Promise((r) => { if (proc.exitCode !== null) r(); else proc.once("exit", r); });

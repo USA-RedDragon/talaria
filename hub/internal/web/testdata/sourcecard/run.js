@@ -13,6 +13,7 @@ const { proc, connect } = require("../cdp.js").launch(bin, dir);
 const { until } = require("../cdp.js");
 
 const LABEL = "Allow code from github.com/AppImage/appimagetool in this chat";
+const ALWAYS = "Always allow code from github.com/AppImage/appimagetool";
 
 async function open(c, w, touch, dark) {
   const { ev } = c;
@@ -38,7 +39,7 @@ async function check(c, w, touch, dark) {
     const box = a.getBoundingClientRect();
     return { vw, buttons: out, boxRight: Math.round(box.right), scroll: document.scrollingElement.scrollWidth, client: document.scrollingElement.clientWidth, text: a.textContent };
   })()`);
-  assert.deepStrictEqual(r.buttons.map((b) => b.t), ["Allow", LABEL, "Deny"], tag + ": the buttons " + JSON.stringify(r.buttons));
+  assert.deepStrictEqual(r.buttons.map((b) => b.t), ["Allow once", LABEL, ALWAYS, "Deny"], tag + ": the buttons " + JSON.stringify(r.buttons));
   assert.ok(r.buttons.every((b) => b.l >= 0 && b.r <= r.vw), tag + ": a button is outside the screen " + JSON.stringify(r));
   assert.ok(r.scroll <= r.client, tag + ": the page scrolls sideways " + JSON.stringify(r));
   assert.ok(r.text.includes("Code from External"), tag + ": the card says why it asks");
@@ -59,7 +60,7 @@ async function check(c, w, touch, dark) {
   // A tap on the source button sends the choice, and Hermes takes it.
   await open(c, 412, true, false);
   await c.ev(`[...document.querySelectorAll("#log .approval button")].find((b) => b.textContent === ${JSON.stringify(LABEL)}).click()`);
-  await until(c.ev, `document.body.innerText.includes("approved: source")`, "Hermes got the source choice");
+  await until(c.ev, `document.body.innerText.includes("approved: session")`, "Hermes got the chat choice");
   c.close();
   await new Promise((r) => { if (proc.exitCode !== null) r(); else proc.once("exit", r); });
 })().catch((e) => { console.error(e); proc.kill(); process.exit(1); });
