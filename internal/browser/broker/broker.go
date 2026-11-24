@@ -67,8 +67,8 @@ type Message struct {
 	Error      string          `json:"error,omitempty"`
 	Code       string          `json:"code,omitempty"`
 	AllowHosts []string        `json:"allow_hosts,omitempty"`
-	// ConfirmHosts are sites, besides Salesforce, where every click asks
-	// the user (docs/browser.md section 7.1).
+	// ConfirmHosts are sites, besides Salesforce, where every click needs
+	// the user's approval (docs/browser.md section 7.1).
 	ConfirmHosts []string `json:"confirm_hosts,omitempty"`
 	// AutologinHosts are exact hosts where browser_login may submit the
 	// login form Firefox filled (docs/browser.md section 7.4).
@@ -134,8 +134,9 @@ type Options struct {
 	// may open in agent tabs. All others are blocked there.
 	AllowHosts []string
 	// ConfirmHosts are host names (with their subdomains) where every
-	// click and every Enter or Space key press needs the user's OK, and
-	// scripts may only read, as on Salesforce.
+	// click and every Enter or Space key press needs the user's approval
+	// (once, for the chat or always), and scripts may only read, as on
+	// Salesforce.
 	ConfirmHosts []string
 	// AutologinHosts are exact host names where browser_login may submit
 	// the login form that Firefox filled from its saved logins.

@@ -616,7 +616,7 @@ class ToolTests(BrowserBase):
         guard = self.last("click")["args"]["guard"]
         self.assertTrue(guard["sensitive"] and guard["confirmed"])
 
-    def test_confirm_hosts_still_confirm_every_time(self):
+    def test_confirm_hosts_ask_on_the_person_card(self):
         self.fake.inspect = {"url": "https://crm.example.com/x", "host": "crm.example.com", "top_host": "crm.example.com",
                              "sensitive": [], "protected": True, "target": {"kind": "other"}}
         for _ in range(2):
@@ -3276,6 +3276,37 @@ class PersonOnlyCards(BrowserBase):
         self.assertEqual(self.last("eval")["args"]["guard"]["allow"], ["protected_write acme.lightning.force.com"])
         self.sf_write()
         self.assertEqual(len(self.asked), 2, "Allow once covers one script")
+
+    def confirm_host(self):
+        self.fake.inspect = {"url": "https://crm.example.com/x", "host": "crm.example.com", "top_host": "crm.example.com",
+                             "sensitive": [], "protected": True, "target": {"kind": "other"}}
+
+    def test_confirm_hosts_click_asks_once_per_answer_scope(self):
+        self.confirm_host()
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.assertEqual(len(self.asked), 2, "Allow once covers one click")
+        self.assertEqual(self.asked[0]["remember_key"], "plugin_rule:browser:protected-click:crm.example.com")
+        self.assertIn("Allow in this chat (or always) allows clicks, submits and Enter or Space on crm.example.com "
+                      "again without asking.", self.asked[0]["message"])
+        self.choice = "session"
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.run_tool("browser_press", tab_id=7, ref="e9", key="Enter")
+        self.assertEqual(len(self.asked), 3, "Allow in this chat covers the chat's later clicks")
+        self.assertEqual(len([r for r in self.fake.requests if r["op"] == "click"]), 4)
+
+    def test_confirm_hosts_always_answer_covers_a_scheduled_run(self):
+        self.confirm_host()
+        self.choice = "always"
+        self.run_tool("browser_click", tab_id=7, ref="e9")
+        from tools import approval
+        approval.clear_session(self.KEY)
+        self.assertTrue(browser.approved("browser:protected-click:crm.example.com"))
+        with mock.patch.object(browser, "no_user", lambda: True):
+            out = self.run_tool("browser_click", tab_id=7, ref="e9")
+        self.assertNotIn("error", out)
+        self.assertEqual(len(self.asked), 1)
 
     def test_this_chat_answer_covers_the_chat_and_its_subagents_only(self):
         self.salesforce()

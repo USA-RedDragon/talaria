@@ -57,8 +57,8 @@ The agent asks before it does anything you cannot easily undo. The question appe
 | Click or type without submitting anything | Never |
 | Open a site it has not used in this session | Once per site per session |
 | Submit a form | Once per site per session |
-| Click or type on a page with a password, payment or one-time code field | Every time, also for each step of a batch |
-| Run a script on a page | Once per site per session, every time on a page with secret fields |
+| Click or type on a page with a password, payment or one-time code field | Asks on a card you answer: once, for this chat or always; once covers one action, also each step of a batch |
+| Run a script on a page | Once per site per session; on a page with secret fields a card you answer (once, this chat or always) |
 
 Signing in with the login Firefox saved (`browser_login`) on a site that is not in `browser.autologin-hosts` asks you with a card that names the site and the computer. Allow once or Allow on the computer; Settings, Computers lists and revokes what you allowed. See [Sign-in cards](approvals-and-trust.md#sign-in-cards).
 
@@ -68,7 +68,7 @@ Two settings make this stricter, and only the config file on your computer can c
 
 ```yaml
 browser:
-  confirm-hosts:      # ask every time for any click or Enter here; scripts may only read
+  confirm-hosts:      # clicks and Enter here need your approval on a card (once, this chat or always); scripts may only read
     - bank.example.com
   start-firefox: false   # do not let the agent start Firefox when it is closed
 ```

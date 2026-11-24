@@ -23,7 +23,8 @@ const MAX_LOGIN_FILL_MS = 60000;
 
 // Salesforce hosts are "protected sites" (docs/browser.md section 7.1):
 // every click and every key press that can activate a control needs the
-// user's OK each time, and scripts may never change data there.
+// user's approval (the plugin passes it once the user allowed it), and
+// scripts may never change data there.
 const PROTECTED_SUFFIXES = ["force.com", "salesforce.com", "visualforce.com", "cloudforce.com", "salesforce-setup.com",
   "salesforce-sites.com", "documentforce.com", "force-user-content.com"];
 
@@ -2644,7 +2645,7 @@ const OPS = {
     const protHost = protectedHost(topHost) ? topHost : host;
     if (allow_writes && (protectedHost(topHost) || protectedHost(host)) && !allows(g, "protected_write", protHost)) {
       throw new Refused("a script that changes data on Salesforce (or a site in browser.confirm-hosts) needs the user's OK " +
-        "each time; without allow_writes it does not", { kind: "protected_write", host: protHost });
+        "(a person-only card); without allow_writes it does not", { kind: "protected_write", host: protHost });
     }
     const writes = (g.write_hosts || []).map(siteOf);
     if (!writes.includes(site) && !(g.script_hosts || []).map(siteOf).includes(site) && !allows(g, "script", site) &&
