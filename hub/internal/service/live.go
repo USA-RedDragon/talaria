@@ -402,6 +402,18 @@ func (ls *live) lostPrompts(ids []string) {
 	ls.settle(true, ids...)
 }
 
+func approvalChoices(p *gateway.Prompt) {
+	if p.Kind != gateway.PromptApproval || len(p.Choices) > 0 {
+		return
+	}
+	switch {
+	case p.LoginGrant != nil:
+		p.Choices = []string{gateway.ChoiceOnce, gateway.ChoiceSession, gateway.ChoiceDevice, gateway.ChoiceDeny}
+	default:
+		p.Choices = []string{gateway.ChoiceOnce, gateway.ChoiceSession, gateway.ChoiceAlways, gateway.ChoiceDeny}
+	}
+}
+
 func promptInfo(p gateway.Prompt) hub.PromptInfo {
 	str := func(s *string) string {
 		if s == nil {
@@ -410,7 +422,7 @@ func promptInfo(p gateway.Prompt) hub.PromptInfo {
 		return *s
 	}
 	return hub.PromptInfo{ID: p.PromptID, Kind: p.Kind, Choices: append([]string(nil), p.Choices...), Multi: p.MultiSelect,
-		Command: str(p.Command), Description: str(p.Description), Subagent: str(p.Subagent), GrantSource: str(p.GrantSource), Rule: str(p.Rule), Reason: str(p.Reason), Question: str(p.Question), Timeout: p.Timeout,
+		Command: str(p.Command), Description: str(p.Description), Subagent: str(p.Subagent), GrantSource: str(p.GrantSource), AlwaysExempt: str(p.AlwaysExempt), Scope: str(p.Scope), Rule: str(p.Rule), Reason: str(p.Reason), Question: str(p.Question), Timeout: p.Timeout,
 		LoginGrant: loginGrantCard(p.LoginGrant)}
 }
 

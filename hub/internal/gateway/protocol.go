@@ -83,8 +83,10 @@ const (
 
 // Approval choices (gateway/session_pending_controls.py).
 const (
-	ChoiceOnce = "once"
-	ChoiceDeny = "deny"
+	ChoiceOnce    = "once"
+	ChoiceSession = "session"
+	ChoiceAlways  = "always"
+	ChoiceDeny    = "deny"
 	// ChoiceDevice is the sign-in grant card's grant for a computer.
 	ChoiceDevice = "device"
 )
@@ -197,7 +199,9 @@ type Prompt struct {
 	// GrantSource names the source (such as github.com/owner/repo) a smart
 	// approval card offers to allow for the whole chat: the card's "source"
 	// choice grants it. Empty when the card offers none.
-	GrantSource *string `json:"grant_source,omitempty"`
+	GrantSource  *string `json:"grant_source,omitempty"`
+	AlwaysExempt *string `json:"always_exempt,omitempty"`
+	Scope        *string `json:"scope,omitempty"`
 	// Rule and Reason are the parts of a smart approval card: the rule's
 	// name, and the checker's reason in plain words (a ledger write adds
 	// its entry and source as further lines). Description has the same

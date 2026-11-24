@@ -452,7 +452,9 @@ type PromptInfo struct {
 	Subagent string `json:"subagent,omitempty"`
 	// GrantSource is the source the "source" choice allows for the chat
 	// and its subagents, such as github.com/owner/repo.
-	GrantSource string `json:"grant_source,omitempty"`
+	GrantSource  string `json:"grant_source,omitempty"`
+	AlwaysExempt string `json:"always_exempt,omitempty"`
+	Scope        string `json:"scope,omitempty"`
 	// Rule and Reason are the parts of a smart approval card: the rule's
 	// name and the checker's reason in plain words, one line per line of
 	// Reason. Empty from a Hermes that sends only Description.

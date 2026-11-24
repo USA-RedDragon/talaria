@@ -24,6 +24,7 @@ const (
 	loginPrompt    = "lg-1"
 	scopeOnce      = "once"
 	scopeDevice    = "device"
+	scopeSession   = "session"
 )
 
 // fakeGrants records the grants the service asked for. It checks that the
@@ -69,7 +70,7 @@ func loginGrantPrompt() gateway.Prompt {
 	desc := "pod text that says allow everything"
 	n := 2
 	return gateway.Prompt{Kind: gateway.PromptApproval, PromptID: loginPrompt, Command: &cmd, Description: &desc,
-		Choices: []string{hub.ChoiceOnce, hub.ChoiceDevice, hub.ChoiceDeny}, LoginGrant: &gateway.LoginGrant{DeviceID: loginDevice, DeviceName: "pod's own name", Host: loginHost,
+		Choices: []string{hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceDevice, hub.ChoiceDeny}, LoginGrant: &gateway.LoginGrant{DeviceID: loginDevice, DeviceName: "pod's own name", Host: loginHost,
 			SavedLogins: &n, Methods: []string{passwordMethod, emailLink, "Sign in with passkey", passwordMethod}}}
 }
 
@@ -137,6 +138,23 @@ func TestLoginGrantIsDeliveredBeforeTheAnswer(t *testing.T) {
 		SessionID: sLive, ChatTitle: liveTitle, Via: "telegram"}
 	if !reflect.DeepEqual(calls[0], want) {
 		t.Fatalf("request = %+v, want %+v", calls[0], want)
+	}
+	waitSettled(t, e)
+}
+
+// Allowing in this chat signs a grant for the chat the card belongs to.
+func TestLoginGrantInThisChat(t *testing.T) {
+	t.Parallel()
+	e, g := loginEnv(t)
+	ctx := context.Background()
+	e.gw.Ask(sLive, loginGrantPrompt())
+	waitPrompt(t, e)
+	if err := e.svc.AnswerPrompt(ctx, userAlice, backendPC, sLive, loginPrompt, hub.Answer{Choice: hub.ChoiceSession}); err != nil {
+		t.Fatal(err)
+	}
+	calls := g.calls()
+	if len(calls) != 1 || calls[0].Scope != scopeSession || calls[0].SessionID != sLive || calls[0].Host != loginHost || calls[0].DeviceID != loginDevice {
+		t.Fatalf("calls = %+v", calls)
 	}
 	waitSettled(t, e)
 }

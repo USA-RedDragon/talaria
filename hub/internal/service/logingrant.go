@@ -34,6 +34,7 @@ func (s *Service) granter() hub.LoginGrants {
 // an approval carries one, its lists are bounded, and the computer has the
 // hub's own name, not the pod's. ls.mu may be held.
 func (s *Service) vetLoginGrant(backendID string, p *gateway.Prompt) bool {
+	approvalChoices(p)
 	g := p.LoginGrant
 	if g == nil {
 		return false
@@ -130,6 +131,8 @@ func grantScope(choice string) string {
 	switch choice {
 	case hub.ChoiceOnce:
 		return logingrant.ScopeOnce
+	case hub.ChoiceSession:
+		return logingrant.ScopeSession
 	case hub.ChoiceDevice:
 		return logingrant.ScopeDevice
 	}
@@ -160,7 +163,7 @@ func (s *Service) answerLoginGrant(ctx context.Context, user, backendID, session
 			return fmt.Errorf("%w: a denied sign-in has no method", hub.ErrBadValue)
 		}
 		return nil
-	case hub.ChoiceOnce, hub.ChoiceDevice:
+	case hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceDevice:
 	default:
 		return fmt.Errorf("%w: this approval does not offer %q", hub.ErrBadValue, a.Choice)
 	}
