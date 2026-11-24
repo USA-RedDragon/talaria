@@ -674,6 +674,11 @@ function privateAddress(ip) {
   return h === "::" || h === "::1" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h);
 }
 
+function unspecifiedAddress(ip) {
+  const h = String(ip).replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "0.0.0.0" || h === "::" || h === "0:0:0:0:0:0:0:0";
+}
+
 function privateHost(host) {
   const h = host.toLowerCase().replace(/\.$/, "");
   return h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") ||
@@ -783,6 +788,11 @@ browser.webRequest.onBeforeRequest.addListener(
     }
     try {
       const rec = await browser.dns.resolve(host);
+      if (rec.addresses.length && rec.addresses.every(unspecifiedAddress)) {
+        // A DNS blocker's answer (0.0.0.0 or ::): Firefox does not connect
+        // there either, and there is nothing for the user to allow.
+        return { cancel: true };
+      }
       return rec.addresses.some(privateAddress) ? cancelled(details, "private") : {};
     } catch (e) {
       // A name the browser cannot resolve here is not loaded either; failing
