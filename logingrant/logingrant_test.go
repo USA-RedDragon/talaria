@@ -69,6 +69,25 @@ func TestSignVerifyPostHosts(t *testing.T) {
 	}
 }
 
+func TestSignVerifySessionScope(t *testing.T) {
+	t.Parallel()
+	pub, key, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	c := claims(now)
+	c.Scope, c.SessionID = logingrant.ScopeSession, "20261124_101500_abcdef"
+	tok, err := logingrant.Sign(key, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := logingrant.Verify([]ed25519.PublicKey{pub}, tok, now)
+	if err != nil || got.Scope != logingrant.ScopeSession || got.SessionID != c.SessionID {
+		t.Fatalf("verify: %+v %v", got, err)
+	}
+	if logingrant.ScopeSession != "session" {
+		t.Fatalf("ScopeSession = %q, the hub signs \"session\"", logingrant.ScopeSession)
+	}
+}
+
 func TestSignRefusesBadClaims(t *testing.T) {
 	t.Parallel()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
@@ -81,6 +100,9 @@ func TestSignRefusesBadClaims(t *testing.T) {
 		"passkey method": func(c *logingrant.Claims) { c.Method = "Sign in with a passkey" },
 		"push method":    func(c *logingrant.Claims) { c.Method = "Approve on phone" },
 		"scope":          func(c *logingrant.Claims) { c.Scope = "always" },
+		"session no id": func(c *logingrant.Claims) {
+			c.Scope, c.SessionID = logingrant.ScopeSession, ""
+		},
 		"device id":      func(c *logingrant.Claims) { c.DeviceID = "d abc" },
 		"no user":        func(c *logingrant.Claims) { c.Sub = "" },
 		"post host ip":   func(c *logingrant.Claims) { c.PostHosts = []string{"10.0.0.1"} },

@@ -35,7 +35,15 @@ const (
 	// ScopeDevice allows sign-ins on the host on that computer until the
 	// user revokes the grant.
 	ScopeDevice = "device"
+	// ScopeSession allows sign-ins on the host on that computer for the
+	// chat named by SessionID (and its subagents) until the user revokes
+	// the grant or SessionLifetime passes without a sign-in.
+	ScopeSession = "session"
 )
+
+// SessionLifetime is how long a session grant stays usable after it arrived
+// or was last used.
+const SessionLifetime = 30 * 24 * time.Hour
 
 // MaxDelivery is the longest allowed exp - iat: the device must receive the
 // grant within this time after the hub signed it.
@@ -236,8 +244,10 @@ func checkClaims(c *Claims) error {
 		return fmt.Errorf("%w: host", ErrClaims)
 	case !ValidMethod(c.Method):
 		return fmt.Errorf("%w: method", ErrClaims)
-	case c.Scope != ScopeOnce && c.Scope != ScopeDevice:
+	case c.Scope != ScopeOnce && c.Scope != ScopeDevice && c.Scope != ScopeSession:
 		return fmt.Errorf("%w: scope", ErrClaims)
+	case c.Scope == ScopeSession && c.SessionID == "":
+		return fmt.Errorf("%w: a session grant needs session_id", ErrClaims)
 	case !ValidPostHosts(c.Host, c.PostHosts):
 		return fmt.Errorf("%w: post_hosts", ErrClaims)
 	case len(c.SessionID) > 256 || len(c.ChatTitle) > MaxTitleLen*4 || len(c.Via) > 32:
