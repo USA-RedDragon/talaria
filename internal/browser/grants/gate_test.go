@@ -869,3 +869,142 @@ func TestSessionGrantKeptApartFromDeviceGrant(t *testing.T) {
 		t.Errorf("stored scopes = %v", scopes)
 	}
 }
+
+const (
+	jobA = "9f2c1ab07d3e"
+	jobB = "1b8e5d0c44aa"
+	kJob = "job_id"
+	kSID = "session_id"
+)
+
+func jobToken(r *rig, t *testing.T, job string, mod func(*logingrant.Claims)) string {
+	t.Helper()
+	return r.token(t, func(c *logingrant.Claims) {
+		c.Scope, c.JobID, c.SessionID = logingrant.ScopeJob, job, "chat-that-asked"
+		if mod != nil {
+			mod(c)
+		}
+	})
+}
+
+func (r *rig) loginJob(job string, sessions ...string) (json.RawMessage, error) {
+	return r.gate.Call(context.Background(), "login", map[string]any{kTab: 1, kSessions: sessions, kJob: job,
+		kGuard: map[string]any{kLogins: []string{hostA}}})
+}
+
+func TestJobGrantHoldsOnlyForItsJob(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	if err := r.add(t, jobToken(r, t, jobA, nil)); err != nil {
+		t.Fatal(err)
+	}
+	r.inner.reply["login"] = submitted
+	if _, err := r.loginJob(jobA, "cron-run-1"); err != nil {
+		t.Errorf("the job's run refused: %v", err)
+	}
+	r.now = r.now.Add(200 * 24 * time.Hour)
+	if _, err := r.loginJob(jobA, "cron-run-2"); err != nil {
+		t.Errorf("a job grant lapsed without being revoked: %v", err)
+	}
+	_, err := r.loginJob(jobB, "cron-run-1")
+	wantRefused(t, err, hostA)
+	_, err = r.loginJob("", "chat-that-asked")
+	wantRefused(t, err, hostA)
+	_, err = r.login(hostA)
+	wantRefused(t, err, hostA)
+	r.inner.mu.Lock()
+	sent := r.inner.args[len(r.inner.args)-1]
+	r.inner.mu.Unlock()
+	if strings.Contains(sent, kJob) {
+		t.Errorf("the job id reached the extension: %s", sent)
+	}
+	st, _ := r.op(t, map[string]any{kAction: kStatus, kHost: hostA, kJob: jobA})
+	if g, _ := st["grant"].(map[string]any); g == nil || g["scope"] != "job" || g["job_id"] != jobA {
+		t.Errorf("status for the job = %v", st)
+	}
+	st, _ = r.op(t, map[string]any{kAction: kStatus, kHost: hostA, kJob: jobB, kSessions: []string{"chat-that-asked"}})
+	if st["grant"] != nil {
+		t.Errorf("status for another job = %v", st)
+	}
+	list, _ := r.op(t, map[string]any{kAction: kList})
+	gs := asList(list["grants"])
+	if first, _ := gs[0].(map[string]any); len(gs) != 1 || first["last_used"] == float64(0) {
+		t.Errorf("a sign-in did not mark the job grant used: %v", list["grants"])
+	}
+}
+
+func TestJobGrantsAreOnePerJobAndHost(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	for _, job := range []string{jobA, jobB, jobA} {
+		if err := r.add(t, jobToken(r, t, job, nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, _ := r.op(t, map[string]any{kAction: kList})
+	if n := len(asList(list["grants"])); n != 2 {
+		t.Errorf("stored %d job grants, want 2: %v", n, list["grants"])
+	}
+}
+
+func TestRevokeOneChatsSessionGrant(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	for _, chat := range []string{chatA, chatB} {
+		if err := r.add(t, sessionToken(r, t, chat, nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := r.op(t, map[string]any{kAction: kRevoke, kHost: hostA, kSID: chatA})
+	if err != nil || out["revoked"] != true {
+		t.Fatalf("revoke = %v %v", out, err)
+	}
+	_, err = r.loginAs(chatA)
+	wantRefused(t, err, hostA)
+	if _, err := r.loginAs(chatB); err != nil {
+		t.Errorf("another chat's grant went with it: %v", err)
+	}
+	out, _ = r.op(t, map[string]any{kAction: kRevoke, kHost: hostA, kSID: chatA})
+	if out["revoked"] != false {
+		t.Errorf("revoking twice = %v", out)
+	}
+}
+
+func TestRevokeOneChatKeepsTheDeviceGrant(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	if err := r.add(t, r.token(t, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.add(t, sessionToken(r, t, chatA, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := r.op(t, map[string]any{kAction: kRevoke, kHost: hostA, kSID: chatA}); out["revoked"] != true {
+		t.Fatalf("revoke = %v", out)
+	}
+	if _, err := r.loginAs(chatB); err != nil {
+		t.Errorf("the device grant went with a chat's grant: %v", err)
+	}
+	list, _ := r.op(t, map[string]any{kAction: kList})
+	if n := len(asList(list["grants"])); n != 1 {
+		t.Errorf("grants left = %d, want the device grant", n)
+	}
+}
+
+func TestRevokeOneJobsGrant(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	for _, job := range []string{jobA, jobB} {
+		if err := r.add(t, jobToken(r, t, job, nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, _ := r.op(t, map[string]any{kAction: kRevoke, kHost: hostA, kJob: jobA}); out["revoked"] != true {
+		t.Fatalf("revoke = %v", out)
+	}
+	_, err := r.loginJob(jobA)
+	wantRefused(t, err, hostA)
+	if _, err := r.loginJob(jobB); err != nil {
+		t.Errorf("another job's grant went with it: %v", err)
+	}
+}

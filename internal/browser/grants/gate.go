@@ -84,7 +84,7 @@ func (g *Gate) Effective() ([]string, map[string]string) {
 		if !slices.Contains(hosts, gr.Host) {
 			hosts = append(hosts, gr.Host)
 		}
-		if gr.Method != "" && gr.Scope != logingrant.ScopeSession {
+		if gr.Method != "" && gr.Scope != logingrant.ScopeSession && gr.Scope != logingrant.ScopeJob {
 			methods[gr.Host] = gr.Method
 		}
 	}
@@ -109,6 +109,16 @@ func sessionIDs(ids []string) []string {
 		}
 	}
 	return out
+}
+
+// maxJobIDLen is the longest job id a call names.
+const maxJobIDLen = 64
+
+func jobID(id string) string {
+	if len(id) > maxJobIDLen {
+		return ""
+	}
+	return id
 }
 
 // Sync sends the merged lists to the extension and arms the timer for the
@@ -164,18 +174,20 @@ type loginArgs struct {
 	// SessionIDs are the calling chat's session lineage: a session grant
 	// holds only when it names one of them.
 	SessionIDs []string `json:"session_ids"`
-	Guard      struct {
+	// JobID is the scheduled job the call runs for: a job grant holds only
+	// when it names it.
+	JobID string `json:"job_id"`
+	Guard struct {
 		LoginHosts []string `json:"login_hosts"`
 	} `json:"guard"`
 }
 
 // PostHosts returns, per host, the other hosts the user allowed its login
-// form to send the login to, for the chat whose session lineage is
-// sessions; only hosts that have any.
-func (g *Gate) PostHosts(hosts, sessions []string) map[string][]string {
+// form to send the login to, for the caller; only hosts that have any.
+func (g *Gate) PostHosts(hosts []string, caller Who) map[string][]string {
 	out := map[string][]string{}
 	for _, gr := range g.o.Store.Grants() {
-		if all := gr.AllPostHosts(); len(all) > 0 && slices.Contains(hosts, gr.Host) && gr.For(sessions) {
+		if all := gr.AllPostHosts(); len(all) > 0 && slices.Contains(hosts, gr.Host) && gr.For(caller) {
 			out[gr.Host] = union(out[gr.Host], all)
 		}
 	}
@@ -191,6 +203,7 @@ func withPostHosts(raw []byte, post map[string][]string) (json.RawMessage, error
 		return nil, refuse("login", "bad arguments")
 	}
 	delete(m, "session_ids")
+	delete(m, "job_id")
 	var guard map[string]json.RawMessage
 	if len(m["guard"]) > 0 && string(m["guard"]) != "null" {
 		if err := json.Unmarshal(m["guard"], &guard); err != nil {
@@ -230,13 +243,13 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 	if h := urlHost(a.URL); h != "" {
 		hosts = append(hosts, h)
 	}
-	sessions := sessionIDs(a.SessionIDs)
+	caller := Who{Sessions: sessionIDs(a.SessionIDs), JobID: jobID(a.JobID)}
 	for _, h := range hosts {
-		if !slices.Contains(g.o.ConfigHosts, h) && !g.o.Store.Allows(h, sessions) {
-			return nil, refuse("login", "browser_login is not allowed on %s: it is not in browser.autologin-hosts and the user has not allowed it for this computer or this chat", h)
+		if !slices.Contains(g.o.ConfigHosts, h) && !g.o.Store.Allows(h, caller) {
+			return nil, refuse("login", "browser_login is not allowed on %s: it is not in browser.autologin-hosts and the user has not allowed it for this computer, this chat or this scheduled job", h)
 		}
 	}
-	send, err := withPostHosts(raw, g.PostHosts(hosts, sessions))
+	send, err := withPostHosts(raw, g.PostHosts(hosts, caller))
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +274,7 @@ func (g *Gate) login(ctx context.Context, args any) (json.RawMessage, error) {
 	g.mu.Unlock()
 	if out.Submitted {
 		for _, h := range hosts {
-			if err := g.o.Store.Used(h, sessions); err != nil {
+			if err := g.o.Store.Used(h, caller); err != nil {
 				slog.Warn("Could not record a sign-in grant use", "host", h, "error", err)
 			}
 		}
@@ -323,6 +336,8 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 		PostHost   string   `json:"post_host"`
 		Token      string   `json:"token"`
 		SessionIDs []string `json:"session_ids"`
+		SessionID  string   `json:"session_id"`
+		JobID      string   `json:"job_id"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, refuse(OpName, "bad arguments: %v", err)
@@ -333,7 +348,7 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 	case "list":
 		return json.Marshal(g.list())
 	case "status":
-		return g.status(a.Host, sessionIDs(a.SessionIDs))
+		return g.status(a.Host, Who{Sessions: sessionIDs(a.SessionIDs), JobID: jobID(a.JobID)})
 	case "add":
 		gr, err := g.add(ctx, a.Token)
 		if err != nil {
@@ -341,11 +356,17 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 		}
 		return json.Marshal(map[string]any{"grant": gr})
 	case "revoke":
-		ok, err := g.o.Store.Revoke(a.Host, a.PostHost)
+		var ok bool
+		var err error
+		if a.SessionID != "" || a.JobID != "" {
+			ok, err = g.o.Store.RevokeFor(a.Host, a.SessionID, a.JobID)
+		} else {
+			ok, err = g.o.Store.Revoke(a.Host, a.PostHost)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("revoke: %w", err)
 		}
-		if a.PostHost == "" {
+		if a.PostHost == "" && a.SessionID == "" && a.JobID == "" {
 			g.mu.Lock()
 			delete(g.seen, a.Host)
 			g.mu.Unlock()
@@ -356,12 +377,12 @@ func (g *Gate) grantsOp(ctx context.Context, args any) (json.RawMessage, error) 
 	return nil, refuse(OpName, "unknown action %q", a.Action)
 }
 
-func (g *Gate) status(host string, sessions []string) (json.RawMessage, error) {
+func (g *Gate) status(host string, caller Who) (json.RawMessage, error) {
 	if host == "" {
 		return nil, refuse(OpName, "status needs a host")
 	}
 	var grant *Grant
-	if gr, ok := g.o.Store.Get(host, sessions); ok {
+	if gr, ok := g.o.Store.Get(host, caller); ok {
 		grant = &gr
 	}
 	_, methods := g.Effective()
@@ -378,7 +399,7 @@ func (g *Gate) status(host string, sessions []string) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{"host": host, "config": slices.Contains(g.o.ConfigHosts, host), "grant": grant,
 		"once": grant != nil && grant.Scope == logingrant.ScopeOnce, "session": grant != nil && grant.Scope == logingrant.ScopeSession,
 		"method": methods[host], "saved_logins": saved, "methods_seen": seen,
-		"post_hosts": nonNil(g.PostHosts([]string{host}, sessions)[host])})
+		"post_hosts": nonNil(g.PostHosts([]string{host}, caller)[host])})
 }
 
 // add verifies a grant token and stores it. The grant must verify with a hub

@@ -39,6 +39,10 @@ const (
 	// chat named by SessionID (and its subagents) until the user revokes
 	// the grant or SessionLifetime passes without a sign-in.
 	ScopeSession = "session"
+	// ScopeJob allows sign-ins on the host on that computer for the scheduled
+	// job named by JobID, in every run of it, until the user revokes the
+	// grant.
+	ScopeJob = "job"
 )
 
 // SessionLifetime is how long a session grant stays usable after it arrived
@@ -91,6 +95,7 @@ var (
 
 var (
 	deviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	jobIDPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	noncePattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{22,128}$`)
 	hostLabel       = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 )
@@ -112,6 +117,8 @@ type Claims struct {
 	// SessionID and ChatTitle name the chat whose card the user answered.
 	SessionID string `json:"session_id,omitempty"`
 	ChatTitle string `json:"chat_title,omitempty"`
+	// JobID is the scheduled job a job grant is for.
+	JobID string `json:"job_id,omitempty"`
 	// Via is where the user answered: web or telegram.
 	Via      string `json:"via,omitempty"`
 	IssuedAt int64  `json:"iat"`
@@ -244,10 +251,14 @@ func checkClaims(c *Claims) error {
 		return fmt.Errorf("%w: host", ErrClaims)
 	case !ValidMethod(c.Method):
 		return fmt.Errorf("%w: method", ErrClaims)
-	case c.Scope != ScopeOnce && c.Scope != ScopeDevice && c.Scope != ScopeSession:
+	case c.Scope != ScopeOnce && c.Scope != ScopeDevice && c.Scope != ScopeSession && c.Scope != ScopeJob:
 		return fmt.Errorf("%w: scope", ErrClaims)
 	case c.Scope == ScopeSession && c.SessionID == "":
 		return fmt.Errorf("%w: a session grant needs session_id", ErrClaims)
+	case c.Scope == ScopeJob && !jobIDPattern.MatchString(c.JobID):
+		return fmt.Errorf("%w: a job grant needs a valid job_id", ErrClaims)
+	case c.Scope != ScopeJob && c.JobID != "":
+		return fmt.Errorf("%w: only a job grant names a job", ErrClaims)
 	case !ValidPostHosts(c.Host, c.PostHosts):
 		return fmt.Errorf("%w: post_hosts", ErrClaims)
 	case len(c.SessionID) > 256 || len(c.ChatTitle) > MaxTitleLen*4 || len(c.Via) > 32:

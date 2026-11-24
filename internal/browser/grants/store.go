@@ -32,9 +32,11 @@ type Grant struct {
 	GrantedAt int64  `json:"granted_at"`
 	SessionID string `json:"session_id"`
 	ChatTitle string `json:"chat_title"`
-	Via       string `json:"via"`
-	User      string `json:"user"`
-	LastUsed  int64  `json:"last_used"`
+	// JobID is the scheduled job a job grant is for.
+	JobID    string `json:"job_id,omitempty"`
+	Via      string `json:"via"`
+	User     string `json:"user"`
+	LastUsed int64  `json:"last_used"`
 	// ExpiresAt is set for a once grant and a session grant only.
 	ExpiresAt int64 `json:"expires_at,omitempty"`
 	// PostHosts are the other hosts the login form of Host may send the
@@ -47,11 +49,24 @@ type Grant struct {
 	OncePostExpiresAt int64    `json:"once_post_expires_at,omitempty"`
 }
 
-// For reports whether the grant holds for a call from a chat whose session
-// lineage is sessions: a session grant only for its own chat, any other
-// grant for every caller.
-func (g Grant) For(sessions []string) bool {
-	return g.Scope != logingrant.ScopeSession || slices.Contains(sessions, g.SessionID)
+// Who is who asks to sign in: the chat whose session lineage is Sessions,
+// or the run of the scheduled job JobID.
+type Who struct {
+	Sessions []string
+	JobID    string
+}
+
+// For reports whether the grant holds for the caller: a session grant only
+// for its own chat, a job grant only for its own job, any other grant for
+// every caller.
+func (g Grant) For(c Who) bool {
+	switch g.Scope {
+	case logingrant.ScopeSession:
+		return slices.Contains(c.Sessions, g.SessionID)
+	case logingrant.ScopeJob:
+		return c.JobID != "" && c.JobID == g.JobID
+	}
+	return true
 }
 
 // AllPostHosts returns the grant's post hosts and its once post hosts.
@@ -230,7 +245,7 @@ func (s *Store) writeLocked(st state) error {
 func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 	now := s.now()
 	g := Grant{Host: c.Host, Method: c.Method, Scope: c.Scope, GrantedAt: now.Unix(), SessionID: c.SessionID,
-		ChatTitle: c.ChatTitle, Via: c.Via, User: c.Sub, PostHosts: union(c.PostHosts, nil)}
+		ChatTitle: c.ChatTitle, JobID: c.JobID, Via: c.Via, User: c.Sub, PostHosts: union(c.PostHosts, nil)}
 	switch c.Scope {
 	case logingrant.ScopeOnce:
 		g.ExpiresAt = now.Add(logingrant.OnceLifetime).Unix()
@@ -244,13 +259,13 @@ func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 		}
 		st.Nonces[c.Nonce] = c.Expires + int64(logingrant.ClockSkew/time.Second) + 1
 		out = g
-		if g.Scope == logingrant.ScopeSession {
-			addSession(st, &g)
+		if g.Scope == logingrant.ScopeSession || g.Scope == logingrant.ScopeJob {
+			addKept(st, &g)
 			out = g
 			return nil
 		}
 		for i, old := range st.Grants {
-			if old.Host != g.Host || old.Scope == logingrant.ScopeSession {
+			if old.Host != g.Host || old.Scope == logingrant.ScopeSession || old.Scope == logingrant.ScopeJob {
 				continue
 			}
 			switch {
@@ -292,11 +307,11 @@ func (s *Store) Add(c *logingrant.Claims) (Grant, error) {
 	return out, err
 }
 
-// addSession stores the session grant g in st, replacing the same chat's
-// grant on the host and keeping the post hosts and method it had.
-func addSession(st *state, g *Grant) {
+// addKept stores the session or job grant g in st, replacing the same chat's
+// or job's grant on the host and keeping the post hosts and method it had.
+func addKept(st *state, g *Grant) {
 	for i, old := range st.Grants {
-		if old.Host != g.Host || old.Scope != logingrant.ScopeSession || old.SessionID != g.SessionID {
+		if old.Host != g.Host || old.Scope != g.Scope || old.SessionID != g.SessionID || old.JobID != g.JobID {
 			continue
 		}
 		g.LastUsed = old.LastUsed
@@ -308,6 +323,29 @@ func addSession(st *state, g *Grant) {
 		return
 	}
 	st.Grants = append(st.Grants, *g)
+}
+
+// RevokeFor removes the grant for host that only one chat or one job has,
+// the session grant of sessionID or the job grant of jobID, and reports
+// whether there was one. Every other grant of the host stays.
+func (s *Store) RevokeFor(host, sessionID, jobID string) (bool, error) {
+	found := false
+	err := s.mutate(func(st *state) error {
+		before := len(st.Grants)
+		st.Grants = slices.DeleteFunc(st.Grants, func(g Grant) bool {
+			return g.Host == host && (g.Scope == logingrant.ScopeSession && sessionID != "" && g.SessionID == sessionID ||
+				g.Scope == logingrant.ScopeJob && jobID != "" && g.JobID == jobID)
+		})
+		found = len(st.Grants) != before
+		if !found {
+			return errNoChange
+		}
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return false, nil
+	}
+	return found, err
 }
 
 // Revoke removes the grant for host and reports whether there was one. With
@@ -348,10 +386,10 @@ func (s *Store) Revoke(host, postHost string) (bool, error) {
 
 var errNoChange = errors.New("no change")
 
-// Used records a submitted sign-in on host from the chat whose session
-// lineage is sessions: it sets last_used, removes a once grant and once post
-// hosts, and keeps that chat's session grant for another SessionLifetime.
-func (s *Store) Used(host string, sessions []string) error {
+// Used records a submitted sign-in on host from the caller: it sets
+// last_used, removes a once grant and once post hosts, and keeps the chat's
+// session grant for another SessionLifetime.
+func (s *Store) Used(host string, caller Who) error {
 	err := s.mutate(func(st *state) error {
 		changed := false
 		now := s.now()
@@ -364,7 +402,7 @@ func (s *Store) Used(host string, sessions []string) error {
 		})
 		for i := range st.Grants {
 			g := &st.Grants[i]
-			if g.Host != host || !g.For(sessions) {
+			if g.Host != host || !g.For(caller) {
 				continue
 			}
 			g.LastUsed, changed = now.Unix(), true
@@ -398,15 +436,15 @@ func (s *Store) Grants() []Grant {
 	return out
 }
 
-// Get returns the unexpired grant for host that holds for the chat whose
-// session lineage is sessions: a device grant first, then that chat's
-// session grant, then a once grant.
-func (s *Store) Get(host string, sessions []string) (Grant, bool) {
+// Get returns the unexpired grant for host that holds for the caller: a
+// device grant first, then the job's grant, then the chat's session grant,
+// then a once grant.
+func (s *Store) Get(host string, caller Who) (Grant, bool) {
 	var best Grant
 	found := false
-	rank := map[string]int{logingrant.ScopeDevice: 3, logingrant.ScopeSession: 2, logingrant.ScopeOnce: 1}
+	rank := map[string]int{logingrant.ScopeDevice: 4, logingrant.ScopeJob: 3, logingrant.ScopeSession: 2, logingrant.ScopeOnce: 1}
 	for _, g := range s.Grants() {
-		if g.Host == host && g.For(sessions) && (!found || rank[g.Scope] > rank[best.Scope]) {
+		if g.Host == host && g.For(caller) && (!found || rank[g.Scope] > rank[best.Scope]) {
 			best, found = g, true
 		}
 	}
@@ -414,9 +452,9 @@ func (s *Store) Get(host string, sessions []string) (Grant, bool) {
 }
 
 // Allows reports whether host has an unexpired grant that holds for the
-// chat whose session lineage is sessions.
-func (s *Store) Allows(host string, sessions []string) bool {
-	_, ok := s.Get(host, sessions)
+// caller.
+func (s *Store) Allows(host string, caller Who) bool {
+	_, ok := s.Get(host, caller)
 	return ok
 }
 

@@ -88,6 +88,25 @@ func TestSignVerifySessionScope(t *testing.T) {
 	}
 }
 
+func TestSignVerifyJobScope(t *testing.T) {
+	t.Parallel()
+	pub, key, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	c := claims(now)
+	c.Scope, c.JobID = logingrant.ScopeJob, "9f2c1ab07d3e"
+	tok, err := logingrant.Sign(key, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := logingrant.Verify([]ed25519.PublicKey{pub}, tok, now)
+	if err != nil || got.Scope != logingrant.ScopeJob || got.JobID != c.JobID {
+		t.Fatalf("verify: %+v %v", got, err)
+	}
+	if logingrant.ScopeJob != "job" {
+		t.Fatalf("ScopeJob = %q, the hub signs \"job\"", logingrant.ScopeJob)
+	}
+}
+
 func TestSignRefusesBadClaims(t *testing.T) {
 	t.Parallel()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
@@ -103,10 +122,17 @@ func TestSignRefusesBadClaims(t *testing.T) {
 		"session no id": func(c *logingrant.Claims) {
 			c.Scope, c.SessionID = logingrant.ScopeSession, ""
 		},
-		"device id":      func(c *logingrant.Claims) { c.DeviceID = "d abc" },
-		"no user":        func(c *logingrant.Claims) { c.Sub = "" },
-		"post host ip":   func(c *logingrant.Claims) { c.PostHosts = []string{"10.0.0.1"} },
-		"post host self": func(c *logingrant.Claims) { c.PostHosts = []string{c.Host} },
+		"job no id": func(c *logingrant.Claims) {
+			c.Scope, c.JobID = logingrant.ScopeJob, ""
+		},
+		"job odd id": func(c *logingrant.Claims) {
+			c.Scope, c.JobID = logingrant.ScopeJob, "a b"
+		},
+		"job id on a device grant": func(c *logingrant.Claims) { c.JobID = "9f2c1ab07d3e" },
+		"device id":                func(c *logingrant.Claims) { c.DeviceID = "d abc" },
+		"no user":                  func(c *logingrant.Claims) { c.Sub = "" },
+		"post host ip":             func(c *logingrant.Claims) { c.PostHosts = []string{"10.0.0.1"} },
+		"post host self":           func(c *logingrant.Claims) { c.PostHosts = []string{c.Host} },
 		"post host twice": func(c *logingrant.Claims) {
 			c.PostHosts = []string{"api.example.com", "api.example.com"}
 		},
