@@ -714,13 +714,13 @@ class Runner:
                 return "it submits a form the approved steps did not"
         return ""
 
-    def ask(self, text: str) -> None:
-        """Ask the user again, on a step that left the approved card."""
+    def ask(self, text: str, rules: list[str]) -> None:
+        """Ask the user again, on a step that left the approved card, for the step's own rules."""
         if self.b.bypass():
             return
         if self.b.no_user():
             raise StepError("needs the user's OK on a page with secret fields, and no user is present", "approval")
-        if not self.b._confirm(text):
+        if not self.b._confirm(text, rules=rules):
             raise StepError("the user did not allow this action", "declined")
 
     def allow(self, tool: str, args: dict, info: Optional[dict]) -> dict:
@@ -735,7 +735,7 @@ class Runner:
                 self.covered_used = True
             if key not in self.covered and not b.approved(key) and not b.bypass():
                 if self.card and not b.no_user():
-                    self.ask("This step is not in the steps you approved. " + str(approval.get("message") or ""))
+                    self.ask("This step is not in the steps you approved. " + str(approval.get("message") or ""), [key])
                 else:
                     raise StepError(f"needs the user's approval, which the batch did not ask for because the page was "
                                     f"not known when it started ({rule_words(key)}). Run this step with its own tool, "
@@ -964,7 +964,7 @@ def run(b: Any, args: dict, conn: Any, sid: str) -> str:
     if card and (b.bypass() or (b.person_cleared(card.get("rules")) and all(b.approved(k) for k in card.get("needs") or []))):
         card = None
     if card and not b.no_user():
-        if not b._confirm(card["text"], rules=card.get("rules")):
+        if not b._confirm(card["text"], rules=[*(card.get("rules") or []), *(card.get("needs") or [])]):
             return json.dumps({"error": "the user did not allow this batch; nothing was run", "code": "declined"},
                               ensure_ascii=False)
         runner.card = card

@@ -796,12 +796,12 @@ def ask_allow(conn: Any, op: str, kind: str, host: str, why: str) -> str:
     text = f"Allow the agent to {what} {host} in {where}? The check said: {why}."
     if person:
         rules = [_rule("allow-" + kind.replace("_", "-") + ("-login" if kind == "scripted" else ""),
-                       site_of(host) or "unknown")] if host else []
+                       site_of(host) or host)]
         if no_user() and not person_cleared(rules):
             return ("Only a person can allow this, and no user is present in this run. Report that this step needs "
                     "the user.")
         return "" if _confirm(text, rules=rules) else "The user did not allow it."
-    rule = _rule(_ALLOW_RULES.get(kind, f"allow-{kind}"), (host if kind == "click" else site_of(host)) or "unknown")
+    rule = _rule(_ALLOW_RULES.get(kind, f"allow-{kind}"), (host if kind == "click" else site_of(host)) or host)
     if approved(rule) or bypass():
         return ""
     if no_user():
@@ -841,6 +841,11 @@ def _blocked_requests(conn: Any, notes: Any) -> None:
         if lift and _IN_HANDLER.get():
             person = [k for k in lift if k in ("private", "hub")]
             rules = [_rule("lift-" + k, site_of(h)) for k in person for h in hosts if site_of(h)]
+            exempt = ""
+            if person and not rules:
+                # No host is named, so a standing grant would lift the limit for any host.
+                exempt = "the blocked requests name no host"
+                rules = [_rule("lift-" + k, "unnamed-host") for k in person]
             if person and set(lift) - set(person):
                 rules.append(_rule("lift-" + "-".join(sorted(set(lift) - set(person))), "tab"))
             text = f"{line}; allow? Allow lifts that limit for {where}."
@@ -851,7 +856,7 @@ def _blocked_requests(conn: Any, notes: Any) -> None:
             asked = not ok
             if not ok and not no_user():
                 if person:
-                    ok = _confirm(text, rules=rules)
+                    ok = _confirm(text, rules=rules, always_exempt=exempt)
                 else:
                     try:
                         from tools.approval import request_tool_approval
@@ -1006,9 +1011,26 @@ def _saved_logins_line(n: int) -> str:
     return "Whether Firefox has a saved login for this site is not known."
 
 
+def chat_sessions(session_id: str) -> list[str]:
+    """The session lineage of ``session_id``, itself first and its chat last (subagents and side
+    agents name their parents): a session sign-in grant holds when it names one of them."""
+    core = _core()
+    out: list[str] = []
+    cur: Optional[str] = session_id
+    for _ in range(core.MAX_LINEAGE_HOPS + 1):
+        if not cur or cur in out:
+            break
+        out.append(cur)
+        try:
+            cur = core.hub()._parent(cur)
+        except Exception:
+            break
+    return out[:32]
+
+
 def login_grant_card(conn: Any, host: str, status: dict, job_id: str = "", existing: str = "") -> dict:
     """The approve request for a sign-in grant: the hub shows its own card from ``login_grant``
-    and answers once, device or deny, after it has given the device the grant."""
+    and answers once, this chat, device or deny, after it has given the device the grant."""
     saved = status.get("saved_logins")
     saved = saved if isinstance(saved, int) and not isinstance(saved, bool) and saved >= -1 else -1
     methods = grant_methods(status.get("methods_seen")) if existing or status.get("methods_seen") else []
@@ -1023,10 +1045,12 @@ def login_grant_card(conn: Any, host: str, status: dict, job_id: str = "", exist
 
 
 def _status(conn: Any, host: str, in_hook: bool = True) -> Optional[dict]:
-    """The device's grant status of ``host``; None when the device cannot tell (an older daemon,
-    not connected, failed): the caller then falls back to the device config alone."""
+    """The device's grant status of ``host`` for this chat (a session grant of another chat does
+    not count); None when the device cannot tell (an older daemon, not connected, failed): the
+    caller then falls back to the device config alone."""
     try:
-        return grants_op(conn.device_id, {"action": "status", "host": host}, in_hook=in_hook)
+        return grants_op(conn.device_id, {"action": "status", "host": host,
+                                          "session_ids": chat_sessions(_session(""))}, in_hook=in_hook)
     except GrantsUnsupported:
         return None
     except _core().BrowserError as exc:
@@ -1050,6 +1074,11 @@ def site_of(url_or_host: str) -> str:
 
 def _rule(kind: str, site: str) -> str:
     return f"browser:{kind}:{site}"
+
+
+def _unparsed_visit(url: str) -> str:
+    """The rule of a visit to an address the extension could not read: that exact address only."""
+    return _rule("visit", "url-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16])
 
 
 # Salesforce hosts are protected sites (docs/browser.md section 7.1): every click, and every
@@ -1171,7 +1200,7 @@ def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dic
             f"browser_login: {host} is not an https page, so Firefox's saved login is not used there. Report that this "
             f"sign-in needs the user.")}
     status = _status(conn, host) if host else None
-    if host and not listed and status is not None and not status.get("config") and not status.get("grant"):
+    if host and status is not None and not status.get("config") and not status.get("grant"):
         return {"login_hosts": [host]}, login_grant_card(conn, host, status)
     if not host or not (listed or allowed_by_grant(status)):
         return {}, {"action": "block", "message": (
@@ -1179,7 +1208,7 @@ def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dic
             f"{conn.name}, so Firefox's saved login is not used there. Report that this sign-in needs the user.")}
     grant: dict = {"login_hosts": [host]}
     mine = (status or {}).get("grant")
-    if isinstance(mine, dict) and mine.get("scope") == "device":
+    if isinstance(mine, dict) and mine.get("scope") in ("device", "session"):
         grant["device_grant"] = True  # the user allowed this host on this computer from a hub card
         # "Allow on <computer>" on the hub card is the user's standing answer for this host there:
         # no second question, in chats and in scheduled runs alike, until the user revokes it.
@@ -1345,8 +1374,10 @@ def decide(tool_name: str, args: dict, conn: Any, inspected: Optional[dict] = No
         dest = site_of(target_host)
         if not dest:
             # Ask anyway; with no approved host the extension refuses to open it.
-            return {}, {"action": "approve", "rule_key": _rule("visit", "unknown"),
-                        "message": f"Open {url[:200]} in {where} with the user's logins."}
+            return {}, {"action": "approve",
+                        "rule_key": _unparsed_visit(url),
+                        "message": f"Open {url[:200]} in {where} with the user's logins. Approving for the session "
+                                   f"(or always) covers this exact address only."}
         if tab is not None and site_of(str(info.get("host") or "")) == dest:
             return {}, None
         return {"visit_hosts": [target_host]}, {
@@ -1630,12 +1661,16 @@ def person_cleared(rules: Any) -> bool:
     return bypass() or (bool(rules) and all(approved(r) for r in rules))
 
 
-def _confirm(text: str, rules: Any = ()) -> bool:
+def _confirm(text: str, rules: Any, *, always_exempt: str = "") -> bool:
     """A person-only card (docs/browser.md section 7.5): only a click on it answers, never smart
-    approval or an agent. With rules it offers Allow in this chat and Always allow, recorded under
-    the first rule not yet allowed and then copied to the others; without rules it covers this
-    action only. A chat without approvals, or rules the user already allowed, need no card."""
+    approval or an agent. It offers Allow once, Allow in this chat, Always allow (unless
+    ``always_exempt`` says why a standing grant means nothing here) and Deny; this chat and always
+    are recorded under the first rule not yet allowed and then copied to the others. ``rules`` name
+    the specific things allowed and may not be empty. A chat without approvals, or rules the user
+    already allowed, need no card."""
     rules = [r for r in (rules or []) if r]
+    if not rules:
+        raise ValueError("_confirm needs the specific rule the card allows")
     if person_cleared(rules):
         return True
     from tools.approval import _approval_scope, _persist_choice
@@ -1643,14 +1678,14 @@ def _confirm(text: str, rules: Any = ()) -> bool:
     from tools.approval_prompt import request_elicitation_consent
     session_key = get_current_session_key()
     need = [r for r in rules if not approved(r)]
-    remember = "plugin_rule:" + need[0] if need else None
-    if remember:
-        text += (" Allow in this chat (or always) allows " + "; ".join(rule_words(r) for r in need)
-                 + " again without asking.")
+    remember = "plugin_rule:" + need[0]
+    text += (f" Allow in this chat{'' if always_exempt else ' (or always)'} allows "
+             + "; ".join(rule_words(r) for r in need) + " again without asking.")
+    extra = {"always_exempt": always_exempt} if always_exempt else {}
     ok = request_elicitation_consent(
         text, "Only you can answer this card; the agent and the approval judge cannot.",
-        surface="device-browser", title="Allow this browser action?", remember_key=remember) == "accept"
-    if ok and remember and len(need) > 1:
+        surface="device-browser", title="Allow this browser action?", remember_key=remember, **extra) == "accept"
+    if ok and len(need) > 1:
         scope = _approval_scope(session_key, remember)
         if scope:
             _persist_choice(session_key, "always" if scope == "permanent" else "session",
@@ -2557,7 +2592,7 @@ def _late_grant(tool: str, args: dict, conn: Any) -> dict:
         raise _Refused(_err(f"{tool} was not run: signing in there needs the user's answer on a card, and the check "
                             f"before it could not read the page, so nobody was asked. Try again.", "approval"))
     key = str((approval or {}).get("rule_key") or "")
-    if key == _rule("visit", "unknown"):
+    if key == _unparsed_visit(str(args.get("url") or "")):
         return {}  # the page still cannot be read: the extension decides on its own lists, as before
     if key and not approved(key) and not bypass():
         raise _Refused(_err(f"{tool} was not run: it needs the user's approval (rule {key}), and the check before it "
@@ -3004,7 +3039,8 @@ def _login(args: dict, conn: Any, sid: str) -> str:
         raise ValueError("give tab_id (a tab that shows the login page) or url (the login page to open), not both")
     grant = _take_grant(_grant_key(_session(sid), "browser_login", args)) or _late_grant("browser_login", args, conn)
     req: dict = {"guard": {"login_hosts": grant.get("login_hosts") or []},
-                 "timeout_ms": int(_int(args, "wait_seconds", 15, 1, 60) * 1000)}
+                 "timeout_ms": int(_int(args, "wait_seconds", 15, 1, 60) * 1000),
+                 "session_ids": chat_sessions(_session(sid))}
     if tab is not None:
         req["tab_id"] = tab
     else:

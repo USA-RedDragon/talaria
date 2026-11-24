@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextvars
+import hashlib
 import inspect
 import json
 import re
@@ -32,6 +33,11 @@ browser = core._load_sibling("hermes_device_browser", "browser.py")
 # The rules of the plugin's own approvals; person-only rules are not among them.
 def NORMAL(rule: str) -> bool:
     return rule.split(":")[1] in ("visit", "click", "script", "script-write", "submit")
+
+
+def unparsed_visit(url: str) -> str:
+    """The rule of a visit to an address the extension could not read: that exact address only."""
+    return "browser:visit:url-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
@@ -67,8 +73,11 @@ class FakeBrowser:
         action, host = args.get("action"), str(args.get("host") or "")
         if action == "status":
             grant = self.grants.get(host)
+            if grant and grant["scope"] == "session" and grant.get("session_id") not in (args.get("session_ids") or []):
+                grant = None
             return {"ok": True, "result": {"host": host, "config": host in self.config_hosts, "grant": grant,
                                            "once": bool(grant and grant["scope"] == "once"),
+                                           "session": bool(grant and grant["scope"] == "session"),
                                            "method": (grant or {}).get("method", ""), "saved_logins": self.saved_logins,
                                            "methods_seen": list(self.methods_seen)}}
         if action == "list":
@@ -398,7 +407,7 @@ class ToolTests(BrowserBase):
     def test_navigate_asks_when_inspect_fails(self):
         self.fake.fail["inspect"] = (core.BROWSER_FAILED, "tab is gone")
         self.run_tool("browser_navigate", url="https://example.com/b", tab_id=7)
-        self.assertEqual(self.decision["rule_key"], "browser:visit:unknown")
+        self.assertEqual(self.decision["rule_key"], unparsed_visit("https://example.com/b"))
         self.assertEqual(self.last("navigate")["args"]["guard"], {"visit_hosts": []},
                          "nothing approved, so the extension refuses another site")
 
@@ -853,9 +862,12 @@ class ToolTests(BrowserBase):
         self.assertLess(seen[0], core.BROWSER_DEFAULT_TIMEOUT_S)
 
     def login_page(self, listed: bool = True):
+        """The sign-in page of login.example.com; ``listed`` puts the host in the device config, which
+        the extension's autologin list mirrors."""
         self.fake.inspect = {"url": "https://login.example.com/authsvc", "host": "login.example.com",
                              "top_host": "login.example.com", "sensitive": ["password"], "autologin": listed,
                              "top_autologin": listed, "target": {"kind": "field", "field": "password"}}
+        self.fake.config_hosts = {"login.example.com"} if listed else set()
 
     def test_login_asks_its_own_rule(self):
         self.login_page()
@@ -1114,7 +1126,7 @@ class ToolTests(BrowserBase):
 
 
     def test_login_from_url(self):
-        self.fake.autologin = {"login.example.com"}
+        self.fake.autologin = self.fake.config_hosts = {"login.example.com"}
         self.run_tool("browser_login", url="https://login.example.com/")
         self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
         self.assertEqual(self.last("login")["args"]["url"], "https://login.example.com/")
@@ -2353,7 +2365,7 @@ class BrowserDeviceTests(BrowserBase):
             d = plugins._get_pre_tool_call_directive_details("browser_navigate", {"url": "https://example.org/"},
                                                              session_id=self.session, tool_call_id="call-1")
             self.assertLess(time.monotonic() - t0, 1.9)
-            self.assertEqual((d.action, d.rule_key), ("approve", "browser:visit:unknown"))
+            self.assertEqual((d.action, d.rule_key), ("approve", unparsed_visit("https://example.org/")))
             self.assertEqual(mgr._hook_abandoned, {})
             self.assertEqual(mgr._hook_timeout_suppressed_until, {})
             d = plugins._get_pre_tool_call_directive_details("terminal", {"command": "id"},
@@ -3121,8 +3133,10 @@ class PersonOnlyCards(BrowserBase):
         self.asked: list[dict] = []
         self.choice = "once"
 
-        def consent(message, description, *, surface="", title="", remember_key=None, timeout_seconds=None):
-            self.asked.append({"message": message, "remember_key": remember_key, "surface": surface})
+        def consent(message, description, *, surface="", title="", remember_key=None, timeout_seconds=None,
+                    always_exempt=""):
+            self.asked.append({"message": message, "remember_key": remember_key, "surface": surface,
+                               "always_exempt": always_exempt})
             if self.choice == "deny":
                 return "decline"
             if remember_key and self.choice in ("session", "always"):
