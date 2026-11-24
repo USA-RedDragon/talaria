@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
-Date: Tue, 24 Nov 2026 08:53:57 +0000
+Date: Tue, 24 Nov 2026 09:29:08 +0000
 Subject: [PATCH] hermes: 0175 every approval card offers once, this chat,
  always and deny
 
@@ -300,7 +300,7 @@ index b0f2182f..0863cdd1 100644
  
  def _policy_requester(policy):
 diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
-index 8452a7d3..efc1c07c 100644
+index 8452a7d3..35c8f93c 100644
 --- a/gateway/session_pending_controls.py
 +++ b/gateway/session_pending_controls.py
 @@ -83,14 +83,8 @@ class PendingControls:
@@ -316,7 +316,7 @@ index 8452a7d3..efc1c07c 100644
 -                # Smart approval: "Always allow code from this source in this chat" (a chat grant, never config).
 -                choices.append('source')
 +            from tools.approval_scope import offer
-+            choices = offer(data)
++            choices = offer({**data, 'pattern_key': data.get('pattern_key') or 'approval'})
              prompt = {'kind': 'approval', 'prompt_id': prompt_id,
                        'execution_generation': generation,
                        'command': _redact_approval_command(data.get('command', '')),
