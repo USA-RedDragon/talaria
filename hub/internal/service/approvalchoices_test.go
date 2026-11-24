@@ -16,15 +16,15 @@ func approvalKinds() map[string]gateway.Prompt {
 	loginBare.Choices = nil
 	return map[string]gateway.Prompt{
 		"plain command": {Kind: gateway.PromptApproval, PromptID: "k-plain", Command: ptr("rm -rf build"), Description: ptr("recursive delete"),
-			Choices: []string{"once", "session", "always", "deny"}},
+			Choices: []string{hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceAlways, hub.ChoiceDeny}},
 		"no choices": {Kind: gateway.PromptApproval, PromptID: "k-bare", Command: ptr("cleanup")},
 		"provenance": {Kind: gateway.PromptApproval, PromptID: "k-prov", Command: ptr("run this command"), Rule: ptr("Code from External"),
 			Reason: ptr("The command runs binaries through the ld-linux loader."), Subagent: ptr("unpack the sysroot"),
-			GrantSource: ptr("docker.io/hashicorp/tfe-agent"), Choices: []string{"once", "session", "always", "deny"}},
+			GrantSource: ptr("docker.io/hashicorp/tfe-agent"), Choices: []string{hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceAlways, hub.ChoiceDeny}},
 		"login":            func() gateway.Prompt { login.PromptID = "k-login"; return login }(),
 		"login no choices": func() gateway.Prompt { loginBare.PromptID = "k-login-bare"; return loginBare }(),
 		"exempt": {Kind: gateway.PromptApproval, PromptID: "k-exempt", Command: ptr("echo"), AlwaysExempt: ptr("one-off"),
-			Choices: []string{"once", "session", "deny"}},
+			Choices: []string{hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceDeny}},
 	}
 }
 

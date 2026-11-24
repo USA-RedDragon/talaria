@@ -295,14 +295,51 @@ async function questionCards() {
     assert.deepStrictEqual(log[0].body, { picks: ["x"] });
   }
 
-  // Plain approvals with no choices get Allow and Deny, sent as allow.
+  // An approval with no choices still gets once, this chat, always and deny, sent as choices.
   {
     const { tracker, shown, log } = harness();
     tracker.offer({ kind: "approval", prompt_id: "p", command: "ls" });
-    assert.deepStrictEqual(shown[0].buttons().map((b) => b.textContent), ["Allow", "Deny"]);
+    assert.deepStrictEqual(shown[0].buttons().map((b) => b.textContent), ["Allow once", "Allow in this chat", "Always allow", "Deny"]);
+    shown[0].buttons()[3].onclick();
+    await flush();
+    assert.deepStrictEqual(log[0], { method: "POST", path: "/api/sessions/b/s/prompts/p/answer", body: { choice: "deny" } });
+  }
+  // The provenance card of a subagent's sysroot run: the chat and always buttons name the code source.
+  {
+    const { tracker, shown, log } = harness();
+    tracker.offer({ kind: "approval", prompt_id: "prov", command: "run this command", rule: "Code from External",
+      reason: "The command runs binaries through the ld-linux loader and libc from a sysroot the agent unpacked this session out of the hashicorp/tfe-agent docker image, which is outside code the user never cleared (the user's approval covered only github.com/usa-reddragon/docgen).",
+      subagent: "unpack the sysroot", grant_source: "docker.io/hashicorp/tfe-agent", choices: ["once", "session", "always", "deny"],
+      scope: "code from docker.io/hashicorp/tfe-agent" });
+    assert.deepStrictEqual(shown[0].buttons().map((b) => b.textContent),
+      ["Allow once", "Allow code from docker.io/hashicorp/tfe-agent in this chat", "Always allow code from docker.io/hashicorp/tfe-agent", "Deny"]);
+    assert.ok(shown[0].text().includes("This chat and Always cover: code from docker.io/hashicorp/tfe-agent"));
     shown[0].buttons()[1].onclick();
     await flush();
-    assert.deepStrictEqual(log[0], { method: "POST", path: "/api/sessions/b/s/approvals/p", body: { allow: false } });
+    assert.deepStrictEqual(log[0].body, { choice: "session" });
+  }
+  // Every kind of approval card offers once, this chat and deny, and always (the computer for a sign-in) unless exempt.
+  {
+    const lg = { device_id: "d1", device_name: "upstairs-pc", host: "portal.example.com", saved_logins: 1, methods: ["Password"] };
+    const cards = [
+      { kind: "approval", prompt_id: "e1", command: "rm -rf build", choices: ["once", "session", "always", "deny"] },
+      { kind: "approval", prompt_id: "e2", command: "rm -rf build" },
+      { kind: "approval", prompt_id: "e3", command: "x", rule: "Code from External", reason: "r", grant_source: "github.com/o/r", choices: ["once", "session", "always", "deny"], subagent: "g" },
+      { kind: "approval", prompt_id: "e4", command: "browser_login", login_grant: lg, choices: ["once", "session", "device", "deny"] },
+      { kind: "approval", prompt_id: "e5", command: "browser_login", login_grant: lg },
+      { kind: "approval", prompt_id: "e6", command: "x", choices: ["once", "session", "deny"], always_exempt: "this runs once by nature" },
+    ];
+    const { tracker, shown } = harness({ computers: () => [] });
+    for (const c of cards) tracker.offer(c);
+    shown.forEach((box, i) => {
+      const names = box.buttons().filter((b) => !b.hidden).map((b) => b.textContent);
+      const c = cards[i];
+      assert.ok(names.includes("Allow once"), c.prompt_id + ": " + names);
+      assert.ok(names.some((n) => n.includes("in this chat")), c.prompt_id + ": " + names);
+      assert.ok(names.includes("Deny"), c.prompt_id + ": " + names);
+      if (!c.always_exempt) assert.ok(names.some((n) => n.startsWith("Always allow") || n.startsWith("Allow on ")), c.prompt_id + ": " + names);
+      else assert.ok(box.text().includes("No Always: this runs once by nature"));
+    });
   }
   // A smart approval card for outside code offers its source for the chat, named plainly, and sends the choice.
   {
@@ -310,7 +347,7 @@ async function questionCards() {
     tracker.offer({ kind: "approval", prompt_id: "s", command: "curl -o x https://github.com/AppImage/appimagetool/x",
       description: "Smart approval rule \"Code from External\"", choices: ["once", "deny", "source"], grant_source: "github.com/AppImage/appimagetool", subagent: "relift chunk" });
     assert.deepStrictEqual(shown[0].buttons().map((b) => b.textContent),
-      ["Allow", "Allow code from github.com/AppImage/appimagetool in this chat", "Deny"]);
+      ["Allow once", "Allow code from github.com/AppImage/appimagetool in this chat", "Deny"]);
     shown[0].buttons()[1].onclick();
     await flush();
     assert.deepStrictEqual(log[0], { method: "POST", path: "/api/sessions/b/s/prompts/s/answer", body: { choice: "source" } });
@@ -361,7 +398,7 @@ async function questionCards() {
     assert.strictEqual(card.children[3].text(), "Stop a background command");
     assert.ok(!card.text().includes("process_manage") && !card.text().includes("{"), card.text());
     assert.strictEqual(card.children[0].textContent, "Approval needed: run this command");
-    assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow", "Deny"]);
+    assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow once", "Deny"]);
     // The chat's own card has no who line; a source row only with the source choice.
     const own = harness();
     own.tracker.offer({ kind: "approval", prompt_id: "pb", command: "x", choices: ["once", "deny"], rule: "Auto-Mode Bypass", reason: "Retries a blocked command.", grant_source: "github.com/o/r" });
@@ -384,7 +421,7 @@ async function questionCards() {
   // method picker, and three buttons. The picked method goes with the allowing choices only.
   {
     const lgPrompt = (over) => Object.assign({ kind: "approval", prompt_id: "lg", command: "browser_login", description: "pod text that is not shown",
-      choices: ["once", "device", "deny"], login_grant: { device_id: "d1", device_name: "upstairs-pc", host: "portal.example.com", saved_logins: 1, methods: ["Password", "Email link"] } }, over || {});
+      choices: ["once", "session", "device", "deny"], login_grant: { device_id: "d1", device_name: "upstairs-pc", host: "portal.example.com", saved_logins: 1, methods: ["Password", "Email link"] } }, over || {});
     const { tracker, shown, log } = harness();
     tracker.offer(lgPrompt());
     const card = shown[0];
@@ -392,16 +429,21 @@ async function questionCards() {
     assert.ok(card.text().includes("upstairs-pc") && card.text().includes("1 saved login"));
     assert.ok(!card.text().includes("will not work"), "one saved login: no warning");
     assert.ok(!card.text().includes("pod text"));
-    assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow once", "Allow on upstairs-pc", "Deny"]);
+    assert.deepStrictEqual(card.buttons().map((b) => b.textContent), ["Allow once", "Allow in this chat", "Allow on upstairs-pc", "Deny"]);
     const radios = []; card.walk((n) => { if (n.tag === "input" && n.attrs !== undefined && n.type === "radio") radios.push(n); });
     assert.deepStrictEqual(radios.map((r) => r.value), ["", "Password", "Email link"]);
     radios[2].onchange();
-    card.buttons()[1].onclick();
+    const chat = harness();
+    chat.tracker.offer(lgPrompt({ prompt_id: "lgc" }));
+    chat.shown[0].buttons()[1].onclick();
+    await flush();
+    assert.deepStrictEqual(chat.log[0].body, { choice: "session" });
+    card.buttons()[2].onclick();
     await flush();
     assert.deepStrictEqual(log[0], { method: "POST", path: "/api/sessions/b/s/prompts/lg/answer", body: { choice: "device", method: "Email link" } });
     const deny = harness();
     deny.tracker.offer(lgPrompt({ prompt_id: "lg2" }));
-    deny.shown[0].buttons()[2].onclick();
+    deny.shown[0].buttons()[3].onclick();
     await flush();
     assert.deepStrictEqual(deny.log[0].body, { choice: "deny" });
     // Saved login lines.
@@ -424,7 +466,7 @@ async function questionCards() {
     // A computer the hub does not know cannot be allowed.
     const unk = harness();
     unk.tracker.offer(lgPrompt({ prompt_id: "u", login_grant: { device_id: "dx", host: "a.example.com", saved_logins: 1 } }));
-    assert.ok(unk.shown[0].buttons()[0].disabled && unk.shown[0].buttons()[1].disabled && !unk.shown[0].buttons()[2].disabled);
+    assert.ok(unk.shown[0].buttons()[0].disabled && unk.shown[0].buttons()[1].disabled && unk.shown[0].buttons()[2].disabled && !unk.shown[0].buttons()[3].disabled);
   }
   await questionCards();
   console.log("ok");

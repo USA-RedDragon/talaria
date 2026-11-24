@@ -29,6 +29,8 @@ const (
 	envStaging    = "staging"
 	envProd       = "prod"
 	lblOnce       = "Allow once"
+	lblChat       = "Allow in this chat"
+	lblAlways     = "Always allow"
 	titleFixCI    = "Fix CI"
 	titleTerminal = "Terminal chat"
 	topicTrip     = "Trip"
