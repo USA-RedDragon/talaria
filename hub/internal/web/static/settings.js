@@ -303,7 +303,7 @@ window.HubSettings = (ctx) => {
     for (const x of items) {
       const row = el("div", "set-row set-grant");
       const top = el("span", "set-top");
-      top.append(el("span", "nm", x.host), el("span", "pill", x.scope === "once" ? "Once" : "Always on this computer"));
+      top.append(el("span", "nm", x.host), el("span", "pill", { once: "Once", session: "This chat", job: "This scheduled job" }[x.scope] || "Always on this computer"));
       const meta = el("span", "meta");
       if (x.method) meta.append(el("span", "", "Method: " + x.method));
       const allowed = el("span", "", "allowed " + ago(x.granted_at) + " in ");

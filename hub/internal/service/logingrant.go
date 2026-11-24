@@ -126,12 +126,17 @@ func loginGrantCard(g *gateway.LoginGrant) *hub.LoginGrantCard {
 		Method: g.Method, Existing: g.Existing, JobID: g.JobID, PostHosts: slices.Clone(g.PostHosts)}
 }
 
-// grantScope is the scope of the grant a sign-in card's choice gives.
-func grantScope(choice string) string {
+// grantScope is the scope of the grant a sign-in card's choice gives. On the
+// card of a scheduled job's run the chat choice allows the job, since the
+// job's later runs are not in the chat.
+func grantScope(choice, jobID string) string {
 	switch choice {
 	case hub.ChoiceOnce:
 		return logingrant.ScopeOnce
 	case hub.ChoiceSession:
+		if jobID != "" {
+			return logingrant.ScopeJob
+		}
 		return logingrant.ScopeSession
 	case hub.ChoiceDevice:
 		return logingrant.ScopeDevice
@@ -181,6 +186,11 @@ func (s *Service) answerLoginGrant(ctx context.Context, user, backendID, session
 	if gr == nil {
 		return fmt.Errorf("%w: this hub does not keep sign-in grants. Turn computers on in the hub's config", hub.ErrBadValue)
 	}
-	return gr.GrantLogin(ctx, hub.LoginGrantRequest{User: user, BackendID: backendID, DeviceID: g.DeviceID, Host: g.Host, Method: a.Method,
-		Scope: grantScope(a.Choice), SessionID: sessionID, ChatTitle: strings.TrimSpace(title), Via: via, PostHosts: g.PostHosts})
+	scope := grantScope(a.Choice, g.JobID)
+	req := hub.LoginGrantRequest{User: user, BackendID: backendID, DeviceID: g.DeviceID, Host: g.Host, Method: a.Method,
+		Scope: scope, SessionID: sessionID, ChatTitle: strings.TrimSpace(title), Via: via, PostHosts: g.PostHosts}
+	if scope == logingrant.ScopeJob {
+		req.JobID = g.JobID
+	}
+	return gr.GrantLogin(ctx, req)
 }

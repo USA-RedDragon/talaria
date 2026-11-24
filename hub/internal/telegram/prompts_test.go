@@ -626,6 +626,27 @@ func TestLoginGrantCard(t *testing.T) {
 	}
 }
 
+// A scheduled job's sign-in card offers the job where other cards offer the
+// chat.
+func TestLoginGrantCardForAScheduledJob(t *testing.T) {
+	t.Parallel()
+	h := startBot(t, nil)
+	sid := h.startTurn(t)
+	card := loginCard()
+	card[kChoices] = []string{hub.ChoiceOnce, hub.ChoiceSession, hub.ChoiceDevice, hub.ChoiceDeny}
+	lg, _ := card["login_grant"].(map[string]any)
+	lg["job_id"] = "9f2c1ab07d3e"
+	h.hub.emit(t, sid, hub.KindApprovalRequest, card)
+	req := h.tg.wait(mSend, "Sign in with the saved login on portal.example.com?")
+	if got := labels(req); !slices.Equal(got, []string{"Allow once", "Allow for this scheduled job", "Allow on upstairs-pc", "Deny"}) {
+		t.Fatalf("labels = %v", got)
+	}
+	h.tg.press(dm(aliceTG), aliceTG, req.ResultID, data(req.buttons()[1]))
+	if got := h.hub.waitAnswer(t); got.Answer.Choice != hub.ChoiceSession {
+		t.Fatalf("answer = %+v", got)
+	}
+}
+
 // A card with post hosts names them.
 func TestLoginGrantCardPostHosts(t *testing.T) {
 	t.Parallel()

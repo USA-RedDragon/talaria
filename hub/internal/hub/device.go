@@ -283,10 +283,13 @@ type LoginGrantRequest struct {
 	Host      string
 	// Method is "" or a sign-in method label.
 	Method string
-	// Scope is logingrant.ScopeOnce or logingrant.ScopeDevice.
+	// Scope is logingrant.ScopeOnce, ScopeSession, ScopeJob or
+	// ScopeDevice.
 	Scope     string
 	SessionID string
 	ChatTitle string
+	// JobID is the scheduled job of a ScopeJob grant.
+	JobID string
 	// Via is "web" or "telegram".
 	Via string
 	// PostHosts are the other sites the login form may send the login to.
@@ -301,8 +304,10 @@ type LoginGrant struct {
 	GrantedAt int64  `json:"granted_at"`
 	SessionID string `json:"session_id"`
 	ChatTitle string `json:"chat_title"`
-	Via       string `json:"via"`
-	User      string `json:"user"`
+	// JobID is the scheduled job a job grant is for.
+	JobID string `json:"job_id,omitempty"`
+	Via   string `json:"via"`
+	User  string `json:"user"`
 	// LastUsed is 0 for a grant that was never used.
 	LastUsed  int64 `json:"last_used"`
 	ExpiresAt int64 `json:"expires_at,omitempty"`

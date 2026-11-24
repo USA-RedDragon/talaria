@@ -87,6 +87,27 @@ func TestGrantLoginSignsAndDelivers(t *testing.T) {
 	})
 }
 
+func TestGrantLoginSignsAJobGrant(t *testing.T) {
+	t.Parallel()
+	stores(t, func(t *testing.T, st *store.Store) {
+		e := setup(t, st)
+		id := e.computer(deviceName)
+		req := hub.LoginGrantRequest{User: userAlice, BackendID: backendID, DeviceID: id, Host: grantHost, Scope: logingrant.ScopeJob,
+			JobID: "9f2c1ab07d3e", SessionID: "s1", ChatTitle: "Nightly report", Via: grantVia}
+		if err := e.a.dev.GrantLogin(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		toks := e.plugin.LoginGrantTokens(id)
+		if len(toks) != 1 {
+			t.Fatalf("tokens = %v", toks)
+		}
+		c, err := logingrant.Verify([]ed25519.PublicKey{pubKey(e.key)}, toks[0], time.Now())
+		if err != nil || c.Scope != logingrant.ScopeJob || c.JobID != "9f2c1ab07d3e" || c.SessionID != "s1" {
+			t.Fatalf("claims = %+v %v", c, err)
+		}
+	})
+}
+
 // A computer that is not the answering user's, one of another backend, a
 // sandbox and a made-up one get nothing signed.
 func TestGrantLoginRefusesOtherComputers(t *testing.T) {

@@ -327,7 +327,11 @@ func settledOutcome(p hub.PromptInfo, shown, now time.Time, cancelled bool,
 	}
 	if p.Kind != hub.PromptClarify && answer != nil {
 		if o, ok := answer(); ok {
-			return outcomeHead(o), "", true
+			head := outcomeHead(o)
+			if p.LoginGrant != nil && p.LoginGrant.JobID != "" {
+				head = strings.Replace(head, "Allowed for this chat", "Allowed for this scheduled job", 1)
+			}
+			return head, "", true
 		}
 	}
 	timeout := time.Duration(p.Timeout * float64(time.Second))
@@ -527,6 +531,9 @@ func loginGrantLabel(g *hub.LoginGrantCard, choice string) string {
 	case hub.ChoiceOnce:
 		return "Allow once"
 	case hub.ChoiceSession:
+		if g.JobID != "" {
+			return "Allow for this scheduled job"
+		}
 		return "Allow in this chat"
 	case hub.ChoiceDevice:
 		return "Allow on " + truncate(g.DeviceName, 30)

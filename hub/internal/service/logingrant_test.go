@@ -25,6 +25,8 @@ const (
 	scopeOnce      = "once"
 	scopeDevice    = "device"
 	scopeSession   = "session"
+	scopeJob       = "job"
+	loginJob       = "9f2c1ab07d3e"
 )
 
 // fakeGrants records the grants the service asked for. It checks that the
@@ -154,6 +156,26 @@ func TestLoginGrantInThisChat(t *testing.T) {
 	}
 	calls := g.calls()
 	if len(calls) != 1 || calls[0].Scope != scopeSession || calls[0].SessionID != sLive || calls[0].Host != loginHost || calls[0].DeviceID != loginDevice {
+		t.Fatalf("calls = %+v", calls)
+	}
+	waitSettled(t, e)
+}
+
+// The card of a scheduled job's sign-in is for the job: "this chat" there
+// signs a job grant, so the job's later runs need no second answer.
+func TestLoginGrantForAScheduledJob(t *testing.T) {
+	t.Parallel()
+	e, g := loginEnv(t)
+	ctx := context.Background()
+	p := loginGrantPrompt()
+	p.LoginGrant.JobID = loginJob
+	e.gw.Ask(sLive, p)
+	waitPrompt(t, e)
+	if err := e.svc.AnswerPrompt(ctx, userAlice, backendPC, sLive, loginPrompt, hub.Answer{Choice: hub.ChoiceSession}); err != nil {
+		t.Fatal(err)
+	}
+	calls := g.calls()
+	if len(calls) != 1 || calls[0].Scope != scopeJob || calls[0].JobID != loginJob || calls[0].Host != loginHost || calls[0].DeviceID != loginDevice {
 		t.Fatalf("calls = %+v", calls)
 	}
 	waitSettled(t, e)

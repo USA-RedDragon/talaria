@@ -468,6 +468,20 @@ async function questionCards() {
     unk.tracker.offer(lgPrompt({ prompt_id: "u", login_grant: { device_id: "dx", host: "a.example.com", saved_logins: 1 } }));
     assert.ok(unk.shown[0].buttons()[0].disabled && unk.shown[0].buttons()[1].disabled && unk.shown[0].buttons()[2].disabled && !unk.shown[0].buttons()[3].disabled);
   }
+  // A sign-in card of a scheduled job's run offers the job where other cards offer the chat; the answer is still
+  // the session choice, which the hub turns into a job grant.
+  {
+    const job = harness();
+    job.tracker.offer({ kind: "approval", prompt_id: "j", command: "browser_login", choices: ["once", "session", "device", "deny"],
+      login_grant: { device_id: "d1", device_name: "upstairs-pc", host: "portal.example.com", saved_logins: 1, job_id: "9f2c1ab07d3e" } });
+    assert.deepStrictEqual(job.shown[0].buttons().map((b) => b.textContent), ["Allow once", "Allow for this scheduled job", "Allow on upstairs-pc", "Deny"]);
+    job.shown[0].buttons()[1].onclick();
+    await flush();
+    assert.deepStrictEqual(job.log[0].body, { choice: "session" });
+    job.tracker.outcome("j", "Allowed for this chat (in the hub)");
+    assert.ok(job.shown[0].text().includes("Allowed for this scheduled job"), job.shown[0].text());
+    assert.ok(!job.shown[0].text().includes("for this chat"), job.shown[0].text());
+  }
   await questionCards();
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

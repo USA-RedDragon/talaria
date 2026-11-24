@@ -81,7 +81,7 @@ func (s *Server) GrantLogin(ctx context.Context, req hub.LoginGrantRequest) erro
 		title = string([]rune(title)[:logingrant.MaxTitleLen])
 	}
 	token, err := logingrant.Sign(s.opts.Key, logingrant.Claims{Sub: req.User, DeviceID: d.ID, Host: req.Host, Method: req.Method,
-		Scope: req.Scope, PostHosts: req.PostHosts, SessionID: req.SessionID, ChatTitle: title, Via: req.Via, IssuedAt: now.Unix(), Expires: now.Add(grantLifetime).Unix()})
+		Scope: req.Scope, PostHosts: req.PostHosts, SessionID: req.SessionID, JobID: req.JobID, ChatTitle: title, Via: req.Via, IssuedAt: now.Unix(), Expires: now.Add(grantLifetime).Unix()})
 	if err != nil {
 		return fmt.Errorf("%w: %w", hub.ErrBadValue, err)
 	}

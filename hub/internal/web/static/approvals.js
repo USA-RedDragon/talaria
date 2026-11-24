@@ -11,7 +11,7 @@ window.HubApprovals = (() => {
   // "Denied (in Telegram)", "Answered", or why a card was closed) into
   // { allowed, head, where, closed }.
   function outcomeOf(text) {
-    const m = /^(Allowed once|Allowed for this chat|Allowed always|Allowed|Denied) \((.+)\)$/.exec(String(text || ""));
+    const m = /^(Allowed once|Allowed for this chat|Allowed for this scheduled job|Allowed always|Allowed|Denied) \((.+)\)$/.exec(String(text || ""));
     if (m) return { allowed: m[1] !== "Denied", head: m[1], where: m[2] };
     if (text === "Answered") return { allowed: null, head: "Answered" };
     return { allowed: null, closed: true, head: "Not answered" };
@@ -363,7 +363,7 @@ window.HubApprovals = (() => {
         const allow = (c) => () => (method ? { choice: c, method } : { choice: c });
         const known = !!computer;
         const once = button("primary", "Allow once", allow("once"));
-        const chat = button("", "Allow in this chat", allow("session"));
+        const chat = button("", lg.job_id ? "Allow for this scheduled job" : "Allow in this chat", allow("session"));
         const dev = button("", "Allow on " + (computer || "this computer"), allow("device"));
         if (!known) { locked.add(once); locked.add(chat); locked.add(dev); once.disabled = chat.disabled = dev.disabled = true; }
         if (!choices.includes("once")) once.hidden = true;
@@ -452,7 +452,8 @@ window.HubApprovals = (() => {
     function outcome(id, text) {
       const card = cards.get(id);
       if (!card) return;
-      finish(id, text);
+      const lg = card.prompt && card.prompt.login_grant;
+      finish(id, lg && lg.job_id ? String(text).replace("Allowed for this chat", "Allowed for this scheduled job") : text);
     }
 
     // lost is the hub's word that Hermes no longer holds these prompts and
