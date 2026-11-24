@@ -927,19 +927,32 @@ class ToolTests(BrowserBase):
         self.run_tool("browser_login", tab_id=7)
         self.assertEqual(self.decision["rule_key"], "browser:login:login.example.com")
 
-    def test_login_grant_without_method_asks_again_after_a_picker(self):
+    def test_login_device_grant_without_method_asks_nothing_before_the_login(self):
+        # Methods an earlier run saw (a signed-in page's account button, say) raise no card before this run: the
+        # run itself asks when its page shows a picker again.
         self.login_page()
         self.fake.grants["login.example.com"] = {"host": "login.example.com", "method": "", "scope": "device"}
-        self.fake.methods_seen = ["Passkey", "Password", "Approve on phone", "Email link", "Password", "x" * 81, 5]
-        self.run_tool("browser_login", tab_id=7)
-        d = self.decision
-        self.assertEqual(d["rule_key"], f"browser:login-grant:{self.device.conn.device_id}:login.example.com")
-        self.assertEqual(d["login_grant"]["methods"], ["Password", "Email link"])
-        self.assertEqual(d["login_grant"]["existing"], "device")
-        # A grant that has a method does not ask again.
-        self.fake.grants["login.example.com"]["method"] = "Password"
+        self.fake.methods_seen = ["jacob@example.com acme", "Password"]
         self.run_tool("browser_login", tab_id=7)
         self.assertIsNone(self.decision)
+
+    def test_login_on_a_signed_in_page_reports_it_and_asks_nothing(self):
+        self.login_page()
+        self.fake.login_result = {"tab_id": 7, "filled": False, "submitted": False, "landed_host": "login.example.com",
+                                  "signed_in": True}
+        out = self.run_tool("browser_login", tab_id=7)
+        self.assertTrue(out["signed_in"])
+        self.assertIn("signed in on login.example.com already", out["note"])
+        self.assertNotIn("needs the user", out["note"])
+        self.assertFalse(browser._needs_method(dict(self.fake.login_result, methods_seen=["Password"],
+                                                    reason="no method is configured")))
+
+    def test_login_auto_method_and_shown_by_reach_the_model(self):
+        self.login_page()
+        self.fake.login_result = {"tab_id": 7, "filled": True, "submitted": True, "landed_host": "login.example.com",
+                                  "method": "Password", "method_auto": True, "shown_by": "window"}
+        out = self.run_tool("browser_login", tab_id=7)
+        self.assertEqual((out["method"], out["method_auto"], out["shown_by"]), ("Password", True, "window"))
 
     def test_login_card_never_lists_refused_methods(self):
         self.assertEqual(browser.grant_methods(["Passkey", "Security key", "Verify", "Phone", "Password", "Use SMS", "  Pad ",

@@ -1181,10 +1181,6 @@ def _decide_login(args: dict, conn: Any, where: str) -> tuple[dict, Optional[dic
     mine = (status or {}).get("grant")
     if isinstance(mine, dict) and mine.get("scope") == "device":
         grant["device_grant"] = True  # the user allowed this host on this computer from a hub card
-        if not mine.get("method") and not status.get("method"):
-            methods = grant_methods(status.get("methods_seen"))
-            if methods:  # the page showed a sign-in method picker and no method is chosen yet
-                return grant, login_grant_card(conn, host, status, existing="device")
         # "Allow on <computer>" on the hub card is the user's standing answer for this host there:
         # no second question, in chats and in scheduled runs alike, until the user revokes it.
         return grant, None
@@ -3021,6 +3017,11 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     elif _needs_method(res):
         res = _login_pick_method(conn, sid, req, res)
     out = {k: res[k] for k in ("tab_id", "filled", "submitted", "landed_host", "reason") if k in res}
+    for k in ("signed_in", "method_auto"):
+        if res.get(k) is True:
+            out[k] = True
+    if res.get("shown_by") in ("focus", "window"):
+        out["shown_by"] = res["shown_by"]  # how the hidden tab was shown so Firefox would fill it
     if isinstance(res.get("needs_post_host"), str):
         out["needs_post_host"] = res["needs_post_host"][:253]
     if isinstance(res.get("post_host_allowed"), str):
@@ -3030,7 +3031,10 @@ def _login(args: dict, conn: Any, sid: str) -> str:
     seen = res.get("methods_seen")
     if isinstance(seen, list):  # labels only, from a sign-in method picker
         out["methods_seen"] = [x[:80] for x in seen if isinstance(x, str)][:12]
-    if not out.get("submitted"):
+    if out.get("signed_in"):
+        out["note"] = (f"Firefox is signed in on {out.get('landed_host') or 'this site'} already: the page shows no login "
+                       f"form and nothing that asks to sign in, so nothing was filled or clicked. Continue on the page.")
+    elif not out.get("submitted"):
         out["note"] = "The sign-in did not happen. Do not try to type the password; report that it needs the user."
     return _ok(out)
 
@@ -3038,7 +3042,7 @@ def _login(args: dict, conn: Any, sid: str) -> str:
 def _needs_method(res: dict) -> bool:
     """The login stopped on a sign-in method picker because no method is chosen for the host, or
     no button is or starts with the chosen one, and the page offers a method a card may list."""
-    if res.get("submitted") or not grant_methods(res.get("methods_seen")):
+    if res.get("submitted") or res.get("signed_in") or not grant_methods(res.get("methods_seen")):
         return False
     reason = str(res.get("reason") or "")
     # Extensions before 0.32.7 send no needs_method; their reasons say the same.
