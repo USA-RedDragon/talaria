@@ -1,4 +1,4 @@
-assertion/assertion.go	106	89
+assertion/assertion.go	106	88
 cmd/acp.go	29	1
 cmd/acphost.go	57	23
 cmd/autoupdate.go	75	58
@@ -43,10 +43,10 @@ internal/autoupdate/release.go	109	86
 internal/browser/bidi/bidi.go	51	0
 internal/browser/broker/broker.go	200	161
 internal/browser/broker/peercred_linux.go	13	9
-internal/browser/grants/gate.go	186	166
+internal/browser/grants/gate.go	196	175
 internal/browser/grants/keys.go	19	17
 internal/browser/grants/logins.go	62	51
-internal/browser/grants/store.go	178	156
+internal/browser/grants/store.go	203	175
 internal/browser/headless/group_unix.go	6	5
 internal/browser/headless/headless.go	72	57
 internal/browser/host/host.go	47	30
@@ -66,7 +66,7 @@ internal/claudeusage/timeline.go	96	86
 internal/config/config.go	107	97
 internal/config/load.go	18	17
 internal/daemonstate/daemonstate.go	17	13
-internal/device/device.go	803	712
+internal/device/device.go	803	713
 internal/device/files.go	156	118
 internal/device/files_unix.go	5	4
 internal/device/mcp.go	69	60
@@ -83,7 +83,7 @@ internal/hermesbuild/launch.go	65	62
 internal/hermesbuild/relocate.go	38	31
 internal/hubapi/hubapi.go	92	83
 internal/legacy/legacy.go	8	8
-internal/mcp/mcp.go	519	451
+internal/mcp/mcp.go	519	453
 internal/mcp/mcptest/fake.go	136	113
 internal/oci/extract.go	130	106
 internal/oci/ocitest/ocitest.go	127	118
@@ -108,13 +108,13 @@ internal/setup/system.go	52	7
 internal/setup/task.go	67	54
 internal/setup/update.go	82	71
 internal/setup/windows.go	76	63
-internal/splice/conn.go	306	265
+internal/splice/conn.go	306	264
 internal/splice/resolve.go	127	111
 internal/splice/rpc.go	97	83
 internal/splice/splice.go	225	201
 internal/tokenstore/tokenstore.go	104	72
 internal/userdir/userdir.go	3	2
 internal/winshell/winshell.go	52	42
-logingrant/logingrant.go	72	64
+logingrant/logingrant.go	73	65
 main.go	11	0
 plugin/embed.go	4	3
