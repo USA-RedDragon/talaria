@@ -1102,10 +1102,34 @@ async function onLoginPage(tab) {
   return (await tabSensitive(tab.id)).includes("password");
 }
 
+// visibleSoon waits up to ms for the tab's page to be visible.
+async function visibleSoon(tabId, ms) {
+  const end = Date.now() + ms;
+  for (;;) {
+    let seen = null;
+    try {
+      seen = await inPage(tabId, pageVisibility);
+    } catch (e) {
+      seen = null; // the page is loading
+    }
+    if (seen && seen.visibility === "visible") {
+      return true;
+    }
+    if (Date.now() >= end) {
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
 // activate shows tab in its window, and the window when it is minimized,
-// and returns what restore needs to put things back.
+// and returns what restore needs to put things back. On Wayland Firefox is
+// not told when the compositor minimizes its window (windows.get still says
+// normal or maximized), so a page that stays hidden gets its window
+// focused, and when that does not show it either, the tab moves into a new
+// window of its own until restore moves it back.
 async function activate(tab) {
-  const before = { tabId: tab.id, windowId: tab.windowId, prev: null, minimized: false };
+  const before = { tabId: tab.id, windowId: tab.windowId, prev: null, minimized: false, moved: null, shown: "" };
   if (!tab.active) {
     const [prev] = await browser.tabs.query({ active: true, windowId: tab.windowId });
     before.prev = prev ? prev.id : null;
@@ -1116,14 +1140,41 @@ async function activate(tab) {
     before.minimized = true;
     await browser.windows.update(tab.windowId, { state: "normal" });
   }
+  if (await visibleSoon(tab.id, 1000)) {
+    return before;
+  }
+  try {
+    await browser.windows.update(tab.windowId, { focused: true });
+  } catch (e) {
+    // A window that cannot take focus still gets the new window below.
+  }
+  if (await visibleSoon(tab.id, 1500)) {
+    before.shown = "focus";
+    return before;
+  }
+  const { index } = await browser.tabs.get(tab.id);
+  const own = await browser.windows.create({ tabId: tab.id, focused: true });
+  before.moved = { index, windowId: own.id };
+  before.shown = "window";
+  await visibleSoon(tab.id, 3000);
   return before;
 }
 
 // restore makes the previously active tab active again, and minimizes the
-// window again, unless the user changed the active tab meanwhile.
+// window again, unless the user changed the active tab meanwhile. A tab
+// that activate moved into a window of its own goes back to its place and
+// its tab group; the emptied window closes.
 async function restore(before) {
   let restored = false;
   try {
+    if (before.moved) {
+      await browser.tabs.move(before.tabId, { windowId: before.windowId, index: before.moved.index });
+      await addToGroup(before.tabId);
+      if (before.prev !== null) {
+        await browser.tabs.update(before.prev, { active: true });
+      }
+      return true;
+    }
     const [now] = await browser.tabs.query({ active: true, windowId: before.windowId });
     if (before.prev !== null && now && now.id === before.tabId) {
       await browser.tabs.update(before.prev, { active: true });
@@ -2808,8 +2859,8 @@ const OPS = {
           const out = { tab_id: tabId, filled: false, submitted: false, landed_host: hostOf((await browser.tabs.get(tabId)).url) };
           out.reason = now.passwords !== 1 ? "the login form changed while waiting for Firefox to fill it"
             : now.visibility !== "visible" ? "the tab did not become visible (document.visibilityState is " +
-              now.visibility + "), and Firefox fills saved logins only in a visible tab. Is the window hidden or the " +
-              "screen off?" : NOT_FILLED;
+              now.visibility + ")" + (before && before.shown === "window" ? ", not even in a window of its own" : "") +
+              ", and Firefox fills saved logins only in a visible tab. Is the screen locked or off?" : NOT_FILLED;
           if (now.password_filled && now.username_present && !now.username_filled) {
             out.reason = "Firefox filled the password but not the username field. " + NOT_FILLED;
           }

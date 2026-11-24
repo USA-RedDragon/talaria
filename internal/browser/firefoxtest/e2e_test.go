@@ -215,7 +215,7 @@ func startFirefoxGrants(ctx context.Context, t *testing.T) (*broker.Broker, *bid
 	go func() { _ = b.Serve(ctx) }()
 	gr := newGrantRig(t, b, filepath.Join(root, "state", grants.FileName))
 
-	ffDone := runFirefox(ctx, t, profile, []string{
+	env := []string{
 		"HOME=" + home,
 		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
 		"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
@@ -223,12 +223,21 @@ func startFirefoxGrants(ctx context.Context, t *testing.T) (*broker.Broker, *bid
 		"XDG_STATE_HOME=" + filepath.Join(home, ".local", "state"),
 		"TMPDIR=" + os.TempDir(),
 		"PATH=" + os.Getenv("PATH"),
-		"MOZ_HEADLESS=1",
 		// Firefox 160 (the CI runner) ignores --remote-allow-system-access and wants this variable;
 		// 157 accepts either.
 		"MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1",
 		broker.SocketEnv + "=" + sock,
-	})
+	}
+	if desktopE2E() {
+		for _, k := range []string{"WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE", "DBUS_SESSION_BUS_ADDRESS"} {
+			if v, ok := os.LookupEnv(k); ok {
+				env = append(env, k+"="+v)
+			}
+		}
+	} else {
+		env = append(env, "MOZ_HEADLESS=1")
+	}
+	ffDone := runFirefox(ctx, t, profile, env)
 
 	port := waitBiDiPort(ctx, t, profile, ffDone)
 	bc, err := bidi.Dial(ctx, "127.0.0.1", port)
@@ -263,8 +272,12 @@ func runFirefox(ctx context.Context, t *testing.T, profile string, env []string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ff := exec.CommandContext(ctx, bin, "--headless", "--no-remote", "--profile", profile,
-		"--remote-debugging-port=0", "--remote-allow-system-access", "about:blank")
+	args := []string{"--headless", "--no-remote", "--profile", profile,
+		"--remote-debugging-port=0", "--remote-allow-system-access", "about:blank"}
+	if desktopE2E() {
+		args = args[1:]
+	}
+	ff := exec.CommandContext(ctx, bin, args...)
 	ff.Env = env
 	var log bytes.Buffer
 	ff.Stdout, ff.Stderr = &log, &log
