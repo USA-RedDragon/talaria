@@ -1,0 +1,3369 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USA-RedDragon <USA-RedDragon@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 08:53:57 +0000
+Subject: [PATCH] hermes: 0175 every approval card offers once, this chat,
+ always and deny
+
+---
+ acp_adapter/permissions.py                    |  19 +-
+ agent/transports/codex_app_server_session.py  |   1 +
+ gateway/platforms/api_server.py               |   4 +-
+ gateway/platforms/api_server_runs.py          |   7 +-
+ gateway/platforms/base.py                     |  13 +-
+ gateway/run.py                                |   9 +-
+ gateway/run_turn_runner_approval_text.py      |   9 +-
+ gateway/session_group_controls.py             |   2 +-
+ gateway/session_hosted_rpc.py                 |   4 +-
+ gateway/session_local_editor.py               |  15 +-
+ gateway/session_pending_controls.py           |  17 +-
+ hermes_cli/cli_modal_mixin.py                 |   8 +-
+ hermes_cli/plugins.py                         |   6 +-
+ p/SOUL.md                                     |   1 +
+ .../discord/adapter_exec_approval_view.py     |   6 +-
+ plugins/platforms/qqbot/adapter.py            |   3 +-
+ plugins/platforms/qqbot/keyboards.py          |   6 +-
+ .../acp_adapter/test_gateway_editor_policy.py |   2 +-
+ .../acp_adapter/test_gateway_event_mapping.py |   2 +-
+ .../test_gateway_prompt_reoffer.py            |   2 +-
+ tests/acp_adapter/test_gateway_reasoning.py   |   2 +-
+ tests/acp_adapter/test_permissions.py         |  24 +-
+ tests/agent/test_shell_hooks.py               |   2 +-
+ tests/gateway/relay/test_relay_interactive.py |   2 +-
+ tests/gateway/test_api_server_runs.py         |  15 +-
+ .../test_api_server_runs_hosted_room.py       |   4 +-
+ .../test_approval_card_publication_window.py  |   2 +-
+ .../gateway/test_approval_prompt_redaction.py |   6 +-
+ .../test_exec_approval_source_choice.py       |  17 +-
+ tests/gateway/test_exec_approval_template.py  |   9 +-
+ tests/gateway/test_kanban_finite_admission.py |   2 +-
+ tests/gateway/test_peer_client_approvals.py   |   8 +-
+ .../test_session_group_peer_approvals.py      |   2 +-
+ tests/gateway/test_session_hosted_rpc.py      |   7 +-
+ tests/gateway/test_slack_approval_buttons.py  |   7 +-
+ .../test_subagent_approval_outlives_turn.py   |   7 +-
+ .../gateway/test_telegram_approval_buttons.py |  11 +-
+ tests/gateway/test_tui_approval_redaction.py  |  39 +++-
+ tests/hermes_cli/test_cli_approval_ui.py      |  17 +-
+ tests/tools/test_approval.py                  |  44 +++-
+ tests/tools/test_approval_plugin_hooks.py     |   3 +-
+ tests/tools/test_approval_scope_enforced.py   | 217 ++++++++++++++++++
+ .../tools/test_delegate_child_session_yolo.py |   2 +-
+ .../test_execute_code_approval_cluster.py     |  28 ++-
+ tests/tools/test_file_write_safety.py         |  53 +++--
+ tests/tools/test_login_grant_post_hosts.py    |   8 +-
+ tests/tools/test_mcp_trust_approval_scope.py  |  64 +++++-
+ tests/tools/test_mcp_trust_gating.py          |   7 +-
+ .../tools/test_plugin_login_grant_approval.py |  34 ++-
+ tests/tools/test_request_tool_approval.py     |  48 +++-
+ tests/tools/test_smart_approval_card_parts.py |   6 +-
+ .../test_smart_provenance_chat_grants.py      |  14 +-
+ .../test_smart_provenance_image_source.py     | 212 +++++++++++++++++
+ .../test_hosted_room_driver_runtime.py        |   2 +-
+ .../test_hosted_room_peer_approvals.py        |   5 +-
+ tests/tui_gateway/test_hosted_room_service.py |   4 +-
+ tools/approval.py                             | 127 ++++++----
+ tools/approval_automode.py                    | 116 +++++++++-
+ tools/approval_chat_grants.py                 | 103 ++++++++-
+ tools/approval_gateway_wait.py                |   3 +-
+ tools/approval_prompt.py                      |  76 +++---
+ tools/approval_scope.py                       |  57 +++++
+ tools/browser_vault_tool.py                   |   3 +-
+ tools/file_tools_write_guards.py              |  24 +-
+ tools/mcp_tool_events.py                      |   4 +-
+ tools/mcp_tool_handlers.py                    |  10 +-
+ tools/mcp_tool_sampling.py                    |   4 +-
+ tools/write_approval.py                       |  14 +-
+ tui_gateway/hosted_room_driver.py             |   5 +-
+ tui_gateway/hosted_room_service.py            |   4 +-
+ tui_gateway/server.py                         |   8 +-
+ 71 files changed, 1262 insertions(+), 366 deletions(-)
+ create mode 100644 p/SOUL.md
+ create mode 100644 tests/tools/test_approval_scope_enforced.py
+ create mode 100644 tests/tools/test_smart_provenance_image_source.py
+ create mode 100644 tools/approval_scope.py
+
+diff --git a/acp_adapter/permissions.py b/acp_adapter/permissions.py
+index 3bdbb7f2..908c120b 100644
+--- a/acp_adapter/permissions.py
++++ b/acp_adapter/permissions.py
+@@ -34,19 +34,16 @@ def _build_permission_options(
+     *, allow_permanent: bool, allow_session: bool = True, smart_denied: bool = False,
+ ) -> list[PermissionOption]:
+     """Return ACP options that match Hermes approval semantics."""
+-    # A gate that re-asks every time (allow_session=False, e.g. protected
+-    # agent-instruction writes) collapses to the same two options as a Smart
+-    # DENY override — offering a scope Hermes discards would re-prompt every write.
+-    # See #81887.
+-    once_only = smart_denied or not allow_session
++    from tools.approval_scope import require
++    require({"pattern_key": "acp", "allow_session": allow_session, "allow_permanent": allow_permanent,
++             "always_exempt": "" if allow_permanent else "acp"})
+     options = [PermissionOption(option_id="allow_once", kind="allow_once", name="Allow once")]
+-    if not once_only:
+-        # ACP has no session-scoped kind: closest persistent hint, Hermes semantics in the id.
+-        options.append(PermissionOption(option_id="allow_session", kind="allow_always", name="Allow for session"))
+-        if allow_permanent:
+-            options.append(PermissionOption(option_id="allow_always", kind="allow_always", name="Allow always"))
++    # ACP has no session-scoped kind: closest persistent hint, Hermes semantics in the id.
++    options.append(PermissionOption(option_id="allow_session", kind="allow_always", name="Allow for session"))
++    if allow_permanent:
++        options.append(PermissionOption(option_id="allow_always", kind="allow_always", name="Allow always"))
+     options.append(PermissionOption(option_id="deny", kind="reject_once", name="Deny"))
+-    if not once_only and _permission_option_supports_kind("reject_always"):
++    if _permission_option_supports_kind("reject_always"):
+         options.append(PermissionOption(option_id="deny_always", kind="reject_always", name="Deny always"))
+     return options
+ 
+diff --git a/agent/transports/codex_app_server_session.py b/agent/transports/codex_app_server_session.py
+index 5c7c9f67..f0ed045b 100644
+--- a/agent/transports/codex_app_server_session.py
++++ b/agent/transports/codex_app_server_session.py
+@@ -739,6 +739,7 @@ class CodexAppServerSession:
+             return "decline"
+         command, description = prompt()
+         try:
++            # Always is omitted: codex keeps no permanent grant; acceptForSession is the widest it has.
+             choice = self._approval_callback(command, description, allow_permanent=False)
+             return _approval_choice_to_codex_decision(choice)
+         except Exception:
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index 15686c43..1cecb23e 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -82,8 +82,8 @@ _CAPABILITY_ENDPOINTS = (
+ 
+ 
+ def _approval_event_choices(*, smart_denied: bool, allow_session: bool, allow_permanent: bool) -> list[str]:
+-    if smart_denied or not allow_session:
+-        return ["once", "deny"]
++    if not allow_session:
++        raise ValueError("an approval card must offer Allow in this chat")
+     return ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
+ 
+ 
+diff --git a/gateway/platforms/api_server_runs.py b/gateway/platforms/api_server_runs.py
+index 62284dd1..b5daeb28 100644
+--- a/gateway/platforms/api_server_runs.py
++++ b/gateway/platforms/api_server_runs.py
+@@ -1370,16 +1370,15 @@ async def _handle_run_approval(self, request: web.Request, *, _api_server) -> we
+     except Exception:
+         return _json_error(_openai_error, "Invalid JSON", status=400)
+     if getattr(self.gateway_runner, 'session_authority', None) is not None:
+-        if self._room_grant_token(request) and body.get('choice') not in {'once', 'deny'}:
+-            return _json_error(_openai_error, 'Room approvals require once or deny', status=400)
++        if self._room_grant_token(request) and body.get('choice') not in {'once', 'session', 'always', 'deny'}:
++            return _json_error(_openai_error, 'Room approvals require once, session, always or deny', status=400)
+         return await _respond_authority_run(self, run_id, body, kind='approval', _api_server=_api_server)
+     raw_choice = str(body.get("choice", "")).strip().lower()
+     choice = _APPROVAL_CHOICE_ALIASES.get(raw_choice, raw_choice)
+     room_scoped = bool(self._room_grant_token(request))
+     raw_request_id = body.get("request_id")
+     request_id = raw_request_id.strip() if isinstance(raw_request_id, str) else ""
+-    # Room grants may resolve exactly one request and never widen to session/always.
+-    allowed = {"once", "deny"} if room_scoped else {"once", "session", "always", "deny"}
++    allowed = {"once", "session", "always", "deny"}
+     resolve_all = any(_api_server._coerce_request_bool(body.get(k), default=False) for k in ("all", "resolve_all"))
+     approval_session_key = self._run_approval_sessions.get(run_id)
+     for failed, message, code, status in (
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index d934edff..02208c70 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -2756,14 +2756,11 @@ class BasePlatformAdapter(ABC):
+     def _exec_approval_actions(
+             self, *, allow_permanent: bool, allow_session: bool, smart_denied: bool,
+             grant_source: Optional[str] = None) -> list[tuple[str, str, str]]:
+-        """``(label, choice, style)`` rows for the approval buttons. A smart deny is an owner
+-        override for one operation only, so it offers neither the session nor the permanent tier;
+-        the permanent tier is never offered without the session tier."""
+-        choices = ["once"]
+-        if not smart_denied and allow_session:
+-            choices.append("session")
+-            if allow_permanent:
+-                choices.append("always")
++        """``(label, choice, style)`` rows for the approval buttons: once, session, always (unless the card
++        is ``always_exempt``) and deny, a smart deny included (``tools.approval_scope``)."""
++        choices = ["once", "session"]
++        if allow_permanent:
++            choices.append("always")
+         rows = [(self._EA_ACTION_LABELS[c], c, self._EA_ACTION_STYLES.get(c, "")) for c in choices]
+         if grant_source and self._EA_SOURCE_BUTTON:
+             rows.append((f"Allow code from {grant_source} in this chat", "source", ""))
+diff --git a/gateway/run.py b/gateway/run.py
+index c937e8c4..d3704796 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -593,11 +593,10 @@ def _format_exec_approval_fallback(
+     heading = (t("gateway.exec_approval.smart_deny_heading") if smart_denied
+                else f"⚠️ **{ea_header_text()}**")
+ 
+-    choices = [t("gateway.exec_approval.text_choice_once", prefix=command_prefix)]
+-    if not smart_denied and allow_session:
+-        choices.append(t("gateway.exec_approval.text_choice_session", prefix=command_prefix))
+-        if allow_permanent:
+-            choices.append(t("gateway.exec_approval.text_choice_always", prefix=command_prefix))
++    choices = [t("gateway.exec_approval.text_choice_once", prefix=command_prefix),
++               t("gateway.exec_approval.text_choice_session", prefix=command_prefix)]
++    if allow_permanent:
++        choices.append(t("gateway.exec_approval.text_choice_always", prefix=command_prefix))
+     choices.append(t("gateway.exec_approval.text_choice_deny", prefix=command_prefix))
+     return (
+         t("gateway.exec_approval.text_body", heading=heading, command=command,  # whole: send() splits it
+diff --git a/gateway/run_turn_runner_approval_text.py b/gateway/run_turn_runner_approval_text.py
+index 381ab177..4525dc41 100644
+--- a/gateway/run_turn_runner_approval_text.py
++++ b/gateway/run_turn_runner_approval_text.py
+@@ -52,11 +52,10 @@ def _cutting_text_prompt(adapter: Any, chat_id: str, command: str, description:
+         return (f"{heading}\n\n{instructions}{notice}{format_approval_deadline_line(approval_timeout_seconds())}"
+                 f"\n\n{ea_reason_label_text()}: {description}\n{fence}\n{shown}\n{fence}")
+ 
+-    choices = [t("gateway.exec_approval.text_choice_once", prefix=prefix)]
+-    if not smart_denied and allow_session:
+-        choices.append(t("gateway.exec_approval.text_choice_session", prefix=prefix))
+-        if allow_permanent:
+-            choices.append(t("gateway.exec_approval.text_choice_always", prefix=prefix))
++    choices = [t("gateway.exec_approval.text_choice_once", prefix=prefix),
++               t("gateway.exec_approval.text_choice_session", prefix=prefix)]
++    if allow_permanent:
++        choices.append(t("gateway.exec_approval.text_choice_always", prefix=prefix))
+     choices.append(t("gateway.exec_approval.text_choice_deny", prefix=prefix))
+     full = prompt(choices, "", command, code_fence(command))
+     if measure(full) <= limit:
+diff --git a/gateway/session_group_controls.py b/gateway/session_group_controls.py
+index 003059f5..1390a818 100644
+--- a/gateway/session_group_controls.py
++++ b/gateway/session_group_controls.py
+@@ -329,7 +329,7 @@ def _execution_control(service, method, params):
+     def approve():
+         if (type(params.get('execution_generation')) is not int
+                 or params['execution_generation'] < 1
+-                or params.get('choice') not in {'once', 'deny'}
++                or params.get('choice') not in {'once', 'session', 'always', 'deny'}
+                 or not isinstance(params.get('request_id'), str) or not params['request_id']):
+             raise RuntimeStoreError('invalid_params')
+         try:
+diff --git a/gateway/session_hosted_rpc.py b/gateway/session_hosted_rpc.py
+index cb90452f..3bebb229 100644
+--- a/gateway/session_hosted_rpc.py
++++ b/gateway/session_hosted_rpc.py
+@@ -258,7 +258,7 @@ class HostedRoomAuthorityRPC:
+             if prompt:
+                 result.update(status='waiting_for_approval', pending_approval={
+                     **prompt, 'request_id': prompt['prompt_id'],
+-                    'choices': [c for c in prompt['choices'] if c in {'once', 'deny'}]})
++                    'choices': [c for c in prompt['choices'] if c in {'once', 'session', 'always', 'deny'}]})
+         return result
+ 
+     async def _interrupt(self, params):
+@@ -301,7 +301,7 @@ class HostedRoomAuthorityRPC:
+         return {**self._terminal(row, task, generation, notify=False), 'discarded': True}
+ 
+     async def _approve(self, params):
+-        if params['choice'] not in {'once', 'deny'}:
++        if params['choice'] not in {'once', 'session', 'always', 'deny'}:
+             raise RuntimeStoreError('invalid_params')
+         snapshot = await self.authority.attach(self.principal, self.ref, history=False)  # prompts only
+         prompt = next((p for p in snapshot.prompts if p.get('prompt_id') == params['request_id']
+diff --git a/gateway/session_local_editor.py b/gateway/session_local_editor.py
+index b0f2182f..0863cdd1 100644
+--- a/gateway/session_local_editor.py
++++ b/gateway/session_local_editor.py
+@@ -1,7 +1,6 @@
+ """Editor policy lives with execution; an ACP connection is only a viewer."""
+ from contextlib import contextmanager
+ from dataclasses import asdict
+-import uuid
+ 
+ from hermes_state_runtime import RuntimeStoreError
+ 
+@@ -43,13 +42,17 @@ def request_editor_edit(proposal):
+         notify = approval._gateway_notify_cbs.get(route)
+     if notify is None:
+         return False
+-    # Each diff is a one-use consent, never a command-pattern or session grant.
++    key = f'editor_edit:{proposal.path}'
++    if approval.is_approved(route, key):
++        return True
+     data = {'command': f'Edit {proposal.path}', 'description': 'Approve proposed file change',
+-            'pattern_key': 'editor-' + uuid.uuid4().hex,
+-            'allow_session': False, 'allow_permanent': False, 'edit': asdict(proposal)}
+-    data['pattern_keys'] = [data['pattern_key']]
++            'pattern_key': key, 'pattern_keys': [key], 'scope': f'edits to {proposal.path}',
++            'edit': asdict(proposal)}
+     decision = _await_gateway_decision(route, notify, data, surface='acp')
+-    return decision.get('resolved') and decision.get('choice') == 'once'
++    choice = decision.get('choice') if decision.get('resolved') else None
++    if choice in ('session', 'always'):
++        approval._persist_choice(route, choice, [key])
++    return choice in ('once', 'session', 'always')
+ 
+ 
+ def _policy_requester(policy):
+diff --git a/gateway/session_pending_controls.py b/gateway/session_pending_controls.py
+index 8452a7d3..efc1c07c 100644
+--- a/gateway/session_pending_controls.py
++++ b/gateway/session_pending_controls.py
+@@ -83,14 +83,8 @@ class PendingControls:
+         from gateway.run import _redact_approval_command
+         with self.events.lock:
+             prompt_id = data['request_id']
+-            choices = ['once', 'deny']
+-            if data.get('allow_session', True) and not data.get('smart_denied', False):
+-                choices.append('session')
+-            if data.get('allow_permanent', True) and not data.get('smart_denied', False):
+-                choices.append('always')
+-            if data.get('grant_source'):
+-                # Smart approval: "Always allow code from this source in this chat" (a chat grant, never config).
+-                choices.append('source')
++            from tools.approval_scope import offer
++            choices = offer(data)
+             prompt = {'kind': 'approval', 'prompt_id': prompt_id,
+                       'execution_generation': generation,
+                       'command': _redact_approval_command(data.get('command', '')),
+@@ -101,17 +95,16 @@ class PendingControls:
+             for part in ('rule', 'reason'):  # the card's parts; ``description`` stays for older clients
+                 if data.get(part):
+                     prompt[part] = _redact_approval_command(str(data[part]))
+-            if data.get('grant_source'):
+-                prompt['grant_source'] = _redact_approval_command(str(data['grant_source']))
++            for part in ('grant_source', 'scope', 'always_exempt'):
++                if data.get(part):
++                    prompt[part] = _redact_approval_command(str(data[part]))
+             if data.get('login_grant') is not None:
+                 # A device plugin asks to use a saved login: a human-only card. ``device`` approves this one call
+                 # (nothing is stored here); the hub signs and delivers the grant before it answers.
+                 from tools.approval import sanitize_login_grant
+                 prompt['login_grant'] = sanitize_login_grant(data['login_grant'])
+-                prompt['choices'] = ['once', 'device', 'deny']
+             if 'edit' in data:
+                 prompt['edit'] = deepcopy(data['edit'])
+-                prompt['choices'] = ['once', 'deny']
+             if timeout_s is not None:
+                 prompt['timeout_s'] = timeout_s
+             self.pending[prompt_id] = (route, prompt)
+diff --git a/hermes_cli/cli_modal_mixin.py b/hermes_cli/cli_modal_mixin.py
+index 8924726d..8b04252e 100644
+--- a/hermes_cli/cli_modal_mixin.py
++++ b/hermes_cli/cli_modal_mixin.py
+@@ -1113,11 +1113,9 @@ class CLIModalMixin:
+     def _approval_choices(self, command: str, *, allow_permanent: bool = True,
+                           allow_session: bool = True,
+                           smart_denied: bool = False) -> list[str]:
+-        """Smart-DENY overrides and re-ask-every-time gates (allow_session=False) show only
+-        once/deny; ``allow_permanent=False`` for another reason hides only 'always'."""
+-        if smart_denied or not allow_session:
+-            choices = ["once", "deny"]
+-        elif allow_permanent:
++        """Every approval offers once, session and deny (``tools.approval_scope``); ``allow_permanent=False``
++        (a card with an ``always_exempt`` reason) hides only 'always'."""
++        if allow_permanent:
+             choices = ["once", "session", "always", "deny"]
+         else:
+             choices = ["once", "session", "deny"]
+diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
+index 20769e0c..df3eb7c7 100644
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -1230,8 +1230,10 @@ def _resolve_block_from_details(
+                 turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id)
+         try:
+             extra = {"login_grant": details.login_grant} if details.login_grant is not None else {}
+-            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name,
+-                                           **extra)
++            import hashlib
++            rule_key = details.rule_key or (
++                f"{tool_name}:{hashlib.sha256((details.message or '').encode('utf-8')).hexdigest()[:12]}")
++            result = request_tool_approval(tool_name, details.message or "", rule_key=rule_key, **extra)
+         finally:
+             if approval_tokens is not None:
+                 with suppress(Exception):
+diff --git a/p/SOUL.md b/p/SOUL.md
+new file mode 100644
+index 00000000..de81136d
+--- /dev/null
++++ b/p/SOUL.md
+@@ -0,0 +1 @@
++You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of the ask — a one-line question gets a one-line answer, and finished work gets a short report of what changed, what's verified, and what's left, never a replay of the process. No filler ("Great question," "I'd be happy to"), no restating the request back, no re-summarizing what you already said, no narrating tool calls the user can see. Plain claims over adjectives; when unsure, say so plainly. Agree because it's right, not because the user said it. Depth is earned — give it when the user asks for detail, teaches, or the stakes demand it, not by default.
+\ No newline at end of file
+diff --git a/plugins/platforms/discord/adapter_exec_approval_view.py b/plugins/platforms/discord/adapter_exec_approval_view.py
+index bd277698..a2dbbb17 100644
+--- a/plugins/platforms/discord/adapter_exec_approval_view.py
++++ b/plugins/platforms/discord/adapter_exec_approval_view.py
+@@ -38,13 +38,11 @@ def build_exec_approval_view(discord, base, *, unauthorized):
+             self._localize_buttons(
+                 allow_once="gateway.exec_approval.action_once", allow_session="gateway.exec_approval.action_session",
+                 allow_always="gateway.exec_approval.action_always", deny="gateway.exec_approval.action_deny")
+-            if smart_denied or not allow_session:
+-                self.remove_item(self.allow_session)
+-                self.remove_item(self.allow_always)
+-            elif not allow_permanent:
++            if not allow_permanent:
+                 self.remove_item(self.allow_always)
+             if not allow_once:  # Deny-only card: the command could not be shown in full
+                 self.remove_item(self.allow_once)
++                self.remove_item(self.allow_session)
+ 
+         def _check_auth(self, interaction: discord.Interaction) -> bool:
+             """Base admission always required; with ``require_admin`` the clicker must
+diff --git a/plugins/platforms/qqbot/adapter.py b/plugins/platforms/qqbot/adapter.py
+index ee7a3b2e..c6099f4e 100644
+--- a/plugins/platforms/qqbot/adapter.py
++++ b/plugins/platforms/qqbot/adapter.py
+@@ -634,7 +634,8 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
+ 
+     # Button decision → ``choice`` for tools.approval.resolve_gateway_approval. The
+     # 3-button layout folds "session" into "always"; ``/approve session`` still works.
+-    _APPROVAL_BUTTON_TO_CHOICE = {"allow-once": "once", "allow-always": "always", "deny": "deny"}
++    _APPROVAL_BUTTON_TO_CHOICE = {"allow-once": "once", "allow-session": "session", "allow-always": "always",
++                                  "deny": "deny"}
+ 
+     @staticmethod
+     def _parse_gateway_session_key(session_key: str) -> Optional[dict[str, str]]:
+diff --git a/plugins/platforms/qqbot/keyboards.py b/plugins/platforms/qqbot/keyboards.py
+index 164fa62a..06bdb04a 100644
+--- a/plugins/platforms/qqbot/keyboards.py
++++ b/plugins/platforms/qqbot/keyboards.py
+@@ -1,7 +1,7 @@
+ """QQ Bot inline keyboards + approval / update-prompt helpers. A button click dispatches an
+ ``INTERACTION_CREATE`` event carrying the button's ``data``; the bot must ACK promptly via
+ ``PUT /interactions/{id}`` or the user sees an error indicator. ``button_data`` formats:
+-``approve:<session_key>:<decision>[:<request_id>]`` (allow-once|allow-always|deny) and ``update_prompt:<answer>`` (y|n).
++``approve:<session_key>:<decision>[:<request_id>]`` (allow-once|allow-session|allow-always|deny) and ``update_prompt:<answer>`` (y|n).
+ Ported from WideLee's qqbot-agent-sdk v1.2.2 (authorship via Co-authored-by)."""
+ 
+ from __future__ import annotations
+@@ -15,7 +15,7 @@ UPDATE_PROMPT_PREFIX = "update_prompt:"
+ 
+ # session_key may itself contain colons (agent:main:qqbot:c2c:OPENID): greedy group, decision trails.
+ # The request id trails, so a card from an older build (no id) still parses.
+-_APPROVAL_DATA_RE = re.compile(r"^approve:(.+):(allow-once|allow-always|deny)(?::([0-9A-Za-z_-]+))?$")
++_APPROVAL_DATA_RE = re.compile(r"^approve:(.+):(allow-once|allow-session|allow-always|deny)(?::([0-9A-Za-z_-]+))?$")
+ _UPDATE_PROMPT_RE = re.compile(r"^update_prompt:(y|n)$")
+ 
+ def _to_dict(value: Any) -> Any:
+@@ -110,6 +110,8 @@ def build_approval_keyboard(session_key: str, *, allow_permanent: bool = True, a
+     prefix = f"{APPROVAL_BUTTON_PREFIX}{session_key}"
+     rid = f":{request_id}" if request_id else ""
+     buttons = [("allow", "✅ 允许一次", "已允许", f"{prefix}:allow-once{rid}", 1)] if allow_once else []
++    if allow_once:
++        buttons.append(("session", "🕒 本会话允许", "已本会话允许", f"{prefix}:allow-session{rid}", 1))
+     if allow_once and allow_permanent:
+         buttons.append(("always", "⭐ 始终允许", "已始终允许", f"{prefix}:allow-always{rid}", 1))
+     buttons.append(("deny", "❌ 拒绝", "已拒绝", f"{prefix}:deny{rid}", 0))
+diff --git a/tests/acp_adapter/test_gateway_editor_policy.py b/tests/acp_adapter/test_gateway_editor_policy.py
+index 0065e3d1..67731aa1 100644
+--- a/tests/acp_adapter/test_gateway_editor_policy.py
++++ b/tests/acp_adapter/test_gateway_editor_policy.py
+@@ -59,7 +59,7 @@ async def test_editor_guard_uses_shared_waiter_without_leaking_to_cli(tmp_path):
+     try:
+         await asyncio.wait_for(notified.wait(), 5)
+         pending = controls.snapshot('editor', 1)[0]
+-        assert pending['choices'] == ['once', 'deny']
++        assert pending['choices'] == ['once', 'session', 'always', 'deny']
+         assert pending['edit']['old_text'] == 'original'
+         assert pending['edit']['new_text'] == 'approved'
+         assert path.read_text() == 'original' and not task.done()
+diff --git a/tests/acp_adapter/test_gateway_event_mapping.py b/tests/acp_adapter/test_gateway_event_mapping.py
+index c97141c0..25005003 100644
+--- a/tests/acp_adapter/test_gateway_event_mapping.py
++++ b/tests/acp_adapter/test_gateway_event_mapping.py
+@@ -97,7 +97,7 @@ async def test_an_answered_permission_card_is_closed(choice, status):
+     editor._conn.request_permission.return_value = SimpleNamespace(outcome=outcome)
+     editor._gateway.rpc.return_value = {'status': 'resolved'}
+     prompt = {'kind': 'approval', 'prompt_id': 'p', 'execution_generation': 1, 'command': 'rm -r x',
+-              'description': 'recursive delete', 'choices': ['once', 'deny']}
++              'description': 'recursive delete', 'choices': ['once', 'session', 'always', 'deny']}
+     await editor._answer_permission('s', prompt)
+     card = editor._conn.request_permission.await_args.kwargs['tool_call']
+     (closed,) = updates(editor)
+diff --git a/tests/acp_adapter/test_gateway_prompt_reoffer.py b/tests/acp_adapter/test_gateway_prompt_reoffer.py
+index 57b113ad..a9ff6f5c 100644
+--- a/tests/acp_adapter/test_gateway_prompt_reoffer.py
++++ b/tests/acp_adapter/test_gateway_prompt_reoffer.py
+@@ -9,7 +9,7 @@ from acp_adapter.gateway_server import GatewayACPAgent
+ from hermes_cli.gateway_client import GatewayClientError
+ 
+ APPROVAL = {"kind": "approval", "prompt_id": "p-1", "execution_generation": 3, "command": "rm -r x",
+-            "description": "remove", "choices": ["once", "deny"]}
++            "description": "remove", "choices": ["once", "session", "always", "deny"]}
+ CLARIFY = {"kind": "clarify", "prompt_id": "q-1", "execution_generation": 3, "question": "Pick a color",
+            "choices": ["blue", "green"], "multi_select": False}
+ 
+diff --git a/tests/acp_adapter/test_gateway_reasoning.py b/tests/acp_adapter/test_gateway_reasoning.py
+index a7bedeec..b6e62f71 100644
+--- a/tests/acp_adapter/test_gateway_reasoning.py
++++ b/tests/acp_adapter/test_gateway_reasoning.py
+@@ -24,7 +24,7 @@ REASONING = "REASONING-BEFORE-THE-ANSWER"
+ ANSWER = "THE-ANSWER"
+ # A card the owner still lists for the session: an attach that resumes the session offers it to the editor again.
+ CARD = {"kind": "approval", "prompt_id": "p-1", "execution_generation": 3, "command": "rm -r build",
+-        "description": "remove the build directory", "choices": ["once", "deny"]}
++        "description": "remove the build directory", "choices": ["once", "session", "always", "deny"]}
+ 
+ 
+ @pytest.fixture
+diff --git a/tests/acp_adapter/test_permissions.py b/tests/acp_adapter/test_permissions.py
+index 02f7a991..66ea7d1d 100644
+--- a/tests/acp_adapter/test_permissions.py
++++ b/tests/acp_adapter/test_permissions.py
+@@ -100,20 +100,28 @@ class TestApprovalBridge:
+             "deny_always",
+         ]
+ 
+-    def test_session_less_gate_offers_only_once_and_deny(self):
+-        """allow_session=False collapses the editor menu to once/deny.
++    def test_session_less_gate_is_refused(self):
++        """A card without Allow in this chat is never shown: a bare once/deny menu is unscoped."""
++        from tools.approval_scope import UnscopedApproval
++
++        with pytest.raises(UnscopedApproval):
++            _invoke_callback(
++                AllowedOutcome(option_id="allow_once", outcome="selected"),
++                allow_permanent=False,
++                allow_session=False,
++            )
+ 
+-        Hermes discards any scope broader than one operation for the
+-        protected agent-instruction gate, so an editor that renders
+-        "Allow for session" would re-prompt on the next write (#81887).
+-        """
++    def test_always_exempt_gate_still_offers_the_session_choice(self):
+         _, kwargs, _, _, _ = _invoke_callback(
+             AllowedOutcome(option_id="allow_once", outcome="selected"),
+             allow_permanent=False,
+-            allow_session=False,
++            allow_session=True,
+         )
+ 
+-        assert [option.option_id for option in kwargs["options"]] == ["allow_once", "deny"]
++        ids = [option.option_id for option in kwargs["options"]]
++        assert ids[:2] == ["allow_once", "allow_session"]
++        assert "allow_always" not in ids
++        assert "deny" in ids
+ 
+     def test_tool_call_ids_are_unique(self):
+         _, first_kwargs, _, _, _ = _invoke_callback(
+diff --git a/tests/agent/test_shell_hooks.py b/tests/agent/test_shell_hooks.py
+index c134bc9d..c9e9828c 100644
+--- a/tests/agent/test_shell_hooks.py
++++ b/tests/agent/test_shell_hooks.py
+@@ -174,7 +174,7 @@ class TestCallbackSubprocess:
+             return {"approved": False, "message": "denied by human"}
+ 
+         monkeypatch.setattr("tools.approval.request_tool_approval", _gate)
+-        assert plugins.resolve_pre_tool_block("terminal", {"command": "rm"}) == "denied by human"
++        assert plugins.resolve_pre_tool_block("terminal", {"command": "rm"}).startswith("denied by human")
+         assert seen == [("terminal", "risky", "terminal:rm")]
+ 
+     def test_matcher_regex_filters_callback(self, tmp_path, monkeypatch):
+diff --git a/tests/gateway/relay/test_relay_interactive.py b/tests/gateway/relay/test_relay_interactive.py
+index 9defad0d..a2f9f840 100644
+--- a/tests/gateway/relay/test_relay_interactive.py
++++ b/tests/gateway/relay/test_relay_interactive.py
+@@ -115,7 +115,7 @@ async def test_exec_approval_smart_denied_and_flag_gating():
+         "c1", "cmd", "s", smart_denied=True, allow_permanent=True, allow_session=True
+     )
+     ids = [o["id"] for o in stub.sent[-1]["options"]]
+-    assert ids == ["once", "deny"]  # smart-deny: no session/always
++    assert ids == ["once", "session", "always", "deny"]  # smart-deny offers every choice
+     await adapter.send_exec_approval(
+         "c1", "cmd", "s", allow_session=True, allow_permanent=False
+     )
+diff --git a/tests/gateway/test_api_server_runs.py b/tests/gateway/test_api_server_runs.py
+index 9a243ad2..f59e0f56 100644
+--- a/tests/gateway/test_api_server_runs.py
++++ b/tests/gateway/test_api_server_runs.py
+@@ -44,10 +44,8 @@ from tests.waiting import async_wait_until
+     [
+         (False, True, True, ["once", "session", "always", "deny"]),
+         (False, True, False, ["once", "session", "deny"]),
+-        (False, False, True, ["once", "deny"]),
+-        (False, False, False, ["once", "deny"]),
+-        (True, True, True, ["once", "deny"]),
+-        (True, False, False, ["once", "deny"]),
++        (True, True, True, ["once", "session", "always", "deny"]),
++        (True, True, False, ["once", "session", "deny"]),
+     ],
+ )
+ def test_approval_event_choices_follow_backend_capabilities(
+@@ -63,6 +61,15 @@ def test_approval_event_choices_follow_backend_capabilities(
+     )
+ 
+ 
++@pytest.mark.parametrize("smart_denied", [False, True])
++@pytest.mark.parametrize("allow_permanent", [False, True])
++def test_approval_event_choices_refuse_a_card_without_allow_in_this_chat(smart_denied, allow_permanent):
++    with pytest.raises(ValueError):
++        _approval_event_choices(
++            smart_denied=smart_denied, allow_session=False, allow_permanent=allow_permanent
++        )
++
++
+ def _make_adapter(api_key: str = "") -> APIServerAdapter:
+     """Create an adapter with optional API key."""
+     extra = {}
+diff --git a/tests/gateway/test_api_server_runs_hosted_room.py b/tests/gateway/test_api_server_runs_hosted_room.py
+index 88d11110..fbb334b5 100644
+--- a/tests/gateway/test_api_server_runs_hosted_room.py
++++ b/tests/gateway/test_api_server_runs_hosted_room.py
+@@ -84,7 +84,7 @@ class TestHostedRoomRuns:
+         assert "approval" not in auth_adapter._run_statuses[run_id]
+ 
+     @pytest.mark.asyncio
+-    async def test_room_grant_cannot_create_session_or_permanent_approval_policy(
++    async def test_room_grant_answers_one_request_with_any_scope_but_never_all(
+         self, auth_adapter
+     ):
+         app = _create_runs_app(auth_adapter)
+@@ -103,7 +103,7 @@ class TestHostedRoomRuns:
+             async with TestClient(TestServer(app)) as cli:
+                 permanent = await cli.post(
+                     "/v1/runs/run-room/approval",
+-                    json={"choice": "always"},
++                    json={"choice": "everything"},
+                 )
+                 resolve_all = await cli.post(
+                     "/v1/runs/run-room/approval",
+diff --git a/tests/gateway/test_approval_card_publication_window.py b/tests/gateway/test_approval_card_publication_window.py
+index a9a3cce4..fb59d6e5 100644
+--- a/tests/gateway/test_approval_card_publication_window.py
++++ b/tests/gateway/test_approval_card_publication_window.py
+@@ -34,7 +34,7 @@ def _publish_and_hold():
+         assert release.wait(10)
+ 
+     def wait():
+-        out["decision"] = _await_gateway_decision(SK, notify, {"command": "rm -rf /tmp/x"})
++        out["decision"] = _await_gateway_decision(SK, notify, {"command": "rm -rf /tmp/x", "pattern_key": "rm-rf"})
+ 
+     thread = threading.Thread(target=wait)
+     thread.start()
+diff --git a/tests/gateway/test_approval_prompt_redaction.py b/tests/gateway/test_approval_prompt_redaction.py
+index 12f4344f..eeaca782 100644
+--- a/tests/gateway/test_approval_prompt_redaction.py
++++ b/tests/gateway/test_approval_prompt_redaction.py
+@@ -99,7 +99,7 @@ class TestApprovalCommandWiring:
+ 
+ 
+ class TestApprovalTextFallbackContract:
+-    def test_smart_deny_only_advertises_one_operation(self):
++    def test_smart_deny_advertises_every_choice(self):
+         from gateway.run import _format_exec_approval_fallback
+ 
+         text = _format_exec_approval_fallback(
+@@ -107,8 +107,8 @@ class TestApprovalTextFallbackContract:
+             allow_permanent=False, smart_denied=True,
+         )
+         assert "`/approve`" in text
+-        assert "approve session" not in text
+-        assert "approve always" not in text
++        assert "`/approve session`" in text
++        assert "`/deny`" in text
+ 
+     def test_text_fallback_says_silence_means_no(self, monkeypatch):
+         """Surfaces without buttons get the same deadline line as the button card."""
+diff --git a/tests/gateway/test_exec_approval_source_choice.py b/tests/gateway/test_exec_approval_source_choice.py
+index 0624b81c..ea616b49 100644
+--- a/tests/gateway/test_exec_approval_source_choice.py
++++ b/tests/gateway/test_exec_approval_source_choice.py
+@@ -2,7 +2,8 @@
+ 
+ Smart approval offers it on a Code from External card. An adapter whose cards and callbacks carry it
+ (``_EA_SOURCE_BUTTON``, Telegram) renders it as its own button row; every other adapter keeps once / session /
+-always / deny. A press resolves the card with the ``source`` choice.
++always / deny, and so does every card without a source: a smart deny is not narrowed to once / deny. A press
++resolves the card with the ``source`` choice.
+ """
+ 
+ from types import SimpleNamespace
+@@ -49,12 +50,12 @@ class _WithSource(_Buttons):
+ async def test_adapter_without_support_never_gets_the_source_choice():
+     adapter = _Buttons()
+     await adapter.send_exec_approval("chat", "curl x", "sess", smart_denied=True, grant_source=SOURCE)
+-    assert adapter.prompts[0].choices == ["once", "deny"]
++    assert adapter.prompts[0].choices == ["once", "session", "always", "deny"]
+ 
+ 
+ @pytest.mark.asyncio
+ @pytest.mark.parametrize("smart_denied, expected", [
+-    (True, ["once", "source", "deny"]),
++    (True, ["once", "session", "always", "source", "deny"]),
+     (False, ["once", "session", "always", "source", "deny"]),
+ ])
+ async def test_adapter_with_support_offers_the_source_choice(smart_denied, expected):
+@@ -69,7 +70,7 @@ async def test_adapter_with_support_offers_the_source_choice(smart_denied, expec
+ async def test_no_source_means_no_choice():
+     adapter = _WithSource()
+     await adapter.send_exec_approval("chat", "curl x", "sess", smart_denied=True)
+-    assert adapter.prompts[0].choices == ["once", "deny"]
++    assert adapter.prompts[0].choices == ["once", "session", "always", "deny"]
+ 
+ 
+ class _Button:
+@@ -106,7 +107,7 @@ async def test_telegram_card_has_the_source_button_in_its_own_row():
+     markup = adapter._bot.send_message.call_args.kwargs["reply_markup"]
+     rows = [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
+     assert rows[-1] == [(LABEL, rows[-1][0][1])] and rows[-1][0][1].startswith("ea:source:")
+-    assert [b[1].split(":")[1] for row in rows[:-1] for b in row] == ["once", "deny"]
++    assert [b[1].split(":")[1] for row in rows[:-1] for b in row] == ["once", "session", "always", "deny"]
+ 
+ 
+ @pytest.mark.asyncio
+@@ -114,7 +115,8 @@ async def test_telegram_card_without_a_source_is_unchanged():
+     adapter = _telegram()
+     await adapter.send_exec_approval(chat_id="12345", command="rm x", session_key="s", smart_denied=True)
+     markup = adapter._bot.send_message.call_args.kwargs["reply_markup"]
+-    assert [b.callback_data.split(":")[1] for row in markup.inline_keyboard for b in row] == ["once", "deny"]
++    assert [b.callback_data.split(":")[1] for row in markup.inline_keyboard for b in row] == [
++        "once", "session", "always", "deny"]
+ 
+ 
+ def test_turn_runner_hands_the_card_its_source():
+@@ -146,4 +148,5 @@ def test_turn_runner_hands_the_card_its_source():
+         loop.close()
+         with approval._lock:
+             approval._gateway_queues.clear()
+-    assert adapter.prompts and adapter.prompts[0].choices == ["once", "source", "deny"]
++    assert adapter.prompts and adapter.prompts[0].choices == [
++        "once", "session", "always", "source", "deny"]
+diff --git a/tests/gateway/test_exec_approval_template.py b/tests/gateway/test_exec_approval_template.py
+index 974bee68..90573c61 100644
+--- a/tests/gateway/test_exec_approval_template.py
++++ b/tests/gateway/test_exec_approval_template.py
+@@ -1,7 +1,7 @@
+ """Invariants for the exec-approval template method on BasePlatformAdapter.
+ 
+-The choice set (once / session / always / deny, minus the persistent tiers under a smart deny)
+-used to be re-derived in every button adapter and needed three separate "same fix × N adapters"
++The choice set (once / session / always / deny; always is left out only for an always-exempt card, and a
++smart deny offers every choice) used to be re-derived in every button adapter and needed three separate "same fix × N adapters"
+ sweeps. It now comes from one place; adapters only render it.
+ """
+ 
+@@ -46,9 +46,8 @@ class _Buttons(_Plain):
+     [
+         (True, True, False, ["once", "session", "always", "deny"]),
+         (False, True, False, ["once", "session", "deny"]),
+-        (True, False, False, ["once", "deny"]),          # no session tier → no permanent tier either
+-        (True, True, True, ["once", "deny"]),            # smart deny: owner override is one-shot
+-        (False, False, True, ["once", "deny"]),
++        (True, True, True, ["once", "session", "always", "deny"]),   # smart deny: every choice
++        (False, True, True, ["once", "session", "deny"]),
+     ],
+ )
+ @pytest.mark.asyncio
+diff --git a/tests/gateway/test_kanban_finite_admission.py b/tests/gateway/test_kanban_finite_admission.py
+index be0884f2..08db10d9 100644
+--- a/tests/gateway/test_kanban_finite_admission.py
++++ b/tests/gateway/test_kanban_finite_admission.py
+@@ -137,7 +137,7 @@ def test_durable_kanban_admission_preserves_headless_policy_in_worker(kanban_own
+                                {'execution_id': 'probe'})
+             with worker_turn_scope(frame):
+                 assert _is_single_query_approval_context(), 'persisted card must reach worker as single-query'
+-                result = request_tool_approval('execute_code', 'headless test',
++                result = request_tool_approval('execute_code', 'headless test', rule_key='execute_code:headless-test',
+                     approval_callback=lambda *args: (_ for _ in ()).throw(AssertionError('must not prompt')))
+                 assert result['approved'] is (mode == 'approve')
+                 if mode == 'deny':
+diff --git a/tests/gateway/test_peer_client_approvals.py b/tests/gateway/test_peer_client_approvals.py
+index ecac9664..00eb7fd3 100644
+--- a/tests/gateway/test_peer_client_approvals.py
++++ b/tests/gateway/test_peer_client_approvals.py
+@@ -49,7 +49,8 @@ async def lender(api, owner, tmp_path, monkeypatch):
+         api._run_owners['run_approval'] = api._run_idempotency_scope(scope)
+         live = owner.sessions[ref.session_id]
+         owner.register_approval(ref.session_id, row['generation'], live.route, {
+-            'request_id': 'prompt', 'command': 'echo approved', 'description': 'Test command'})
++            'request_id': 'prompt', 'command': 'echo approved', 'description': 'Test command',
++            'pattern_key': 'terminal:echo-approved'})
+         answers = []
+         live.controls.remote_responders['prompt'] = lambda *answer: answers.append(answer)
+         client._runs[('task', 7)] = {
+@@ -73,7 +74,7 @@ async def test_approval_posts_observed_identity_without_polling(lender, poll):
+         assert observed['run_execution_generation'] == lender.row['generation']
+         assert observed['approval'] == {
+             'request_id': 'prompt', 'command': 'echo approved', 'description': 'Test command',
+-            'choices': ['once', 'deny', 'session', 'always']}
++            'choices': ['once', 'session', 'always', 'deny']}
+         lender.wire.now = 61
+         if poll == 'failed':
+             lender.wire.fail_get = True
+@@ -119,7 +120,8 @@ async def test_groups_approve_refusal_matches_local_nonpending_approval(lender,
+     elif reason == 'approval_not_pending':
+         live.controls.respond(lender.ref.session_id, row['generation'], 'prompt', {'choice': 'deny'})
+         owner.register_approval(lender.ref.session_id, row['generation'], live.route, {
+-            'request_id': 'replacement', 'command': 'echo replacement'})
++            'request_id': 'replacement', 'command': 'echo replacement',
++            'pattern_key': 'terminal:echo-replacement'})
+         live.controls.remote_responders['replacement'] = lambda *answer: lender.answers.append(answer)
+     else:
+         # The older handler has no active approval session after its run ends.
+diff --git a/tests/gateway/test_session_group_peer_approvals.py b/tests/gateway/test_session_group_peer_approvals.py
+index aefcc419..8dfb097b 100644
+--- a/tests/gateway/test_session_group_peer_approvals.py
++++ b/tests/gateway/test_session_group_peer_approvals.py
+@@ -63,7 +63,7 @@ def test_lent_bot_approval_survives_reregistration_and_runs_each_command_once(ga
+                     lambda state: state['driver_status']['pending_actions'], timeout=30, room_id='linked')
+                 action, = actions
+                 assert action['approval']['command'] == g.target_model.command
+-                assert action['approval']['choices'] == ['once', 'deny']
++                assert action['approval']['choices'] == ['once', 'session', 'always', 'deny']
+                 assert action['execution_generation'] == 1  # Each hosted task is a first attempt.
+                 assert (effects.read_text().splitlines() if effects.exists() else []) == ['ran'] * (turn - 1)
+                 params = {key: action[key] for key in (
+diff --git a/tests/gateway/test_session_hosted_rpc.py b/tests/gateway/test_session_hosted_rpc.py
+index 0269670f..9b011c83 100644
+--- a/tests/gateway/test_session_hosted_rpc.py
++++ b/tests/gateway/test_session_hosted_rpc.py
+@@ -155,13 +155,14 @@ def test_controls_are_exact_current_admission_and_loop_safe(hosted_owner):
+     assert rpc.info(**coords, session_id=sid)['task_id'] == 'task'
+     live = authority.sessions[sid]
+     answers = []
+-    authority.register_approval(sid, row['generation'], live.route, {'request_id': 'approve-me', 'command': 'owned fixture'})
++    authority.register_approval(sid, row['generation'], live.route, {'request_id': 'approve-me', 'command': 'owned fixture',
++                                                                                'pattern_key': 'terminal:owned-fixture'})
+     live.controls.remote_responders['approve-me'] = lambda *answer: answers.append(answer)
+     pending = rpc.info(**coords, session_id=sid)['pending_approval']
+     assert pending['request_id'] == 'approve-me'
+-    assert pending['choices'] == ['once', 'deny']
++    assert pending['choices'] == ['once', 'session', 'always', 'deny']
+     with pytest.raises(RuntimeStoreError, match='invalid_params'):
+-        rpc.approve(session_id=sid, request_id='approve-me', choice='always')
++        rpc.approve(session_id=sid, request_id='approve-me', choice='everything')
+     assert not answers
+     assert rpc.approve(session_id=sid, request_id='approve-me', choice='once')['status'] == 'resolved'
+     assert answers == [('approval', 'approve-me', 'once')]
+diff --git a/tests/gateway/test_slack_approval_buttons.py b/tests/gateway/test_slack_approval_buttons.py
+index 16e97c45..213b1ccc 100644
+--- a/tests/gateway/test_slack_approval_buttons.py
++++ b/tests/gateway/test_slack_approval_buttons.py
+@@ -122,22 +122,21 @@ class TestSlackExecApproval:
+             assert e["value"] == "agent:main:slack:group:C1:1111"
+ 
+     @pytest.mark.asyncio
+-    async def test_smart_deny_owner_override_hides_persistent_buttons(self):
++    async def test_smart_deny_offers_every_choice(self):
+         adapter = _make_adapter()
+         mock_client = adapter._team_clients["T1"]
+         mock_client.chat_postMessage = AsyncMock(return_value={"ts": "1234.5678"})
+ 
+         await adapter.send_exec_approval(
+             chat_id="C1", command="rm -rf /", session_key="s",
+-            allow_permanent=False, smart_denied=True,
++            allow_permanent=True, smart_denied=True,
+         )
+ 
+         kwargs = mock_client.chat_postMessage.call_args.kwargs
+         elements = kwargs["blocks"][1]["elements"]
+         assert [element["action_id"] for element in elements] == [
+-            "hermes_approve_once", "hermes_deny",
++            "hermes_approve_once", "hermes_approve_session", "hermes_approve_always", "hermes_deny",
+         ]
+-        assert "one operation" in kwargs["blocks"][0]["text"]["text"].lower()
+ 
+ 
+ # ===========================================================================
+diff --git a/tests/gateway/test_subagent_approval_outlives_turn.py b/tests/gateway/test_subagent_approval_outlives_turn.py
+index ad3e1952..b9020d9b 100644
+--- a/tests/gateway/test_subagent_approval_outlives_turn.py
++++ b/tests/gateway/test_subagent_approval_outlives_turn.py
+@@ -46,7 +46,8 @@ def _end_the_turn(owner, admission_id, generation):
+ 
+ def _wait_for_a_subagent():
+     entry = _ApprovalEntry({'command': 'true # approval-test', 'request_id': 'sub-1',
+-                            'description': 'Subagent "check it" asks: a test', 'subagent': 'check it'})
++                            'description': 'Subagent "check it" asks: a test', 'subagent': 'check it',
++                            'pattern_key': 'terminal:approval-test'})
+     approval._gateway_queues.setdefault(ROUTE, []).append(entry)
+     return entry
+ 
+@@ -84,7 +85,7 @@ async def test_a_subagent_prompt_stays_listed_and_answerable_after_the_turn_ende
+ async def test_a_turn_prompt_is_still_fenced_to_its_turn(owner):
+     authority = owner.authority
+     admission, generation = _run_a_turn(owner, 'first')
+-    entry = _ApprovalEntry({'command': 'rm -rf build', 'request_id': 'turn-1'})
++    entry = _ApprovalEntry({'command': 'rm -rf build', 'request_id': 'turn-1', 'pattern_key': 'rm-rf'})
+     approval._gateway_queues.setdefault(ROUTE, []).append(entry)
+     authority.register_approval('s', generation, ROUTE, entry.data)
+     ref, actor = SessionRef('owned', 's'), _actor()
+@@ -120,7 +121,7 @@ def test_the_prompt_is_a_normal_approval_card_naming_the_subagent(owner):
+     (event_type, prompt), = events
+     assert event_type == 'approval.request'
+     assert prompt['kind'] == 'approval' and prompt['prompt_id'] == 'sub-1'
+-    assert prompt['choices'] == ['once', 'deny', 'session', 'always']
++    assert prompt['choices'] == ['once', 'session', 'always', 'deny']
+     assert prompt['description'] == 'Subagent "check it" asks: a test'
+     assert prompt['timeout_s'] == 1800
+     assert prompt['subagent'] == 'check it'
+diff --git a/tests/gateway/test_telegram_approval_buttons.py b/tests/gateway/test_telegram_approval_buttons.py
+index c1c444d8..cbd81755 100644
+--- a/tests/gateway/test_telegram_approval_buttons.py
++++ b/tests/gateway/test_telegram_approval_buttons.py
+@@ -149,8 +149,8 @@ class TestTelegramExecApproval:
+ 
+ 
+     @pytest.mark.asyncio
+-    async def test_smart_deny_two_buttons_share_one_row(self, monkeypatch):
+-        """smart_deny yields 2 buttons — they pair into a single readable row."""
++    async def test_smart_deny_offers_every_choice(self, monkeypatch):
++        """smart_deny offers once/session/always/deny, laid out like any other card."""
+         adapter = _make_adapter()
+         adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+         captured_rows = []
+@@ -165,11 +165,12 @@ class TestTelegramExecApproval:
+ 
+         await adapter.send_exec_approval(
+             chat_id="12345", command="curl example.test", session_key="s",
+-            allow_permanent=False, smart_denied=True,
++            allow_permanent=True, smart_denied=True,
+         )
+ 
+-        assert captured_rows == [
+-            [t("platform.telegram.approval.action_once"), t("platform.telegram.approval.action_deny")],
++        assert [text for row in captured_rows for text in row] == [
++            t("platform.telegram.approval.action_once"), t("platform.telegram.approval.action_session"),
++            t("platform.telegram.approval.action_always"), t("platform.telegram.approval.action_deny"),
+         ]
+ 
+ 
+diff --git a/tests/gateway/test_tui_approval_redaction.py b/tests/gateway/test_tui_approval_redaction.py
+index 7bbf4c17..9281ff57 100644
+--- a/tests/gateway/test_tui_approval_redaction.py
++++ b/tests/gateway/test_tui_approval_redaction.py
+@@ -39,20 +39,47 @@ class TestTuiApprovalEmitRedaction:
+         assert "github.com" in sent["params"]["command"]
+ 
+     @pytest.mark.parametrize(
+-        ("allow_session", "allow_permanent", "expected"),
++        ("allow_permanent", "always_exempt", "expected"),
+         [
+-            (True, True, ["once", "session", "always", "deny"]),
+-            (True, False, ["once", "session", "deny"]),
+-            (False, False, ["once", "deny"]),
++            (True, "", ["once", "session", "always", "deny"]),
++            (False, "no permanent grant of this thing means anything", ["once", "session", "deny"]),
+         ],
+     )
+     def test_emit_approval_request_honors_allowed_scopes(
+-        self, monkeypatch, allow_session, allow_permanent, expected
++        self, monkeypatch, allow_permanent, always_exempt, expected
+     ):
+         tui_server, sent = self._sent(monkeypatch)
+         tui_server._emit_approval_request(
+             "sess-1",
+-            {"allow_permanent": allow_permanent, "allow_session": allow_session, "command": "<write to AGENTS.md>"},
++            {"allow_permanent": allow_permanent, "allow_session": True, "always_exempt": always_exempt,
++             "command": "<write to AGENTS.md>"},
+         )
+ 
+         assert sent["params"]["choices"] == expected
++
++    @pytest.mark.parametrize(
++        ("allow_permanent", "always_exempt"), [(True, ""), (False, ""), (False, "reason")],
++    )
++    def test_emit_approval_request_refuses_a_card_without_allow_in_this_chat(
++        self, monkeypatch, allow_permanent, always_exempt
++    ):
++        from tools.approval_scope import UnscopedApproval
++
++        tui_server, sent = self._sent(monkeypatch)
++        with pytest.raises(UnscopedApproval):
++            tui_server._emit_approval_request(
++                "sess-1",
++                {"allow_permanent": allow_permanent, "allow_session": False, "always_exempt": always_exempt,
++                 "command": "<write to AGENTS.md>"},
++            )
++        assert not sent
++
++    def test_emit_approval_request_refuses_always_left_out_without_a_reason(self, monkeypatch):
++        from tools.approval_scope import UnscopedApproval
++
++        tui_server, sent = self._sent(monkeypatch)
++        with pytest.raises(UnscopedApproval):
++            tui_server._emit_approval_request(
++                "sess-1", {"allow_permanent": False, "allow_session": True, "command": "<write to AGENTS.md>"},
++            )
++        assert not sent
+diff --git a/tests/hermes_cli/test_cli_approval_ui.py b/tests/hermes_cli/test_cli_approval_ui.py
+index feec4091..172397dd 100644
+--- a/tests/hermes_cli/test_cli_approval_ui.py
++++ b/tests/hermes_cli/test_cli_approval_ui.py
+@@ -68,7 +68,7 @@ def _make_background_cli_stub():
+ 
+ 
+ class TestCliApprovalUi:
+-    def test_smart_denied_callback_offers_only_once_and_deny(self):
++    def test_smart_denied_callback_offers_every_choice(self):
+         cli = _make_cli_stub()
+         result = {}
+ 
+@@ -76,7 +76,7 @@ class TestCliApprovalUi:
+             result["value"] = cli._approval_callback(
+                 "rm -rf /tmp/example",
+                 "recursive delete",
+-                allow_permanent=False,
++                allow_permanent=True,
+                 smart_denied=True,
+             )
+ 
+@@ -88,19 +88,14 @@ class TestCliApprovalUi:
+             time.sleep(0.01)
+ 
+         assert cli._approval_state is not None
+-        assert cli._approval_state["choices"] == ["once", "deny"]
++        assert cli._approval_state["choices"] == ["once", "session", "always", "deny"]
+ 
+         cli._approval_state["response_queue"].put("deny")
+         thread.join(timeout=2)
+         assert result["value"] == "deny"
+ 
+-    def test_session_less_gate_offers_only_once_and_deny(self):
+-        """A gate that re-asks every time must not advertise a session scope.
+-
+-        The protected agent-instruction gate (tools/file_tools.py) grants one
+-        operation and persists nothing, so offering "session" here makes every
+-        later write re-prompt and reads as a broken gate (#81887).
+-        """
++    def test_gate_without_a_session_flag_still_offers_the_session_choice(self):
++        """No gate narrows the menu to a bare once/deny: the session choice is always offered."""
+         cli = _make_cli_stub()
+         result = {}
+ 
+@@ -120,7 +115,7 @@ class TestCliApprovalUi:
+             time.sleep(0.01)
+ 
+         assert cli._approval_state is not None
+-        assert cli._approval_state["choices"] == ["once", "deny"]
++        assert cli._approval_state["choices"] == ["once", "session", "deny"]
+ 
+         cli._approval_state["response_queue"].put("once")
+         thread.join(timeout=2)
+diff --git a/tests/tools/test_approval.py b/tests/tools/test_approval.py
+index 85022ab3..00c5a00a 100644
+--- a/tests/tools/test_approval.py
++++ b/tests/tools/test_approval.py
+@@ -777,37 +777,59 @@ class TestSmartDeniedPrompt:
+         result = prompt_dangerous_approval(
+             "rm -rf /tmp/example",
+             "recursive delete",
+-            allow_permanent=False,
++            allow_permanent=True,
+             smart_denied=True,
+             approval_callback=callback,
+         )
+ 
+         assert result == "deny"
+-        assert captured == {"allow_permanent": False, "smart_denied": True}
++        assert captured == {"allow_permanent": True, "smart_denied": True}
+ 
+-    def test_short_prompt_smart_deny_rejects_session_input(self):
+-        with mock_patch("builtins.input", return_value="session"):
++    @pytest.mark.parametrize("answer, expected", [("session", "session"), ("always", "always"), ("once", "once")])
++    def test_smart_deny_accepts_session_and_always_input(self, answer, expected):
++        with mock_patch("builtins.input", return_value=answer):
+             result = prompt_dangerous_approval(
+                 "rm -rf /tmp/example",
+                 "recursive delete",
+-                allow_permanent=False,
++                allow_permanent=True,
+                 smart_denied=True,
+             )
+ 
+-        assert result == "deny"
++        assert result == expected
+ 
+-    def test_smart_deny_offers_only_once_and_deny(self, capsys):
++    def test_smart_deny_offers_every_choice(self, capsys):
+         with mock_patch("builtins.input", return_value="deny"):
+             prompt_dangerous_approval(
+                 "rm -rf /tmp/example",
+                 "recursive delete",
+-                allow_permanent=False,
++                allow_permanent=True,
+                 smart_denied=True,
+             )
+ 
+         rendered = capsys.readouterr().out
+-        assert "[o]nce" in rendered and "[d]eny" in rendered
+-        assert "[s]ession" not in rendered and "[a]lways" not in rendered
++        for choice in ("[o]nce", "[s]ession", "[a]lways", "[d]eny"):
++            assert choice in rendered
++
++    def test_always_exempt_prompt_offers_once_session_and_deny(self, capsys):
++        with mock_patch("builtins.input", return_value="deny"):
++            prompt_dangerous_approval(
++                "rm -rf /tmp/example",
++                "recursive delete",
++                allow_permanent=False,
++                always_exempt="a permanent grant of this means nothing",
++            )
++
++        rendered = capsys.readouterr().out
++        assert "[o]nce" in rendered and "[s]ession" in rendered and "[d]eny" in rendered
++        assert "[a]lways" not in rendered
++
++    def test_unscoped_prompts_are_refused(self):
++        from tools.approval_scope import UnscopedApproval
++
++        with pytest.raises(UnscopedApproval):
++            prompt_dangerous_approval("rm -rf /tmp/example", "recursive delete", allow_session=False)
++        with pytest.raises(UnscopedApproval):
++            prompt_dangerous_approval("rm -rf /tmp/example", "recursive delete", allow_permanent=False)
+ 
+ 
+ 
+@@ -2103,7 +2125,7 @@ class TestCliApprovalTimeoutClassifiedSeparately:
+         with self._interactive_env():
+             with _patch("hermes_cli.config.load_config_readonly", return_value=cfg):
+                 result = mod.request_tool_approval(
+-                    "write_file", "plugin flagged this write",
++                    "write_file", "plugin flagged this write", rule_key="write_file:plugin-flagged",
+                     approval_callback=lambda *a, **kw: "timeout",
+                 )
+ 
+diff --git a/tests/tools/test_approval_plugin_hooks.py b/tests/tools/test_approval_plugin_hooks.py
+index 7a1b7e11..b1f8ebd9 100644
+--- a/tests/tools/test_approval_plugin_hooks.py
++++ b/tests/tools/test_approval_plugin_hooks.py
+@@ -347,7 +347,8 @@ def _capture_hooks(run):
+ 
+ _PROTECTED_WRITE = (lambda: _request_protected_instruction_approval(["AGENTS.md"]), None, "cli")
+ _ELICITATION = (lambda: request_elicitation_consent("Allow server access?", "an MCP server asks",
+-                                                    surface="mcp-trust/test-server"),
++                                                    surface="mcp-trust/test-server",
++                                                    remember_key="mcp_elicitation:test-server"),
+                 "accept", "mcp-trust/test-server")
+ 
+ 
+diff --git a/tests/tools/test_approval_scope_enforced.py b/tests/tools/test_approval_scope_enforced.py
+new file mode 100644
+index 00000000..85c08838
+--- /dev/null
++++ b/tests/tools/test_approval_scope_enforced.py
+@@ -0,0 +1,217 @@
++"""Every approval card offers once, this chat, always (or a stated exemption) and deny.
++
++Invariants:
++  1. ``tools.approval_scope.offer`` is the one source of a card's choices; a card without a named thing, without
++     the session choice, or without always and no ``always_exempt`` reason raises.
++  2. The gateway wait, the CLI prompt, request_tool_approval and request_elicitation_consent refuse such a card
++     before anything is shown.
++  3. No module outside the approval core builds an approval card that turns the session or always choice off,
++     and every call to request_tool_approval or request_elicitation_consent names its rule (a static scan).
++  4. Each surface draws all the choices it is given: the gateway pending prompt, the CLI menu, the TUI payload, the
++     api_server event, platform buttons, ACP options.
++"""
++
++from __future__ import annotations
++
++import ast
++import pathlib
++
++import pytest
++
++from tools import approval as approval_mod
++from tools import approval_prompt
++from tools.approval_scope import UnscopedApproval, offer, require
++
++ROOT = pathlib.Path(__file__).resolve().parents[2]
++FOUR = ["once", "session", "always", "deny"]
++CARD = {"command": "rm -rf build", "pattern_key": "recursive delete", "pattern_keys": ["recursive delete"]}
++
++
++def test_offer_is_four_choices():
++    assert offer(CARD) == FOUR
++    assert offer({**CARD, "smart_denied": True}) == FOUR
++    assert offer({**CARD, "grant_source": "github.com/o/r"}) == FOUR
++    assert offer({**CARD, "login_grant": {"host": "h"}}) == ["once", "session", "device", "deny"]
++    assert offer({**CARD, "allow_permanent": False, "always_exempt": "one-off content"}) == ["once", "session", "deny"]
++
++
++@pytest.mark.parametrize("card", [
++    {"command": "x"},
++    {**CARD, "pattern_key": "", "pattern_keys": [""]},
++    {**CARD, "allow_session": False},
++    {**CARD, "allow_permanent": False},
++    {**CARD, "allow_permanent": False, "always_exempt": "  "},
++])
++def test_bare_card_is_refused(card):
++    with pytest.raises(UnscopedApproval):
++        require(card)
++
++
++def test_gateway_wait_refuses_a_bare_card():
++    from tools.approval_gateway_wait import _await_gateway_decision
++    with pytest.raises(UnscopedApproval):
++        _await_gateway_decision("s", lambda data: None, {**CARD, "allow_session": False}, surface="gateway")
++
++
++def test_cli_prompt_refuses_a_bare_card():
++    with pytest.raises(UnscopedApproval):
++        approval_prompt.prompt_dangerous_approval("x", "y", allow_session=False, approval_callback=lambda *a, **k: "once")
++    with pytest.raises(UnscopedApproval):
++        approval_prompt.prompt_dangerous_approval("x", "y", allow_permanent=False,
++                                                  approval_callback=lambda *a, **k: "once")
++
++
++@pytest.mark.parametrize("key", ["", "   "])
++def test_request_tool_approval_needs_a_rule(key):
++    with pytest.raises(UnscopedApproval):
++        approval_mod.request_tool_approval("browser_click", "a card", rule_key=key)
++    with pytest.raises(TypeError):
++        approval_mod.request_tool_approval("browser_click", "a card")
++
++
++@pytest.mark.parametrize("key", ["", "   "])
++def test_elicitation_needs_a_rule(key):
++    with pytest.raises(UnscopedApproval):
++        approval_prompt.request_elicitation_consent("m", "d", remember_key=key)
++    with pytest.raises(TypeError):
++        approval_prompt.request_elicitation_consent("m", "d")
++
++
++def test_pending_prompt_lists_every_choice():
++    from gateway.session_pending_controls import PendingControls
++    seen = []
++
++    class _Events:
++        import threading
++        lock = threading.RLock()
++
++    controls = PendingControls.__new__(PendingControls)
++    controls.events, controls.pending, controls.background = _Events(), {}, set()
++    controls.announce = lambda sid, prompt, event_type: seen.append(prompt)
++    for data, want in [
++        ({**CARD, "request_id": "a"}, FOUR),
++        ({**CARD, "request_id": "b", "smart_denied": True, "grant_source": "docker.io/hashicorp/tfe-agent",
++          "rule": "Code from External"}, FOUR),
++        ({**CARD, "request_id": "c", "login_grant": {"host": "login.example.com", "device_id": "d"}},
++         ["once", "session", "device", "deny"]),
++        ({**CARD, "request_id": "d", "edit": {"path": "a"}}, FOUR),
++    ]:
++        controls.register("sid", "route", 1, data)
++        assert seen[-1]["choices"] == want, data
++
++
++def test_cli_menu_offers_session_for_every_card():
++    from hermes_cli.cli_modal_mixin import CLIModalMixin
++    menu = CLIModalMixin._approval_choices
++    assert menu(None, "x") == FOUR
++    assert menu(None, "x", smart_denied=True) == FOUR
++    assert menu(None, "x", allow_session=False) == FOUR
++    assert menu(None, "x", allow_permanent=False) == ["once", "session", "deny"]
++
++
++def test_tui_payload_offers_every_choice():
++    from tui_gateway.server import _approval_request_payload
++    assert _approval_request_payload({**CARD, "smart_denied": True})["choices"] == FOUR
++
++
++def test_api_server_event_offers_every_choice():
++    from gateway.platforms.api_server import _approval_event_choices
++    assert _approval_event_choices(smart_denied=True, allow_session=True, allow_permanent=True) == FOUR
++    with pytest.raises(ValueError):
++        _approval_event_choices(smart_denied=False, allow_session=False, allow_permanent=True)
++
++
++def test_platform_buttons_offer_every_choice():
++    from gateway.platforms.base import BasePlatformAdapter
++
++    class _Labels:
++        _EA_ACTION_LABELS = {c: c for c in FOUR}
++        _EA_ACTION_STYLES: dict = {}
++
++    rows = BasePlatformAdapter._exec_approval_actions(_Labels(), allow_permanent=True, allow_session=True,
++                                                      smart_denied=True)
++    assert [choice for _label, choice, _style in rows] == FOUR
++
++
++def test_acp_options_offer_every_choice():
++    from acp_adapter.permissions import _build_permission_options
++    ids = [o.option_id for o in _build_permission_options(allow_permanent=True, smart_denied=True)]
++    assert ids[:4] == ["allow_once", "allow_session", "allow_always", "deny"]
++    with pytest.raises(UnscopedApproval):
++        _build_permission_options(allow_permanent=True, allow_session=False)
++
++
++def test_qqbot_buttons_offer_this_chat():
++    from plugins.platforms.qqbot.keyboards import build_approval_keyboard
++    text = repr(build_approval_keyboard("s", request_id="r"))
++    assert "allow-session" in text and "allow-always" in text and "allow-once" in text
++
++
++# --- the static scan ------------------------------------------------------------------------------------------
++
++_CORE = {"tools/approval.py", "tools/approval_scope.py", "tools/approval_prompt.py", "tools/approval_gateway_wait.py"}
++_PROMPTS = {"request_tool_approval": "rule_key", "request_elicitation_consent": "remember_key"}
++_OFF_FLAGS = ("allow_session", "allow_permanent")
++
++
++def _sources():
++    for path in sorted(ROOT.rglob("*.py")):
++        rel = path.relative_to(ROOT).as_posix()
++        if rel.startswith(("tests/", ".venv/", "website/", "node_modules/")) or "/node_modules/" in rel:
++            continue
++        try:
++            yield rel, ast.parse(path.read_text(encoding="utf-8"))
++        except (SyntaxError, UnicodeDecodeError):
++            continue
++
++
++def _is_false(node) -> bool:
++    return isinstance(node, ast.Constant) and node.value is False
++
++
++def _name(func) -> str:
++    return func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
++
++
++_EXEMPT = {
++    "agent/transports/codex_app_server_session.py:allow_permanent=False":
++        "codex keeps no permanent grant; acceptForSession is the widest it has",
++}
++
++
++def _problems() -> list[str]:
++    out: list[str] = []
++    for rel, tree in _sources():
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Call):
++                name = _name(node.func)
++                if name in _PROMPTS and rel not in _CORE:
++                    kw = {k.arg: k.value for k in node.keywords}
++                    value = kw.get(_PROMPTS[name])
++                    if value is None and not any(k.arg is None for k in node.keywords):
++                        out.append(f"{rel}:{node.lineno}: {name} without {_PROMPTS[name]}")
++                    elif isinstance(value, ast.Constant) and not (isinstance(value.value, str) and value.value.strip()):
++                        out.append(f"{rel}:{node.lineno}: {name} with an empty {_PROMPTS[name]}")
++                for k in node.keywords:
++                    if k.arg in _OFF_FLAGS and _is_false(k.value) and rel not in _CORE \
++                            and f"{rel}:{k.arg}=False" not in _EXEMPT:
++                        out.append(f"{rel}:{node.lineno}: {k.arg}=False turns a choice off")
++            if isinstance(node, ast.Dict) and rel not in _CORE:
++                for key, value in zip(node.keys, node.values):
++                    if isinstance(key, ast.Constant) and key.value in _OFF_FLAGS and _is_false(value):
++                        out.append(f"{rel}:{node.lineno}: {key.value!r}: False turns a choice off")
++            if isinstance(node, (ast.List, ast.Set)) and rel not in _CORE:
++                values = [e.value for e in node.elts if isinstance(e, ast.Constant)]
++                if len(values) == len(node.elts) and sorted(map(str, values)) == ["deny", "once"]:
++                    out.append(f"{rel}:{node.lineno}: a bare once/deny choice list")
++    return out
++
++
++def test_no_bare_prompt_anywhere():
++    assert _problems() == []
++
++
++def test_each_exemption_names_its_reason_in_the_code():
++    for spot, reason in _EXEMPT.items():
++        rel = spot.split(":", 1)[0]
++        assert ("Always is omitted: " + reason) in (ROOT / rel).read_text(encoding="utf-8"), spot
+diff --git a/tests/tools/test_delegate_child_session_yolo.py b/tests/tools/test_delegate_child_session_yolo.py
+index 1672775f..a76d9397 100644
+--- a/tests/tools/test_delegate_child_session_yolo.py
++++ b/tests/tools/test_delegate_child_session_yolo.py
+@@ -52,7 +52,7 @@ def _clean(monkeypatch):
+ 
+ 
+ def _probe() -> dict:
+-    gate = approval.request_tool_approval("browser_click", "a person-only card")
++    gate = approval.request_tool_approval("browser_click", "a person-only card", rule_key="browser_click:person-only")
+     return {"bypass": approval.is_approval_bypass_active(), "yolo": approval._yolo_active(),
+             "approved": bool(gate.get("approved"))}
+ 
+diff --git a/tests/tools/test_execute_code_approval_cluster.py b/tests/tools/test_execute_code_approval_cluster.py
+index d21cf7b2..89f4d0d8 100644
+--- a/tests/tools/test_execute_code_approval_cluster.py
++++ b/tests/tools/test_execute_code_approval_cluster.py
+@@ -308,8 +308,8 @@ def test_guard_smart_mode(gw_session, monkeypatch):
+     assert res["approved"] is True
+ 
+ 
+-def test_terminal_smart_deny_owner_override_is_one_operation(gw_session, monkeypatch):
+-    """A human may override DENY, but a broad UI choice must not be persisted."""
++def test_terminal_smart_deny_owner_override_persists_only_the_exact_action(gw_session, monkeypatch):
++    """A human may override DENY with every choice; session/always persist the exact action, never the pattern."""
+     with A._lock:
+         A._permanent_approved.discard("owner-override-test-danger")
+         A._session_approved.get(gw_session, set()).discard("owner-override-test-danger")
+@@ -332,7 +332,11 @@ def test_terminal_smart_deny_owner_override_is_one_operation(gw_session, monkeyp
+     assert result["approved"] is True
+     assert result["user_approved"] is True
+     assert shown["approval_data"]["smart_denied"] is True
+-    assert shown["approval_data"]["allow_permanent"] is False
++    assert shown["approval_data"]["allow_session"] is True
++    assert shown["approval_data"]["allow_permanent"] is True
++    (exact,) = shown["approval_data"]["scope_keys"]
++    assert exact.startswith("smart_override:")
++    assert A.is_approved(gw_session, exact) is True
+     assert A.is_approved(gw_session, "owner-override-test-danger") is False
+ 
+     _register_resolver(gw_session, "deny")
+@@ -341,7 +345,7 @@ def test_terminal_smart_deny_owner_override_is_one_operation(gw_session, monkeyp
+     assert changed["outcome"] == "denied"
+ 
+ 
+-def test_execute_code_smart_deny_owner_override_is_one_operation(gw_session, monkeypatch):
++def test_execute_code_smart_deny_owner_override_persists_only_the_exact_action(gw_session, monkeypatch):
+     """Never persist the coarse execute_code key after overriding smart DENY."""
+     with A._lock:
+         A._permanent_approved.discard("execute_code")
+@@ -355,7 +359,11 @@ def test_execute_code_smart_deny_owner_override_is_one_operation(gw_session, mon
+     assert result["approved"] is True
+     assert result["user_approved"] is True
+     assert shown["approval_data"]["smart_denied"] is True
+-    assert shown["approval_data"]["allow_permanent"] is False
++    assert shown["approval_data"]["allow_session"] is True
++    assert shown["approval_data"]["allow_permanent"] is True
++    (exact,) = shown["approval_data"]["scope_keys"]
++    assert exact.startswith("smart_override:")
++    assert A.is_approved(gw_session, exact) is True
+     assert A.is_approved(gw_session, "execute_code") is False
+ 
+     _register_resolver(gw_session, "deny")
+@@ -389,7 +397,7 @@ def test_smart_escalate_still_persists_session_choice(gw_session, monkeypatch):
+     assert A.is_approved(gw_session, key) is True
+ 
+ 
+-def test_terminal_smart_deny_pending_payload_is_one_operation(gw_session, monkeypatch):
++def test_terminal_smart_deny_pending_payload_offers_every_choice(gw_session, monkeypatch):
+     monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "smart")
+     monkeypatch.setattr(approval_smart, "_smart_approve", lambda _command, _description: "deny")
+     monkeypatch.setattr(
+@@ -405,14 +413,13 @@ def test_terminal_smart_deny_pending_payload_is_one_operation(gw_session, monkey
+ 
+     assert result["status"] == "pending_approval"
+     assert result["smart_denied"] is True
+-    assert result["allow_permanent"] is False
+     with A._lock:
+         pending = dict(A._pending[gw_session])
+     assert pending["smart_denied"] is True
+-    assert pending["allow_permanent"] is False
++    assert pending.get("allow_permanent") is not False and pending.get("allow_session") is not False
+ 
+ 
+-def test_execute_code_smart_deny_pending_payload_is_one_operation(gw_session, monkeypatch):
++def test_execute_code_smart_deny_pending_payload_offers_every_choice(gw_session, monkeypatch):
+     monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "smart")
+     monkeypatch.setattr(approval_smart, "_smart_approve", lambda _command, _description: "deny")
+ 
+@@ -420,11 +427,10 @@ def test_execute_code_smart_deny_pending_payload_is_one_operation(gw_session, mo
+ 
+     assert result["status"] == "pending_approval"
+     assert result["smart_denied"] is True
+-    assert result["allow_permanent"] is False
+     with A._lock:
+         pending = dict(A._pending[gw_session])
+     assert pending["smart_denied"] is True
+-    assert pending["allow_permanent"] is False
++    assert pending.get("allow_permanent") is not False and pending.get("allow_session") is not False
+ 
+ 
+ def test_terminal_serializes_smart_deny_pending_capabilities(monkeypatch):
+diff --git a/tests/tools/test_file_write_safety.py b/tests/tools/test_file_write_safety.py
+index c349fccf..57d0511d 100644
+--- a/tests/tools/test_file_write_safety.py
++++ b/tests/tools/test_file_write_safety.py
+@@ -685,25 +685,41 @@ class TestProtectedInstructionFiles:
+         assert len(approvals["calls"]) == 1, "yolo bypassed the protected gate"
+ 
+     def test_second_write_prompts_again(self, tmp_path, approvals):
+-        """One-operation approval: no session stickiness."""
++        """An Allow once answer covers one operation: no stickiness."""
+         target = tmp_path / "AGENTS.md"
+         approvals["answer"] = "once"
+         self._write(target)
+         self._write(target, "second")
+         assert len(approvals["calls"]) == 2
+ 
+-    def test_cli_prompt_is_told_no_scope_persists(self, tmp_path, approvals):
+-        """The prompt must not advertise a scope this gate discards.
+-
+-        Since nothing is persisted, a rendered "session"/"always" option
+-        re-prompts on the very next write and reads as a broken gate
+-        (#81887).
+-        """
++    def test_cli_prompt_offers_once_session_and_always(self, tmp_path, approvals):
++        """The card is never a bare once/deny: it offers this chat and always too."""
+         approvals["answer"] = "once"
+         self._write(tmp_path / "SOUL.md")
+         call = approvals["calls"][0]
+-        assert call["allow_session"] is False
+-        assert call["allow_permanent"] is False
++        assert call.get("allow_session", True) is True
++        assert call["allow_permanent"] is True
++
++    @pytest.fixture
++    def isolated_grants(self, monkeypatch):
++        import tools.approval as A
++        monkeypatch.setattr(A, "_session_approved", {})
++        monkeypatch.setattr(A, "_permanent_approved", set())
++        monkeypatch.setattr(A, "_permanent_approved_by_home", {})
++        monkeypatch.setattr(A, "_permanent_baseline_by_home", {})
++        monkeypatch.setattr(A, "save_permanent_allowlist", lambda grants: None)
++
++    @pytest.mark.parametrize("answer", ["session", "always"])
++    def test_session_and_always_answers_cover_the_same_files_only(
++            self, tmp_path, approvals, isolated_grants, answer):
++        approvals["answer"] = answer
++        res = self._write(tmp_path / "AGENTS.md", "first")
++        assert not res.get("error"), res
++        res = self._write(tmp_path / "AGENTS.md", "second")
++        assert not res.get("error"), res
++        assert len(approvals["calls"]) == 1
++        self._write(tmp_path / "SOUL.md")
++        assert len(approvals["calls"]) == 2
+ 
+     def test_regular_file_never_prompts(self, tmp_path, approvals):
+         res = self._write(tmp_path / "notes.md", "hello")
+@@ -873,9 +889,9 @@ class TestProtectedInstructionFiles:
+         token = approval_context.set_current_session_key(session_key)
+         try:
+             def notify(approval_data):
+-                # Buttons must not offer persistent scopes for this gate.
+-                assert approval_data.get("allow_permanent") is False
+-                assert approval_data.get("allow_session") is False
++                assert approval_data.get("allow_permanent") is not False
++                assert approval_data.get("allow_session") is not False
++                assert approval_data["pattern_keys"] == ["protected_instruction_file:AGENTS.md"]
+                 A.resolve_gateway_approval(session_key, "once")
+ 
+             A.register_gateway_notify(session_key, notify)
+@@ -888,13 +904,12 @@ class TestProtectedInstructionFiles:
+         finally:
+             approval_context.reset_current_session_key(token)
+ 
+-    def test_gateway_payload_renders_only_once_and_deny(self, tmp_path):
++    def test_gateway_payload_renders_every_choice(self, tmp_path):
+         """End-to-end: what this gate emits, a TUI/desktop client can render.
+ 
+-        The transport used to derive its button set from ``allow_permanent``
+-        alone, so it re-added a "session" scope the gate refuses to persist —
+-        users tapped it and got re-prompted on every write (#81887). Asserting
+-        the two layers together is what catches that drift.
++        The gate offers once / session / always (persisted under the files'
++        own key) and deny; asserting the two layers together catches drift
++        between what the gate persists and what the transport renders.
+         """
+         import tools.approval as A
+         from tools import approval_context
+@@ -916,7 +931,7 @@ class TestProtectedInstructionFiles:
+         finally:
+             approval_context.reset_current_session_key(token)
+ 
+-        assert rendered["choices"] == ["once", "deny"]
++        assert rendered["choices"] == ["once", "session", "always", "deny"]
+ 
+ 
+ class TestProfileHomeExemptsHermesRoot:
+diff --git a/tests/tools/test_login_grant_post_hosts.py b/tests/tools/test_login_grant_post_hosts.py
+index de5b5709..66b088ab 100644
+--- a/tests/tools/test_login_grant_post_hosts.py
++++ b/tests/tools/test_login_grant_post_hosts.py
+@@ -85,7 +85,8 @@ def _ask_in_thread(grant):
+     result = {}
+ 
+     def run():
+-        result["value"] = approval_mod.request_tool_approval("browser_login", "r", login_grant=dict(grant))
++        result["value"] = approval_mod.request_tool_approval("browser_login", "r", rule_key="browser_login:test",
++                                                     login_grant=dict(grant))
+ 
+     worker = threading.Thread(target=propagate_context_to_thread(run))
+     worker.start()
+@@ -101,7 +102,7 @@ def test_card_and_prompt_carry_post_hosts(gateway):
+     controls.register("s", object(), 1, {**card, "login_grant": {**card["login_grant"], "post_hosts": ["p.example", 5]}})
+     prompt = controls.pending[card["request_id"]][1]
+     assert prompt["login_grant"]["post_hosts"] == ["p.example"]
+-    assert prompt["choices"] == ["once", "device", "deny"]
++    assert prompt["choices"] == ["once", "session", "device", "deny"]
+     approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
+     worker.join(30)
+     assert result["value"]["approved"] is False
+@@ -136,6 +137,7 @@ def _registry(is_async):
+         if first["ok"]:
+             return json.dumps(first)
+         verdict = approval_mod.request_tool_approval("browser_login", "Sign in needs another host",
++                                                    rule_key="browser_login:login.example.net",
+                                                     login_grant=dict(GRANT))
+         if not verdict.get("approved"):
+             return json.dumps({"ok": False, "denied": True, "message": verdict.get("message", "")})
+@@ -161,7 +163,7 @@ def _dispatch_in_thread(reg):
+ 
+ 
+ @pytest.mark.parametrize("is_async", [False, True])
+-@pytest.mark.parametrize("choice", ["once", "device"])
++@pytest.mark.parametrize("choice", ["once", "session", "device"])
+ def test_handler_raises_card_and_blocks_until_answered(gateway, is_async, choice):
+     reg, calls = _registry(is_async)
+     worker, result = _dispatch_in_thread(reg)
+diff --git a/tests/tools/test_mcp_trust_approval_scope.py b/tests/tools/test_mcp_trust_approval_scope.py
+index b5c5dd24..b378be64 100644
+--- a/tests/tools/test_mcp_trust_approval_scope.py
++++ b/tests/tools/test_mcp_trust_approval_scope.py
+@@ -1,8 +1,8 @@
+ """MCP trust-gate approval scopes: what a prompt offers is what the answer does.
+ 
+ The ``trust: untrusted`` gate offers Once / Session / Always and honours them per (server, tool)
+-through the real gateway approval queue; consent prompts with no identity to remember
+-(elicitation, sampling, payment fill) offer only Once / Deny on every surface.
++through the real gateway approval queue; consent prompts (elicitation, sampling, payment fill) offer Once / Session / Always / Deny on every
++surface and remember the answer under their remember_key.
+ """
+ 
+ from unittest.mock import patch
+@@ -70,18 +70,60 @@ def test_session_and_always_answers_stop_the_next_prompt_for_that_tool_only(choi
+         assert "mcp:srv/write" in allowlist
+ 
+ 
+-def test_consent_without_an_identity_offers_and_records_only_once(monkeypatch):
+-    """Elicitation-style consent: the card offers Once / Deny, the CLI panel is asked for once/deny,
+-    and a stale broader answer approves this call without remembering anything."""
+-    with _Chat("tg:chat-c", "session") as chat:
+-        assert approval_prompt.request_elicitation_consent("Use the camera?", "server asks") == "accept"
+-    assert chat.cards[0]["allow_session"] is False and chat.cards[0]["allow_permanent"] is False
++@pytest.mark.parametrize("choice", ["session", "always"])
++def test_consent_offers_every_choice_and_records_under_its_remember_key(choice):
++    """Elicitation-style consent: the card offers Once / Session / Always / Deny and a session or always
++    answer is remembered under the card's remember_key, so the same ask is not repeated."""
++    key = "mcp_elicitation:camera"
++    with _Chat("tg:chat-c", choice) as chat:
++        assert approval_prompt.request_elicitation_consent(
++            "Use the camera?", "server asks", remember_key=key) == "accept"
++        assert approval_prompt.request_elicitation_consent(
++            "Use the camera?", "server asks", remember_key=key) == "accept"
++    assert len(chat.cards) == 1
++    assert chat.cards[0]["allow_session"] is True and chat.cards[0]["allow_permanent"] is True
++    assert chat.cards[0]["pattern_keys"] == [key]
++    assert approval.is_approved("tg:chat-c", key)
++
++    with _Chat("tg:chat-d", "deny") as other:
++        blocked = approval_prompt.request_elicitation_consent(
++            "Use the camera?", "server asks", remember_key=key)
++    if choice == "session":  # another chat is not covered
++        assert blocked == "decline" and len(other.cards) == 1
++    else:
++        assert blocked == "accept" and other.cards == []
++
++
++def test_consent_once_answer_remembers_nothing(monkeypatch):
++    key = "mcp_elicitation:mic"
++    with _Chat("tg:chat-e", "once") as chat:
++        assert approval_prompt.request_elicitation_consent("Use the mic?", "asks", remember_key=key) == "accept"
++        assert approval_prompt.request_elicitation_consent("Use the mic?", "asks", remember_key=key) == "accept"
++    assert len(chat.cards) == 2
+     assert approval._session_approved == {}
+ 
+     asked = []
+     monkeypatch.setattr("tools.terminal_tool._get_approval_callback",
+-                        lambda: lambda *a, **kw: asked.append(kw) or "always")
++                        lambda: lambda *a, **kw: asked.append(kw) or "once")
+     monkeypatch.setattr(approval_prompt._ctx, "_no_user_can_answer", lambda: False)
+-    assert approval_prompt.request_elicitation_consent("Fill card?", "pay") == "accept"
+-    assert asked[0]["allow_session"] is False and asked[0]["allow_permanent"] is False
++    assert approval_prompt.request_elicitation_consent("Fill card?", "pay", remember_key="vault_fill:x") == "accept"
++    assert asked[0].get("allow_session", True) is True and asked[0]["allow_permanent"] is True
+     assert approval._session_approved == {} and approval._permanent_approved == set()
++
++
++def test_always_exempt_consent_offers_once_session_and_deny():
++    with _Chat("tg:chat-f", "always") as chat:
++        assert approval_prompt.request_elicitation_consent(
++            "Pay?", "pay", remember_key="vault_pay:x", always_exempt="a payment is never pre-approved") == "accept"
++    assert chat.cards[0]["allow_session"] is True and chat.cards[0]["allow_permanent"] is False
++    assert chat.cards[0]["always_exempt"]
++    assert approval._permanent_approved == set()
++
++
++def test_consent_without_a_remember_key_is_refused():
++    from tools.approval_scope import UnscopedApproval
++
++    with pytest.raises(TypeError):
++        approval_prompt.request_elicitation_consent("Use the camera?", "server asks")
++    with pytest.raises(UnscopedApproval):
++        approval_prompt.request_elicitation_consent("Use the camera?", "server asks", remember_key="")
+diff --git a/tests/tools/test_mcp_trust_gating.py b/tests/tools/test_mcp_trust_gating.py
+index 5aaed6a6..69e3e505 100644
+--- a/tests/tools/test_mcp_trust_gating.py
++++ b/tests/tools/test_mcp_trust_gating.py
+@@ -250,6 +250,7 @@ class TestTrustGateApprovalRouting:
+             assert approval_prompt.request_elicitation_consent(
+                 "MCP tool 'write' on UNTRUSTED server 'srv' wants to run.",
+                 "Approve once or deny.", surface="mcp-trust/srv",
++                remember_key="mcp_elicitation:srv",
+             ) == "accept"
+         finally:
+             approval.unregister_gateway_notify(session_key)
+@@ -257,7 +258,7 @@ class TestTrustGateApprovalRouting:
+             clear_session_vars(session_tokens)
+ 
+         assert len(seen) == 1
+-        assert seen[0]["pattern_key"] == "mcp_elicitation"
++        assert seen[0]["pattern_key"] == "mcp_elicitation:srv"
+         assert seen[0]["request_id"]
+ 
+     @pytest.mark.parametrize("platform,cron,single_query", [
+@@ -294,7 +295,7 @@ class TestTrustGateApprovalRouting:
+         if single_query:
+             monkeypatch.setattr(approval_prompt._ctx, "_is_single_query_approval_context", lambda: True)
+         try:
+-            assert approval_prompt.request_elicitation_consent("write", "Approve once or deny.") == "decline"
++            assert approval_prompt.request_elicitation_consent("write", "Approve once or deny.", remember_key="mcp_elicitation:test") == "decline"
+         finally:
+             approval.unregister_gateway_notify(session_key)
+             reset_current_session_key(key_token)
+@@ -323,7 +324,7 @@ class TestTrustGateApprovalRouting:
+         asked = []
+         set_approval_callback(lambda *args, **kwargs: asked.append(args) or "once")
+         try:
+-            assert approval_prompt.request_elicitation_consent("write", "Approve once or deny.") == "decline"
++            assert approval_prompt.request_elicitation_consent("write", "Approve once or deny.", remember_key="mcp_elicitation:test") == "decline"
+         finally:
+             set_approval_callback(None)
+             clear_session_vars(tokens)
+diff --git a/tests/tools/test_plugin_login_grant_approval.py b/tests/tools/test_plugin_login_grant_approval.py
+index 17a27e86..a03fd304 100644
+--- a/tests/tools/test_plugin_login_grant_approval.py
++++ b/tests/tools/test_plugin_login_grant_approval.py
+@@ -1,8 +1,9 @@
+ """A device plugin's approval can carry a ``login_grant`` (ask to use a saved login on a host).
+ 
+   1. The approve directive of ``pre_tool_call`` keeps the ``login_grant`` dict and hands it to the gate.
+-  2. The pending card carries the sanitized object and the choices once/device/deny.
++  2. The pending card carries the sanitized object and the choices once/session/device/deny.
+   3. ``device`` approves this one call like ``once`` and writes nothing; it is refused on a normal prompt.
++     ``session`` approves and is remembered for the chat under the card's rule key.
+   4. Only a human answers: yolo, approvals.mode off, smart approval and allowlisted rules do not skip the card;
+      with no human the call is blocked.
+ """
+@@ -128,10 +129,10 @@ def test_sanitize_keeps_only_known_bounded_keys():
+ 
+ # --- 2. the card ----------------------------------------------------------------------------------------
+ 
+-def test_card_has_the_object_and_three_choices(gateway):
++def test_card_has_the_object_and_four_choices(gateway):
+     worker, result = _ask()
+     card = _wait_card(gateway)
+-    assert card["login_grant"] == GRANT and card["allow_session"] is False and card["allow_permanent"] is False
++    assert card["login_grant"] == GRANT and card["allow_session"] is True
+     from gateway.session_pending_controls import PendingControls
+ 
+     class _Events:
+@@ -143,7 +144,7 @@ def test_card_has_the_object_and_three_choices(gateway):
+     controls = PendingControls(_Events())
+     controls.register("s", object(), 1, {**card, "login_grant": {**GRANT, "evil": 1}})
+     prompt = controls.pending[card["request_id"]][1]
+-    assert prompt["choices"] == ["once", "device", "deny"]
++    assert prompt["choices"] == ["once", "session", "device", "deny"]
+     assert prompt["login_grant"] == GRANT
+     approval_mod.resolve_gateway_approval(KEY, "deny", request_id=card["request_id"])
+     worker.join(30)
+@@ -160,7 +161,8 @@ def test_normal_prompt_has_no_device_choice():
+             pass
+ 
+     controls = PendingControls(_Events())
+-    controls.register("s", object(), 1, {"request_id": "r", "command": "c", "description": "d"})
++    controls.register("s", object(), 1, {"request_id": "r", "command": "c", "description": "d",
++                                         "pattern_key": "k"})
+     prompt = controls.pending["r"][1]
+     assert "device" not in prompt["choices"] and "login_grant" not in prompt
+ 
+@@ -184,7 +186,7 @@ def test_once_and_device_approve_one_call_and_persist_nothing(gateway, choice):
+     assert result["value"]["approved"] is False
+ 
+ 
+-@pytest.mark.parametrize("choice", ["session", "always", "source", "bogus"])
++@pytest.mark.parametrize("choice", ["always", "source", "bogus"])
+ def test_login_grant_card_refuses_other_choices(gateway, choice):
+     worker, result = _ask()
+     card = _wait_card(gateway)
+@@ -194,6 +196,16 @@ def test_login_grant_card_refuses_other_choices(gateway, choice):
+     assert _persisted() == (False, False)
+ 
+ 
++def test_session_answer_approves_and_remembers_for_the_chat(gateway):
++    worker, result = _ask()
++    card = _wait_card(gateway)
++    assert approval_mod.resolve_gateway_approval(KEY, "session", request_id=card["request_id"]) == 1
++    worker.join(30)
++    assert result["value"]["approved"] is True and result["value"]["login_scope"] == "session"
++    assert _persisted() == (True, False)
++    assert approval_mod._session_approved.get(KEY)
++
++
+ def test_device_is_refused_on_a_normal_prompt(gateway):
+     result = {}
+ 
+@@ -259,7 +271,7 @@ def test_allowlisted_rule_does_not_skip_the_card(gateway):
+     assert result["value"]["approved"] is False
+ 
+ 
+-def test_cli_prompt_offers_once_and_deny_only(monkeypatch):
++def test_cli_prompt_offers_once_session_and_deny(monkeypatch):
+     seen = {}
+ 
+     def callback(command, description, **kwargs):
+@@ -268,9 +280,10 @@ def test_cli_prompt_offers_once_and_deny_only(monkeypatch):
+ 
+     monkeypatch.setattr(approval_mod, "_presence", lambda cb=None: (callback, True, False, False))
+     monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": KEY)
+-    result = approval_mod.request_tool_approval("browser_login", "r", login_grant=dict(GRANT))
++    result = approval_mod.request_tool_approval("browser_login", "r", rule_key="browser:login-grant:d_abc:portal.example.com",
++                                                login_grant=dict(GRANT))
+     assert result["approved"] is True
+-    assert seen.get("allow_permanent") is False and seen.get("allow_session") is False
++    assert seen.get("allow_permanent") is False and seen.get("allow_session", True) is True
+     assert _persisted() == (False, False)
+ 
+ 
+@@ -280,6 +293,7 @@ def test_no_human_is_blocked(monkeypatch, mode):
+     monkeypatch.setattr(approval_mod, "_yolo_active", lambda: True)
+     monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: mode)
+     monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": KEY)
+-    result = approval_mod.request_tool_approval("browser_login", "r", login_grant=dict(GRANT))
++    result = approval_mod.request_tool_approval("browser_login", "r", rule_key="browser:login-grant:d_abc:portal.example.com",
++                                                login_grant=dict(GRANT))
+     assert result["approved"] is False
+     assert "BLOCKED" in result["message"] and "portal.example.com" in result["message"]
+diff --git a/tests/tools/test_request_tool_approval.py b/tests/tools/test_request_tool_approval.py
+index 1a5e407f..d0e42909 100644
+--- a/tests/tools/test_request_tool_approval.py
++++ b/tests/tools/test_request_tool_approval.py
+@@ -59,7 +59,7 @@ class TestRequestToolApproval:
+         monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: False)
+         monkeypatch.setattr(approval, "prompt_dangerous_approval", lambda *a, **k: "once")
+         monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval", lambda *a, **k: "once")
+-        res = request_tool_approval("write_file", "writing ~/.ssh/authorized_keys")
++        res = request_tool_approval("write_file", "writing ~/.ssh/authorized_keys", rule_key="ssh-authorized-keys")
+         assert res["approved"] is True
+ 
+     def test_cli_deny_blocks(self, monkeypatch):
+@@ -81,7 +81,7 @@ class TestRequestToolApproval:
+             tool_call_id="call-1",
+         )
+         try:
+-            res = request_tool_approval("terminal", "curl PUT to external API")
++            res = request_tool_approval("terminal", "curl PUT to external API", rule_key="curl-put")
+         finally:
+             approval_context.reset_current_observability_context(tokens)
+         assert res["approved"] is False
+@@ -120,7 +120,7 @@ class TestRequestToolApproval:
+         monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: True)
+         monkeypatch.setattr(tools_approval_context, "_is_cron_approval_context", lambda: True)
+         monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "deny")
+-        res = request_tool_approval("terminal", "smtp send")
++        res = request_tool_approval("terminal", "smtp send", rule_key="smtp-send")
+         assert res["approved"] is False
+         assert "cron" in res["message"].lower()
+ 
+@@ -131,22 +131,50 @@ class TestRequestToolApproval:
+         monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: True)
+         monkeypatch.setattr(tools_approval_context, "_is_cron_approval_context", lambda: True)
+         monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "approve")
+-        res = request_tool_approval("terminal", "smtp send")
++        res = request_tool_approval("terminal", "smtp send", rule_key="smtp-send")
+         assert res["approved"] is True
+ 
+ 
+-    def test_distinct_reasons_get_distinct_keys(self, monkeypatch):
+-        """Two different reasons on the SAME tool must not share an [a]lways
+-        allowlist entry (Finding 3: tool_name alone was too coarse)."""
++    def test_distinct_rule_keys_get_distinct_pattern_keys(self, monkeypatch):
++        """Two different rules on the SAME tool must not share an [a]lways allowlist entry."""
+         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
+         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+         monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: False)
+         monkeypatch.setattr(approval, "prompt_dangerous_approval", lambda *a, **k: "deny")
+         monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval", lambda *a, **k: "deny")
+-        k1 = request_tool_approval("write_file", "write to ~/.ssh")["pattern_key"]
+-        k2 = request_tool_approval("write_file", "send an email")["pattern_key"]
++        k1 = request_tool_approval("write_file", "write to ~/.ssh", rule_key="ssh-writes")["pattern_key"]
++        k2 = request_tool_approval("write_file", "send an email", rule_key="email-sends")["pattern_key"]
+         assert k1 != k2
+ 
++    def test_rule_key_is_required_and_must_name_something(self):
++        from tools.approval_scope import UnscopedApproval
++
++        with pytest.raises(TypeError):
++            request_tool_approval("write_file", "write to ~/.ssh")
++        with pytest.raises(UnscopedApproval):
++            request_tool_approval("write_file", "write to ~/.ssh", rule_key="")
++
++    def test_plugin_directive_without_rule_key_gets_a_key_per_message(self, monkeypatch):
++        """The plugin path (not the gate) derives ``tool:sha256(message)[:12]`` for a directive with no rule_key."""
++        import hashlib
++        from types import SimpleNamespace
++
++        from hermes_cli.plugins import _resolve_block_from_details
++
++        seen = []
++
++        def fake(tool_name, reason, **kwargs):
++            seen.append((tool_name, reason, kwargs["rule_key"]))
++            return {"approved": True}
++
++        monkeypatch.setattr("tools.approval.request_tool_approval", fake)
++        for message in ("write to ~/.ssh", "send an email"):
++            details = SimpleNamespace(action="approve", message=message, rule_key="", login_grant=None)
++            assert _resolve_block_from_details(details, "write_file") is None
++        assert seen[0][2] == "write_file:" + hashlib.sha256(b"write to ~/.ssh").hexdigest()[:12]
++        assert seen[1][2] == "write_file:" + hashlib.sha256(b"send an email").hexdigest()[:12]
++        assert seen[0][2] != seen[1][2]
++
+     def test_explicit_rule_key_overrides_derivation(self, monkeypatch):
+         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
+         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+@@ -164,7 +192,7 @@ class TestRequestToolApproval:
+         monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: False)
+         monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: False)
+         monkeypatch.setattr(tools_approval_context, "_is_cron_approval_context", lambda: False)
+-        res = request_tool_approval("terminal", "smtp send")
++        res = request_tool_approval("terminal", "smtp send", rule_key="smtp-send")
+         assert res["approved"] is False
+         assert "no interactive user or gateway" in res["message"].lower()
+ 
+diff --git a/tests/tools/test_smart_approval_card_parts.py b/tests/tools/test_smart_approval_card_parts.py
+index a2f6a6ba..05e2e278 100644
+--- a/tests/tools/test_smart_approval_card_parts.py
++++ b/tests/tools/test_smart_approval_card_parts.py
+@@ -167,9 +167,11 @@ def test_the_pending_prompt_a_client_reads_keeps_the_fields():
+     controls = PendingControls(_Events())
+     controls.register("s", object(), 1, {"request_id": "r1", "command": "c", "description": "old text",
+                                          "rule": "Code from External", "reason": "Line one\nLine two",
+-                                         "subagent": "the goal", "smart_denied": True})
++                                         "subagent": "the goal", "smart_denied": True,
++                                         "pattern_key": "k"})
+     prompt = controls.pending["r1"][1]
+     assert prompt["rule"] == "Code from External" and prompt["reason"] == "Line one\nLine two"
+     assert prompt["subagent"] == "the goal" and prompt["description"] == "old text"
+-    controls.register("s", object(), 1, {"request_id": "r2", "command": "c", "description": "old text"})
++    controls.register("s", object(), 1, {"request_id": "r2", "command": "c", "description": "old text",
++                                         "pattern_key": "k"})
+     assert "rule" not in controls.pending["r2"][1] and "reason" not in controls.pending["r2"][1]
+diff --git a/tests/tools/test_smart_provenance_chat_grants.py b/tests/tools/test_smart_provenance_chat_grants.py
+index 3579b008..cfa87976 100644
+--- a/tests/tools/test_smart_provenance_chat_grants.py
++++ b/tests/tools/test_smart_provenance_chat_grants.py
+@@ -6,7 +6,7 @@ Invariants:
+      depth, with no config change, even when the judge still names Code from External.
+   2. A grant written while a card waits re-reviews the card and clears it without a click; one the root agent
+      holds as an undelivered steer counts.
+-  3. The card choice "source" records a chat grant in the session store (never config.yaml) that covers later
++  3. The card choices "session" and "always" (and "source" from an old client) record a chat grant in the session store (never config.yaml) that covers later
+      commands of the chat and its subagents.
+   4. A claim of the grant in a peer-agent message, a parent goal or steer, or tool output clears nothing; a grant
+      for one repository does not cover another or a look-alike; a withdrawal ends it.
+@@ -207,7 +207,7 @@ def test_card_choice_records_chat_grant_for_subagents(db, strict_judge, gateway,
+     assert _review(other, tmp_path).decision == "allow"
+ 
+ 
+-def test_pending_controls_offer_source_choice():
++def test_pending_controls_offer_every_choice_with_a_source():
+     from gateway.session_pending_controls import PendingControls
+ 
+     class _Events:
+@@ -219,11 +219,13 @@ def test_pending_controls_offer_source_choice():
+     events = _Events()
+     controls = PendingControls(events)
+     controls.register("s", object(), 1, {"request_id": "r1", "command": "c", "description": "d",
+-                                         "smart_denied": True, "grant_source": "https://github.com/a/b"})
++                                         "smart_denied": True, "grant_source": "https://github.com/a/b",
++                                         "pattern_key": "k"})
+     prompt = controls.pending["r1"][1]
+-    assert prompt["choices"] == ["once", "deny", "source"] and prompt["grant_source"] == "https://github.com/a/b"
+-    controls.register("s", object(), 1, {"request_id": "r2", "command": "c", "description": "d", "smart_denied": True})
+-    assert controls.pending["r2"][1]["choices"] == ["once", "deny"]
++    assert prompt["choices"] == ["once", "session", "always", "deny"] and prompt["grant_source"] == "https://github.com/a/b"
++    controls.register("s", object(), 1, {"request_id": "r2", "command": "c", "description": "d", "smart_denied": True,
++                                         "pattern_key": "k"})
++    assert controls.pending["r2"][1]["choices"] == ["once", "session", "always", "deny"]
+ 
+ 
+ # --- what never counts -----------------------------------------------------------------------------------
+diff --git a/tests/tools/test_smart_provenance_image_source.py b/tests/tools/test_smart_provenance_image_source.py
+new file mode 100644
+index 00000000..0374954a
+--- /dev/null
++++ b/tests/tools/test_smart_provenance_image_source.py
+@@ -0,0 +1,212 @@
++"""Smart approval: a Code from External card for code out of a container image offers this chat and always.
++
++The live card (relift chat, a subagent): "The command runs binaries through the ld-linux loader and libc from a
++sysroot the agent unpacked this session out of the hashicorp/tfe-agent docker image, which is outside code the
++user never cleared (the user's approval covered only github.com/usa-reddragon/docgen)." It showed only Allow and
++Deny.
++
++Invariants:
++  1. The card offers once, this chat, always and deny, each scoped to the image (docker.io/hashicorp/tfe-agent),
++     whether the session shows the image (crane export | tar) or only the review model names it.
++  2. "This chat" records the source as cleared for the chat and its subagents: the review reads it as the user's
++     grant and does not ask again about that image, while another image or source is still held.
++  3. "Always" stores ``code_source:docker.io/hashicorp/tfe-agent`` in command_allowlist: a new chat runs code
++     from that image without a card.
++  4. A card that names no source scopes this chat and always to the exact action, never the broad rule.
++"""
++
++from __future__ import annotations
++
++import threading
++import time
++
++import pytest
++
++from hermes_state import SessionDB
++from tools import approval as approval_mod
++from tools import approval_automode as A
++from tools import approval_chat_grants as G
++from tools.approval_scope import offer
++from tools.delegate_tool import _bind_approval_review_root
++
++REASON = ("The command runs binaries through the ld-linux loader and libc from a sysroot the agent unpacked "
++          "this session out of the hashicorp/tfe-agent docker image, which is outside code the user never cleared "
++          "(the user's approval covered only github.com/usa-reddragon/docgen).")
++IMAGE = "docker.io/hashicorp/tfe-agent"
++UNPACK = "mkdir -p {d}/sysroot && crane export hashicorp/tfe-agent:1.20.1 - | tar -x -C {d}/sysroot"
++COPY = "docker create --name tfe hashicorp/tfe-agent:1.20.1 && docker cp tfe:/ {d}/sysroot"
++RUN = ("{d}/sysroot/lib64/ld-linux-x86-64.so.2 --library-path {d}/sysroot/usr/lib/x86_64-linux-gnu "
++       "{d}/sysroot/usr/bin/tfc-agent --version")
++
++
++@pytest.mark.parametrize("ref, want", [
++    ("docker.io/hashicorp/tfe-agent", IMAGE),
++    ("docker://docker.io/hashicorp/tfe-agent:1.20.1", IMAGE),
++    ("index.docker.io/hashicorp/tfe-agent@sha256:" + "a" * 64, IMAGE),
++    ("https://hub.docker.com/r/hashicorp/tfe-agent", IMAGE),
++    ("docker.io/ubuntu:24.04", "docker.io/library/ubuntu"),
++    ("ghcr.io/USA-RedDragon/talaria:v1", "ghcr.io/usa-reddragon/talaria"),
++    ("evil.example/hashicorp/tfe-agent", None),
++    ("docker.io.evil.example/hashicorp/tfe-agent", None),
++    ("docker.io/hashicorp/*", None),
++    ("docker.io/$IMG", None),
++    ("hashicorp/tfe-agent", None),
++])
++def test_image_identity(ref, want):
++    hit = G.image_source(ref)
++    assert (hit[0] if hit else None) == want
++
++
++def test_bare_image_name_resolves_only_from_the_sessions_own_commands():
++    assert G.bare_image_source("hashicorp/tfe-agent", [COPY])[0] == IMAGE
++    assert G.bare_image_source("hashicorp/tfe-agent", ["docker pull hashicorp/other"]) is None
++    assert G.bare_image_source("hashicorp/tfe-agent", []) is None
++    assert G.bare_image_source("hashicorp/tfe-agent",
++                               [COPY, "docker pull ghcr.io/hashicorp/tfe-agent:1"]) is None
++
++
++@pytest.fixture()
++def db(tmp_path):
++    database = SessionDB(db_path=tmp_path / "state.db")
++    database.create_session("root", source="cli")
++    database.append_message("root", "user", "Run docgen against the TFE agent and port the lanes")
++    database.append_message("root", "assistant", "Starting subagents for it.")
++    G.record_card_grant(database, "root", ["github.com/usa-reddragon/docgen"])
++    yield database
++    database.close()
++
++
++class Judge:
++    def __init__(self, source=""):
++        self.source = source
++
++    def __call__(self, stage, system, user, max_tokens):
++        if stage == 1:
++            return "<block>yes</block>"
++        tag = f"<source>{self.source}</source>" if self.source else ""
++        return f"<block>yes</block><category>Code from External</category><reason>{REASON}</reason>{tag}"
++
++
++@pytest.fixture()
++def judge():
++    j = Judge()
++    A.set_complete_override(j)
++    yield j
++    A.set_complete_override(None)
++
++
++class _Agent:
++    def __init__(self, session_id, db=None, messages=None):
++        self.session_id = session_id
++        self._session_db = db
++        self._approval_review_messages = messages
++
++
++def _root(db):
++    return _Agent("root", db, db.get_messages_as_conversation("root"))
++
++
++def _child(parent, db, earlier: str, tmp_path, goal="relift lane tfe-agent"):
++    messages = [{"role": "user", "content": goal}]
++    if earlier:
++        messages += [
++            {"role": "assistant", "content": "", "tool_calls": [
++                {"id": "c1", "type": "function",
++                 "function": {"name": "terminal", "arguments": {"command": earlier.format(d=tmp_path)}}}]},
++            {"role": "tool", "tool_call_id": "c1", "content": '{"output": "", "exit_code": 0}'}]
++    child = _Agent(f"{parent.session_id}-child", db, messages)
++    _bind_approval_review_root(child, parent, goal)
++    child._delegate_depth = getattr(parent, "_delegate_depth", 0) + 1
++    return child
++
++
++def _args(tmp_path, command=RUN):
++    return {"command": command.format(d=tmp_path)}
++
++
++@pytest.fixture()
++def gateway(monkeypatch, tmp_path):
++    key = "gw-relift"
++    cards: list = []
++    monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": key)
++    monkeypatch.setattr(A, "_cwd", lambda: str(tmp_path))
++    monkeypatch.setattr(A.HeldReview, "INTERVAL", 0.0)
++    approval_mod.register_gateway_notify(key, cards.append)
++    yield key, cards
++    approval_mod.unregister_gateway_notify(key)
++    approval_mod.clear_session(key)
++
++
++def _ask(agent, monkeypatch, tmp_path, result, command=RUN):
++    monkeypatch.setattr(A, "_current_agent", lambda: agent)
++    result["value"] = approval_mod._provenance_decision(
++        approval_mod._ACTION_GATE, "terminal", _args(tmp_path, command), command="<terminal> " + command,
++        approval_callback=None, is_cli=False, is_gateway=True, is_ask=False)
++
++
++def _card(cards, limit=10.0):
++    end = time.monotonic() + limit
++    while not cards and time.monotonic() < end:
++        time.sleep(0.02)
++    assert cards, "no approval card was raised"
++    return cards[0]
++
++
++def _answer(agent, gateway, monkeypatch, tmp_path, choice, command=RUN):
++    key, cards = gateway
++    cards.clear()
++    result: dict = {}
++    worker = threading.Thread(target=lambda: _ask(agent, monkeypatch, tmp_path, result, command))
++    worker.start()
++    card = _card(cards)
++    approval_mod.resolve_gateway_approval(key, choice, request_id=card["request_id"])
++    worker.join(30)
++    return card, result["value"]
++
++
++@pytest.mark.parametrize("earlier, named", [(UNPACK, ""), (COPY, "hashicorp/tfe-agent"), (COPY, IMAGE)])
++def test_live_card_offers_this_chat_and_always_for_the_image(
++        db, judge, gateway, monkeypatch, tmp_path, earlier, named):
++    judge.source = named
++    root = _root(db)
++    card, result = _answer(_child(root, db, earlier, tmp_path), gateway, monkeypatch, tmp_path, "session")
++    assert card["rule"] == "Code from External"
++    assert REASON in card["reason"]
++    assert card["grant_source"] == IMAGE
++    assert offer(card) == ["once", "session", "always", "deny"]
++    assert card["scope_keys"] == ["code_source:" + IMAGE]
++    assert result["approved"] is True
++
++    leaf = _child(_child(root, db, "", tmp_path, "x"), db, earlier, tmp_path, "run it again")
++    assert A.review("terminal", _args(tmp_path), agent=leaf, cwd=str(tmp_path)).decision == "allow"
++    judge.source = named.replace("tfe-agent", "consul") if named else ""
++    other = earlier.replace("tfe-agent", "consul")
++    leaf = _child(_child(root, db, "", tmp_path, "x"), db, other, tmp_path, "another image")
++    if named:
++        assert A.review("terminal", _args(tmp_path), agent=leaf, cwd=str(tmp_path)).decision == "block"
++
++
++def test_always_clears_the_image_in_a_new_chat(db, judge, gateway, monkeypatch, tmp_path):
++    root = _root(db)
++    card, result = _answer(_child(root, db, UNPACK, tmp_path), gateway, monkeypatch, tmp_path, "always")
++    assert result["approved"] is True
++    assert "code_source:" + IMAGE in approval_mod.load_permanent_allowlist()
++    db.create_session("other", source="cli")
++    db.append_message("other", "user", "Something else")
++    fresh = _child(_Agent("other", db, db.get_messages_as_conversation("other")), db, UNPACK, tmp_path)
++    monkeypatch.setattr(approval_mod, "get_current_session_key", lambda default="": "gw-other")
++    assert A.review("terminal", _args(tmp_path), agent=fresh, cwd=str(tmp_path)).decision == "allow"
++
++
++def test_card_without_a_source_scopes_to_the_exact_action(db, judge, gateway, monkeypatch, tmp_path):
++    root = _root(db)
++    command = "cd {d} && ./build.sh"
++    card, result = _answer(_child(root, db, "", tmp_path), gateway, monkeypatch, tmp_path, "session", command)
++    assert offer(card) == ["once", "session", "always", "deny"]
++    assert card["scope_keys"] == [approval_mod.override_key("<terminal> " + command)]
++    assert result["approved"] is True
++    key, cards = gateway
++    cards.clear()
++    again: dict = {}
++    _ask(_child(root, db, "", tmp_path), monkeypatch, tmp_path, again, command)
++    assert again["value"]["approved"] is True and not cards
+diff --git a/tests/tui_gateway/test_hosted_room_driver_runtime.py b/tests/tui_gateway/test_hosted_room_driver_runtime.py
+index 852d22f7..a4ff4cc3 100644
+--- a/tests/tui_gateway/test_hosted_room_driver_runtime.py
++++ b/tests/tui_gateway/test_hosted_room_driver_runtime.py
+@@ -1877,7 +1877,7 @@ def test_pending_local_approval_is_reported_with_safe_choices(db: Path):
+     _room, member, action = next(item for item in actions if item[2] is not None)
+     assert member == PROFILE
+     assert action["request_id"] == "approval-1"
+-    assert action["approval"]["choices"] == ["once", "deny"]
++    assert action["approval"]["choices"] == ["once", "session", "always", "deny"]
+     assert runtime.stop(timeout=5.0)
+ 
+ 
+diff --git a/tests/tui_gateway/test_hosted_room_peer_approvals.py b/tests/tui_gateway/test_hosted_room_peer_approvals.py
+index 2f29119e..8397149f 100644
+--- a/tests/tui_gateway/test_hosted_room_peer_approvals.py
++++ b/tests/tui_gateway/test_hosted_room_peer_approvals.py
+@@ -25,7 +25,8 @@ async def test_older_lender_approval_runs_once_and_finishes(tmp_path):
+     def run(*args, **kwargs):
+         route = get_current_session_key()
+         decision = _await_gateway_decision(route, _gateway_notify_cb(route), {
+-            'command': command, 'description': 'Write the test receipt', 'timeout_s': 20})
++            'command': command, 'description': 'Write the test receipt', 'timeout_s': 20,
++            'pattern_key': 'terminal:test-receipt'})
+         if decision['choice'] == 'once':
+             subprocess.run(command, shell=True, check=True)
+         return {'final_response': 'PEER_REPLY'}
+@@ -39,7 +40,7 @@ async def test_older_lender_approval_runs_once_and_finishes(tmp_path):
+                                             timeout=10, what='older lender approval card')
+             action, = actions
+             assert action['approval']['command'] == command
+-            assert action['approval']['choices'] == ['once', 'deny']
++            assert action['approval']['choices'] == ['once', 'session', 'always', 'deny']
+             assert not effects.exists()
+             params = {key: action[key] for key in ('member_id', 'task_id', 'execution_generation', 'request_id')}
+             answered = await asyncio.to_thread(_execution_control, home, 'groups.approve', {
+diff --git a/tests/tui_gateway/test_hosted_room_service.py b/tests/tui_gateway/test_hosted_room_service.py
+index 463d768f..ddc31492 100644
+--- a/tests/tui_gateway/test_hosted_room_service.py
++++ b/tests/tui_gateway/test_hosted_room_service.py
+@@ -946,14 +946,14 @@ def test_local_pending_approval_requires_exact_task_generation_and_request(
+         info={
+             "pending_approval": {
+                 "request_id": "approval-1",
+-                "choices": ["once", "always", "deny"],
++                "choices": ["once", "session", "always", "deny"],
+             }
+         },
+     )
+ 
+     action = service.status("room-1")["pending_actions"][0]
+     assert action["member_id"] == "ops"
+-    assert action["approval"]["choices"] == ["once", "deny"]
++    assert action["approval"]["choices"] == ["once", "session", "always", "deny"]
+     with pytest.raises(RuntimeError, match="no longer pending"):
+         service.approve_room_task(
+             "room-1",
+diff --git a/tools/approval.py b/tools/approval.py
+index c82b3b26..bcc6b63d 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -696,7 +696,7 @@ def _pending_result(spec, session_key: str, *, command: str, description: str,
+         pending["pattern_keys"] = pattern_keys
+     pending["description"] = description
+     if smart_denied:
+-        pending.update(smart_denied=True, allow_permanent=False)
++        pending.update(smart_denied=True)
+     submit_pending(session_key, pending)
+     if not spec.pending_keys:
+         return {
+@@ -717,7 +717,7 @@ def _pending_result(spec, session_key: str, *, command: str, description: str,
+         ),
+     }
+     if smart_denied:
+-        result.update(smart_denied=True, allow_permanent=False)
++        result.update(smart_denied=True)
+     return result
+ 
+ 
+@@ -964,18 +964,22 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
+                     is_ask: bool, smart: bool = False, pending_body=None,
+                     review_blocked: bool = False, card_extra: dict | None = None, on_choice=None,
+-                    login_grant: dict | None = None) -> dict:
++                    login_grant: dict | None = None, scope_keys: list[str] | None = None) -> dict:
+     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
+ 
+-    ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
+-    owner override reduces every surface to once/deny and persists nothing. ``login_grant`` (a sanitized
+-    sign-in grant request) makes the prompt once/device/deny: ``device`` approves this one call like ``once``,
+-    and nothing is ever persisted. ``pending_body`` is a thunk, built only once a human is
+-    actually asked, so a smart APPROVE never pays for redacting a large script.
++    Every card offers once/session/always/deny (``tools.approval_scope``). ``scope_keys`` (default
++    ``pattern_keys``) are what :func:`_persist_choice` stores on session/always; a smart-DENY owner override
++    stores the key of this exact action (:func:`override_key`), never the broad pattern, so a later identical
++    action skips the review and nothing else does. ``login_grant`` (a sanitized sign-in grant request) makes the
++    prompt once/session/device/deny: ``session`` is recorded for this chat under the card's pattern key, and
++    ``device`` (the hub's grant for that computer) is its Always. ``pending_body`` is a thunk, built only once a
++    human is actually asked, so a smart APPROVE never pays for redacting a large script.
+     """
+     from agent.redact import redact_approval_display
+ 
+     smart_denied = review_blocked  # a provenance review block: the owner may override this one operation
++    if smart and not review_blocked and is_approved(session_key, override_key(command)):
++        return _user_approved(session_key, description) if spec.user_approved else _approved()
+     from tools.prompt_handoff import has_approvals, peek_approval
+     handed = (peek_approval(session_key, redact_approval_display(command), pattern_keys)
+               if smart and has_approvals(session_key) else None)
+@@ -989,8 +993,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+         if result is not None:
+             return result
+     pending_body = pending_body() if pending_body else None
+-    allow_permanent = not smart_denied and login_grant is None
+-    one_shot = smart_denied or login_grant is not None  # nothing persists; no session/always scope is offered
++    if scope_keys is None:
++        scope_keys = [override_key(command)] if smart_denied else list(pattern_keys)
++    # A sign-in grant's Always is the hub's "Allow on this computer"; only the hub can sign it, so the CLI offers none.
++    cli_exempt = "the hub signs a sign-in grant for a computer; the CLI cannot" if login_grant is not None else ""
+ 
+     def deny(template: str, outcome: str, **fmt) -> dict:
+         breaker = ""
+@@ -1007,15 +1013,17 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+             # ``device`` answers a sign-in grant card only; a client sending it elsewhere approves nothing.
+             return _denied("BLOCKED: unsupported answer for this approval. The user has NOT consented.",
+                            pattern_key=pattern_key, description=description, outcome="denied", noun=spec.noun)
+-        if login_grant is not None and choice not in ("once", "device"):
++        if login_grant is not None and choice not in ("once", "session", "device"):
+             return _denied("BLOCKED: unsupported answer for this sign-in approval. The user has NOT consented.",
+                            pattern_key=pattern_key, description=description, outcome="denied", noun=spec.noun)
+         if on_choice is not None:
+             on_choice(choice)
+-        # A smart-DENY owner override is always one operation, even if an older client returns "session" or "always".
+-        # A sign-in grant answer (once or device) is one operation too: no allowlist is written.
+-        if not one_shot and choice in ("once", "session", "always"):
+-            _persist_choice(session_key, choice, pattern_keys)
++        if login_grant is not None:
++            if choice == "session":
++                _persist_choice(session_key, "session", scope_keys)
++            return {**_approved(), "login_scope": choice}
++        if choice in ("session", "always"):
++            _persist_choice(session_key, choice, scope_keys)
+         if spec.user_approved:
+             return _user_approved(session_key, description)
+         return _approved()
+@@ -1023,7 +1031,7 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+     if spec.transport:
+         attempt = _present_with_selected_transport(
+             command=command, description=description, pattern_key=pattern_key, pattern_keys=pattern_keys,
+-            session_key=session_key, allow_session=not smart_denied, allow_permanent=allow_permanent,
++            session_key=session_key, allow_session=True, allow_permanent=login_grant is None,
+             surface=approval_context.gateway_approval_surface() if (is_gateway or is_ask) else "cli",
+         )
+         choice, denied = _transport_choice(attempt, pattern_key=pattern_key, description=description)
+@@ -1044,13 +1052,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+         display_description = redact_approval_display(description)
+         notify_cb = _gateway_notify_cb(session_key)
+         if notify_cb is not None:
+-            # Smart DENY overrides are one-operation decisions, so the UI must not offer a
+-            # permanent or session scope.
+             data = {
+                 "command": display_command, "pattern_key": pattern_key,
+-                "pattern_keys": pattern_keys, "description": display_description,
+-                "allow_permanent": not one_shot,
+-                "allow_session": not one_shot,
++                "pattern_keys": pattern_keys, "scope_keys": list(scope_keys), "description": display_description,
++                "allow_permanent": True, "allow_session": True,
+             }
+             if smart_denied:
+                 data["smart_denied"] = True
+@@ -1091,7 +1096,7 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+                 display_command, display_description = command, description
+             return _pending_result(
+                 spec, session_key, command=display_command, description=display_description, pattern_key=pattern_key,
+-                pattern_keys=pattern_keys, body=pending_body, smart_denied=smart_denied,
++                pattern_keys=scope_keys, body=pending_body, smart_denied=smart_denied,
+             )
+ 
+     # CLI interactive: single combined prompt, wrapped in the pre/post plugin hooks.
+@@ -1102,10 +1107,9 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+     hook_kwargs = dict(command=prompt_command, description=prompt_description, pattern_key=pattern_key,
+                        pattern_keys=list(pattern_keys), session_key=session_key, surface="cli")
+     approval_context._fire_approval_hook("pre_approval_request", **hook_kwargs)
+-    # A sign-in grant card cannot show ``device`` here: the CLI offers once/deny only.
+-    choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=allow_permanent,
++    choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=not cli_exempt,
+                                        smart_denied=smart_denied, approval_callback=approval_callback,
+-                                       **({"allow_session": False} if login_grant is not None else {}))
++                                       always_exempt=cli_exempt)
+     approval_context._fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
+     if choice == "timeout":
+         return deny(spec.cli_timeout, "timeout")
+@@ -1123,6 +1127,28 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
+     return grant(choice)
+ 
+ 
++CODE_SOURCE_PREFIX = "code_source:"
++
++
++def granted_code_sources(session_key: str) -> dict[str, str]:
++    """``identity -> "always" | "session"`` for the code sources the user allowed on an approval card for every
++    chat (``code_source:<identity>`` in command_allowlist) or for this chat (its session approvals)."""
++    out: dict[str, str] = {}
++    with _lock:
++        for key in _session_approved.get(session_key, set()):
++            if isinstance(key, str) and key.startswith(CODE_SOURCE_PREFIX):
++                out[key[len(CODE_SOURCE_PREFIX):]] = "session"
++        for key in _permanent_set():
++            if isinstance(key, str) and key.startswith(CODE_SOURCE_PREFIX):
++                out[key[len(CODE_SOURCE_PREFIX):]] = "always"
++    return {k: v for k, v in out.items() if k}
++
++
++def override_key(command: str) -> str:
++    """The approval key of one exact action (a smart-DENY or provenance override): the hash of its text."""
++    return "smart_override:" + hashlib.sha256(str(command or "").encode("utf-8")).hexdigest()[:16]
++
++
+ def _provenance_on() -> bool:
+     try:
+         return _automode.provenance_enabled()
+@@ -1145,9 +1171,15 @@ def _handed_over_verdict(data: dict):
+ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command: str, approval_callback,
+                          is_cli: bool, is_gateway: bool, is_ask: bool, pending_body=None) -> dict:
+     """Provenance review (``approvals.smart_provenance``) of one action: allow runs it; a HARD rule
+-    block is final; a SOFT rule block, or a review that could not decide, goes to the human as a
+-    one-operation card naming the rule (blocked when no human can answer). Never allows on a failed review."""
++    block is final; a SOFT rule block, or a review that could not decide, goes to the human as a card naming
++    the rule (blocked when no human can answer). Never allows on a failed review. The card offers once, this chat
++    and always: for the code sources it names (a chat grant, and ``code_source:<identity>`` in command_allowlist,
++    which the review reads as the user's grant), else for this exact action (:func:`override_key`, checked here
++    before any review)."""
+     session_key = get_current_session_key()
++    if is_approved(session_key, override_key(command)):
++        _reset_denials(session_key)
++        return _user_approved(session_key, "the user allowed this exact action earlier")
+     agent, cwd = _automode._current_agent(), _automode._cwd()
+     from agent.redact import redact_approval_display
+     from tools.prompt_handoff import has_approvals, peek_approval
+@@ -1176,16 +1208,21 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+         return {"approved": False, "outcome": "denied", "description": verdict.card_text, **rule_fields,
+                 "message": guided(f"BLOCKED by {verdict.card_text}.{_REVIEW_ADVICE}"
+                                   f"{_denial_breaker_addendum(session_key)}")}
+-    # The card can grant the clone's source for the chat ("Always allow code from this source in this chat").
++    from tools.approval_chat_grants import card_identity, record_card_grant
+     sources = list(verdict.detail.get("grant_sources") or [])
+-    card_extra = ({"grant_source": ", ".join(sources), "grant_sources": sources}
+-                  if sources and _automode.grant_chat(agent)[0] else {})
++    identities = [i for i in (card_identity(s) for s in sources) if i]
++    if identities:
++        shown = ", ".join(sources)
++        card_extra = {"grant_source": shown, "grant_sources": sources, "scope": f"code from {shown}"}
++        scope_keys = [CODE_SOURCE_PREFIX + i for i in dict.fromkeys(identities)]
++    else:
++        card_extra = {"scope": "this exact action"}
++        scope_keys = [override_key(command)]
+ 
+     def on_choice(choice: str) -> None:
+-        if choice == "source" and sources:
+-            from tools.approval_chat_grants import record_card_grant
++        if choice in ("session", "always", "source") and identities:
+             sid, db, _root = _automode.grant_chat(agent)
+-            if not record_card_grant(db, sid, sources):
++            if sid and not record_card_grant(db, sid, sources):
+                 logger.warning("Smart approval: could not record the card grant for %s", ", ".join(sources))
+ 
+     # A ledger write says what entry it is and where the approval it claims came from, so the user can judge it.
+@@ -1209,7 +1246,7 @@ def _provenance_decision(spec: _GateSpec, tool_name: str, args: dict, *, command
+                                  pattern_keys=["smart_provenance"], session_key=session_key,
+                                  approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway,
+                                  is_ask=is_ask, pending_body=pending_body, review_blocked=True,
+-                                 card_extra=card_extra, on_choice=on_choice)
++                                 card_extra=card_extra, on_choice=on_choice, scope_keys=scope_keys)
+     if result.get("approved") and watch is not None and watch.cleared is not None:
+         result.update({"smart_approved": True, "description": "smart approval (provenance review) after the user's "
+                                                               "message in the chat"})
+@@ -1508,9 +1545,10 @@ def sanitize_login_grant(raw) -> dict:
+ 
+ 
+ def _login_grant_approval(tool_name: str, reason: str, login_grant: dict, approval_callback=None) -> dict:
+-    """The human-only card of a plugin's sign-in grant request. Only a human answer approves it: yolo,
+-    ``approvals.mode`` off, the smart judge, cron/unattended auto-approve and the session and permanent
+-    allowlists are not consulted, and nothing is written to them. No human present: blocked."""
++    """The human-only card of a plugin's sign-in grant request (once/session/device/deny). Only a human answer
++    approves it: yolo, ``approvals.mode`` off, the smart judge, cron/unattended auto-approve and the allowlists are
++    not consulted. ``session`` is recorded under ``plugin_login_grant:<device>:<host>`` for this chat (the hub
++    signs a grant scoped to the chat); ``device`` is the hub's grant for that computer. No human present: blocked."""
+     description = reason or f"Plugin asks to use a saved login for {tool_name}"
+     host = login_grant.get("host") or "?"
+     pattern_key = f"plugin_login_grant:{login_grant.get('device_id') or '?'}:{host}"
+@@ -1530,7 +1568,7 @@ def _login_grant_approval(tool_name: str, reason: str, login_grant: dict, approv
+     )
+ 
+ 
+-def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", approval_callback=None,
++def request_tool_approval(tool_name: str, reason: str, *, rule_key: str, approval_callback=None,
+                           login_grant: dict | None = None) -> dict:
+     """Escalate an arbitrary tool call to the human-approval gate.
+ 
+@@ -1538,19 +1576,20 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
+     it asks the SAME human gate as Tier-2 dangerous shell patterns (session/permanent
+     allowlist, CLI prompt, gateway pending, once/session/always/deny, timeout fail-closed), so
+     the LLM cannot skip it. Cron honors ``approvals.cron_mode``; any OTHER non-interactive
+-    context without an approval bridge fails CLOSED. ``rule_key`` controls the ``[a]lways``
+-    allowlist grain; when empty it is ``tool_name`` + a hash of ``reason`` so DISTINCT reasons
+-    on the same tool persist independently. Returns the ``check_dangerous_command`` result shape.
++    context without an approval bridge fails CLOSED. ``rule_key`` (required, non-empty) names the specific
++    thing the card's session and always answers grant (``plugin_rule:<rule_key>``); an empty one raises
++    :class:`tools.approval_scope.UnscopedApproval`. Returns the ``check_dangerous_command`` result shape.
+ 
+-    ``login_grant`` (a dict) turns it into a sign-in grant request: always a human card (once/device/deny),
++    ``login_grant`` (a dict) turns it into a sign-in grant request: always a human card (once/session/device/deny),
+     never skipped or stored by yolo, mode off, smart approval, cron/unattended mode or the allowlists;
+     blocked when no human is present. See :func:`_login_grant_approval`.
+     """
++    from tools.approval_scope import UnscopedApproval
++    if not (isinstance(rule_key, str) and rule_key.strip()):
++        raise UnscopedApproval(f"request_tool_approval for {tool_name!r} needs a rule_key naming the specific thing")
+     if login_grant is not None:
+         return _login_grant_approval(tool_name, reason, sanitize_login_grant(login_grant), approval_callback)
+     description = reason or f"Plugin requires approval for {tool_name}"
+-    if not rule_key:
+-        rule_key = f"{tool_name}:{hashlib.sha256(description.encode('utf-8')).hexdigest()[:12]}"
+     subject = f"Tool '{tool_name}' requires approval ({description})"
+     return _run_approval_gate(
+         # Namespaced so plugin-rule approvals share the allowlist machinery without ever colliding with a real
+diff --git a/tools/approval_automode.py b/tools/approval_automode.py
+index 81c0475f..c6943d88 100644
+--- a/tools/approval_automode.py
++++ b/tools/approval_automode.py
+@@ -444,6 +444,19 @@ def _fetched_paths(command: str, base: str | None, sources: dict[str, str] | Non
+             continue
+         args = words[1:]
+         piped, streamed = streamed, ""
++        exported = _image_export(prog, args)
++        if exported is not None:
++            image, out = exported
++            if out is None:
++                streamed = image
++            else:
++                path = _abs_path(out, cwd)
++                found.append(path)
++                if sources is not None:
++                    sources[path] = image
++                if downloads is not None:
++                    downloads.add(path)
++            continue
+         unpacked = None
+         if prog in _TAR_PROGS:
+             unpacked = _tar_unpack(args)
+@@ -459,11 +472,10 @@ def _fetched_paths(command: str, base: str | None, sources: dict[str, str] | Non
+             arc = _abs_path(archive, cwd) if archive else ""
+             url = piped if from_stdin else (sources.get(arc, "") if arc in (downloads or ()) else "")
+             if where and where not in ("/", os.path.expanduser("~"), base, anchor):
+-                from tools.approval_chat_grants import forge_repo
+                 found.append(where)
+-                new = url if forge_repo(url) else ""  # two origins in one folder: unknown
++                new = url if _origin(url) else ""  # two origins in one folder: unknown
+                 old = sources.get(where, new)
+-                sources[where] = new if forge_repo(old) == forge_repo(new) else ""
++                sources[where] = new if _origin(old) == _origin(new) else ""
+         if prog == "git" and "clone" in args:
+             rest = args[args.index("clone") + 1:]
+         elif prog == "gh" and args[:2] == ["repo", "clone"]:
+@@ -552,6 +564,56 @@ def _fetched_paths(command: str, base: str | None, sources: dict[str, str] | Non
+     return found
+ 
+ 
++def _origin(url: str) -> str | None:
++    """The forge repo or container image an archive came from (``docker://`` marks an image), else ``None``."""
++    if isinstance(url, str) and url.startswith("docker://"):
++        from tools.approval_chat_grants import image_source
++        hit = image_source(url)
++        return hit[0] if hit else None
++    from tools.approval_chat_grants import forge_repo
++    return forge_repo(url)
++
++
++def _image_export(prog: str, args: list[str]) -> tuple[str, str | None] | None:
++    """``(docker://<image>, output path or None for stdout)`` of ``docker|podman save``, ``crane export|pull`` or
++    ``skopeo copy docker://... docker-archive:|oci-archive:<path>``; ``None`` for any other command."""
++    from tools.approval_chat_grants import image_source
++
++    def ident(ref: str) -> str | None:
++        ref = ref.strip("'\"").removeprefix("docker://")
++        if "/" not in ref.split(":", 1)[0] or "." not in ref.split("/", 1)[0]:
++            ref = "docker.io/" + ref
++        hit = image_source(ref)
++        return "docker://" + hit[0] if hit else None
++
++    if prog in ("docker", "podman", "nerdctl") and (args[:1] == ["save"] or args[:2] == ["image", "save"]):
++        rest = args[1:] if args[:1] == ["save"] else args[2:]
++        out, refs, i = None, [], 0
++        while i < len(rest):
++            if rest[i] in ("-o", "--output") and i + 1 < len(rest):
++                out, i = rest[i + 1], i + 2
++                continue
++            if rest[i].startswith("--output="):
++                out = rest[i].split("=", 1)[1]
++            elif not rest[i].startswith("-"):
++                refs.append(rest[i])
++            i += 1
++        image = ident(refs[0]) if len(refs) == 1 else None
++        return (image, out) if image else None
++    if prog == "crane" and args[:1] in (["export"], ["pull"]) and len(args) >= 3:
++        pos = [a for a in args[1:] if a == "-" or not a.startswith("-")]
++        image = ident(pos[0]) if len(pos) >= 2 else None
++        return (image, None if pos[1] == "-" else pos[1]) if image else None
++    if prog == "skopeo" and args[:1] == ["copy"]:
++        pos = [a for a in args[1:] if not a.startswith("-")]
++        if len(pos) == 2 and pos[0].startswith("docker://"):
++            image = ident(pos[0])
++            kind, _, path = pos[1].partition(":")
++            if image and kind in ("docker-archive", "oci-archive", "dir", "oci") and path:
++                return image, path.split(":", 1)[0]
++    return None
++
++
+ def _dangerous_pattern(tool_name: str, args: dict) -> str:
+     """Why stage 1 may not clear a command upstream's dangerous-command patterns flag: a small stage-1 model
+     allows some of them (``curl | sh``), and only those reached upstream's guardian at all."""
+@@ -596,6 +658,25 @@ def session_fetched_paths(*message_lists: list | None, cwd: str | None = None,
+     return paths
+ 
+ 
++def _session_commands(*message_lists: list | None) -> list[str]:
++    """The terminal commands of these transcripts, and ``args``' own command when the last item is a call's args."""
++    out: list[str] = []
++    for item in message_lists:
++        if isinstance(item, dict):
++            if isinstance(item.get("command"), str):
++                out.append(item["command"])
++            continue
++        for message in item or []:
++            if not isinstance(message, dict) or message.get("role") != "assistant":
++                continue
++            for call in message.get("tool_calls") or []:
++                _cid, name, raw = _call_parts(call)
++                command = _parse_args(raw).get("command") if name == "terminal" else None
++                if isinstance(command, str):
++                    out.append(command)
++    return out
++
++
+ def trusted_sources() -> list[str]:
+     """``approvals.trusted_sources``: URL prefixes (``git@github.com:me/``, ``https://github.com/me/``) whose
+     clones are the operator's own code. There is no default."""
+@@ -1031,7 +1112,7 @@ def build_input(tool_name: str, args: dict, *, messages: list | None, root_messa
+     fetch_source = ""
+     display: dict[str, str] = {}
+     if not read_only:
+-        from tools.approval_chat_grants import command_sources as _command_sources, url_source
++        from tools.approval_chat_grants import command_sources as _command_sources, image_source, url_source
+         text = args.get("command") if tool_name == "terminal" else args.get("code") if tool_name == "execute_code" else None
+         own_paths: list[str] = []
+         if isinstance(text, str):
+@@ -1051,10 +1132,11 @@ def build_input(tool_name: str, args: dict, *, messages: list | None, root_messa
+             if not fetched_code_facts(tool_name, args, [path], cwd):
+                 continue
+             url = sources.get(path, "")
+-            ident = url_source(url, clone=path not in downloads) if url else None
++            image = image_source(url) if url.startswith("docker://") else None
++            ident = image[0] if image else url_source(url, clone=path not in downloads) if url else None
+             hit_sources.append(ident)
+             if ident:
+-                display.setdefault(ident, url_source(url, clone=path not in downloads, display=True) or ident)
++                display.setdefault(ident, image[1] if image else url_source(url, clone=path not in downloads, display=True) or ident)
+             fetch_source = fetch_source or url
+     return ReviewInput(lines=lines, action=_call_line(tool_name, args, None, _ACTION_ARG_CHARS, facts),
+                        instruction_files=_instruction_files_block(cwd), skip_stage1=skip, session_fetch=fetched,
+@@ -1205,7 +1287,7 @@ _PROMPT_PROCESS = """
+ If the action should be blocked:
+ <block>yes</block><category>Exact BLOCK Rule Name</category><reason>[Exact BLOCK Rule Name] one short sentence</reason>
+ 
+-When the category is Code from External and the code comes from one named outside source, add <source>host/owner/repo</source> after the reason (for example <source>github.com/owner/repo</source>), also when the command only calls a script or function that fetches it. Leave it out when you cannot tell or there are several sources.
++When the category is Code from External and the code comes from one named outside source, add <source>host/owner/repo</source> after the reason (for example <source>github.com/owner/repo</source>), also when the command only calls a script or function that fetches it. For code from a container image (files the session pulled, saved, exported or unpacked out of it) the source is the image as registry/owner/name without a tag (for example <source>docker.io/hashicorp/tfe-agent</source>). Leave it out when you cannot tell or there are several sources.
+ 
+ If the action should be allowed:
+ <block>no</block>
+@@ -1880,6 +1962,14 @@ def chat_grants(agent, messages: list | None, root_messages: list | None, pendin
+         G.record_events(db, sid, fresh)
+     merged = {e.get("key"): e for e in stored}
+     merged.update({e["key"]: e for e in fresh if e["key"] not in merged})
++    try:
++        from tools.approval import granted_code_sources
++        from tools.approval_context import get_current_session_key
++        for ident, scope in granted_code_sources(get_current_session_key(default="")).items():
++            ev = G.scope_grant_event(ident, scope)
++            merged.setdefault(ev["key"], ev)
++    except Exception as exc:
++        logger.warning("Smart approval (provenance): card grants unreadable (%s: %s)", type(exc).__name__, exc)
+     return G.active_grants(merged.values())
+ 
+ 
+@@ -2133,14 +2223,19 @@ def _granted_sources(tool_name: str, args: dict, data: ReviewInput, grants: dict
+     (clones, downloads, in this call or earlier in the session), every fetched path it runs in or names has a
+     granted source, it names no remote source that is not granted, and it matches no dangerous command
+     pattern (``chmod +x`` then running the file is how a downloaded binary starts, so it is not one); else
+-    nothing."""
++    nothing. A fetched path whose origin the session does not show counts as the granted container image the
++    review model names (``docker create`` plus ``docker cp`` leaves no trace of the image in the path)."""
+     from tools.approval_chat_grants import covers
+     hits = data.hit_sources
+     danger = _dangerous_pattern(tool_name, args)
+     if danger and not _only_chmod_then_run(tool_name, args, danger):
+         return ""
+-    if any(not ident or ident not in grants for ident in hits):
++    from tools.approval_chat_grants import image_source
++    judged = bool(judge) and judge in grants and tool_name == "terminal" and image_source(judge) is not None
++    if any((not ident and not judged) or (ident and ident not in grants) for ident in hits):
+         return ""
++    if judged and not all(hits):
++        return judge
+     if any(not covers(grants, ref) for ref, _ident in data.command_sources):
+         return ""
+     if hits:
+@@ -2278,6 +2373,9 @@ def review(tool_name: str, args: dict, *, agent=None, messages: list | None = No
+     if bare and not verdict.detail.get("judge_source") and tool_name == "terminal":
+         from tools.approval_chat_grants import bare_repo_source
+         found = bare_repo_source(bare, data.fetch_urls)  # the forge the session fetched that repo from, never a guess
++        if not found:
++            from tools.approval_chat_grants import bare_image_source
++            found = bare_image_source(bare, _session_commands(messages, root_messages, args))
+         if found:
+             verdict.detail["judge_source"], verdict.detail["judge_source_display"] = found
+     if verdict.decision == "block" and _norm(verdict.rule) == _norm("Code from External") and grants:
+diff --git a/tools/approval_chat_grants.py b/tools/approval_chat_grants.py
+index 6b14c0c6..34eb6cbc 100644
+--- a/tools/approval_chat_grants.py
++++ b/tools/approval_chat_grants.py
+@@ -23,6 +23,7 @@ from __future__ import annotations
+ import hashlib
+ import json
+ import logging
++import os
+ import re
+ import time
+ from typing import Any, Iterable
+@@ -189,6 +190,9 @@ def judge_source(text: str) -> tuple[str, str] | None:
+     ref = text.strip()
+     if not ref or len(ref) > 200 or _JUDGE_BAD.search(ref.rstrip(".")):
+         return None
++    image = image_source(ref)
++    if image is not None:
++        return image
+     if "://" not in ref and not re.match(r"[\w.-]+@", ref) and not _NPM_SHORTHAND.fullmatch(ref):
+         ref = "https://" + ref
+     ident = url_source(ref, clone=True)
+@@ -201,6 +205,74 @@ def judge_source(text: str) -> tuple[str, str] | None:
+     return ident, shown
+ 
+ 
++_REGISTRIES = {"docker.io": "docker.io", "index.docker.io": "docker.io", "registry-1.docker.io": "docker.io",
++               "registry.hub.docker.com": "docker.io", "hub.docker.com": "docker.io", "ghcr.io": "ghcr.io",
++               "quay.io": "quay.io", "gcr.io": "gcr.io", "registry.k8s.io": "registry.k8s.io",
++               "k8s.gcr.io": "k8s.gcr.io", "mcr.microsoft.com": "mcr.microsoft.com", "public.ecr.aws": "public.ecr.aws",
++               "registry.gitlab.com": "registry.gitlab.com", "nvcr.io": "nvcr.io", "cgr.dev": "cgr.dev",
++               "lscr.io": "lscr.io", "docker.elastic.co": "docker.elastic.co"}
++_IMAGE_PATH = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
++_IMAGE_TOOLS = frozenset({"docker", "podman", "nerdctl", "crane", "skopeo", "ctr", "buildah", "regctl", "oras"})
++
++
++def image_source(ref: str) -> tuple[str, str] | None:
++    """``(identity, display)`` of a container image on a known registry (``docker.io/hashicorp/tfe-agent``,
++    ``docker://ghcr.io/o/i:tag``, ``https://hub.docker.com/r/o/i``), the tag and digest dropped; ``None`` for
++    anything else (a registry that is not known, a bare ``owner/name``, a wildcard)."""
++    if not isinstance(ref, str):
++        return None
++    ref = ref.strip().rstrip(".,;:)!?\"'")
++    if not ref or len(ref) > 300 or _JUDGE_BAD.search(ref):
++        return None
++    for scheme in ("docker://", "oci://", "https://", "http://"):
++        if ref.lower().startswith(scheme):
++            ref = ref[len(scheme):]
++    ref = ref.split("@", 1)[0]
++    host, _, path = ref.partition("/")
++    registry = _REGISTRIES.get(host.lower())
++    if registry is None or not path:
++        return None
++    if host.lower() == "hub.docker.com":
++        segs = [s for s in path.split("/") if s]
++        path = "/".join(segs[1:3]) if segs[:1] in (["r"], ["repository"]) else ("library/" + segs[1] if segs[:1] == ["_"] else "")
++    last = path.rsplit("/", 1)
++    if ":" in last[-1]:
++        path = path[: len(path) - len(last[-1])] + last[-1].split(":", 1)[0]
++    path = path.strip("/")
++    if registry == "docker.io" and "/" not in path:
++        path = "library/" + path
++    if not _IMAGE_PATH.fullmatch(path.lower()) or ".." in path:
++        return None
++    return f"{registry}/{path.lower()}", f"{registry}/{path}"
++
++
++def bare_image_source(text: str, commands: Iterable[str]) -> tuple[str, str] | None:
++    """``(identity, display)`` for an image the review model named as ``owner/name`` (or ``name``) without a
++    registry, when a container tool command of the session (``docker pull``, ``docker save``, ``crane export``,
++    ``skopeo copy``) names exactly one image with that path; never a guess."""
++    want = (text or "").strip().lower().split("@", 1)[0]
++    if ":" in want.rsplit("/", 1)[-1]:
++        want = want.rsplit(":", 1)[0]
++    if not want or not re.fullmatch(r"[a-z0-9][\w.-]*(?:/[\w.-]+)*", want) or ".." in want:
++        return None
++    found: dict[str, str] = {}
++    for command in commands:
++        words = re.split(r"[\s;&|()]+", command or "")
++        for i, word in enumerate(words):
++            if os.path.basename(word) not in _IMAGE_TOOLS:
++                continue
++            for arg in words[i + 1:i + 12]:
++                if not arg or arg.startswith("-"):
++                    continue
++                cand = arg.strip("'\"")
++                if "/" not in cand.split(":", 1)[0] or "." not in cand.split("/", 1)[0]:
++                    cand = "docker.io/" + cand
++                hit = image_source(cand)
++                if hit and (hit[0].split("/", 1)[1] == want or hit[0].split("/", 1)[1] == "library/" + want):
++                    found[hit[0]] = hit[1]
++    return next(iter(found.items())) if len(found) == 1 else None
++
++
+ def forge_repo(url: str) -> str | None:
+     """The ``host/owner/repo`` identity of a URL on a known forge (GitHub, GitLab, Codeberg, ...: an archive, a
+     release asset, a clone URL), or ``None`` for every other host, a package host included. A tree unpacked from
+@@ -242,7 +314,8 @@ def fetch_identity(ref: str) -> str | None:
+ 
+ def covers(grants: Any, ref: str) -> bool:
+     """Whether a grant covers the source ``ref`` names: its identity, by either reading, is granted."""
+-    ids = {i for i in (url_source(ref), source_identity(ref)) if i}
++    image = image_source(ref) if isinstance(ref, str) and ref.startswith("docker://") else None
++    ids = {image[0]} if image else {i for i in (url_source(ref), source_identity(ref)) if i}
+     return bool(ids & set(grants))
+ 
+ 
+@@ -415,11 +488,14 @@ def record_events(db, session_id: str, events: list[dict]) -> int:
+ 
+ 
+ def card_identity(ref: str) -> str | None:
+-    """The identity a card's source names: an identity already (``github.com/o/r``, ``dl.example.com``), or
+-    a URL or ``owner/repo`` reference."""
++    """The identity a card's source names: an identity already (``github.com/o/r``, ``dl.example.com``,
++    ``docker.io/o/i``), or a URL or ``owner/repo`` reference."""
+     if not isinstance(ref, str):
+         return None
+     ref = ref.strip()
++    image = image_source(ref)
++    if image is not None:
++        return image[0]
+     if not ref or any(c.isspace() for c in ref) or "," in ref:
+         return None
+     if "://" not in ref and "@" not in ref and ":" not in ref.split("/", 1)[0] and "." in ref.split("/", 1)[0]:
+@@ -427,6 +503,22 @@ def card_identity(ref: str) -> str | None:
+     return url_source(ref) or source_identity(ref)
+ 
+ 
++def _card_words(src: str, where: str) -> str:
++    return (f"I allow code from {src} to run {where}: a clone of it, a download from it, a package installed "
++            f"from it, an image pulled from it and files unpacked from it. Nothing else is allowed by this: code "
++            f"from any other source, a file on this machine, a package from a registry, or a command that pipes a "
++            f"download into a shell.")
++
++
++def scope_grant_event(src: str, scope: str) -> dict:
++    """The grant event of a card answer the approval state holds: ``always`` (``code_source:<src>`` in
++    command_allowlist) or ``session`` (this chat's session approvals)."""
++    where = "in every chat and its subagents" if scope == "always" else "in this chat and its subagents"
++    return {"kind": "grant", "source": src, "at": 0.0, "via": "card", "scope": scope,
++            "words": _card_words(src, where) + (" (Always allow on an approval card)" if scope == "always" else ""),
++            "key": _key("scope", scope, src)}
++
++
+ def record_card_grant(db, session_id: str, sources: str | Iterable[str]) -> list[dict]:
+     """The approval card choice \"Allow code from <source> in this chat\": one grant per source (an identity such as
+     ``github.com/o/r``, or a URL). Returns the events recorded."""
+@@ -440,10 +532,7 @@ def record_card_grant(db, session_id: str, sources: str | Iterable[str]) -> list
+         src = card_identity(ref)
+         if src:
+             events.append({"kind": "grant", "source": src, "at": now, "via": "card",
+-                           "words": (f"I allow code from {src} to run in this chat and its subagents: a clone of it, a download "
+-                     f"from it, a package installed from it. Nothing else is allowed by this: code from any "
+-                     f"other source, a file on this machine, a package from a registry, or a command that "
+-                     f"pipes a download into a shell."),
++                           "words": _card_words(src, "in this chat and its subagents"),
+                            "key": _key("card", src, now)})
+     if not events:
+         return []
+diff --git a/tools/approval_gateway_wait.py b/tools/approval_gateway_wait.py
+index c50cd095..a46baad1 100644
+--- a/tools/approval_gateway_wait.py
++++ b/tools/approval_gateway_wait.py
+@@ -214,7 +214,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
+     from tools import approval as _approval
+     from agent.terminal_approval_batch import approval_published, preparing_terminal_approval, register_prepared_approval
+ 
+-    approval_data = _name_subagent(approval_data)
++    from tools.approval_scope import normalized
++    approval_data = normalized(_name_subagent(approval_data))
+     primary_key = approval_data.get("pattern_key", "")
+     if surface == "gateway":
+         surface = _ctx.gateway_approval_surface()
+diff --git a/tools/approval_prompt.py b/tools/approval_prompt.py
+index 276853eb..f5158d6c 100644
+--- a/tools/approval_prompt.py
++++ b/tools/approval_prompt.py
+@@ -20,14 +20,12 @@ logger = logging.getLogger("tools.approval")
+ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: int | None = None,
+                               allow_permanent: bool = True, approval_callback=None,
+                               *, allow_session: bool = True, smart_denied: bool = False,
+-                              title: str | None = None) -> str:
++                              title: str | None = None, always_exempt: str = "") -> str:
+     """Prompt the user to approve a dangerous command (CLI only).
+ 
+-    allow_permanent=False hides [a]lways. allow_session=False hides
+-    [s]ession too — the caller grants one operation and re-asks next time (the
+-    protected agent-instruction gate in ``tools/file_tools.py``); offering a scope
+-    the caller discards makes every later write re-prompt and reads as broken.
+-    smart_denied: owner override of a Smart DENY, offer only once/deny.
++    Every prompt offers [o]nce, [s]ession and [a]lways (``tools.approval_scope``): allow_session=False
++    raises, and allow_permanent=False hides [a]lways only with an ``always_exempt`` reason.
++    smart_denied: owner override of a Smart DENY; it changes the heading, not the choices.
+     title: header for the plain-input prompt when the question is not a dangerous command
+     ("Save to memory?", "<server> is asking"); the default header stays the dangerous-command one.
+     approval_callback: CLI prompt_toolkit callback ``(command, description, *,
+@@ -42,6 +40,9 @@ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: i
+ 
+     See #81887.
+     """
++    from tools.approval_scope import require
++    require({"pattern_key": "cli", "allow_session": allow_session, "allow_permanent": allow_permanent,
++             "always_exempt": always_exempt})
+     if timeout_seconds is None:
+         timeout_seconds = _ctx._get_approval_timeout()
+     from tools.human_input_hooks import human_input_request
+@@ -114,8 +115,6 @@ def _ask_human(command: str, description: str, timeout_seconds: int, allow_perma
+     from agent.redact import redact_approval_display
+     display_command = redact_approval_display(command)
+     display_description = redact_approval_display(description)
+-    # Smart DENY and a session-less gate both reduce the menu to once/deny.
+-    once_only = smart_denied or not allow_session
+ 
+     if approval_callback is not None:
+         try:
+@@ -153,7 +152,7 @@ def _ask_human(command: str, description: str, timeout_seconds: int, allow_perma
+     try:
+         from agent.i18n import t
+         # (prompt key, menu key) by menu shape: once/deny, full, or no [a]lways.
+-        shape = "smart_deny" if once_only else "long" if allow_permanent else "short"
++        shape = "long" if allow_permanent else "short"
+         prompt_key, menu_key = f"approval.prompt_{shape}", f"approval.choose_{shape}"
+         header = title or t('approval.dangerous_header', description=display_description)
+         print(f"\n  {header}"
+@@ -163,14 +162,9 @@ def _ask_human(command: str, description: str, timeout_seconds: int, allow_perma
+         if choice is None:
+             print("\n" + t("approval.timeout", **_ctx.approval_timeout_notice_kwargs()))
+             return "timeout"  # distinct from deny: the user never answered
+-        if once_only:
+-            decision = {**dict.fromkeys(t("approval.smart_deny_once_inputs").split(","), "once"),
+-                        **dict.fromkeys(t("approval.smart_deny_deny_inputs").split(","), "deny"),
+-                        }.get(choice, "deny")
+-        else:
+-            decision = _CLI_CHOICE_ALIASES.get(choice, "deny")
+-            if decision == "always" and not allow_permanent:
+-                decision = "session"
++        decision = _CLI_CHOICE_ALIASES.get(choice, "deny")
++        if decision == "always" and not allow_permanent:
++            decision = "session"
+         print(t(_CLI_CHOICE_I18N[decision]))
+         return decision
+     except (EOFError, KeyboardInterrupt):
+@@ -284,19 +278,21 @@ def _consent(choice, unresolved: str) -> str:
+     return unresolved if choice in ("timeout", "cancelled") else "decline"
+ 
+ 
+-def _remembered_consent(session_key: str, choice, remember_key: str | None, unresolved: str) -> str:
+-    """:func:`_consent`, recording a ``session``/``always`` answer under *remember_key*. Without a key
+-    those scopes were never offered, so a stale or typed broader answer covers this call only."""
+-    if remember_key is not None:
+-        from tools import approval as _a
+-        _a._persist_choice(session_key, choice, [remember_key])
++def _remembered_consent(session_key: str, choice, remember_key: str, unresolved: str,
++                        always_exempt: str = "") -> str:
++    """:func:`_consent`, recording a ``session``/``always`` answer under *remember_key* (``always`` as
++    ``session`` when the card is ``always_exempt``)."""
++    from tools import approval as _a
++    if choice == "always" and always_exempt:
++        choice = "session"
++    _a._persist_choice(session_key, choice, [remember_key])
+     return _consent(choice, unresolved)
+ 
+ 
+ def request_elicitation_consent(message: str, description: str, *,
+                                 timeout_seconds: int | None = None,
+                                 surface: str = "mcp-elicitation", title: str = "Confirm this action?",
+-                                remember_key: str | None = None) -> str:
++                                remember_key: str, always_exempt: str = "", scope: str = "") -> str:
+     """Route an MCP elicitation request to the surface owning the active session:
+     gateway sessions through ``_await_gateway_decision``, CLI/TUI through
+     ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in a
+@@ -304,20 +300,25 @@ def request_elicitation_consent(message: str, description: str, *,
+     treats them as "user did not approve" rather than retrying or hanging.
+     Returns ``"accept" | "decline" | "cancel"``.
+ 
+-    Without *remember_key* the consent covers one call, so every surface offers only
+-    once/deny. With it, the session and always choices are offered and recorded under
+-    that approval key; the caller checks ``tools.approval.is_approved`` before asking."""
++    *remember_key* (required) names the specific thing: every surface offers once, session and always
++    (unless *always_exempt* says why a permanent grant means nothing) and records the answer under it; a key
++    already allowed for this chat or always accepts without asking. *scope* says in words what it covers."""
+     from tools import approval as _a
++    from tools.approval_scope import UnscopedApproval, require
++    if not (isinstance(remember_key, str) and remember_key.strip()):
++        raise UnscopedApproval("request_elicitation_consent needs remember_key naming the specific thing")
++    require({"pattern_key": remember_key, "allow_permanent": not always_exempt, "always_exempt": always_exempt})
+     try:
+         session_key = _ctx.get_current_session_key()
+     except Exception as exc:  # pragma: no cover -- defensive
+         logger.warning("Elicitation consent: session lookup failed: %s", exc)
+         return "decline"
++    if _a.is_approved(session_key, remember_key):
++        return "accept"
+     # A finite gateway turn (``chat -q`` / ``-z`` over the daemon) has no one to answer: parking the prompt
+     # would detach the viewer mid-turn instead of failing closed like the in-process ``-q`` input() path.
+     if _ctx._is_single_query_approval_context():
+         return "decline"
+-    scoped = remember_key is not None
+ 
+     # api_server is an unattended *platform* for the dangerous-command gate, but a live ``/v1/runs`` run
+     # registers an approval notify callback and answers via ``POST /v1/runs/{id}/approval``
+@@ -337,9 +338,10 @@ def request_elicitation_consent(message: str, description: str, *,
+         try:
+             decision = _gw._await_gateway_decision(
+                 session_key, notify_cb, {"command": message, "description": description,
+-                                         "pattern_key": "mcp_elicitation",
+-                                         "pattern_keys": ["mcp_elicitation"],
+-                                         "allow_session": scoped, "allow_permanent": scoped}, surface=surface)
++                                         "pattern_key": remember_key, "pattern_keys": [remember_key],
++                                         "allow_session": True, "allow_permanent": not always_exempt,
++                                         **({"always_exempt": always_exempt} if always_exempt else {}),
++                                         **({"scope": scope} if scope else {})}, surface=surface)
+         except Exception as exc:
+             logger.error("Elicitation gateway dispatch failed: %s", exc, exc_info=True)
+             return "decline"
+@@ -347,7 +349,7 @@ def request_elicitation_consent(message: str, description: str, *,
+             return "decline"
+         if not decision.get("resolved") or decision.get("cancelled"):
+             return "cancel"  # nobody answered (timeout / prompt withdrawn) — not a user refusal
+-        return _remembered_consent(session_key, decision.get("choice"), remember_key, "decline")
++        return _remembered_consent(session_key, decision.get("choice"), remember_key, "decline", always_exempt)
+ 
+     # Nobody can answer a -q, cron or unattended-platform worker. A `hermes chat -q` turn still has the CLI's
+     # panel callback registered, which would wait the full approval timeout before failing closed.
+@@ -357,20 +359,20 @@ def request_elicitation_consent(message: str, description: str, *,
+ 
+     # Same observer payload as the gateway branch (#131876); post fires in a finally so the
+     # wait settles for observers on the early fail-closed return too.
+-    hook_kwargs = dict(command=message, description=description, pattern_key="mcp_elicitation",
+-                       pattern_keys=["mcp_elicitation"], session_key=session_key, surface=surface)
++    hook_kwargs = dict(command=message, description=description, pattern_key=remember_key,
++                       pattern_keys=[remember_key], session_key=session_key, surface=surface)
+     _ctx._fire_approval_hook("pre_approval_request", **hook_kwargs)
+     hook_choice = "cancelled"
+     try:
+         from tools.terminal_tool import _get_approval_callback
+         # Pass the agent thread's panel callback: without it prompt_toolkit fails the prompt closed unseen.
+         choice = prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
+-                                           allow_permanent=scoped, allow_session=scoped, title=title,
+-                                           approval_callback=_get_approval_callback())
++                                           allow_permanent=not always_exempt, title=title,
++                                           always_exempt=always_exempt, approval_callback=_get_approval_callback())
+         hook_choice = choice
+     except Exception as exc:
+         logger.error("Elicitation CLI prompt failed: %s", exc, exc_info=True)
+         return "decline"
+     finally:
+         _ctx._fire_approval_hook("post_approval_response", **hook_kwargs, choice=hook_choice)
+-    return _remembered_consent(session_key, choice, remember_key, "cancel")  # timeout mirrors the gateway
++    return _remembered_consent(session_key, choice, remember_key, "cancel", always_exempt)  # timeout mirrors the gateway
+diff --git a/tools/approval_scope.py b/tools/approval_scope.py
+new file mode 100644
+index 00000000..46426a8f
+--- /dev/null
++++ b/tools/approval_scope.py
+@@ -0,0 +1,57 @@
++"""The choices every approval card offers.
++
++Every card a person answers offers Allow once, Allow in this chat (the chat and its subagents) and Always
++allow, each scoped to the specific thing the card names (its ``pattern_keys``), plus Deny. A card leaves
++out Always only when a permanent grant of that thing would mean nothing; it then names why in
++``always_exempt``. A sign-in grant card's Always is ``device`` (the hub stores it for that computer).
++
++:func:`offer` is the one place a card's choices come from, and :func:`require` refuses a card that would
++offer less: the gateway wait and the CLI prompt call it before anything is shown, so a bare Allow/Deny
++card cannot be raised.
++"""
++
++from __future__ import annotations
++
++from typing import Any, Mapping
++
++ONCE, SESSION, ALWAYS, DEVICE, DENY = "once", "session", "always", "device", "deny"
++
++
++class UnscopedApproval(ValueError):
++    """An approval card that does not offer Allow in this chat, or Always without a reason."""
++
++
++def _keys(data: Mapping[str, Any]) -> list[str]:
++    keys = data.get("pattern_keys")
++    if not keys:
++        keys = [data.get("pattern_key")]
++    return [k for k in keys or [] if isinstance(k, str) and k.strip()]
++
++
++def require(data: Mapping[str, Any]) -> None:
++    """Raise :class:`UnscopedApproval` unless the card names the thing it grants and offers its scopes."""
++    if not _keys(data):
++        raise UnscopedApproval("an approval card must name the specific thing it grants (pattern_keys)")
++    if data.get("allow_session") is False:
++        raise UnscopedApproval(f"approval card {_keys(data)[0]!r} does not offer Allow in this chat")
++    exempt = data.get("always_exempt")
++    if data.get("allow_permanent") is False and not (isinstance(exempt, str) and exempt.strip()):
++        raise UnscopedApproval(f"approval card {_keys(data)[0]!r} leaves out Always without always_exempt")
++
++
++def offer(data: Mapping[str, Any]) -> list[str]:
++    """The card's choices, Deny last."""
++    require(data)
++    if data.get("login_grant") is not None:
++        return [ONCE, SESSION, DEVICE, DENY]
++    exempt = data.get("always_exempt")
++    if isinstance(exempt, str) and exempt.strip():
++        return [ONCE, SESSION, DENY]
++    return [ONCE, SESSION, ALWAYS, DENY]
++
++
++def normalized(data: Mapping[str, Any]) -> dict:
++    """A copy of the card whose ``allow_session``/``allow_permanent`` flags say what :func:`offer` offers,
++    for surfaces that read the flags."""
++    choices = offer(data)
++    return {**data, "allow_session": True, "allow_permanent": ALWAYS in choices or DEVICE in choices}
+diff --git a/tools/browser_vault_tool.py b/tools/browser_vault_tool.py
+index 39647414..d6ee7678 100644
+--- a/tools/browser_vault_tool.py
++++ b/tools/browser_vault_tool.py
+@@ -650,7 +650,8 @@ def _confirm_payment_fill(label: str, origin: str) -> bool:
+         f"Fill payment card '{label}' on {origin}",
+         "The agent wants to enter your saved card details into this checkout page. The card number and "
+         "CVC never enter the conversation. Approve only if you intend to pay here.",
+-        surface="vault-payment", title="Confirm payment card fill?") == "accept"
++        surface="vault-payment", title="Confirm payment card fill?",
++        remember_key=f"vault_payment:{label}:{origin}", scope=f"filling card '{label}' on {origin}") == "accept"
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/tools/file_tools_write_guards.py b/tools/file_tools_write_guards.py
+index 6ce8f40c..fd58280d 100644
+--- a/tools/file_tools_write_guards.py
++++ b/tools/file_tools_write_guards.py
+@@ -264,11 +264,12 @@ _NO_HUMAN = "requires approval but no interactive user or gateway is present to
+ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "default") -> str | None:
+     """Ask the human to approve a write to protected instruction file(s); ``None`` when approved.
+ 
+-    Deliberately NOT routed through ``_run_approval_gate`` (honors --yolo and
+-    allowlists): this gate is one-operation approval EVERY time, no persisted
+-    scope, fail-closed without a human channel.
++    Deliberately NOT routed through ``_run_approval_gate`` (honors --yolo and the command allowlist): only a
++    person's answer on this card clears it, never yolo or auto-approve. The card offers once, this chat and
++    always for exactly these files (``protected_instruction_file:<files>``); fail-closed without a human channel.
+     """
+     targets = ", ".join(dict.fromkeys(reasons))
++    scope_key = "protected_instruction_file:" + ",".join(sorted(dict.fromkeys(reasons)))
+     description = (
+         f"Write to protected agent-instruction file(s): {targets}. "
+         "These files steer future agent behavior; approval is always "
+@@ -293,6 +294,8 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
+     # Gateway surface: block on the button round-trip when a notify callback
+     # is registered for this session. One-operation only — no scope buttons.
+     session_key = get_current_session_key()
++    if _approval.is_approved(session_key, scope_key):
++        return None
+     try:
+         with _approval._lock:
+             notify_cb = _approval._gateway_notify_cbs.get(session_key)
+@@ -302,11 +305,10 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
+     if notify_cb is not None:
+         approval_data = {
+             "command": display,
+-            "pattern_key": "protected_instruction_file",
+-            "pattern_keys": ["protected_instruction_file"],
++            "pattern_key": scope_key,
++            "pattern_keys": [scope_key],
+             "description": description,
+-            "allow_permanent": False,
+-            "allow_session": False}
++            "scope": f"writes to {targets}"}
+         decision = _await_gateway_decision(session_key, notify_cb, approval_data, surface="gateway")
+         if decision.get("notify_failed"):
+             return blocked.format(why="requires approval but the approval request could not be delivered.")
+@@ -331,18 +333,18 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
+             return blocked.format(why=_NO_HUMAN)
+         # Same observer payload as the gateway branch (#131876), fired like the
+         # dangerous-command CLI prompt in tools/approval.py.
+-        hook_kwargs = dict(command=display, description=description, pattern_key="protected_instruction_file",
+-                           pattern_keys=["protected_instruction_file"], session_key=session_key, surface="cli")
++        hook_kwargs = dict(command=display, description=description, pattern_key=scope_key,
++                           pattern_keys=[scope_key], session_key=session_key, surface="cli")
+         _fire_approval_hook("pre_approval_request", **hook_kwargs)
+         choice = prompt_dangerous_approval(
+-            display, description, allow_permanent=False, allow_session=False, approval_callback=callback)
++            display, description, approval_callback=callback)
+         _fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
+         if choice == "cancelled":
+             return blocked.format(why="approval prompt could not be delivered or was not answered "
+                                       f"({getattr(choice, 'cause', 'no answer')}).")
+         timed = choice == "timeout"
+-    # Any tapped scope is a one-operation grant; nothing is persisted.
+     if not timed and choice in {"once", "session", "always"}:
++        _approval._persist_choice(session_key, choice, [scope_key])
+         return None
+     return timed_out if timed else denied
+ 
+diff --git a/tools/mcp_tool_events.py b/tools/mcp_tool_events.py
+index b22af29a..c2e953a1 100644
+--- a/tools/mcp_tool_events.py
++++ b/tools/mcp_tool_events.py
+@@ -431,7 +431,9 @@ def _consent_error(server_name: str, args: dict) -> Optional[str]:
+             f"unattended agent run that follows the instructions below and sends its result to {target}.",
+             f"Instructions: {args.get('instructions') or 'Summarize what happened.'}\n"
+             f"Arguments: {json.dumps(args.get('arguments') or {})[:500]}",
+-            surface=f"mcp-events/{server_name}", title=f"MCP server '{server_name}' event subscription")
++            surface=f"mcp-events/{server_name}", title=f"MCP server '{server_name}' event subscription",
++            remember_key=f"mcp_subscribe:{server_name}:{args['name']}",
++            scope=f"subscriptions to '{args['name']}' from '{server_name}'")
+     except Exception as exc:
+         logger.error("MCP events: approval check failed for %s: %s", server_name, exc, exc_info=True)
+         return tool_error("The event subscription was blocked: the approval system was unavailable.")
+diff --git a/tools/mcp_tool_handlers.py b/tools/mcp_tool_handlers.py
+index 7ca0d510..c177cb80 100644
+--- a/tools/mcp_tool_handlers.py
++++ b/tools/mcp_tool_handlers.py
+@@ -172,10 +172,8 @@ def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[lis
+         message = " ".join([head, *(["This call goes past the chat's spend limit."] if over else []), *extra, tail])
+         if args:
+             message += f"\n\nArguments:\n{_format_trust_gate_arguments(args)}"
+-        # Over the limit the answer covers this call only: a remembered trust grant must not
+-        # pre-approve the next over-limit call.
+-        remember_key = None if over else _trust_approval_key(server_name, tool_name)
+-        scope = "once" if over else "once, for this session, or always"
++        remember_key = f"mcp_spend:{server_name}:{tool_name}" if over else _trust_approval_key(server_name, tool_name)
++        scope = "past the spend limit once, for this session, or always" if over else "once, for this session, or always"
+         description = (f"Server '{server_name}' is configured 'trust: untrusted'. "
+                        f"Approve to run '{tool_name}' {scope}, or deny to block it.")
+         title = f"MCP server '{server_name}' is asking"
+@@ -183,9 +181,9 @@ def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[lis
+         message = " ".join([f"MCP tool '{tool_name}' on server '{server_name}' would take this chat past its "
+                             f"spend limit.", *extra])
+         description = (f"Server '{server_name}' declares a spend limit per chat. Approve to run '{tool_name}' "
+-                       f"once (every further paid call in this chat asks again), or deny to block it.")
++                       f"past it once, for this chat, or always, or deny to block it.")
+         title = f"MCP server '{server_name}' spend limit"
+-        remember_key = None
++        remember_key = f"mcp_spend:{server_name}:{tool_name}"
+     try:  # lazy: tools.approval routes the prompt to whichever surface owns the session
+         from tools.approval_prompt import request_elicitation_consent
+         answer = request_elicitation_consent(message, description, surface=f"mcp-trust/{server_name}", title=title,
+diff --git a/tools/mcp_tool_sampling.py b/tools/mcp_tool_sampling.py
+index 45f0ee45..8d7c8a6c 100644
+--- a/tools/mcp_tool_sampling.py
++++ b/tools/mcp_tool_sampling.py
+@@ -299,7 +299,9 @@ class ElicitationHandler:
+         from tools.approval_prompt import request_elicitation_consent
+ 
+         consent = functools.partial(request_elicitation_consent, message, description,
+-                                    timeout_seconds=int(self.timeout), surface=f"mcp-elicitation/{self.server_name}")
++                                    timeout_seconds=int(self.timeout), surface=f"mcp-elicitation/{self.server_name}",
++                                    remember_key=f"mcp_elicitation:{self.server_name}",
++                                    scope=f"requests from MCP server '{self.server_name}'")
+         captured = self._call_context()
+         return consent if captured is None else (lambda: captured.copy().run(consent))
+ 
+diff --git a/tools/write_approval.py b/tools/write_approval.py
+index 9e285d26..542d421f 100644
+--- a/tools/write_approval.py
++++ b/tools/write_approval.py
+@@ -216,6 +216,9 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: st
+     return GateDecision(blocked=True, message="Memory write denied by user. The change was not saved.")
+ 
+ 
++MEMORY_WRITE_KEY = "memory_write"
++
++
+ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
+     """Prompt inline for a memory write: True approved, False denied, None → stage. Uses the per-thread
+     CLI approval callback (``tools.terminal_tool.set_approval_callback``) directly, not
+@@ -236,16 +239,23 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
+     callback = _get_approval_callback()
+     if callback is None:
+         return None
++    from tools import approval as _approval
++    from tools.approval_context import get_current_session_key
++    session_key = get_current_session_key(default="")
++    if _approval.is_approved(session_key, MEMORY_WRITE_KEY):
++        return True
+     header = summary.strip() or "Save to memory?"
+     try:
+         from tools.approval_prompt import callback_accepts
+         extra = {"title": "Save to memory?"} if callback_accepts(callback, "title") else {}
+-        choice = callback(detail.strip() or header, f"Save to memory: {header}", allow_permanent=False, **extra)
++        choice = callback(detail.strip() or header, f"Save to memory: {header}", allow_permanent=True, **extra)
+     except Exception as e:
+         logger.error("Inline memory approval prompt failed: %s", e)
+         return None
++    if choice in ("session", "always"):
++        _approval._persist_choice(session_key, choice, [MEMORY_WRITE_KEY])
+     # unknown outcome → stage rather than drop
+-    return {"once": True, "session": True, "deny": False}.get(choice)
++    return {"once": True, "session": True, "always": True, "deny": False}.get(choice)
+ 
+ 
+ # --- Skill-specific helpers (gist + diff for the review affordances) ---
+diff --git a/tui_gateway/hosted_room_driver.py b/tui_gateway/hosted_room_driver.py
+index 7c498f37..52bd953b 100644
+--- a/tui_gateway/hosted_room_driver.py
++++ b/tui_gateway/hosted_room_driver.py
+@@ -591,8 +591,9 @@ class HostedRoomRuntime:
+             return
+         approval, action = info.get("pending_approval") or info.get("approval"), None
+         if isinstance(approval, Mapping):
+-            choices = [c for c in approval.get("choices") or () if c in {"once", "deny"}]
+-            safe_approval = {**approval, "choices": choices or ["once", "deny"]}
++            from tools.approval_scope import offer
++            choices = [c for c in approval.get("choices") or () if c in {"once", "session", "always", "device", "deny"}]
++            safe_approval = {**approval, "choices": choices or offer({**approval, "pattern_key": "room"})}
+             action = {
+                 "kind": "approval", "task_id": task["identity"].task_id,
+                 "execution_generation": int(task["execution_generation"]),
+diff --git a/tui_gateway/hosted_room_service.py b/tui_gateway/hosted_room_service.py
+index 8400970b..8513ed79 100644
+--- a/tui_gateway/hosted_room_service.py
++++ b/tui_gateway/hosted_room_service.py
+@@ -1117,8 +1117,8 @@ class HostedRoomService:
+                 if (member_id, task_id, execution_generation) not in live:
+                     self._pending_actions.pop(key, None)
+                     raise RuntimeError("room approval is no longer pending")
+-            if choice not in {"once", "deny"}:
+-                raise RuntimeError("room approval choice must be once or deny")
++            if choice not in {"once", "session", "always", "deny"}:
++                raise RuntimeError("room approval choice must be once, session, always or deny")
+             result = self._dispatch_approval(
+                 route, client, action, task_id=task_id, execution_generation=execution_generation,
+                 request_id=requested_approval_id, choice=choice)
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+index c3cc3d2c..5aa9e4d7 100644
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -652,12 +652,8 @@ def _approval_request_payload(data: dict | None) -> dict:
+     """Build the client-safe representation of a pending approval."""
+     payload = dict(data or {})
+     if "choices" not in payload:
+-        choices = ["once"]
+-        if not payload.get("smart_denied") and payload.get("allow_session") is not False:
+-            choices.append("session")
+-            if payload.get("allow_permanent") is not False:
+-                choices.append("always")
+-        payload["choices"] = choices + ["deny"]
++        from tools.approval_scope import offer
++        payload["choices"] = offer({**payload, "pattern_key": payload.get("pattern_key") or "tui"})
+     from gateway.run import _redact_approval_command  # description too: consent prompts carry MCP/vault text
+     payload.update({k: _redact_approval_command(payload[k]) for k in ("command", "description") if k in payload})
+     return payload
+-- 
+2.56.0
+

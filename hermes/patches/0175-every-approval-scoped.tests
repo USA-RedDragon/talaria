@@ -1,0 +1,9 @@
+# Upstream and earlier-patch tests of the approval and provenance code this patch changes
+tests/tools/test_smart_provenance_judge_source.py
+tests/tools/test_smart_provenance_source_grants.py
+tests/tools/test_smart_provenance_unpacked_source.py
+tests/tools/test_smart_provenance_source_paths.py
+tests/tools/test_smart_provenance_ledger.py
+tests/plugins/platforms/test_qqbot_plugin.py
+tests/tools/test_computer_use_approval_isolation.py
+tests/tools/test_write_approval.py
