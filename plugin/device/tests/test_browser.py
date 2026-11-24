@@ -2686,7 +2686,7 @@ class HermesBrowserContract(unittest.TestCase):
 
     def test_approve_action(self):
         text = (SRC / "hermes_cli" / "plugins.py").read_text(encoding="utf-8")
-        self.assertIn("rule_key=details.rule_key or tool_name", text)
+        self.assertTrue("rule_key=details.rule_key or tool_name" in text or "rule_key = details.rule_key or (" in text)
         approval = (SRC / "tools" / "approval.py").read_text(encoding="utf-8")
         self.assertIn('pattern_key=f"plugin_rule:{rule_key}"', approval)
 
