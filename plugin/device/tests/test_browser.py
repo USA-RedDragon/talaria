@@ -324,6 +324,7 @@ class ToolTests(BrowserBase):
 
     def test_scheduled_run_stops_on_a_stale_extension(self):
         conn = self.device.conn
+        conn.client_version = "0.32.12"
         conn.browser.update(extension_version="0.32.8", extension_shipped="aaaaaaaaaaaaaaaa")
         with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
             status = self.run_tool("browser_status")
@@ -346,6 +347,31 @@ class ToolTests(BrowserBase):
         self.assertTrue(status["available"], "a chat with a user keeps working")
         self.assertIn("Check for Updates", status["extension_update_note"])
         self.assertNotIn("extension_shipped", status)
+
+    def test_newer_extension_says_the_daemon_is_behind_and_does_not_stop_a_run(self):
+        conn = self.device.conn
+        conn.client_version = "0.32.12"
+        conn.browser.update(extension_version="0.32.13", extension_shipped="aaaaaaaaaaaaaaaa", extension_build="bbbbbbbbbbbbbbbb")
+        note = browser.extension_stale(conn)
+        self.assertIn("daemon", note)
+        self.assertIn("0.32.12", note)
+        self.assertIn("next auto-update", note)
+        self.assertIn("talaria update", note)
+        self.assertNotIn("about:addons", note)
+        self.assertNotIn("Check for Updates", note)
+        self.assertNotIn("is older than", note)
+        with mock.patch.object(browser, "no_user", lambda: True), mock.patch.object(browser, "approved", lambda k: True):
+            self.assertEqual(browser._stale_stop(conn), "")
+            self.assertTrue(self.run_tool("browser_status")["available"])
+
+    def test_same_version_with_another_digest_keeps_a_neutral_message(self):
+        conn = self.device.conn
+        conn.client_version = "0.32.12"
+        conn.browser.update(extension_version="0.32.12", extension_shipped="aaaaaaaaaaaaaaaa", extension_build="bbbbbbbbbbbbbbbb")
+        note = browser.extension_stale(conn)
+        self.assertIn("differs", note)
+        self.assertNotIn("is older than", note)
+        self.assertNotIn("behind", note)
 
     def test_unbound_session_uses_the_only_browser_device(self):
         self.hub.unbind(self.session)

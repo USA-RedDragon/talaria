@@ -2392,16 +2392,26 @@ def extension_stale(conn: Any) -> str:
     shipped = info.get("extension_shipped")
     if not shipped or not info.get("connected") or info.get("extension_build") == shipped:
         return ""
-    daemon = getattr(conn, "client_version", "") or "the daemon"
-    return (f"The Talaria Firefox extension on {conn.name or conn.device_id} ({info.get('extension_version') or 'unknown'}) "
-            f"is older than the one talaria {daemon} ships, so the newer extension's fixes are not active there. "
-            f"Firefox installs the signed update by itself at its daily add-on check; to get it now, the user opens "
-            f"about:addons in Firefox, clicks the gear button and then Check for Updates.")
+    daemon = getattr(conn, "client_version", "") or ""
+    where = conn.name or conn.device_id
+    ext = info.get("extension_version") or "unknown"
+    head = f"The Talaria Firefox extension on {where} ({ext})"
+    if _older(daemon, ext):
+        return (f"{head} is newer than the one the daemon on {where} ({daemon}) ships. The newer extension works with it; "
+                f"the daemon updates itself at its next auto-update, which runs every 6 hours. To update it now, run "
+                f"`talaria update` on {where}.")
+    if _older(ext, daemon):
+        return (f"{head} is older than the one talaria {daemon} ships, so the newer extension's fixes are not active there. "
+                f"Firefox installs the signed update by itself at its daily add-on check; to get it now, the user opens "
+                f"about:addons in Firefox, clicks the gear button and then Check for Updates.")
+    return (f"{head} differs from the extension the daemon on {where} ships, though both report the same version, so "
+            f"some fixes may not be active there.")
 
 
 def _stale_stop(conn: Any) -> str:
-    """With no user present and a stale extension: the plain message the run stops with, else ""."""
-    stale = extension_stale(conn) if no_user() else ""
+    """With no user present and an older extension: the plain message the run stops with, else ""."""
+    info = getattr(conn, "browser", None) or {}
+    stale = extension_stale(conn) if no_user() and _older(info.get("extension_version"), getattr(conn, "client_version", "")) else ""
     return (f"{stale} This run has no user, so it stops before any browser work rather than run on the old "
             f"extension. Do not retry; report this message.") if stale else ""
 
