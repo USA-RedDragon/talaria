@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # The upstream image. Both stages and HERMES_BASE_IMAGE use it, so one Renovate bump moves all three.
-ARG HERMES_BASE=docker.io/nousresearch/hermes-agent:v0.23.1@sha256:276d44685c65c0cb2a25f190b63c65c8906f9dc76486fb1c05ae71b5826bda08
+ARG HERMES_BASE=docker.io/nousresearch/hermes-agent:v0.23.4@sha256:ef0650d523ee1b5ab32c779acabc446d9936869a9932591553688a62bcf0c42f
 
 # Patches are text, so they apply once on the build platform; the image for each
 # platform only gets the patched files copied on top of the upstream image.
